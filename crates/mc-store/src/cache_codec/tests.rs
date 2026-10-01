@@ -1604,7 +1604,15 @@ fn cloned_split_store_profile() {
             .unwrap();
         let mut parse = Vec::new();
         for _ in 0..15 {
+            // Today's full load: read both blobs and parse them.
             let started = Instant::now();
+            let (core_json, meta_json): (String, String) = raw
+                .query_row(
+                    "SELECT core_state, meta FROM mc_cache_state WHERE session_id = ?1",
+                    params![session],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap();
             let core: CoreState = serde_json::from_str(&core_json).unwrap();
             let meta: ModuleMeta = serde_json::from_str(&meta_json).unwrap();
             parse.push(started.elapsed().as_secs_f64() * 1000.0);
@@ -1616,7 +1624,8 @@ fn cloned_split_store_profile() {
         core.frozen_units.push(unit(next_unit));
         core.frozen_units.push(unit(next_unit + 1));
         meta.coverage_ordinal = Some(meta.coverage_ordinal.unwrap_or(0) + 1);
-        raw.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);").unwrap();
+        raw.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+            .unwrap();
         let before = wal_bytes(&today);
         let started = Instant::now();
         raw.execute(
@@ -1632,8 +1641,8 @@ fn cloned_split_store_profile() {
         let commit_ms = started.elapsed().as_secs_f64() * 1000.0;
         let (parse_min, parse_median) = median(parse);
         println!(
-            "split-profile today session={session} row_bytes={} parse_min_ms={parse_min:.2} \
-             parse_median_ms={parse_median:.2} append2_commit_wal_bytes={} commit_ms={commit_ms:.1}",
+            "split-profile today session={session} row_bytes={} read_parse_min_ms={parse_min:.2} \
+             read_parse_median_ms={parse_median:.2} append2_commit_wal_bytes={} commit_ms={commit_ms:.1}",
             core_json.len() + meta_json.len(),
             wal_bytes(&today) - before
         );
@@ -1660,12 +1669,27 @@ fn cloned_split_store_profile() {
         let small = store.load_meta(session).unwrap();
         let mut snapshot_ms = Vec::new();
         let mut meta_ms = Vec::new();
+        let mut decode_ms = Vec::new();
         let mut planning_ms = Vec::new();
         for pass in 0..13 {
             let started = Instant::now();
             let snapshot = store.load_transform_snapshot(session).unwrap();
             snapshot_ms.push(started.elapsed().as_secs_f64() * 1000.0);
             std::hint::black_box(snapshot);
+            // The codec's own cost: read the small row, chunks and sections, check every
+            // digest and parse them, comparable with today's read-and-parse of the blobs.
+            let started = Instant::now();
+            let decoded = store
+                .inner
+                .with_conn(|conn| {
+                    let transaction = conn.unchecked_transaction()?;
+                    let decoded = read_decoded(&transaction, session)?;
+                    transaction.commit()?;
+                    Ok(decoded)
+                })
+                .unwrap();
+            decode_ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            std::hint::black_box(decoded);
             let started = Instant::now();
             std::hint::black_box(store.load_meta(session).unwrap());
             meta_ms.push(started.elapsed().as_secs_f64() * 1000.0);
@@ -1683,10 +1707,12 @@ fn cloned_split_store_profile() {
         }
         let (snapshot_min, snapshot_median) = median(snapshot_ms);
         let (meta_min, meta_median) = median(meta_ms);
+        let (decode_min, decode_median) = median(decode_ms);
         let (planning_min, planning_median) = median(planning_ms);
         println!(
             "split-profile load session={session} snapshot_min_ms={snapshot_min:.2} \
-             snapshot_median_ms={snapshot_median:.2} load_meta_min_ms={meta_min:.3} \
+             snapshot_median_ms={snapshot_median:.2} decode_min_ms={decode_min:.2} \
+             decode_median_ms={decode_median:.2} load_meta_min_ms={meta_min:.3} \
              load_meta_median_ms={meta_median:.3} planning_min_ms={planning_min:.3} \
              planning_warm_median_ms={planning_median:.3}"
         );
