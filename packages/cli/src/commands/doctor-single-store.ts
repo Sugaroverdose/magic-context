@@ -2,12 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import {
-    closeDatabase,
-    getPersistedSchemaVersion,
-    openDatabase,
-    resolveDatabasePath,
-} from "@magic-context/core/features/magic-context/storage-db";
+import { LATEST_SUPPORTED_VERSION, closeDatabase, getPersistedSchemaVersion, openDatabase, resolveDatabasePath } from '@magic-context/core/features/magic-context/storage-db';
 import { Database } from "@magic-context/core/shared/sqlite";
 import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
 import { defaultInspectHolders } from "./doctor-repair-db";
@@ -194,7 +189,7 @@ export function runDoctorSingleStore(
                     "single_store_state_split",
                     `context=${JSON.stringify(state)} store=${JSON.stringify(marker)}; restore the paired backup`,
                 );
-            if (contextVersion !== 92 || storeVersion < 61)
+            if (contextVersion !== LATEST_SUPPORTED_VERSION || storeVersion < 61)
                 return refuse(
                     "single_store_version_mismatch",
                     `context.db v${contextVersion}; store.db v${storeVersion}`,
@@ -204,10 +199,10 @@ export function runDoctorSingleStore(
             );
             return 0;
         }
-        if (contextVersion > 92 || storeVersion !== 60)
+        if (contextVersion > LATEST_SUPPORTED_VERSION || storeVersion !== 60)
             return refuse(
                 "single_store_version_mismatch",
-                `context.db v${contextVersion}; store.db v${storeVersion}; need context.db v92 and store.db v60 (upgrade older stores with ck-mc first)`,
+                `context.db v${contextVersion}; store.db v${storeVersion}; need context.db v${LATEST_SUPPORTED_VERSION} and store.db v60 (apply current plugin migrations to context.db; upgrade store.db with ck-mc first)`,
             );
         const backupBytes = statSync(context).size + statSync(store).size;
         const workingBytes = 2 * statSync(store).size;
@@ -242,7 +237,7 @@ export function runDoctorSingleStore(
         } finally {
             closeDatabase();
         }
-        if (contextVersion !== 92)
+        if (contextVersion !== LATEST_SUPPORTED_VERSION)
             return refuse(
                 "single_store_version_mismatch",
                 `context.db v${contextVersion}; store.db v${storeVersion}`,

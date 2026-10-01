@@ -141,7 +141,7 @@ struct BoundaryValidationEntry {
     session: String,
     source_json: String,
     domain: std::sync::Arc<dyn crate::ContextDomain>,
-    data_version: i64,
+    revision: (String, i64, i64, bool),
     valid: Vec<ResolvedContextBoundary>,
 }
 
@@ -179,6 +179,25 @@ impl McStore {
         Ok(true)
     }
 
+    pub(crate) fn compartment_history_revision_tx(
+        conn: &rusqlite::Connection,
+        session: &str,
+    ) -> rusqlite::Result<Option<(String, i64, i64, bool)>> {
+        let has_revision_table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='compartment_history_versions')",
+            [], |row| row.get(0),
+        )?;
+        if !has_revision_table {
+            return Ok(None);
+        }
+        conn.query_row(
+            "SELECT generation, version, rewrite_version, seeded FROM compartment_history_versions WHERE session_id=?1",
+            params![session],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+    }
+
     pub(crate) fn cached_context_boundaries(
         &self,
         session: &str,
@@ -195,30 +214,31 @@ impl McStore {
             .lock()
             .unwrap_or_else(|p| p.into_inner());
         let domain = self.context_domain()?;
-        // data_version changes for every commit by another connection, including direct SQL
-        // repairs that do not advance any semantic watermark. Read it in the same snapshot
-        // as the bodies on a miss. The persisted overlay JSON is a separate cache input:
-        // state sync can replace coordinates without changing context.db.
-        let (version, rows, hit) = self.context_read(|conn| {
-            let version = if domain.has_stable_read_connection() {
-                Some(conn.query_row("PRAGMA data_version", [], |row| row.get::<_, i64>(0))?)
-            } else {
-                None
-            };
-            let hit = version.and_then(|version| {
+        // Cache the validation of host coordinates against canonical compartment rows.
+        // Triggers increment only this session's counter for any row change, atomically
+        // with the data. Its random generation distinguishes recreated counters after
+        // cleanup. Other tables/sessions must not force us to reread summary bodies.
+        // Snapshot the counter and bodies together. Persisted store.db coordinate JSON
+        // is a separate key because the host can replace it without changing context.db.
+        let (revision, rows, hit) = self.context_read(|conn| {
+            // Older schemas lack the mutation counter: validate against actual bodies
+            // every time rather than reusing a possibly outdated coordinate validation.
+            let revision = Self::compartment_history_revision_tx(conn, session)?;
+            let hit = revision.as_ref().and_then(|revision| {
                 cache.entries.iter().position(|entry| {
                     entry.session == session
                         && entry.source_json == json
                         && std::sync::Arc::ptr_eq(&entry.domain, &domain)
-                        && entry.data_version == version
+                        && &entry.revision == revision
                 })
             });
             if hit.is_some() {
-                return Ok((version, Vec::new(), hit));
+                return Ok((revision, Vec::new(), hit));
             }
             let rows = self.load_raw_context_compartments_tx(conn, session)?;
-            Ok((version, rows, None))
+            Ok((revision, rows, None))
         })?;
+        tracing::debug!(target: "magic-context.perf", session, cache_hit = hit.is_some(), "mc-boundary-validation-cache");
         if let Some(index) = hit {
             let entry = cache.entries.remove(index).expect("cache hit index");
             let valid = entry.valid.clone();
@@ -239,7 +259,7 @@ impl McStore {
                 }
             }
         }
-        if let Some(data_version) = version {
+        if let Some(revision) = revision {
             cache.entries.retain(|entry| entry.session != session);
             // Keep only validated coordinates, not summary bodies; bound interleaved sessions.
             if cache.entries.len() >= 8 {
@@ -249,7 +269,7 @@ impl McStore {
                 session: session.into(),
                 source_json: json,
                 domain,
-                data_version,
+                revision,
                 valid: valid.clone(),
             });
         }
@@ -390,7 +410,7 @@ mod tests {
         // A direct same-count, same-sequence repair bypasses semantic revision logs.
         writer
             .execute(
-                "UPDATE compartments SET content='external repair' WHERE session_id='raw'",
+                "UPDATE compartments SET content='updated body' WHERE session_id='raw'",
                 [],
             )
             .unwrap();
@@ -398,10 +418,86 @@ mod tests {
         assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 5);
         assert_eq!(
             store.load_compartments("raw").unwrap()[0].content,
-            "external repair"
+            "updated body"
         );
         writer.execute_batch("INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES ('raw', 1, 6, 9, 'm5', 'm8', 'later', 'published elsewhere', 2)").unwrap();
         assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 9);
+    }
+
+    #[test]
+    fn unrelated_context_commits_from_host_and_module_writer_keep_validation_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        let expected = store.cached_context_boundaries("raw").unwrap();
+        let before = store
+            .compartment_payload_query_count
+            .load(Ordering::Relaxed);
+        let host = Connection::open(dir.path().join("context.db")).unwrap();
+        host.execute_batch("INSERT INTO session_meta(session_id,counter) VALUES ('raw',0)")
+            .unwrap();
+        for pass in 0..12 {
+            host.execute(
+                "UPDATE session_meta SET counter=?1 WHERE session_id='raw'",
+                [pass],
+            )
+            .unwrap();
+            store
+                .with_context_conn_for_test(|conn| {
+                    conn.execute(
+                        "UPDATE session_meta SET last_response_time=?1 WHERE session_id='raw'",
+                        [pass],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            host.execute_batch("INSERT INTO compartments(session_id,sequence,start_message,end_message,title,content,created_at) VALUES ('other',0,1,4,'other','body',1) ON CONFLICT(session_id,sequence) DO UPDATE SET content='BODY'").unwrap();
+            assert_eq!(store.cached_context_boundaries("raw").unwrap(), expected);
+            assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 4);
+        }
+        assert_eq!(
+            store
+                .compartment_payload_query_count
+                .load(Ordering::Relaxed),
+            before,
+            "unrelated commits must not reload this session's bodies"
+        );
+    }
+
+    #[test]
+    fn recreated_revision_generation_and_v92_fallback_do_not_reuse_old_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        assert_eq!(store.cached_context_boundaries("raw").unwrap().len(), 1);
+        let host = Connection::open(dir.path().join("context.db")).unwrap();
+        let old: (String, i64) = host.query_row("SELECT generation,version FROM compartment_history_versions WHERE session_id='raw'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        // Session cleanup removes counters. Reusing a session id must not reuse its cache.
+        host.execute_batch("DELETE FROM compartments WHERE session_id='raw'; DELETE FROM compartment_history_versions WHERE session_id='raw'; INSERT INTO compartments(session_id,sequence,start_message,end_message,start_message_id,end_message_id,title,content,created_at) VALUES ('raw',0,1,5,'m0','m4','raw title','updated body',1)").unwrap();
+        let new: (String, i64) = host.query_row("SELECT generation,version FROM compartment_history_versions WHERE session_id='raw'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(new.1, old.1);
+        assert_ne!(new.0, old.0);
+        assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
+        host.execute_batch("DROP TRIGGER compartment_history_ai; DROP TRIGGER compartment_history_au; DROP TRIGGER compartment_history_ad; DROP TABLE compartment_history_versions").unwrap();
+        let before = store
+            .compartment_payload_query_count
+            .load(Ordering::Relaxed);
+        for _ in 0..3 {
+            assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
+        }
+        assert_eq!(
+            store
+                .compartment_payload_query_count
+                .load(Ordering::Relaxed),
+            before + 3,
+            "v92 without triggers must use exact uncached validation"
+        );
     }
 
     #[test]

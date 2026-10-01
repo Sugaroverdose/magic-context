@@ -58,7 +58,7 @@ pub const SINGLE_STORE_CAPABLE: bool = mc_store::SINGLE_STORE_CAPABLE;
 /// this binary was built; whether that migration changed anything these writers depend
 /// on is answered per table by the fingerprints, so a migration that touched only tables
 /// the module never writes does not stop the module writing.
-pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 92;
+pub const BUILT_CONTEXT_FENCE_VERSION: i64 = 93;
 
 /// Versions at or above this number belong to downstream forks and are excluded when
 /// reading the persisted lane, matching the host's own fence arithmetic.
@@ -79,6 +79,7 @@ pub const CONTEXT_BUSY_TIMEOUT_MS: u32 = 5_000;
 /// The module also writes one non-domain table, [`BRACKET_TABLE`], in every transaction,
 /// so that table is fingerprinted too.
 pub const DOMAIN_TABLES: &[&str] = &[
+    "compartment_history_versions",
     "compartment_events",
     "compartments",
     "memories",
@@ -302,12 +303,16 @@ fn counted<T>(result: Result<T, HostStoreError>) -> Result<T, HostStoreError> {
 /// prints the value it found for any table that drifted.
 pub const DOMAIN_TABLE_FINGERPRINTS: &[(&str, &str)] = &[
     (
+        "compartment_history_versions",
+        "23795e6c060f4dac4cbf8036abb4cba1db284c063f10aeb7eb23ee576a0b24e5",
+    ),
+    (
         "compartment_events",
         "79cb5301803217125d3831923e70a5d913754d6d733a96727f8cb86f2f5e138d",
     ),
     (
         "compartments",
-        "0b8353ff0e21178c2577a28825eea941b515e3c539092f2d5c799eb7c83688a4",
+        "b1ced2e8c3bdb5d1872054ff46d170295f40d6babdb27059a51ea172843d7d70",
     ),
     (
         "context_privilege_state",
@@ -622,10 +627,13 @@ impl FenceState {
         self.persisted_version > self.built_version
     }
 
-    /// Whether a write to `table` may proceed: the bracket table and the table itself
-    /// must both be the ones this binary was built against.
+    /// Allow writes only when the privilege-state table, target table and tables
+    /// written by its triggers match this binary's expected schema fingerprints.
     fn check_write(&self, table: &str) -> Result<(), HostStoreError> {
         self.check_table(BRACKET_TABLE)?;
+        if table == "compartments" {
+            self.check_table("compartment_history_versions")?;
+        }
         self.check_table(table)
     }
 
@@ -999,6 +1007,10 @@ fn with_privileged_transaction<T>(
     live_fence.check_table(BRACKET_TABLE)?;
     for table in tables {
         live_fence.check_table(table)?;
+    }
+    // Compartment triggers write the revision table even when the callback does not.
+    if tables.contains(&"compartments") {
+        live_fence.check_table("compartment_history_versions")?;
     }
 
     transaction.execute(
@@ -2101,6 +2113,43 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
             .unwrap();
         assert_eq!(memories, 0, "a refused publish must write nothing");
+    }
+
+    #[test]
+    fn v92_opens_but_compartment_writes_require_the_v93_revision_schema() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch("DROP TRIGGER compartment_history_ai; DROP TRIGGER compartment_history_au; DROP TRIGGER compartment_history_ad; DROP TABLE compartment_history_versions; DELETE FROM schema_migrations WHERE version=93").unwrap();
+        let mut store = HostStore::open(&path).unwrap();
+        assert_eq!(store.fence().persisted_version, 92);
+        assert!(store.writable_tables().contains(&"memories"));
+        assert!(!store.writable_tables().contains(&"compartments"));
+        let error = store.publish_fold(&sample_publish()).unwrap_err();
+        assert_eq!(error.code(), "single_store_fingerprint_mismatch");
+        assert_eq!(
+            conn.query_row("SELECT count(*) FROM compartments", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn revision_table_drift_refuses_compartment_writes_including_trigger_side_effects() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = fixture_db(dir.path(), "context.db");
+        let mut store = HostStore::open(&path).unwrap();
+        Connection::open(&path)
+            .unwrap()
+            .execute_batch("ALTER TABLE compartment_history_versions ADD COLUMN extra TEXT")
+            .unwrap();
+        let error = store.publish_fold(&sample_publish()).unwrap_err();
+        assert_eq!(error.code(), "single_store_fingerprint_mismatch");
+        assert!(
+            error.to_string().contains("compartment_history_versions"),
+            "{error}"
+        );
     }
 
     #[test]

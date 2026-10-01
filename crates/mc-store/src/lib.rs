@@ -5141,6 +5141,9 @@ pub struct M1RevisionSnapshot {
     pub project_memory_epoch: i64,
     /// The session's highest `m0_mutation_log` id, 0 when it has none.
     pub m0_mutation_head: i64,
+    /// Counter generation and external-UPDATE version for invalidating frozen prompt text.
+    /// Present after an external edit or migration seed; absent for new append-only sessions.
+    pub compartment_history_revision: Option<(String, i64)>,
     /// The global user-profile version (`project_state['__global__']`), 0 when unset.
     pub user_profile_version: u64,
 }
@@ -12233,6 +12236,16 @@ impl McStore {
                 note_status_version,
                 project_memory_epoch,
                 m0_mutation_head,
+                compartment_history_revision: Self::compartment_history_revision_tx(
+                    transaction,
+                    session_id,
+                )?
+                .and_then(|(generation, _version, rewrite_version, seeded)| {
+                    // Do not turn new publications into immediate prefix rebuilds: they
+                    // retain their existing batching policy. External edits must refresh
+                    // frozen text; pre-upgrade histories also need one baseline validation.
+                    (rewrite_version > 0 || seeded).then_some((generation, rewrite_version))
+                }),
                 user_profile_version: user_profile_version.max(0) as u64,
             })
         })

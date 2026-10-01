@@ -44,6 +44,7 @@ import {
 } from "./fail-closed-block";
 import { startMessageFtsRowidMapBackfill } from "./message-fts-rowid-map";
 import { FORK_MIGRATION_VERSION_FLOOR, runMigrations, runMigrationsWithRetry } from "./migrations";
+import { installCompartmentHistoryVersions } from './storage-compartment-history-version';
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import {
     loadToolDefinitionMeasurements,
@@ -131,7 +132,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 92;
+export const LATEST_SUPPORTED_VERSION = 93;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1926,6 +1927,11 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     CREATE INDEX IF NOT EXISTS idx_memories_project_category_hash ON memories(project_path, category, normalized_hash);
     CREATE INDEX IF NOT EXISTS idx_message_history_index_updated_at ON message_history_index(updated_at);
   `);
+
+    // Upgrades, CLI store initialization and Pi use this same counter installer.
+    // Recreating a cleaned session assigns a new token so its reset counter cannot
+    // match cached coordinate validation from the previous session incarnation.
+    installCompartmentHistoryVersions(db);
 
     ensureColumn(db, "message_fts_rowid_map", "message_time_ms", "INTEGER");
     db.exec(`

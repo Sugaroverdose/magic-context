@@ -233,7 +233,7 @@ test("versions outside the offline pair refuse before engine invocation", () => 
     store.exec("INSERT INTO cortexkit_schema_version VALUES ('mc_cache', 62)");
     store.close();
     expect(run()).toBe(2);
-    expect(output()).toContain("single_store_version_mismatch: context.db v92; store.db v62");
+    expect(output()).toContain("single_store_version_mismatch: context.db v93; store.db v62");
     expect(called()).toBe(false);
 });
 
@@ -262,4 +262,27 @@ test("completed migration prints transaction and vacuum timings from the engine 
     process.env.FAKE_REPORT = JSON.stringify({ ...report, transaction_ms: 123, vacuum_ms: 45 });
     expect(run()).toBe(0);
     expect(output()).toContain("Transaction: 123 ms; vacuum: 45 ms");
+});
+
+test("offline preflight upgrades v92 and seeds history revisions before invoking the engine", () => {
+    const path = join(data, "context.db");
+    const context = new Database(path);
+    context.exec(`
+        DROP TRIGGER compartment_history_ai;
+        DROP TRIGGER compartment_history_au;
+        DROP TRIGGER compartment_history_ad;
+        DROP TABLE compartment_history_versions;
+        DELETE FROM schema_migrations WHERE version=93;
+        INSERT INTO compartments(session_id,sequence,start_message,end_message,title,content,created_at)
+        VALUES ('older-history',0,1,4,'title','body',1);
+    `);
+    context.close();
+    expect(run()).toBe(0);
+    expect(called()).toBe(true);
+    const upgraded = new Database(path);
+    try {
+        expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 93 });
+        expect(upgraded.prepare("SELECT version FROM compartment_history_versions WHERE session_id='older-history'").get()).toEqual({ version: 0 });
+        expect(upgraded.prepare("SELECT content FROM compartments WHERE session_id='older-history'").get()).toEqual({ content: "body" });
+    } finally { upgraded.close(); }
 });

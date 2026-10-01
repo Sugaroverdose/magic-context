@@ -1,6 +1,200 @@
 # Rust planning after the single-store migration
 
-## Result
+## Final correction: per-session revisions under writer churn (v93)
+
+**Hold merge/deployment for the coordinated restart window. Rebuild the shared
+plugin/Pi distributions and ck-mc, apply context.db v93, and restart the module with
+the new binary. Old module binaries refuse compartment writes after the trigger
+schema changes, so deploying the database migration alone can strand publications.**
+
+The initial database-wide `data_version` key below was insufficient in production.
+It misses the first validation of every pass when unrelated sessions or the
+module's separate writer connection commit. The final implementation uses
+`compartment_history_versions(session_id, generation, version)` instead. Read only
+that session's small revision row; retain exact overlay JSON and context-domain
+identity in the key. A schema-presence query enables a safe, uncached v92 fallback.
+The remaining sections below this correction record the original, uncontended
+investigation rather than claiming that its first cache key is still deployed.
+
+### Churn workload and measurements
+
+Read the live plugin log and its rotated predecessor in place at
+`$TMPDIR/opencode/magic-context/magic-context.log{,.1}`. The TS-only completion
+marker for TypeScript (TS) passes is `final representation` in `transform-postprocess-phase.ts`. The last
+30-minute window ending 22:20:01.777Z contained 736 completed TS passes across 20
+sessions: 0.409 passes/second, median 26/minute, peak 51/minute, and median aggregate
+interarrival 1.413 seconds.
+
+On fresh paired APFS clones, a separate Python process rotated through 20 unrelated
+session IDs, committing six small `session_meta` updates per simulated TS pass,
+with a burst every approximately 2.44 seconds. This supplies approximately 2.45
+context commits/second at the observed 0.409 TS passes/second. Six transactions per
+pass is an explicit workload assumption, not a measured live transaction count;
+the writer reproduces invalidation/journal churn, not the full tags/index/LKG IO
+mix. Requests were spaced by 2500 ms so this was not a rapid uncontended replay.
+The writer's own `lsof` assertion, plus daemon/module assertions, verified all
+opened databases were under the throwaway clone root. No live database was opened.
+
+A second comparison additionally injected one transaction per transform through
+the module's **actual `ModuleContextDomain` writer connection and privileged write
+bracket**, before planning. Its normal privilege-row flip/commit changes the
+reader's `data_version` without changing compartments. Normal module flushes were
+not disabled. The injected hook and info-level hit tracing were temporary profiling
+instrumentation and are not shipped; ordinary cache-hit tracing remains debug-level.
+This tests the module's own connection, not just another Python connection.
+
+Each session/binary received the same 15 inputs; medians use the last 12 confirmed
+SOFT+ defers. A pass invokes coordinate validation five times; counting all calls
+alone would misleadingly conceal the first-read miss:
+
+| Cache key / churn | Session | First-validation hits | All-call hits | planning ms | trigger_ms |
+| --- | --- | ---: | ---: | ---: | ---: |
+| database-wide / TS writer | ALF | 0/15 | 52/75 | 56.338 | 20.687 |
+| database-wide / TS writer | AFT | 0/15 | 60/75 | 65.024 | 22.394 |
+| database-wide / TS + module writer | ALF | 0/15 | 60/75 | 70.835 | 21.320 |
+| database-wide / TS + module writer | AFT | 0/15 | 56/75 | 77.129 | 22.730 |
+| per-session / TS + module writer | ALF | 14/15 | 74/75 | 27.437 | 21.875 |
+| per-session / TS + module writer | AFT | 14/15 | 74/75 | 17.257 | 17.774 |
+
+The only per-session misses were each session's cold validation. All 12 measured
+warm passes hit on their first read. The own-writer comparisons recorded 318 host
+commits over 129.141 seconds and 246 over 100.204 seconds respectively; both add
+30 actual module-writer transactions. Different elapsed times include compilation
+and process startup, so transaction totals are not compared as throughput results.
+
+All 30 broad/narrow served-byte pairs remained identical, including actual native
+arrays. Nonce-only replays remained identical. A final-source release run, with
+normal module writes enabled and the paced TS writer, measured ALF planning/trigger
+17.424/17.454 ms and AFT 20.257/20.240 ms (276 host commits over 112.361 seconds).
+Its 30 served-byte pairs also matched the broad-key own-writer run, including the
+cold adoption pass. Final byte lengths and SHA-256 values are unchanged below.
+
+### Narrow signal, same-length freshness, and cleanup
+
+Migration v93 and fresh initialization use the same installer. INSERT/DELETE bump
+the affected session; every UPDATE bumps the old session and, on a session move,
+also the new session. This includes same-length title/content updates, coordinates,
+block indices, timestamps, and other row fields. Revision and compartment changes
+commit atomically and roll back together. Existing sessions are seeded without
+changing compartment bodies; reapplying the installer preserves existing counters.
+
+`domain_mutation_epoch` covers project memories/notes, not per-session history.
+`m0_mutation_log` is explicit application logging, not a SQL trigger: direct SQL
+repairs can leave it unchanged. A projection containing only coordinates and body
+lengths would therefore miss a same-length replacement of title/content. The new
+step-through test changes `body` to `BODY` while verifying that m0's log remains
+empty and both the general and external-update versions advance. No length-based heuristic is used. The
+counter has an auxiliary `rewrite_version` for unprivileged in-place UPDATEs and a
+`seeded` marker for histories already present at installation. These enter the
+module's external prefix-revision signal: otherwise fresh coordinates alone could
+leave old body bytes frozen when a repair keeps their coordinates unchanged.
+Ordinary INSERTs and DELETEs retain the existing publication/structural coalescing
+policy. Privileged module updates retain their existing semantic-log and state-hint
+policy. **All** such writes still advance the general validation version, so cached
+coordinates are never reused across them. Installation/reinstallation of the
+owned triggers is atomic, including during fresh schema bootstrap. A managed-pass test warms the prefix, changes
+`SUMMARY` to `CHANGED` through a second SQLite connection without advancing m0's
+log, and requires the next pass to serve the repair via one HARD rebuild, then
+return to defer. Adopting the new revision signal can cause one cold rebuild after
+upgrade; it does not change how the prefix is rendered.
+
+Counters have a random 128-bit generation as well as a monotonic version. Session
+cleanup can delete and recreate a counter at the same numeric version; its new
+generation prevents an old cached validation from matching. The table is in
+`SESSION_SCOPED_TABLES` **after** compartments, so deletions cannot recreate an
+already-cleaned counter. The session-deleted event handler and the cleanup sweep
+for sessions absent from the host's live registry both use that inventory.
+The Rust test also checks equal-version recreation and v92's exact uncached fallback.
+
+The CLI `doctor merge-identities` command combines project identities; it changes
+project keys, not session IDs. The revision
+table has no project coordinate to rekey; it remains attached to its session.
+If a compartment's session ID is moved directly, both old/new counters advance.
+Single-store migrate/repair keep the context-side revision table and use ordinary
+compartment inserts/updates/deletes, so triggers maintain or recreate its rows;
+versions are not imported from disposable store.db. The engine now fences this
+indirectly-written table as well. Pi opens through the same shared storage/migration
+code. `doctor store init` uses that initializer/migration chain for fresh stores;
+its fresh-schema regression confirms the table and triggers exist.
+
+### Shared fence and compatibility
+
+The plugin's maximum supported upstream migration and the Rust binary's compiled
+context schema version are both 93. The generated context
+schema fixture, compartment fingerprint, and revision-table fingerprint are updated
+together. Compartment writes also check their trigger-written revision table at
+transaction time, not just startup. Counter-table drift blocks compartment writes.
+
+- An **older v92 ck-mc on v93 context.db** tolerates the newer numeric lane and can
+  read unchanged row columns. Its old compartment fingerprint does not contain
+  the three new triggers, so compartment writes/publishes refuse with
+  `single_store_fingerprint_mismatch`. Unchanged domain tables remain individually
+  writable. Its database-wide reader cache remains correct but churn-sensitive.
+- The **new ck-mc on actual v92 context.db** can open and read. Missing revision
+  schema disables validation caching and reloads exact body identities every time.
+  Compartment writes/publishes refuse because the required trigger/counter schema
+  is absent; unchanged domains can still write. The single-store migration engine
+  also requires the new counter fingerprint before copying compartments. The CLI's
+  read-only preflight uses the current plugin lane, then upgrades an older
+  unmigrated context through the shared migrations after backup; a v92 preflight
+  regression proves history counters are seeded before engine invocation. A dedicated
+  fence test recreates actual v92 schema, rather than only lowering the lane number.
+- New ck-mc plus v93 schema has the intended narrow cache and compatible writers.
+
+Old binaries refusing compartment publishes after v93 migration is the reason to
+coordinate the schema upgrade, rebuilt distributions and module restart. The
+numeric schema version alone does not globally prohibit all database access.
+
+### Follow-up verification
+
+An intermediate external-signal implementation incorrectly made every publication
+HARD and failed 26 existing tests. Separating external in-place updates from append,
+delete and owned-hint policy fixed those regressions without weakening the existing
+coalescing/replay claims. Only the explicit supported-fence expectation was advanced
+to 93 as required by the authorized schema change.
+
+The new regressions cover populated v92-to-v93 migration through public compartment
+APIs, direct same-length SQL repairs, INSERT/DELETE, cross-session UPDATE, rollback,
+repeat installation, fresh initialization, cleanup/recreation, and unrelated host
+plus own-writer commits that must add zero body reads. The armed migration replay
+now includes a deliberate v93 arm; the fixed expected schema lane advances from
+92 to 93 because this authorized migration changes that contract.
+
+Regression controls temporarily broke each invariant, after staging the specific
+files to preserve their live implementation. Each check was run against the mutant,
+then `git checkout -- <path>` restored the index and `touch` invalidated build timestamps.
+These controls proved that (1) reverting to a database-wide key
+fails the unrelated-commit read-bound test (14 reads versus 2), (2) ignoring revision
+increments fails the external-repair freshness test, and (3) making the UPDATE
+trigger conditional on changed content length fails only the selected populated
+migration test (version remains 1 instead of 2). Each mutant had a nonempty diff
+while applied and an empty diff after restoration. No profiling hook or mutation
+marker is retained. Omitting the revision from the rendered-prefix signal also
+fails only `same_length_sql_repair_without_mutation_log_reloads_the_next_managed_pass`
+(the module wrongly returns SOFT+ instead of HARD after the repair).
+
+Final gates:
+
+- Shared migration/cleanup/identity/doctor scope: 49 existing/new tests passed in
+  the final eight-file run; the new test of updates inside the module's database
+  privilege bracket initially failed because its
+  privilege UPDATE affected no singleton row. Corrected it to enter the actual
+  INSERT/UPSERT write bracket; its isolated rerun passed. No production change or
+  existing claim was relaxed.
+- Plugin and CLI typechecks passed. Shared plugin/Pi/CLI builds passed in this
+  worktree; nothing was deployed.
+- Final Rust library: 1440 passed, 17 opt-in tests ignored. All module integration
+  targets passed with only the previously diagnosed missing-context supervision
+  fixture excluded. The combined command hit its 1200-second cap after reaching
+  store tests; package-scoped store completion passed 180 tests (one ignored) and
+  doc tests. The last source edit removed a needless borrow flagged by clippy;
+  clean clippy and release build then passed.
+- Biome formatting was unavailable: both repository configs reject their existing
+  `rules.preset` key with the installed formatter. Config files were not changed.
+
+## Initial investigation (uncontended, superseded cache key)
+
+### Result
 
 ALF is the orchestration session `ses_227ce5788ffeRPA9THoPLOQreO`; AFT is the tool
 session `ses_313660571ffeZTsf4koSJwk50Q`. Repeated passes that replay cached output

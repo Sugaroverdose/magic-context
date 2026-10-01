@@ -74,10 +74,6 @@ impl ModuleContextDomain {
 }
 
 impl ContextDomain for ModuleContextDomain {
-    fn has_stable_read_connection(&self) -> bool {
-        true
-    }
-
     fn read(
         &self,
         read: &mut dyn FnMut(&Connection) -> rusqlite::Result<()>,

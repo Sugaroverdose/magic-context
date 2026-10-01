@@ -3,6 +3,7 @@ import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { repairOpenCode2HarnessLabels } from "./opencode2-relabel";
+import { installCompartmentHistoryVersions } from './storage-compartment-history-version';
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import { bumpEpochsForWorkspaceMemberSet } from "./workspaces";
 
@@ -3178,6 +3179,13 @@ export const MIGRATIONS: Migration[] = [
                 );
                 INSERT OR IGNORE INTO single_store_state(id, state) VALUES (1, 'required');
             `);
+        },
+    },
+    {
+        version: 93,
+        description: "per-session compartment history revision for shared readers",
+        up(db: Database): void {
+            installCompartmentHistoryVersions(db);
         },
     },
 ];

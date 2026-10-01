@@ -80,6 +80,9 @@ const CONTEXT_CLEARED_TABLES: &[&str] = &[
 /// The `context.db` tables the engine writes. Each must still be the schema this build
 /// was compiled against.
 const WRITTEN_CONTEXT_TABLES: &[&str] = &[
+    // Host triggers maintain compartment_history_versions during copies/replacements.
+    // These revisions belong to canonical context.db rows, not store.db cache mirrors.
+    "compartment_history_versions",
     "memories",
     "notes",
     "compartments",

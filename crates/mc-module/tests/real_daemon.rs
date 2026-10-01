@@ -1328,6 +1328,9 @@ async fn planning_clones_through_real_daemon() {
         request["serve_native"] = json!(true);
         let mut previous_served = Vec::new();
         for pass in 0..15 {
+            if let Ok(delay) = std::env::var("MC_PLANNING_DELAY_MS") {
+                tokio::time::sleep(Duration::from_millis(delay.parse().unwrap())).await;
+            }
             request["nonce"] = json!(pass);
             let response = call(&consumer, request.clone()).await;
             assert_eq!(response["status"], "ok", "{response}");

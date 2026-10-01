@@ -22654,6 +22654,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn same_length_sql_repair_without_mutation_log_reloads_the_next_managed_pass() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("ses", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let request = req("ses", "cfg0", vec![item("a", 1, "raw")]);
+        let first = run(&s, &request, &spine());
+        assert!(m0_bytes(&first).contains("SUMMARY"));
+        assert_ne!(run(&s, &request, &spine()).action, "HARD");
+        let writer = rusqlite::Connection::open(dir.path().join("context.db")).unwrap();
+        let head: i64 = writer
+            .query_row(
+                "SELECT COALESCE(MAX(id),0) FROM m0_mutation_log WHERE session_id='ses'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        writer
+            .execute_batch(
+                "UPDATE compartments SET content='CHANGED', p1='CHANGED' WHERE session_id='ses'",
+            )
+            .unwrap();
+        assert_eq!(
+            writer
+                .query_row(
+                    "SELECT COALESCE(MAX(id),0) FROM m0_mutation_log WHERE session_id='ses'",
+                    [],
+                    |row| row.get::<_, i64>(0)
+                )
+                .unwrap(),
+            head
+        );
+        let repaired = run(&s, &request, &spine());
+        assert_eq!(repaired.action, "HARD");
+        assert!(m0_bytes(&repaired).contains("CHANGED"));
+        assert!(!m0_bytes(&repaired).contains("SUMMARY"));
+        assert_ne!(run(&s, &request, &spine()).action, "HARD");
+    }
+
+    #[test]
     fn compaction_off_is_additive_only_and_byte_stable_across_defers() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
