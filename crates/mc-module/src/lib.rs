@@ -948,6 +948,24 @@ struct DispatchHealth {
     historian_recent_decisions_count: AtomicU64,
 }
 
+/// Subtract from a counter without wrapping below zero. A compare-exchange loop
+/// rather than `fetch_update`, which is deprecated from Rust 1.99, or its
+/// replacement `try_update`, which does not exist before 1.99.
+fn saturating_decrement(counter: &AtomicU64, amount: u64) {
+    let mut current = counter.load(Ordering::Acquire);
+    loop {
+        match counter.compare_exchange_weak(
+            current,
+            current.saturating_sub(amount),
+            Ordering::AcqRel,
+            Ordering::Acquire,
+        ) {
+            Ok(_) => return,
+            Err(actual) => current = actual,
+        }
+    }
+}
+
 impl DispatchHealth {
     const fn new() -> Self {
         Self {
@@ -999,11 +1017,7 @@ impl DispatchHealth {
             before.saturating_sub(registry.active.len()) as u64
         };
         if released > 0 {
-            let _ = self
-                .in_flight_count
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                    Some(count.saturating_sub(released))
-                });
+            saturating_decrement(&self.in_flight_count, released);
         }
     }
 
@@ -1034,11 +1048,7 @@ impl DispatchHealth {
             .remove(&id)
             .is_some();
         if removed {
-            let _ = self
-                .in_flight_count
-                .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
-                    Some(count.saturating_sub(1))
-                });
+            saturating_decrement(&self.in_flight_count, 1);
         }
         removed
     }
