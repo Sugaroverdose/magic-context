@@ -30,7 +30,8 @@ import {
  *   created. (OpenCode reports no window below 20k to the plugin, which then
  *   sends unguarded, so 32k is the small window that is actually enforced.)
  *
- * Opt in only from a throwaway root ($TMPDIR under /magic-context/issue-595/),
+ * Opt in only from a throwaway root: $TMPDIR must be a directory named
+ * `issue-595` under a `magic-context` directory (the opt-in marker),
  * with HOME and every storage and config path under it; the host process is
  * checked with lsof to hold only throwaway databases.
  */

@@ -1211,10 +1211,10 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 						: validatedPass.kind === "spawn-failed"
 							? `subagent run failed (${validatedPass.reason}): ${validatedPass.error}`
 							: "historian returned no usable text";
-				// A prompt-fit refusal from a fallback model is an ordinary failure:
-				// it is counted, surfaced, and keeps the drain reservation as a retry
-				// throttle even though nothing was dispatched, instead of retrying on
-				// the next trigger.
+				// A window refusal here comes from a fallback model (the primary was
+				// fitted above). Treat it like any other failed pass: count it, notify,
+				// and keep the reserved drain budget spent even though nothing was
+				// dispatched, so the next trigger does not retry at once.
 				if (
 					!producerDispatched &&
 					!PRODUCER_PROMPT_FIT_FAILURE_PATTERN.test(errorMsg)

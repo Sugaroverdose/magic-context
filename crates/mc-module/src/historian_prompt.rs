@@ -427,19 +427,11 @@ pub fn build_reference_blocks_from_stored(
     build_reference_blocks(session_id, chunk_start, &refs)
 }
 
-/// Render the historian's category-grouped project-memory block from already-loaded rows.
-///
-/// Canonical form: category-grouped `- <fact>` lines WITHOUT memory ids. This differs
-/// from the m0/m1 memory render (`#id: fact`) by design: the historian system prompt
-/// uses this block only for content-based fact deduplication and contradiction
-/// reporting — it never addresses a memory by id, while the agent-facing wire needs
-/// ids so `<memory-updates>` corrections can point at baseline lines. The TypeScript
-/// renderer (`renderHistorianMemoryBlock` in inject-compartments.ts) emits the same
-/// bytes; the historian prompt golden pins both lanes to this form.
-/// The memories [`render_historian_memory_block`] shows, in the order it shows them.
-/// Rendering any prefix reproduces the first lines of the full block, so a caller
-/// that must shrink the block to fit a model window drops the lowest-priority lines
-/// by taking a shorter prefix.
+/// Return the memories that [`render_historian_memory_block`] renders, in the order
+/// it renders them (by category priority, then input order). Rendering any prefix
+/// of this list reproduces the first lines of the full block, so a caller that must
+/// shrink the block to fit a model window drops the lowest-priority lines by taking
+/// a shorter prefix.
 pub fn order_historian_memories(memories: &[StoredMemory]) -> Vec<StoredMemory> {
     let mut ordered = Vec::new();
     for category in HISTORIAN_MEMORY_CATEGORY_PRIORITY {
@@ -453,6 +445,15 @@ pub fn order_historian_memories(memories: &[StoredMemory]) -> Vec<StoredMemory> 
     ordered
 }
 
+/// Render the historian's category-grouped project-memory block from already-loaded rows.
+///
+/// Canonical form: category-grouped `- <fact>` lines WITHOUT memory ids. This differs
+/// from the m0/m1 memory render (`#id: fact`) by design: the historian system prompt
+/// uses this block only for content-based fact deduplication and contradiction
+/// reporting — it never addresses a memory by id, while the agent-facing wire needs
+/// ids so `<memory-updates>` corrections can point at baseline lines. The TypeScript
+/// renderer (`renderHistorianMemoryBlock` in inject-compartments.ts) emits the same
+/// bytes; the historian prompt golden pins both lanes to this form.
 pub fn render_historian_memory_block(memories: &[StoredMemory]) -> String {
     let mut by_category: HashMap<&str, Vec<&StoredMemory>> = HashMap::new();
     for memory in memories {

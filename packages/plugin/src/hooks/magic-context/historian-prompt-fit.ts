@@ -51,12 +51,16 @@ export const HISTORIAN_MIN_FIT_CHUNK_TOKENS = 1_000;
  */
 const FIT_SLACK_TOKENS = 64;
 
-/** Prompt failures caused by the producer window. Callers back off on these. */
+/**
+ * Prompt failures caused by the producer window. They repeat until the model,
+ * its window or the instructions change, so callers treat them as counted
+ * failures and do not retry them on the next trigger.
+ */
 export const PRODUCER_PROMPT_FIT_FAILURE_PATTERN =
     /producer_prompt_(?:exceeds_window|fit_unavailable|unfit)/;
 
 export interface HistorianProducerWindow {
-    /** `provider/model` of the producer; selects the tokenizer calibration. */
+    /** Producer model id in `provider/model` form; selects the tokenizer calibration. */
     modelKey?: string;
     contextLimitTokens?: number;
     inputLimitTokens?: number;
@@ -65,9 +69,10 @@ export interface HistorianProducerWindow {
 }
 
 /**
- * The producer window the OpenCode historian transport admits prompts against
- * for `modelKey`. `fallbackContextLimit` stands in when the model catalog knows
- * no window for the model.
+ * The window that the OpenCode historian checks a prompt against before sending
+ * it to `modelKey` (see `historianPromptAdmissionFailure`), so a fitted prompt
+ * passes that check. `fallbackContextLimit` stands in when the model catalog
+ * knows no window for the model.
  */
 export function resolveHistorianProducerWindow(
     modelKey: string | undefined,
@@ -142,9 +147,10 @@ export type HistorianPromptFit =
     | { ok: false; reason: string };
 
 /**
- * Fit a structural recomp prompt (no memory block, no fact extraction) to the
- * window of the model the recomp's first attempt runs on. The system prompt is
- * the one the historian transport admits recomp prompts against.
+ * Fit a recomp prompt (rebuilds compartments only: no memory block, no fact
+ * extraction) to the window of the model the recomp's first attempt runs on.
+ * It is measured against the main historian system prompt, which is what the
+ * pre-send window check counts for recomp prompts too.
  */
 export function fitRecompHistorianPrompt(args: {
     model?: ModelInput;
