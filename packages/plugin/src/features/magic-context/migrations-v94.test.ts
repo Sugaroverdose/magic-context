@@ -41,7 +41,8 @@ function tempDbPath(): string {
 function v93Database(path = ":memory:"): Database {
     const db = new Database(path);
     initializeDatabase(db);
-    // Remove the current bootstrap's v94 layout to exercise an actual v93 upgrade.
+    // initializeDatabase already creates the migration-94 tables; remove them and
+    // rebuild lkg_slots through migration 81 to exercise an actual upgrade from 93.
     db.exec(`
         DROP TABLE lkg_slot_chunks;
         DROP TABLE session_replay_decisions;
@@ -196,7 +197,7 @@ describe("migration v94: LKG prefixes as slices", () => {
             );
             const slices = splitLkgPrefix(opencode.jsonPrefix);
             expect(slices.length).toBe(3);
-            // The first boundary moved back one unit to keep the surrogate pair whole.
+            // The first boundary moved back one UTF-16 code unit to keep the surrogate pair whole.
             expect(slices[0]?.length).toBe(LKG_PREFIX_CHUNK_CHARS - 1);
             expect(chunkCount(db, "opencode")).toBe(3);
             expect(loadPersistedLkgSlot(db, "opencode")).toEqual(opencode);
@@ -223,14 +224,16 @@ describe("migration v94: LKG prefixes as slices", () => {
 
             const start = totalChanges(before);
             expect(saveLkgSlotToDb(before, "ses", second)).toBe(true);
-            // The last slice and the metadata row; the first two slices are untouched.
+            // Two row changes: the last slice and the metadata row. The first two
+            // slices are not rewritten.
             expect(totalChanges(before) - start).toBe(2);
             expect(loadPersistedLkgSlot(before, "ses")).toEqual(second);
         } finally {
             before.close();
         }
 
-        // A new connection stands in for a restarted process: nothing is remembered.
+        // A new connection stands in for a restarted process: no state kept in
+        // memory by the first connection carries over.
         const after = new Database(path);
         try {
             initializeDatabase(after);
@@ -340,7 +343,8 @@ describe("LKG slices never replay a torn or mixed prefix", () => {
             const third = slotFor(appendMessage(base, "third"));
             expect(saveLkgSlotToDb(a, "ses", first)).toBe(true);
             expect(saveLkgSlotToDb(b, "ses", other)).toBe(true);
-            // `a` last wrote first's slices, but the stored first slice is other's.
+            // `a` last saved the slices of `first`, but `b` has since replaced the
+            // stored first slice with the one from `other`.
             expect(saveLkgSlotToDb(a, "ses", third)).toBe(true);
             expect(loadPersistedLkgSlot(b, "ses")).toEqual(third);
         } finally {

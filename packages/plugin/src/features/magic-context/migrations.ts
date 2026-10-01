@@ -3194,8 +3194,9 @@ export const MIGRATIONS: Migration[] = [
         description:
             "store LKG prefixes as slices and replay decisions as rows instead of growing records",
         up(db: Database): void {
-            // Both records grew on every pass and were rewritten whole each time;
-            // see migration-v94-write-split.ts.
+            // The LKG slot's prefix and the replay document in session_meta grew
+            // on every pass, and SQLite rewrote each whole record every time; see
+            // migration-v94-write-split.ts.
             splitLkgSlotPrefixes(db);
             splitReplayDecisions(db);
         },

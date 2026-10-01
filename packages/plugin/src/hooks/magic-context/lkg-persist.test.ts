@@ -44,7 +44,7 @@ describe("LKG durable write discipline", () => {
             const changed = { ...slot, jsonPrefix: '[{"text":"onf"}]' };
             expect(saveLkgSlotToDb(db, "ses", changed)).toBe(true);
             expect(loadPersistedLkgSlot(db, "ses")?.jsonPrefix).toBe(changed.jsonPrefix);
-            // The prefix's only slice and the metadata row.
+            // Two row changes: the prefix's only slice and the slot's metadata row.
             expect(
                 (raw.query("SELECT total_changes() AS count").get() as { count: number }).count,
             ).toBe(initial.count + 2);

@@ -6872,8 +6872,9 @@ describe("final message representation", () => {
         initializeDatabase(db);
         const sessionId = "ses-trailing-refresh-cas-failure";
         addTrailingBlankDecisions(db, sessionId, [["assistant-target", "keep:3"]]);
-        // Each decision is its own row; ignoring the row update makes every
-        // compare-and-swap attempt lose.
+        // Each decision is its own row, updated only while it still holds the value
+        // the writer read. Ignoring the update leaves zero changed rows, which the
+        // writer treats as a lost race on every retry.
         db.exec(`
             CREATE TRIGGER reject_trailing_blank_refresh
             BEFORE UPDATE ON session_replay_decisions

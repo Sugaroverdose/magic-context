@@ -588,6 +588,35 @@ A separate slice in the TypeScript plugin, with its own `context.db` migration. 
 
 Order: 1 and 2 first, since they are the per-pass writes measured in 7.1; then 3. Each is proven the same way as the ck-mc slice: the SQL write trace on a clone shows the per-pass frames, and the plugin's existing LKG replay and replay-document tests pass unchanged.
 
+### 7.5 Items 1 and 2 as built: `context.db` migration 94
+
+Items 1 and 2 shipped as `context.db` migration 94 (`packages/plugin/src/features/magic-context/migration-v94-write-split.ts`). Item 3, moving the cached m[0] blobs out of `session_meta`, is deferred (7.6). Where the build differs from 7.4:
+
+- **Each slice stores its own hash.** `lkg_slot_chunks` is `(session_id, chunk, hash, body)`. A save reads the stored slice hashes, which sit before `body` so the read never walks overflow pages, and writes only the slices that differ. The first save after a restart is therefore small even when nothing loaded the slot first, and a save after another connection's save cannot skip a slice it wrongly believes is unchanged. A load checks the count, the total length, each slice against its hash, and the whole-prefix hash.
+- **The migration moves only slots captured in the last 24 hours.** Older slots are dropped, and the next applied pass recaptures them. On a 2026-10-01 clone of the live `context.db` (1,343 slots, 704 MB), moving every slot took 34 to 73 s at load averages of 40 to 60, while holding the write lock every starting process needs. Moving the last day's slots (276 to 280 slots, 195 to 199 MB) and the replay decisions (376,588 rows, 951 sessions) took 3.2 s warm and about 21 s cold at a load average of 50. End to end, the first open (v92 to v94) took 16.5 to 46.5 s. The first plugin start after placement pays this cost once, so place in a quiet window, as for store.db migration 63.
+- **A replay document that does not parse strictly stays in the column, unchanged.** Readers overlay the decision rows on whatever map the column still carries, so such a session keeps today's behaviour: lenient readers see its valid entries and strict writers refuse it.
+- **Each decision write compares against the value it read.** Instead of the `WHERE decision IS NOT excluded.decision` upsert in 7.4, a decision is inserted only if absent, or updated only `WHERE decision IS` the value the mutator saw. On a conflict the batch rolls back and is decided again, so a concurrent strip is never overwritten.
+
+Measured on CEREB clones with `drive.ts` (`PROBE_PIN=1`, plan `first`, six `newmsg`, one `defer`). The synthetic message clock was fixed for both runs, so the served hashes are comparable:
+
+| Pass | `context.db` WAL, v93 | after v94 | Served SHA-256 |
+|---|---|---|---|
+| `first` | 875 frames (3.60 MB) | 477 frames (1.97 MB): 30 of 37 slices differ from the slot captured on the live host | equal |
+| `newmsg` ×6 | 876 to 882 frames (3.61 to 3.63 MB) | 21 to 29 frames (0.09 to 0.12 MB) | equal on every pass |
+| `defer` | 1 frame | 1 frame | equal |
+
+On a new-message pass after v94, the LKG write is one changed slice plus the metadata row (4 to 24 frames), and the replay decision is one row (1 frame). No `session_meta` record is rewritten. That is under the 0.2 MB projected in 7.3.
+
+### 7.6 Follow-up: item 3 needs a coordinated change
+
+`cached_m0_bytes` and `cached_m0_mural_data_url` cannot move out of `session_meta` in a plugin-only change, because writers outside the plugin set them directly:
+
+- ck-mc's `single-store-repair-history` clears both columns on `context.db` (`crates/mc-module/src/single_store_repair.rs:61-63`, applied at `:834-849`). After a move it would leave the side table's stale m[0] in place, and the next pass would replay it.
+- The dashboard reads `cached_m0_bytes` for its token breakdown (`packages/dashboard/src-tauri/src/db.rs:1505`) and clears it (`:5827`).
+- `packages/cli` `migrate-session.ts:391` clears it too.
+
+Item 3 is therefore one change across ck-mc, the dashboard and the CLI together with the plugin. A trigger that keeps the external writers correct was rejected, because it hides SQL behaviour. Until item 3 lands, a length-changing `session_meta` update still rewrites the whole record. Section 7.1 measured these only on execute and nudge passes, not on the common new-message pass.
+
 ## 8. Rollout
 
 - **The fence.** `store.db` goes from 62 to 63. Migration 63 is the next number on both `master` and `alfonso/v93-merge-check` (`window/b0-v92-v93` is at 60, and no branch defines 63; review, section 5). If another `store.db` migration lands first, renumber at merge time. The plugin slice of section 7 moves the `context.db` fence separately.

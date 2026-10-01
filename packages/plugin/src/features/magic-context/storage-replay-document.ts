@@ -138,9 +138,10 @@ function isMissingReplayDocumentColumn(error: unknown): boolean {
  * Where the document lives. `session_meta.trailing_blank_decisions` holds the
  * envelope: the version and every namespace other than the trailing-blank map
  * (`piNative`, `cacheTtlPolicy`). Since migration 94 each trailing-blank decision
- * is its own row in `session_replay_decisions`, so recording one decision no
- * longer rewrites a document that grows with the session, and the whole
- * `session_meta` record with it.
+ * is its own row in `session_replay_decisions`. The map grows by one entry per
+ * assistant message, and SQLite rewrites a whole record whenever its length
+ * changes, so keeping the map in the column made every new decision rewrite the
+ * session's entire `session_meta` record.
  *
  * The column may still carry trailing-blank entries: migration 94 leaves a
  * document it cannot parse strictly where it is, so that session keeps today's
