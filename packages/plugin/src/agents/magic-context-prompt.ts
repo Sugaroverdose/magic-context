@@ -204,7 +204,7 @@ export function buildMagicContextSection(
         return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_NO_REDUCE}\n\n${BASE_INTRO_NO_REDUCE(memoryEnabled, dreamerEnabled, temporalAwarenessEnabled)}${cavemanWarning}${languageGuidance}`;
     }
     if (preset === "light") {
-        return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE_LIGHT}\n\n${BASE_INTRO_LIGHT(memoryEnabled, dreamerEnabled, temporalAwarenessEnabled)}${cavemanWarning}${languageGuidance}\n\n${SELF_TAG_GUIDANCE}`;
+        return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE_LIGHT}\n\n${BASE_INTRO_LIGHT(memoryEnabled, dreamerEnabled, temporalAwarenessEnabled)}${cavemanWarning}\n\n${SELF_TAG_GUIDANCE}${languageGuidance}`;
     }
-    return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE}\n\n${BASE_INTRO(memoryEnabled, dreamerEnabled, temporalAwarenessEnabled)}${cavemanWarning}${languageGuidance}\n\n${SELF_TAG_GUIDANCE}`;
+    return `## Magic Context\n\n${LONG_TERM_PARTNER_FRAME}\n${PARTNER_FRAME_CLOSER_REDUCE}\n\n${BASE_INTRO(memoryEnabled, dreamerEnabled, temporalAwarenessEnabled)}${cavemanWarning}\n\n${SELF_TAG_GUIDANCE}${languageGuidance}`;
 }
