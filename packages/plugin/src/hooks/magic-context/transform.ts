@@ -129,7 +129,7 @@ import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import { extractInMemoryMessageViews } from "./read-session-raw";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { sendStatusNotification } from "./send-session-notification";
-import { modelAcceptsEmptyContent } from "./sentinel";
+import { isAnthropicFamilyRoute, modelAcceptsEmptyContent } from "./sentinel";
 import {
     replayClearedReasoning,
     replayStrippedInlineThinking,
@@ -2023,6 +2023,18 @@ export function createTransform(deps: TransformDeps) {
                 reasoningByMessage = result.reasoningByMessage;
                 messageTagNumbers = result.messageTagNumbers;
                 batch = result.batch;
+                // The forced call skeleton beside reasoning protects Anthropic
+                // signed turns from merging (issue 423). Other routes have no
+                // such rule, so their drops remove the whole pair. An unknown
+                // provider keeps the protective skeleton.
+                if (
+                    resolvedProviderID &&
+                    !isAnthropicFamilyRoute(resolvedProviderID, modelForBudget?.modelID)
+                ) {
+                    for (const target of targets.values()) {
+                        if (target.requiresToolArcSkeleton) target.requiresToolArcSkeleton = false;
+                    }
+                }
                 hasRecentReduceCall = result.hasRecentReduceCall;
                 observeCommitNudgeTransition(sessionId, result.hasRecentCommit, !fullFeatureMode);
                 logTransformTiming(sessionId, "tagMessages", t0);

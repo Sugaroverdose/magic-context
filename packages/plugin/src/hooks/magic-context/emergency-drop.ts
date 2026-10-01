@@ -35,6 +35,16 @@ export const TIER_RECENCY_RESERVE = 0.2;
  */
 export const EMERGENCY_REARM_MIN_TOKENS = 2000;
 
+/**
+ * The selected candidates must together reclaim at least this many tokens, or
+ * the pass is skipped. The gap check above only proves there is something to
+ * close; it says nothing about what the candidates can actually win back. One
+ * live session spent an hour at 100% context dropping one fresh tool result
+ * per pass, 28 to 149 tokens each against a ~9,200-token gap, rewriting a
+ * cached prefix of ~300K tokens every time.
+ */
+export const EMERGENCY_MIN_ACHIEVABLE_RECLAIM_TOKENS = EMERGENCY_REARM_MIN_TOKENS;
+
 export type Tier = 1 | 2 | 3;
 
 // Tier keys are matched against the normalized (lowercased, `mcp_`-stripped)
@@ -154,6 +164,12 @@ export function planEmergencyDrop(input: {
     priorInputSample: number;
     /** True while the persisted pressure-episode latch is non-zero. */
     hasPriorDrop: boolean;
+    /**
+     * True when another mutation already rewrites the cached prefix on this
+     * pass. The selection then rides that rewrite for free, so the minimum
+     * achievable reclaim does not apply.
+     */
+    passAlreadyPriced?: boolean;
 }): EmergencyDropPlan {
     const {
         tags,
@@ -206,10 +222,16 @@ export function planEmergencyDrop(input: {
     const workingSpan = Math.max(ceilingTokens - fixedFloor, 0);
     const target = fixedFloor + TARGET_FRACTION * workingSpan;
     const reclaimTokens = Math.round(currentTotalInputTokens - target);
+    // When the fixed floor alone is already above the ceiling, dropping tool
+    // outputs cannot bring the request under it; say so in every reason.
+    const floorNote =
+        fixedFloor > ceilingTokens
+            ? `; fixed floor ≈${Math.round(fixedFloor)} already exceeds ceiling ${Math.round(ceilingTokens)}: tool drops cannot reach the target`
+            : "";
 
     // Already at/under target, or reclaim too small to justify a cache bust.
     if (reclaimTokens <= EMERGENCY_REARM_MIN_TOKENS) {
-        return noop(`reclaim<=min (${reclaimTokens} <= ${EMERGENCY_REARM_MIN_TOKENS})`);
+        return noop(`reclaim<=min (${reclaimTokens} <= ${EMERGENCY_REARM_MIN_TOKENS})${floorNote}`);
     }
 
     // Union projection form: exact tag-number cutoff directly.
@@ -290,14 +312,22 @@ export function planEmergencyDrop(input: {
     if (selected.length === 0) {
         // No cache rewrite occurred; the caller leaves the episode armed so
         // later completed outputs can form a batch.
-        return noop("no-candidates");
+        return noop(`no-candidates${floorNote}`);
+    }
+
+    // Price the selection before committing it. Skipping leaves the episode
+    // armed, so the candidates can still ride a later rewrite.
+    if (!input.passAlreadyPriced && reclaimed < EMERGENCY_MIN_ACHIEVABLE_RECLAIM_TOKENS) {
+        return noop(
+            `achievable reclaim below minimum (${selected.length} tags, reclaim≈${Math.round(reclaimed)} < ${EMERGENCY_MIN_ACHIEVABLE_RECLAIM_TOKENS} against gap ${reclaimTokens})${floorNote}`,
+        );
     }
 
     return {
         shouldDrop: true,
         tagNumbers: selected,
         reclaimTokens,
-        reason: `tiered drop: ${selected.length} tags, reclaim≈${reclaimed}/${reclaimTokens} tokens (floor≈${fixedFloor}, ceiling=${Math.round(ceilingTokens)})`,
+        reason: `tiered drop: ${selected.length} tags, reclaim≈${reclaimed}/${reclaimTokens} tokens (floor≈${fixedFloor}, ceiling=${Math.round(ceilingTokens)})${floorNote}`,
     };
 }
 

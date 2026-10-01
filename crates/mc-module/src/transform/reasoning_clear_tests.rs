@@ -184,3 +184,182 @@ fn reasoning_clear_legacy_missing_fingerprint_holds_until_bust() {
     );
     assert_eq!(reasoning_clear_mids(&units), HashSet::from(["old"]));
 }
+
+/// OpenCode tool-loop shape on OpenAI Responses: each assistant step carries a reasoning
+/// part whose encrypted payload lives in provider metadata, then a visible answer.
+fn opencode_openai_removal_request(steps: usize, provider: &str, model: &str) -> TransformRequest {
+    let mut native = vec![json!({"info":{"id":"user-0","role":"user"},"parts":[
+        {"id":"user-0-t","type":"text","text":"do the work"}]})];
+    for step in 0..steps {
+        let id = format!("a{step}");
+        native.push(json!({"info":{"id":id,"role":"assistant"},"parts":[
+            {"id":format!("{id}-r"),"type":"reasoning","text":format!("thinking-{id}"),
+             "metadata":{"openai":{"itemId":format!("rs_{id}"),"reasoningEncryptedContent":format!("ENC_{id}")}}},
+            {"id":format!("{id}-t"),"type":"text","text":format!("answer-{id}")}]}));
+    }
+    native.push(json!({"info":{"id":"user-last","role":"user"},"parts":[
+        {"id":"user-last-t","type":"text","text":"continue"}]}));
+    let messages = crate::codec::decode_opencode(&native).messages;
+    let mut request = active_opencode_req("reasoning-removal-openai", "cfg0", messages);
+    request.native_messages = Some(native);
+    request.provider_id = Some(provider.to_string());
+    request.model_key = Some(format!("{provider}/{model}"));
+    request.serve_native = true;
+    request.clear_reasoning_age = 3;
+    with_usage(request, 10_000, 100_000)
+}
+
+fn native_reasoning_parts(native: &[Value], mid: &str) -> usize {
+    native
+        .iter()
+        .find(|message| message["info"]["id"] == mid)
+        .and_then(|message| message["parts"].as_array())
+        .map(|parts| parts.iter().filter(|part| part["type"] == "reasoning").count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn opencode_non_anthropic_removes_old_reasoning_on_bust_and_replays_on_defer() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = store(dir.path());
+    let ctx = pctx("git:proj", dir.path().to_str().unwrap(), 0);
+    // A short session first: nothing is old enough yet.
+    let short = opencode_openai_removal_request(2, "openai", "gpt-6.1-sol");
+    transform_with_projection(&db, &short, &ctx).unwrap();
+
+    // The loop grows on defer passes; a defer pass never originates a removal.
+    let mut request = opencode_openai_removal_request(6, "openai", "gpt-6.1-sol");
+    let deferred = transform_with_projection(&db, &request, &ctx).unwrap();
+    assert_eq!(deferred.response.action, "SOFT+");
+    let deferred_native = reasoning_clear_native(&deferred, &request);
+    // Defer passes never mint a removal unit.
+    assert!(!db
+        .load(&request.session_id)
+        .unwrap()
+        .core
+        .frozen_units
+        .iter()
+        .any(|unit| unit.key.starts_with("strip:reasoning_age:")));
+    let _ = deferred_native;
+
+    request.render_config = "cfg1".to_string();
+    let hard = transform_with_projection(&db, &request, &ctx).unwrap();
+    assert_eq!(hard.response.action, "HARD");
+    let hard_native = reasoning_clear_native(&hard, &request);
+    // Tags: user-0=1, a0=2, a1=3, user-last=4, a2..a5=5..8. Cutoff 8-3=5.
+    let minted: HashSet<String> = db
+        .load(&request.session_id)
+        .unwrap()
+        .core
+        .frozen_units
+        .iter()
+        .filter_map(|unit| unit.key.strip_prefix("strip:reasoning_age:").map(str::to_string))
+        .collect();
+    assert_eq!(
+        minted,
+        HashSet::from(["a0".to_string(), "a1".to_string(), "a2".to_string()])
+    );
+    let removed: Vec<_> = (0..6)
+        .map(|step| format!("a{step}"))
+        .filter(|mid| native_reasoning_parts(&hard_native, mid) == 0)
+        .collect();
+    assert!(!removed.is_empty(), "the bust must remove old reasoning");
+    assert!(!removed.contains(&"a5".to_string()), "the newest assistant keeps its reasoning");
+    assert_eq!(native_reasoning_parts(&hard_native, "a5"), 1);
+    let wire = serde_json::to_string(&hard_native).unwrap();
+    for mid in &removed {
+        assert!(!wire.contains(&format!("ENC_{mid}")), "{mid} encrypted payload left the wire");
+        assert!(wire.contains(&format!("answer-{mid}")), "{mid} answer must survive");
+    }
+    // No canonical-Anthropic empty-shell unit is used on this route.
+    assert!(reasoning_clear_mids(&hard.reasoning_clear_units).is_empty());
+
+    for _ in 0..2 {
+        let replay = transform_with_projection(&db, &request, &ctx).unwrap();
+        assert_eq!(replay.response.action, "SOFT+");
+        assert_eq!(
+            serde_json::to_string(&reasoning_clear_native(&replay, &request)).unwrap(),
+            wire
+        );
+        assert!(replay.response.first_divergence.is_none());
+    }
+}
+
+#[test]
+fn opencode_canonical_anthropic_does_not_use_the_removal_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = store(dir.path());
+    let mut request = opencode_openai_removal_request(6, "anthropic", "claude-sonnet-5");
+    let ctx = pctx("git:proj", dir.path().to_str().unwrap(), 0);
+    transform_with_projection(&db, &request, &ctx).unwrap();
+    request.render_config = "cfg1".to_string();
+    let hard = transform_with_projection(&db, &request, &ctx).unwrap();
+    assert_eq!(hard.response.action, "HARD");
+    let loaded = db.load(&request.session_id).unwrap();
+    assert!(!loaded
+        .core
+        .frozen_units
+        .iter()
+        .any(|unit| unit.key.starts_with("strip:reasoning_age:")));
+}
+
+#[test]
+fn opencode_removal_selects_nothing_on_prefix_bound_unresolved_or_openrouter_routes() {
+    let mut request =
+        opencode_openai_removal_request(6, "google-vertex-anthropic", "claude-opus-5-5@20260930");
+    // a2 keeps only its reasoning, so removing it would leave no content.
+    request.messages[3].ck.content.retain(is_reasoning_block);
+    let tags: BTreeMap<String, u64> = request
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message.mid.clone(), index as u64 + 1))
+        .collect();
+    let none = HashSet::new();
+    assert!(opencode_reasoning_removal_mids(&request, &tags, Some(6), &none).is_empty());
+    request.provider_id = None;
+    request.model_key = Some("openai/gpt-6.1-sol".to_string());
+    assert!(opencode_reasoning_removal_mids(&request, &tags, Some(6), &none).is_empty());
+    request.provider_id = Some("openrouter".to_string());
+    request.model_key = Some("openrouter/anthropic/claude-haiku-4.5".to_string());
+    assert!(opencode_reasoning_removal_mids(&request, &tags, Some(6), &none).is_empty());
+    request.provider_id = Some("openai".to_string());
+    request.model_key = Some("openai/gpt-6.1-sol".to_string());
+    // An ineligible message (a2) does not stop the walk on unbound models.
+    let unbound = opencode_reasoning_removal_mids(&request, &tags, Some(6), &none);
+    assert_eq!(unbound, HashSet::from(["a0", "a1", "a3", "a4"]));
+    assert!(is_prefix_bound_thinking_model(Some("amazon-bedrock/us.anthropic.claude-fable-5-1-v1:0")));
+    assert!(is_prefix_bound_thinking_model(Some("anthropic/claude-sonnet-5-5")));
+    assert!(!is_prefix_bound_thinking_model(Some("anthropic/claude-sonnet-5")));
+    assert!(!is_prefix_bound_thinking_model(Some("anthropic/claude-sonnet-5-50")));
+}
+
+#[test]
+fn reasoning_cutoff_is_not_captured_for_prefix_bound_models() {
+    let mut request = reasoning_clear_fixture();
+    let tags = BTreeMap::from([("old".to_string(), 2), ("multipart-user".to_string(), 30)]);
+    let profile = Some(SerializerProfile::OpencodeAiSdk);
+    request.model_key = Some("anthropic/claude-sonnet-5".to_string());
+    assert!(reasoning_clear_cutoff_with_tags(&request, profile, true, &tags).is_some());
+    request.model_key = Some("anthropic/claude-opus-5-5".to_string());
+    assert_eq!(reasoning_clear_cutoff_with_tags(&request, profile, true, &tags), None);
+    let claude_code = Some(SerializerProfile::ClaudeCodeAnthropic);
+    assert_eq!(reasoning_clear_cutoff_with_tags(&request, claude_code, true, &tags), None);
+}
+
+#[test]
+fn opencode_removal_skips_messages_carrying_openrouter_reasoning_details_under_any_provider_id() {
+    let mut request = opencode_openai_removal_request(6, "my-gateway", "anthropic/claude-haiku-4.5");
+    let natives = request.native_messages.as_mut().unwrap();
+    natives[2]["parts"][1]["metadata"] =
+        json!({"openrouter":{"reasoning_details":[{"type":"reasoning.text","format":"anthropic-claude-v1"}]}});
+    let tags: BTreeMap<String, u64> = request
+        .messages
+        .iter()
+        .enumerate()
+        .map(|(index, message)| (message.mid.clone(), index as u64 + 1))
+        .collect();
+    let selected = opencode_reasoning_removal_mids(&request, &tags, Some(6), &HashSet::new());
+    assert!(!selected.contains("a1"), "{selected:?}");
+    assert!(selected.contains("a0"));
+}

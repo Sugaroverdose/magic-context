@@ -23,6 +23,7 @@
     "@opencode-ai/sdk": "^1.15.13"
   },
   "devDependencies": {
+    "@cortexkit/claustrum-client": "0.5.0",
     "@oh-my-pi/pi-coding-agent": "^18.2.6",
     "@opencode/ai": "2.0.15",
     "@opencode/client": "2.0.15",

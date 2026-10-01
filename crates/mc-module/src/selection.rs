@@ -93,6 +93,12 @@ const TIER_RECENCY_RESERVE: f64 = 0.20;
 pub(crate) const AGE_RECLAIM_MIN_TOKENS: usize = 250;
 /// Minimum reclaim to justify an emergency cache bust (tokens).
 const EMERGENCY_REARM_MIN_TOKENS: f64 = 2000.0;
+/// The selected arcs must together reclaim at least this many tokens, or the pass is
+/// skipped unless another mutation already prices it. The gap check above only proves
+/// there is something to close. One live session spent an hour at 100% context dropping
+/// one fresh tool result per pass, 28 to 149 tokens each against a ~9,200-token gap.
+/// Mirrors the TS `EMERGENCY_MIN_ACHIEVABLE_RECLAIM_TOKENS`.
+const EMERGENCY_MIN_ACHIEVABLE_RECLAIM_TOKENS: f64 = EMERGENCY_REARM_MIN_TOKENS;
 /// Byte→token estimate for the emergency reclaim math (matches the TS nudge).
 const TOKENS_PER_BYTE: f64 = 0.25;
 /// T1 (keep longest): navigation/structure the agent re-uses.
@@ -244,6 +250,12 @@ pub struct SelectionContext {
     /// True when supersession can ride concrete work already scheduled for this pass.
     /// Unlike `pass_already_busting`, a held emergency latch alone does not set this.
     pub supersession_ride_available: bool,
+    /// True only when a rebuild that is independent of the emergency itself (a fold, an
+    /// m[1] or render-config change, a pending soft refresh) already rewrites the cached
+    /// prefix on this pass. The force-band edge and the 95% backstop are permissions to
+    /// rewrite, not rewrites that are already paid for, so they never set this. Only this
+    /// flag waives the emergency minimum achievable reclaim.
+    pub emergency_minimum_waived: bool,
     /// At the scheduler's >=95% backstop, the token window and tier reserve yield.
     pub emergency_window_yields: bool,
     /// Persisted token-window protection expressed as exact block ids.
@@ -1250,6 +1262,14 @@ fn select_emergency(
     // comparison on that rounded value; comparing the raw float can fire for a
     // sub-threshold fractional remainder at the boundary.
     let reclaim_tokens = (ctx.current_total_input_tokens - target).round();
+    let floor_above_ceiling = fixed_floor > ctx.ceiling_tokens;
+    if floor_above_ceiling {
+        tracing::info!(
+            "mc-module: emergency drop: fixed floor ~{:.0} already exceeds ceiling {:.0}; tool drops cannot reach the target",
+            fixed_floor,
+            ctx.ceiling_tokens
+        );
+    }
     if reclaim_tokens <= EMERGENCY_REARM_MIN_TOKENS {
         *assessment = Some(mc_store::EmergencyDropAssessment {
             fixed_floor_tokens: fixed_floor,
@@ -1258,6 +1278,8 @@ fn select_emergency(
             selected_reclaim_tokens: 0.0,
             candidate_tokens: 0.0,
             target_unreachable: reclaim_tokens > 0.0,
+            floor_above_ceiling,
+            skipped_below_minimum_reclaim: false,
         });
         return HashSet::new();
     }
@@ -1347,14 +1369,37 @@ fn select_emergency(
             }
         }
     }
+    // Price the selection before committing it. Skipping leaves the pressure episode
+    // armed, so the candidates can still ride a later rewrite.
+    let skipped_below_minimum_reclaim = !selected.is_empty()
+        && !ctx.emergency_minimum_waived
+        && reclaimed < EMERGENCY_MIN_ACHIEVABLE_RECLAIM_TOKENS;
+    if skipped_below_minimum_reclaim {
+        tracing::info!(
+            "mc-module: emergency drop skipped: achievable reclaim ~{:.0} < {:.0} against gap {:.0} ({} arcs)",
+            reclaimed,
+            EMERGENCY_MIN_ACHIEVABLE_RECLAIM_TOKENS,
+            reclaim_tokens,
+            selected.len()
+        );
+    }
     *assessment = Some(mc_store::EmergencyDropAssessment {
         fixed_floor_tokens: fixed_floor,
         target_tokens: target,
         required_reclaim_tokens: reclaim_tokens,
-        selected_reclaim_tokens: reclaimed,
+        selected_reclaim_tokens: if skipped_below_minimum_reclaim {
+            0.0
+        } else {
+            reclaimed
+        },
         candidate_tokens,
-        target_unreachable: reclaimed < reclaim_tokens,
+        target_unreachable: skipped_below_minimum_reclaim || reclaimed < reclaim_tokens,
+        floor_above_ceiling,
+        skipped_below_minimum_reclaim,
     });
+    if skipped_below_minimum_reclaim {
+        return HashSet::new();
+    }
     selected
 }
 
@@ -2129,6 +2174,41 @@ mod tests {
         assert!(!report.target_unreachable);
     }
 
+    /// The live worker shape: the fixed floor (~326K) is already above the ceiling
+    /// (~251K) and the only candidate is a fresh result worth ~149 tokens. At the 95%
+    /// backstop production sets both `emergency_window_yields` and `pass_already_busting`;
+    /// neither waives the minimum, so the pass is skipped. Only an independent rebuild
+    /// (`emergency_minimum_waived`) lets the small selection ride. Mirrors the TS tests.
+    #[test]
+    fn emergency_skips_a_selection_below_the_minimum_achievable_reclaim() {
+        let items = vec![
+            text_with_id("conversation", 1, 36_204),
+            tool_call("fresh", 2, "bash", serde_json::json!({}), 0),
+            tool_result("fresh", 3, "bash", 596),
+        ];
+        let arcs = group_arcs(&items, &HashSet::new());
+        let arcs = arcs.iter().collect::<Vec<_>>();
+        let mut ctx = base_ctx(PassClass::EmergencyForce);
+        ctx.current_total_input_tokens = 335_200.0;
+        ctx.ceiling_tokens = 251_000.0;
+        ctx.emergency_window_yields = true;
+        ctx.pass_already_busting = true;
+        let mut assessment = None;
+        let selected = select_emergency(&arcs, &ctx, 9_200.0, &HashMap::new(), &mut assessment);
+        let report = assessment.as_ref().unwrap();
+        assert!(selected.is_empty());
+        assert!(report.skipped_below_minimum_reclaim);
+        assert!(report.floor_above_ceiling);
+        assert_eq!(report.selected_reclaim_tokens, 0.0);
+
+        ctx.emergency_minimum_waived = true;
+        let selected = select_emergency(&arcs, &ctx, 9_200.0, &HashMap::new(), &mut assessment);
+        let report = assessment.as_ref().unwrap();
+        assert_eq!(selected.len(), 1);
+        assert!(!report.skipped_below_minimum_reclaim);
+        assert!(report.floor_above_ceiling);
+    }
+
     #[test]
     fn calibrated_emergency_uses_current_token_mass_not_original_bytes() {
         let mut items = Vec::new();
@@ -2373,6 +2453,7 @@ mod tests {
             first_applied_agent_drop_ids: HashSet::new(),
             pass_already_busting: false,
             supersession_ride_available: false,
+            emergency_minimum_waived: false,
             emergency_window_yields: false,
             tag_window_protected_block_ids: HashSet::new(),
             exempt_message_protected_block_ids: HashSet::new(),
@@ -2655,6 +2736,7 @@ mod tests {
                 first_applied_agent_drop_ids: HashSet::new(),
                 pass_already_busting: case.smart_drops || case.ctx.pass_already_busting,
                 supersession_ride_available: case.smart_drops || case.ctx.pass_already_busting,
+                emergency_minimum_waived: false,
                 emergency_window_yields: false,
                 tag_window_protected_block_ids: golden_ordinal_threshold_to_row_identities(
                     &items,
@@ -4322,6 +4404,7 @@ mod tests {
             has_prior_drop: true,
             pass_already_busting: true,
             supersession_ride_available: true,
+            emergency_minimum_waived: false,
             ..base_ctx(PassClass::Execute)
         };
 

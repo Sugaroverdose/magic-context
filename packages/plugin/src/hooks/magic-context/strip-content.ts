@@ -264,6 +264,9 @@ export function replayClearedReasoning(
         if (!parts) continue;
 
         for (const tp of parts) {
+            // A drop may already have rewritten this part to an empty text
+            // sentinel; it is no longer reasoning and must stay empty.
+            if (tp.type === "text") continue;
             if (tp.thinking !== undefined && tp.thinking !== "[cleared]") {
                 tp.thinking = "[cleared]";
                 cleared++;
@@ -329,6 +332,9 @@ export function clearOldReasoning(
         if (!parts) continue;
 
         for (const tp of parts) {
+            // A drop may already have rewritten this part to an empty text
+            // sentinel; it is no longer reasoning and must stay empty.
+            if (tp.type === "text") continue;
             if (tp.thinking !== undefined && tp.thinking !== "[cleared]") {
                 tp.thinking = "[cleared]";
                 cleared++;

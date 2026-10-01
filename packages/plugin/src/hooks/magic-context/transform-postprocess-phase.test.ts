@@ -9385,14 +9385,41 @@ describe("proactive strip of thinking on busting passes", () => {
         expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set());
     });
 
-    it("leaves subagent sessions alone, as Rust mode does", async () => {
+    // Subagents used to be left out. The age lane no longer removes reasoning on
+    // prefix-bound models (an older removal invalidates every newer signed
+    // block), so a busting pass strips subagents' thinking the same way.
+    it("strips subagent sessions on a busting pass too", async () => {
         openDb();
         const sessionId = "ses-proactive-subagent";
         const pass = buildSession(sessionId, "re-rendered first user message");
         const result = await serve(sessionId, pass, { busting: true, fullFeatureMode: false });
-        expect(result.proactiveThinkingStrip).toBeNull();
-        expect(reasoningCount(findMessage(pass, "assistant-one"))).toBe(1);
-        expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set());
+        expect(result.proactiveThinkingStrip).toEqual({ messageIds: ALL_ASSISTANTS });
+        for (const id of ALL_ASSISTANTS) expect(reasoningCount(findMessage(pass, id))).toBe(0);
+    });
+
+    it("strips Rust-mode subagents on a busting pass and replays it on defer", () => {
+        openDb();
+        const sessionId = "ses-proactive-rust-subagent";
+        const postprocess = (messages: MessageLike[], cacheBustingPass: boolean) =>
+            runRustModePostprocess({
+                db,
+                sessionId,
+                messages,
+                fullFeatureMode: false,
+                resolvedProviderID: "anthropic",
+                thinkingBindingRecoveryEnabledForModel: true,
+                cacheBustingPass,
+                tagger: createTagger(),
+                ctxReduceAvailability: { callable: true, frozen: true },
+            });
+        const busting = buildSession(sessionId, "re-rendered first user message");
+        expect(postprocess(busting, true).proactiveThinkingStrip).toEqual({
+            messageIds: ALL_ASSISTANTS,
+        });
+        for (const id of ALL_ASSISTANTS) expect(reasoningCount(findMessage(busting, id))).toBe(0);
+        const defer = buildSession(sessionId, "re-rendered first user message");
+        expect(postprocess(defer, false).proactiveThinkingStrip).toBeNull();
+        expect(sha256(defer)).toBe(sha256(busting));
     });
 
     it("strips through Rust-mode host postprocess only on a busting pass and replays it", () => {

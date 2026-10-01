@@ -21,6 +21,7 @@ import {
 } from "./image-token-estimate";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
+import { neutralizeDroppedReasoningPart } from "./sentinel";
 import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
 import { createExistingTagResolver } from "./tag-id-fallback";
 import {
@@ -895,8 +896,7 @@ export function tagMessages(
                                 message.parts.indexOf(tp) > partialEnd.end_block_index
                             )
                                 continue;
-                            if (tp.thinking !== undefined) tp.thinking = "[cleared]";
-                            if (tp.text !== undefined) tp.text = "[cleared]";
+                            neutralizeDroppedReasoningPart(tp);
                         }
                         return true;
                     },

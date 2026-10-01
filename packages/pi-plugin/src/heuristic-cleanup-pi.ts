@@ -104,6 +104,8 @@ export interface PiHeuristicCleanupConfig {
 		currentTotalInputTokens: number;
 		ceilingTokens: number;
 		usagePercentage?: number;
+		/** Another mutation already rewrites the cached prefix on this pass. */
+		passAlreadyPriced?: boolean;
 	};
 	/**
 	 * Age-tier caveman text compression settings. Caller is responsible
@@ -407,6 +409,7 @@ export function applyPiHeuristicCleanup(
 			usagePercentage: emergency.usagePercentage,
 			priorInputSample,
 			hasPriorDrop: priorInputSample > 0,
+			passAlreadyPriced: emergency.passAlreadyPriced === true,
 		});
 		if (plan.shouldDrop) {
 			const toDrop = new Set(plan.tagNumbers);

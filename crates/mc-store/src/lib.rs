@@ -4465,6 +4465,15 @@ pub struct EmergencyDropAssessment {
     pub selected_reclaim_tokens: f64,
     pub candidate_tokens: f64,
     pub target_unreachable: bool,
+    /// The estimated fixed floor alone was above the ceiling, so tool drops could not
+    /// reach the target on this pass.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub floor_above_ceiling: bool,
+    /// The selection was skipped because it would reclaim less than the minimum worth
+    /// a cache rewrite and no other mutation already priced the pass. Both flags are
+    /// omitted from the stored blob while false, so existing metadata keeps its bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub skipped_below_minimum_reclaim: bool,
 }
 
 /// Calibration frozen at the session's last authorized bust boundary.

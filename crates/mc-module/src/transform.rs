@@ -4508,7 +4508,11 @@ fn apply_once(
         >= scheduler::escalation_bands(ctx.execute_threshold_percentage)
             .force_materialize_percentage;
     let force_episode_available = force_band_active && !loaded.meta.has_prior_emergency_drop;
-    let supersession_ride_available = (prefix_materialization_enabled
+    // A rebuild that is not the emergency itself. It is the only thing that waives the
+    // emergency minimum: the force-band edge and the 95% backstop below permit a rewrite
+    // but do not pay for one. Both flags derive from this one expression so they cannot
+    // drift apart.
+    let independent_rebuild = (prefix_materialization_enabled
         && (!loaded.meta.initialized
             || render_config_changed
             || cached_m1_missing(&loaded.core)
@@ -4517,10 +4521,12 @@ fn apply_once(
             || lineage_state.force_hard
             || (scheduler_outcome.pass != scheduler::PassDecision::Defer
                 && current_m1_digest != applied_m1_revision)))
-        || force_episode_available
-        || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
         || loaded.meta.soft_refresh_pending;
+    let supersession_ride_available = independent_rebuild
+        || force_episode_available
+        || scheduler_outcome.pass == scheduler::PassDecision::Emergency95;
     let pass_already_busting = supersession_ride_available;
+    let emergency_minimum_waived = independent_rebuild;
     let calibration_candidate = crate::decision_calibration::DecisionCalibration::freeze_for_model(
         req.model_key.as_deref(),
     );
@@ -4683,6 +4689,7 @@ fn apply_once(
                 first_applied_agent_drop_ids,
                 pass_already_busting,
                 supersession_ride_available,
+                emergency_minimum_waived,
                 emergency_window_yields: scheduler_outcome.pass
                     == scheduler::PassDecision::Emergency95,
                 tag_window_protected_block_ids: tag_window_protected_block_ids.clone(),
@@ -12597,12 +12604,22 @@ fn new_frozen_strip_units(
     let age_cutoff = tag_age_cutoff(req, tag_numbers);
     let reasoning_mutation_exempt_mid =
         latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
-    let cc_reasoning_cutoff = if SerializerProfile::parse(&req.serializer_profile)
-        == Some(SerializerProfile::ClaudeCodeAnthropic)
-    {
+    let profile = SerializerProfile::parse(&req.serializer_profile);
+    let cc_reasoning_cutoff = if profile == Some(SerializerProfile::ClaudeCodeAnthropic) {
         reasoning_clear_cutoff
     } else {
         None
+    };
+    // OpenCode on any provider other than canonical `anthropic` removes whole old reasoning
+    // blocks through the same frozen `reasoning_age` unit. Canonical Anthropic keeps its
+    // `reasoning_clear` empty-shell lane, which its adapter filters before the wire.
+    let opencode_removal_mids = if profile == Some(SerializerProfile::OpencodeAiSdk)
+        && req.serve_native
+        && !request_accepts_empty_content(req)
+    {
+        opencode_reasoning_removal_mids(req, tag_numbers, age_cutoff, &existing_keys)
+    } else {
+        HashSet::new()
     };
     let mut units = BTreeMap::<String, FrozenUnit>::new();
     let mut has_assistant_response = false;
@@ -12655,14 +12672,14 @@ fn new_frozen_strip_units(
             // then remove whole reasoning blocks at render time. The unit is first minted only on
             // this already-busting pass and replays unchanged on defers; selection.rs continues to
             // exclude every reasoning block from ReductionDecision targets.
-            if message.ck.role == "assistant"
+            let cc_aged = message.ck.role == "assistant"
                 && reasoning_mutation_exempt_mid != Some(message.mid.as_str())
                 && cc_reasoning_cutoff.is_some_and(|cutoff| {
                     let tag = message_tag_number(message, tag_numbers);
                     tag > 0 && tag <= cutoff
                 })
-                && blocks.iter().any(is_reasoning_block)
-            {
+                && blocks.iter().any(is_reasoning_block);
+            if cc_aged || opencode_removal_mids.contains(message.mid.as_str()) {
                 let unit = strip_unit("reasoning_age", &message.mid, "");
                 if !existing_keys.contains(unit.key.as_str()) {
                     units.insert(unit.key.clone(), unit);
@@ -12724,6 +12741,108 @@ fn new_frozen_strip_units(
         }
     }
     units.into_values().collect()
+}
+
+/// True for Claude models whose signed thinking is bound to the request prefix, on any
+/// route. Mirrors TS `isPrefixBoundThinkingModel` and its `PREFIX_BOUND_THINKING_MODELS`
+/// (Fable 5.1, Opus 5.5, Sonnet 5.5); the provider is deliberately ignored.
+pub(crate) fn is_prefix_bound_thinking_model(model_key: Option<&str>) -> bool {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    let Some(key) = model_key else {
+        return false;
+    };
+    let model = key.split_once('/').map_or(key, |(_, model)| model);
+    PATTERN
+        .get_or_init(|| {
+            Regex::new(
+                r"(?i)(?:^|[-_.:/])(?:fable[-_.]?5[-_.]1|opus[-_.]?5[-_.]5|sonnet[-_.]?5[-_.]5)(?:$|[-_.:/@])",
+            )
+            .unwrap()
+        })
+        .is_match(model)
+}
+
+/// OpenCode assistant mids whose reasoning blocks are newly removed on this bust pass.
+/// Mirrors TS `selectReasoningRemovals`: tag at or below the age cutoff, a reasoning
+/// block present, not the newest assistant (nor the newest with replayable content), and
+/// some non-reasoning content left after removal.
+///
+/// Selects nothing when:
+/// - the model is prefix-bound (Fable 5.1, Opus 5.5, Sonnet 5.5): a signed block stays
+///   valid only while everything before it is unchanged, so removing an older block
+///   invalidates every newer one (docs/reports/anthropic-thinking-binding.md);
+/// - the provider is unresolved, since the session may be canonical Anthropic;
+/// - the route is OpenRouter, whose adapter also sends the reasoning as
+///   `reasoning_details` copied onto the tool calls. TS strips those copies; this lane
+///   does not, so it stays off rather than change bytes without shrinking the request.
+fn opencode_reasoning_removal_mids<'a>(
+    req: &'a TransformRequest,
+    tag_numbers: &BTreeMap<String, u64>,
+    age_cutoff: Option<u64>,
+    existing_keys: &HashSet<&str>,
+) -> HashSet<&'a str> {
+    let mut selected = HashSet::new();
+    let Some(cutoff) = age_cutoff.filter(|cutoff| *cutoff > 0) else {
+        return selected;
+    };
+    let provider = req
+        .provider_id
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if provider.is_empty()
+        || provider.contains("openrouter")
+        || is_prefix_bound_thinking_model(req.model_key.as_deref())
+    {
+        return selected;
+    }
+    let newest = latest_assistant_mid(&req.messages);
+    let exempt = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    // `@openrouter/ai-sdk-provider` keeps copies of the reasoning as
+    // `metadata.openrouter.reasoning_details` on other parts of the message. This lane
+    // cannot strip those, so such messages are skipped whatever the provider id is.
+    let openrouter_shaped: HashSet<&str> = req
+        .native_messages
+        .iter()
+        .flatten()
+        .filter_map(|native| {
+            let id = native.get("info")?.get("id")?.as_str()?;
+            native
+                .get("parts")?
+                .as_array()?
+                .iter()
+                .any(|part| {
+                    part.pointer("/metadata/openrouter/reasoning_details")
+                        .is_some()
+                })
+                .then_some(id)
+        })
+        .collect();
+    for message in &req.messages {
+        if message.ck.meta.synthetic
+            || message.ck.role != "assistant"
+            || !message.ck.content.iter().any(is_reasoning_block)
+        {
+            continue;
+        }
+        let mid = message.mid.as_str();
+        if existing_keys.contains(format!("strip:reasoning_age:{mid}").as_str())
+            || openrouter_shaped.contains(mid)
+        {
+            continue;
+        }
+        let tag = message_tag_number(message, tag_numbers);
+        let eligible = !mid.is_empty()
+            && Some(mid) != newest
+            && Some(mid) != exempt
+            && tag > 0
+            && tag <= cutoff
+            && message.ck.content.iter().any(has_meaningful_content);
+        if eligible {
+            selected.insert(mid);
+        }
+    }
+    selected
 }
 
 struct ReasoningMutationPolicy {
@@ -15133,7 +15252,9 @@ fn reasoning_clear_cutoff_with_tags(
     is_bust_pass: bool,
     tag_numbers: &BTreeMap<String, u64>,
 ) -> Option<u64> {
-    if !is_bust_pass {
+    // Prefix-bound models never take the age lane: removing an older signed block
+    // invalidates every newer one.
+    if !is_bust_pass || is_prefix_bound_thinking_model(req.model_key.as_deref()) {
         return None;
     }
     let profile_supported = match profile {
@@ -20191,6 +20312,7 @@ pub(crate) mod tests {
             // The observed pass was Force85, not the scheduler's Emergency95 backstop.
             pass_already_busting: true,
             supersession_ride_available: true,
+            emergency_minimum_waived: false,
             emergency_window_yields: false,
             tag_window_protected_block_ids: protected,
             exempt_message_protected_block_ids: HashSet::new(),
@@ -20335,7 +20457,9 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         bootstrap_covering_a(&s);
-        let huge = "x".repeat(50_000);
+        // Large enough that the force batch clears the emergency minimum achievable
+        // reclaim; this test is about when the producer gate runs.
+        let huge = "x".repeat(100_000);
         let force_messages = vec![
             item("a", 1, "raw"),
             assistant_tool_call("force_old", 2, "force_old_call"),
@@ -21570,6 +21694,70 @@ pub(crate) mod tests {
         assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 
+    /// At the 95% backstop with an earlier emergency drop already persisted, a selection
+    /// that reclaims less than the minimum is skipped. Neither the backstop nor the
+    /// force-band edge counts as an already-paid rewrite.
+    #[test]
+    fn emergency_backstop_skips_a_sub_minimum_selection_with_drops_already_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let context = smart_pctx();
+        let bash_call = |mid: &str, ordinal: u64| {
+            let mut call = assistant_tool_call(mid, ordinal, mid);
+            if let ck_wire::CkKind::ToolCall { name, .. } = &mut call.ck.content[0].kind {
+                *name = "bash".into();
+            }
+            call
+        };
+        let mut request = with_usage(
+            req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("a", 1, "raw"),
+                    bash_call("early", 2),
+                    tool_result("early-result", 3, "early", &"e".repeat(20_000)),
+                    item("protected", 4, &"tail content ".repeat(30_000)),
+                    item("newest-1", 5, "tail"),
+                ],
+            ),
+            167_000,
+            167_000,
+        );
+        request.protected_tokens_effective = Some(30_000);
+        request.protected_tags = 0;
+        transform(&s, &request, &context).unwrap();
+        let first = s.load("ses").unwrap();
+        assert!(
+            first
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:early#0"),
+            "the first backstop pass drops the large arc: {:?}",
+            first.meta.emergency_drop_assessment
+        );
+
+        request.messages.push(bash_call("fresh", 6));
+        request
+            .messages
+            .push(tool_result("fresh-result", 7, "fresh", &"f".repeat(2_000)));
+        request = with_usage(request, 167_000, 167_000);
+        transform(&s, &request, &context).unwrap();
+        let second = s.load("ses").unwrap();
+        assert!(
+            !second
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:fresh#0"),
+            "a ~500-token fresh result must not be dropped at the backstop"
+        );
+        let assessment = second.meta.emergency_drop_assessment.unwrap();
+        assert!(assessment.skipped_below_minimum_reclaim, "{assessment:?}");
+    }
+
     #[test]
     fn force_episode_submargin_dip_does_not_price_second_batch() {
         for percentages in [
@@ -21850,7 +22038,9 @@ pub(crate) mod tests {
     fn subagent_emergency_sample_latch_prevents_repeat_selection() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let huge = "x".repeat(50_000);
+        // Large enough that the first batch clears the emergency minimum achievable
+        // reclaim; this test is about the same-sample latch, not that minimum.
+        let huge = "x".repeat(100_000);
         let messages = vec![
             item("head", 1, "raw"),
             assistant_tool_call("old", 2, "old_call"),
@@ -21875,7 +22065,8 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         assert!(
             !first_red.is_empty(),
-            "the first emergency pass should select drops"
+            "the first emergency pass should select drops: {:?}",
+            s.load("subagent").unwrap().meta.emergency_drop_assessment
         );
         let first_bytes = serde_json::to_vec(&first.ck_messages).unwrap();
 
@@ -40034,6 +40225,7 @@ pub(crate) mod tests {
                 first_applied_agent_drop_ids: HashSet::new(),
                 pass_already_busting: true,
                 supersession_ride_available: false,
+                emergency_minimum_waived: false,
                 emergency_window_yields: false,
                 tag_window_protected_block_ids: HashSet::new(),
                 exempt_message_protected_block_ids: HashSet::new(),
@@ -40305,6 +40497,7 @@ pub(crate) mod tests {
                 first_applied_agent_drop_ids: HashSet::new(),
                 pass_already_busting: false,
                 supersession_ride_available: true,
+                emergency_minimum_waived: false,
                 emergency_window_yields: false,
                 tag_window_protected_block_ids: HashSet::new(),
                 exempt_message_protected_block_ids: HashSet::new(),

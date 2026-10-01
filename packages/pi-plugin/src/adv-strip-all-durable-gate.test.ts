@@ -12,6 +12,7 @@ import {
 	applyPiProactiveThinkingStrip,
 	applyPiThinkingBindingRecovery,
 	resolvePiBindingStripOrder,
+	shouldRunPiProactiveThinkingStrip,
 } from "./provider-error-recovery-pi";
 
 const roots: string[] = [];
@@ -140,5 +141,31 @@ it("a defer branch-away does not silently switch legacy strip order before undo 
 		).toBe("start");
 	} finally {
 		db.close();
+	}
+});
+
+it("runs the proactive strip for subagents as for primaries, never under compaction-off or start order", () => {
+	for (const isSubagent of [false, true]) {
+		expect(
+			shouldRunPiProactiveThinkingStrip({
+				compactionOff: false,
+				bindingStripOrder: "end",
+				isSubagent,
+			}),
+		).toBe(true);
+		expect(
+			shouldRunPiProactiveThinkingStrip({
+				compactionOff: true,
+				bindingStripOrder: "end",
+				isSubagent,
+			}),
+		).toBe(false);
+		expect(
+			shouldRunPiProactiveThinkingStrip({
+				compactionOff: false,
+				bindingStripOrder: "start",
+				isSubagent,
+			}),
+		).toBe(false);
 	}
 });

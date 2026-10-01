@@ -61,6 +61,8 @@ export function applyHeuristicCleanup(
             currentTotalInputTokens: number;
             ceilingTokens: number;
             usagePercentage?: number;
+            /** Another mutation already rewrites the cached prefix on this pass. */
+            passAlreadyPriced?: boolean;
         };
         /**
          * Whether ordinary deduplication, injection stripping, and caveman
@@ -160,6 +162,7 @@ export function applyHeuristicCleanup(
             usagePercentage: emergency.usagePercentage,
             priorInputSample,
             hasPriorDrop: priorInputSample > 0,
+            passAlreadyPriced: emergency.passAlreadyPriced === true,
         });
         if (plan.shouldDrop) {
             const toDrop = new Set(plan.tagNumbers);
