@@ -11,9 +11,13 @@ import {
     writeFileSync,
 } from "node:fs";
 import { dirname, join } from "node:path";
-import { projectDirectoryKey } from "@magic-context/core/features/magic-context/memory/project-identity-cache";
+import {
+    projectDirectoryKey,
+    readRememberedGitIdentity,
+} from "@magic-context/core/features/magic-context/memory/project-identity-cache";
 import {
     auditIdentityMerge,
+    countIdentityRows,
     type IdentityMergeReport,
     mergeProjectIdentities,
 } from "@magic-context/core/features/magic-context/storage-identity-merge";
@@ -25,7 +29,11 @@ import {
     openExistingContextDatabase,
     openExistingDatabase,
 } from "../lib/database-access";
-import { findIdentitySplits, type IdentitySplit } from "./doctor-identity-splits";
+import {
+    findIdentitySplits,
+    type IdentitySplit,
+    orphanedPathReason,
+} from "./doctor-identity-splits";
 import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
 import {
     copyDatabaseBundle,
@@ -134,6 +142,109 @@ function resolveReadOnly(directory: string): string | undefined {
     return undefined;
 }
 
+/**
+ * The identity a directory belongs to. The identity the plugin persisted for the path
+ * (its `project-identities` sidecar) wins over a live probe: a live probe of a folder
+ * that lost its git metadata yields a fresh `dir:` hash, while the plugin keeps using
+ * the persisted `git:` identity there. A leftover path has no live resolution at all.
+ */
+function canonicalIdentity(directory: string, storageDir: string): string | undefined {
+    return (
+        readRememberedGitIdentity(directory, storageDir) ??
+        (orphanedPathReason(directory) ? undefined : resolveReadOnly(directory))
+    );
+}
+
+/**
+ * Refuse a merge that would move data the wrong way. Runs for the preview and again on
+ * the writable handle immediately before `--apply` writes, and `--force` does not
+ * bypass it.
+ */
+function assertMergePairSafe(
+    db: Database,
+    observed: IdentitySplit[],
+    storageDir: string,
+    from: string,
+    to: string,
+): void {
+    // Every checkout and worktree of a repository shares its git: identity, so folding
+    // it into one directory's identity would take the whole repository's pool with it.
+    if (from.startsWith("git:") && !to.startsWith("git:"))
+        throw new Error(
+            `Refusing merge: ${from} is a repository-wide identity shared by every checkout and worktree of its repository. It can only be a merge target, never merged into the directory identity ${to}.`,
+        );
+    const sourceRows = countIdentityRows(db, from);
+    if (sourceRows > 0 && countIdentityRows(db, to) === 0)
+        throw new Error(
+            `Refusing merge: target ${to} owns no rows while ${from} owns ${sourceRows}. Nothing uses ${to}, so moving data into it would strand that data.`,
+        );
+    for (const row of observed) {
+        const involved = row.identities.filter(
+            (item) => item.identity === from || item.identity === to,
+        );
+        if (!involved.length) continue;
+        const persisted = readRememberedGitIdentity(row.directory, storageDir);
+        if (!persisted) continue;
+        if (persisted === from)
+            throw new Error(
+                `Refusing merge: ${from} is the identity the plugin persisted for ${row.directory}; merging away from it would contradict the plugin's own resolution of that path.`,
+            );
+        if (persisted !== to)
+            throw new Error(
+                `Refusing merge: the plugin persisted ${persisted} for ${row.directory}, where ${involved.map((item) => item.identity).join(" and ")} was observed. That persisted identity is canonical for the path; merge into ${persisted} instead of ${to}.`,
+            );
+    }
+}
+
+/** Print one observed directory's suggestion, applying the same rules as an explicit merge. */
+function printSuggestion(db: Database, split: IdentitySplit, storageDir: string): void {
+    const rows = new Map(
+        split.identities.map((row) => [row.identity, countIdentityRows(db, row.identity)]),
+    );
+    const orphaned = orphanedPathReason(split.directory);
+    const persisted = readRememberedGitIdentity(split.directory, storageDir);
+    if (orphaned) {
+        console.log(`Orphaned project path: ${split.directory} (${orphaned})`);
+        console.log("  Not an identity split; no merge proposed.");
+        if (persisted) console.log(`  Identity the plugin persisted for this path: ${persisted}`);
+        for (const [identity, count] of rows) console.log(`  ${identity}: ${count} row(s)`);
+        return;
+    }
+    console.log(`Project identity split: ${split.directory}`);
+    const live = resolveReadOnly(split.directory);
+    if (persisted && live && persisted !== live)
+        console.log(
+            `  Live resolution ${live} disagrees with the identity the plugin persisted for this path, ${persisted}; the persisted identity is canonical.`,
+        );
+    const target =
+        persisted ??
+        live ??
+        split.identities
+            .map((row) => row.identity)
+            .filter((id) => id.startsWith("git:"))
+            .sort()[0];
+    if (!target) {
+        console.log("  Unresolved target; no merge proposed.");
+        return;
+    }
+    const sources = split.identities
+        .map((row) => row.identity)
+        .filter((identity) => identity !== target);
+    for (const identity of sources.filter((id) => id.startsWith("git:")))
+        console.log(
+            `  ${identity}: repository-wide identity shared by every checkout of its repository (${rows.get(identity) ?? 0} row(s)); never proposed as a source for one directory.`,
+        );
+    const targetRows = rows.get(target) ?? countIdentityRows(db, target);
+    if (targetRows === 0 && sources.some((identity) => (rows.get(identity) ?? 0) > 0)) {
+        console.log(
+            `  Target ${target} owns no rows; no merge proposed into it. Open a session in this directory so it records data under its identity, then rerun.`,
+        );
+        return;
+    }
+    for (const identity of sources.filter((id) => !id.startsWith("git:")))
+        console.log(`  ${identity} → ${target}`);
+}
+
 function observations(db: Database, hostPath: string, storageDir: string): IdentitySplit[] {
     const host = openExistingDatabase(hostPath, { readonly: true });
     let rows: IdentitySplit[] = [];
@@ -190,27 +301,19 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
     });
     if (!db) throw new Error(`Context database does not exist: ${dbPath}`);
     let directories: string[] = [];
+    let observed: IdentitySplit[] = [];
     try {
-        const observed = observations(db, hostPath, storageDir);
+        observed = observations(db, hostPath, storageDir);
         if (!options.from || !options.to) {
-            for (const split of observed.filter((row) => row.identities.length > 1)) {
-                const target =
-                    resolveReadOnly(split.directory) ??
-                    split.identities
-                        .map((row) => row.identity)
-                        .filter((id) => id.startsWith("git:"))
-                        .sort()[0];
-                console.log(`Project identity split: ${split.directory}`);
-                for (const row of split.identities)
-                    if (row.identity !== target)
-                        console.log(`  ${row.identity} → ${target ?? "unresolved target"}`);
-            }
+            for (const split of observed.filter((row) => row.identities.length > 1))
+                printSuggestion(db, split, storageDir);
             if (!observed.some((row) => row.identities.length > 1))
                 console.log("No detected identity splits.");
             return 0;
         }
         if (options.from === options.to)
             throw new Error(`Source and target identities must differ: ${options.from}`);
+        assertMergePairSafe(db, observed, storageDir, options.from, options.to);
         for (const identity of [options.from, options.to]) {
             const known =
                 auditIdentityMerge(db, identity, options.to).changedRows > 0 ||
@@ -249,7 +352,9 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
             );
         if (
             !options.force &&
-            !directories.some((directory) => resolveReadOnly(directory) === options.to)
+            !directories.some(
+                (directory) => canonicalIdentity(directory, storageDir) === options.to,
+            )
         )
             throw new Error(
                 `Target ${options.to} does not resolve for any observed directory on this machine; use --force only after reviewing the identity.`,
@@ -293,6 +398,9 @@ export function runMergeIdentityCli(args: string[], deps: Partial<MergeIdentityD
     db = openExistingDatabase(dbPath, { readonly: false });
     if (!db) throw new Error(`Context database disappeared: ${dbPath}`);
     try {
+        // Rows may have moved since the read-only preview; check the pair again on the
+        // handle that is about to write.
+        assertMergePairSafe(db, observed, storageDir, from, to);
         printReport(mergeProjectIdentities(db, from, to));
     } finally {
         db.close();

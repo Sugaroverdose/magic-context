@@ -15,6 +15,11 @@ export interface ProcessProbeEvidence {
     startTime: number | null;
     /** The raw command line, or null when the platform/probe cannot provide it. */
     commandLine: string | null;
+    /**
+     * The executable image name when the process list reports it separately
+     * from the command line (Windows CIM and tasklist), otherwise absent.
+     */
+    imageName?: string | null;
 }
 
 export interface RpcPortFileRecord {
@@ -253,6 +258,12 @@ export function readProcessProbeEvidence(pid: number): ProcessProbeEvidence {
     };
 }
 
+function readCachedWindowsImageName(pid: number): string | null {
+    return rpcIdentityPlatform === "win32"
+        ? (windowsProcessFactsCache?.get(pid)?.imageName ?? null)
+        : null;
+}
+
 interface ProcessListEntry {
     pid: number;
     command: string;
@@ -464,6 +475,50 @@ function commandLooksLikeOpenCode(command: string): boolean {
 }
 
 /**
+ * Text found in the image name or command line of every process that can write
+ * an RPC discovery record: OpenCode (CLI, server, desktop app, the CLI bundled
+ * in OpenChamber), Pi and Oh My Pi, ck-mc, and the runtimes they run on. These
+ * are matched as substrings, so a renamed or wrapped launch still counts as a
+ * possible host. A false match only keeps a record, never deletes one.
+ */
+const RPC_HOST_PROCESS_MARKERS = [
+    "opencode",
+    "openchamber",
+    "ck-mc",
+    "magic-context",
+    "cortexkit",
+    "electron",
+    "node",
+    "bun",
+    "deno",
+    "pi-coding-agent",
+    "oh-my-pi",
+];
+
+/**
+ * Whether the process's image name or command line proves it cannot be a Magic
+ * Context host. Pi's image names (`pi`, `omp`) are too short to match as
+ * substrings, so they are compared as whole executable names. Missing evidence
+ * is never proof: with neither field readable this returns false.
+ */
+export function processCannotBeRpcHost(
+    evidence: Pick<ProcessProbeEvidence, "commandLine" | "imageName">,
+): boolean {
+    const texts = [evidence.imageName, evidence.commandLine].filter(
+        (text): text is string => typeof text === "string" && text.trim().length > 0,
+    );
+    if (texts.length === 0) return false;
+    for (const text of texts) {
+        const normalized = text.toLowerCase();
+        if (RPC_HOST_PROCESS_MARKERS.some((marker) => normalized.includes(marker))) return false;
+        const tokens = commandTokens(text);
+        if (commandHasPiExecutable(tokens)) return false;
+        if (tokens.some((token) => piHarnessKindFromExecutable(token) !== undefined)) return false;
+    }
+    return true;
+}
+
+/**
  * Verify that a live PID still belongs to the process that wrote a port record.
  *
  * A PID can be reused after its original process exits. On Linux, procfs gives
@@ -472,6 +527,10 @@ function commandLooksLikeOpenCode(command: string): boolean {
  * database-open guard path. Legacy records without a start time use a weaker
  * command-name check. A failed filesystem or process probe is inconclusive,
  * not proof that this port record still belongs to OpenCode.
+ *
+ * "implausible" is returned only with proof that the live process did not write
+ * the record: it started after the record's `started_at`, or its image cannot
+ * be any Magic Context host. Callers may delete such a record on every platform.
  */
 export type PidIdentityPlausibility = "plausible" | "implausible" | "inconclusive";
 
@@ -483,10 +542,22 @@ export function isPidIdentityPlausible(
 
     if (Number.isFinite(record.started_at) && record.started_at > 0) {
         const processStartTime = evidence ? evidence.startTime : readProcessStartTime(record.pid);
-        if (processStartTime === null) return "inconclusive";
-        return processStartTime <= record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS
-            ? "plausible"
-            : "implausible";
+        if (processStartTime !== null) {
+            // A host writes `started_at` after it starts, so a process that started
+            // later than the record (beyond clock skew) cannot have written it: the
+            // PID was reused and the record is stale.
+            return processStartTime <= record.started_at + RPC_IDENTITY_SKEW_TOLERANCE_MS
+                ? "plausible"
+                : "implausible";
+        }
+        // Some start times cannot be read at all (Windows service hosts such as
+        // svchost, when the query is not elevated). Then only an image that no host
+        // can run proves the PID was reused; anything else stays unknown.
+        const identity = evidence ?? {
+            commandLine: readProcessCommand(record.pid),
+            imageName: readCachedWindowsImageName(record.pid),
+        };
+        return processCannotBeRpcHost(identity) ? "implausible" : "inconclusive";
     }
 
     const command = evidence
@@ -497,7 +568,13 @@ export function isPidIdentityPlausible(
             ? (readWindowsProcess(record.pid).command ?? null)
             : readPsProcessCommand(record.pid);
     if (command === null) return "inconclusive";
-    return commandLooksLikeOpenCode(command) ? "plausible" : "implausible";
+    if (commandLooksLikeOpenCode(command)) return "plausible";
+    // A record without a start time carries only a PID. Its process is proven
+    // unrelated only when its image cannot be a host (Pi and OpenChamber, for
+    // example, do not match the OpenCode markers above).
+    return processCannotBeRpcHost({ commandLine: command, imageName: evidence?.imageName })
+        ? "implausible"
+        : "inconclusive";
 }
 
 export function __setRpcIdentityTestHooks(hooks: {
@@ -929,6 +1006,15 @@ export interface AsyncProcessInspection {
     liveness(pid: number): PidLiveness;
 }
 
+/** Process evidence from one snapshot row; the image name is included only when known. */
+function snapshotEvidence(fact: ProcessFacts | undefined): ProcessProbeEvidence {
+    return {
+        startTime: fact?.startTime ?? null,
+        commandLine: fact?.commandLine ?? fact?.imageName ?? null,
+        ...(fact?.imageName ? { imageName: fact.imageName } : {}),
+    };
+}
+
 function execProcessListAsync(file: string, args: string[], timeout: number): Promise<string> {
     return new Promise((resolve, reject) => {
         execFile(
@@ -1035,10 +1121,7 @@ export function inspectProcessesAsync(forceFresh = false): Promise<AsyncProcessI
             ...(fresh && snapshot
                 ? { processSnapshot: { source: snapshot.source, facts: snapshot.facts } }
                 : {}),
-            evidence: (pid: number) => ({
-                startTime: byPid.get(pid)?.startTime ?? null,
-                commandLine: byPid.get(pid)?.commandLine ?? byPid.get(pid)?.imageName ?? null,
-            }),
+            evidence: (pid: number) => snapshotEvidence(byPid.get(pid)),
             liveness: (pid: number) => (byPid.has(pid) ? "alive" : fresh ? "dead" : "inconclusive"),
         } satisfies AsyncProcessInspection;
     })().finally(() => {
@@ -1057,10 +1140,7 @@ export function inspectWindowsProcessesSync(): AsyncProcessInspection {
         ...(snapshot
             ? { processSnapshot: { source: snapshot.source, facts: snapshot.facts } }
             : {}),
-        evidence: (pid) => ({
-            startTime: byPid.get(pid)?.startTime ?? null,
-            commandLine: byPid.get(pid)?.commandLine ?? byPid.get(pid)?.imageName ?? null,
-        }),
+        evidence: (pid) => snapshotEvidence(byPid.get(pid)),
         liveness: (pid) => (byPid.has(pid) ? "alive" : snapshot ? "dead" : "inconclusive"),
     };
 }
