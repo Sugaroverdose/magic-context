@@ -112,6 +112,7 @@ import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
+import { nativeSessionRemove } from '../hidden-child-native';
 import { createLateHiddenExecutor, createV2HiddenCompletionExecutor } from "../hidden-completion";
 import { type HostServiceOwner, removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
@@ -657,6 +658,7 @@ export async function registerContext(context: V2Context) {
     const hiddenChildHook = new HiddenChildHook();
     await registerHiddenChildAgents(context.agent);
     let hiddenAgentsReady: Promise<void> | undefined;
+    const nativeRemove = nativeSessionRemove(context.session);
     const createHiddenExecutor = (database: NonNullable<typeof db>) =>
         createV2HiddenCompletionExecutor(
             {
@@ -679,7 +681,10 @@ export async function registerContext(context: V2Context) {
                     hiddenSessionErrors.delete(input.sessionID);
                     return context.session.prompt(input);
                 },
-                // The injected session surface stops short of deletion, so retiring a hidden
+                // Newer hosts give plugins `session.remove`; its presence moves hidden runs onto
+                // children parented to the user's session and removed when each run ends.
+                ...(nativeRemove ? { removeSession: nativeRemove } : {}),
+                // Older hosts' injected session surface stops short of deletion, so retiring a hidden
                 // child reaches the host's delete route directly — through the registration
                 // the child recorded when it was created, never through whichever service
                 // happens to be registered now.
