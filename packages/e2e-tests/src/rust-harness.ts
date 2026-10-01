@@ -764,7 +764,8 @@ export class RustTestHarness {
             throw new Error(
                 `sendPrompt did not complete within ${timeoutMs}ms. stderr:\n${this.opencodeInstance
                     .stderr()
-                    .slice(-2000)}\nmodule log:\n${this.subc.moduleLog().slice(-2000)}`,
+                    .slice(-2000)}\nmodule log:\n${this.subc.moduleLog().slice(-2000)}\n` +
+                    `plugin log:\n${await this.flushedPluginLogTail()}`,
             );
         }
         if (result.data === undefined) {
@@ -772,7 +773,8 @@ export class RustTestHarness {
                 `sendPrompt returned without session data: ${JSON.stringify(result.error ?? null)}\n` +
                     `stdout:\n${this.opencodeInstance.stdout().slice(-2000)}\n` +
                     `stderr:\n${this.opencodeInstance.stderr().slice(-2000)}\n` +
-                    `module log:\n${this.subc.moduleLog().slice(-2000)}`,
+                    `module log:\n${this.subc.moduleLog().slice(-2000)}\n` +
+                    `plugin log:\n${await this.flushedPluginLogTail()}`,
             );
         }
         return result;
@@ -877,6 +879,17 @@ export class RustTestHarness {
             },
             { timeoutMs, label: `>= ${minCount} rust passes` },
         );
+    }
+
+    /**
+     * The end of the plugin's log, for a failure message. The plugin writes its
+     * diagnostics (a refused pass among them) to this file rather than to the
+     * host's stderr, and buffers them for up to half a second, so wait out one
+     * buffer interval before reading. Only failure reporting calls this.
+     */
+    private async flushedPluginLogTail(): Promise<string> {
+        await Bun.sleep(1_000);
+        return this.diagnosticLog().slice(-4000);
     }
 
     /** Read the subprocess diagnostic log for assertions about the active lineage. */

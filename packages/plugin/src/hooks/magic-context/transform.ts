@@ -119,7 +119,12 @@ import { saveLkgSlotToDb } from "./lkg-persist";
 import { captureLkgSlot, projectLkgEntry, resolveLkgModelKeys } from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
-import { createPassOutcome, type PassDegradationKind } from "./pass-outcome";
+import {
+    createPassOutcome,
+    degradationChangesRequest,
+    type PassDegradationKind,
+    type PassDegradationSite,
+} from "./pass-outcome";
 import {
     createDefaultBoundarySnapshotForTests,
     hasRunnableCompartmentWindow,
@@ -737,7 +742,11 @@ export function createTransform(deps: TransformDeps) {
         // mode keeps going instead: native compaction owns the window there,
         // the pass only adds blocks, and on any thrown error the wrapper would
         // serve the input unchanged anyway.
-        const failPass = (site: string, error: unknown, kind?: PassDegradationKind): void => {
+        const failPass = (
+            site: PassDegradationSite,
+            error: unknown,
+            kind?: PassDegradationKind,
+        ): void => {
             passOutcome.record(site, kind);
             if (deps.compactionOff === true) return;
             throw degradedPassError(site, error);
@@ -2790,17 +2799,26 @@ export function createTransform(deps: TransformDeps) {
                 );
                 return;
             }
-            // Last-resort size guard. A pass that recorded any degradation, or
-            // whose own estimate is untrusted, has not shown that it matches
-            // what a healthy pass would send. If its request is over the
-            // model's limit, stop: the wrapper replays the last good request
-            // or refuses, instead of sending a request the provider rejects.
-            // An untrusted estimate is partial (it misses parts it cannot
-            // count), so one already over the limit is over it for certain.
-            // A healthy pass pays nothing here: it is only estimated when a
-            // degradation was recorded and no estimate exists yet.
-            const degradedServe = passOutcome.degradations.length > 0;
-            if (degradedServe || (finalWireEstimate && !finalWireEstimate.trusted)) {
+            // Last-resort size guard. A pass that recorded a degradation able
+            // to grow or change its request (PASS_DEGRADATION_EFFECTS) has not
+            // shown that it matches what a healthy pass would send. If its
+            // request is over the model's limit, stop: the wrapper replays the
+            // last good request or refuses, instead of sending a request the
+            // provider rejects. Any other pass is served exactly as a healthy
+            // one, over the limit or not, and the emergency drop and
+            // provider-overflow recovery handle it as before. That includes a
+            // pass whose estimate is untrusted, i.e. missing a part it could
+            // not count, such as a system prompt not yet measured on a
+            // session's first pass: a missing measurement says nothing about
+            // whether the pass is degraded. A missing part can only make the
+            // estimate smaller, so on a degraded pass an untrusted estimate
+            // already over the limit is over it for certain. A healthy pass
+            // pays nothing here: it is only estimated when such a degradation
+            // was recorded and no estimate exists yet.
+            const requestChangingDegradations = passOutcome.degradations.filter((degradation) =>
+                degradationChangesRequest(degradation.site),
+            );
+            if (requestChangingDegradations.length > 0) {
                 try {
                     finalWireEstimate ??= estimateFinalWireInputTokens({
                         messages,
@@ -2823,7 +2841,7 @@ export function createTransform(deps: TransformDeps) {
                 ) {
                     sessionLog(
                         sessionId,
-                        `degraded pass over the context limit: estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} limit=${boundaryContextLimit} degradations=${passOutcome.degradations.map((item) => item.site).join(",") || "none"}; not sending it`,
+                        `degraded pass over the context limit: estimate=${finalWireEstimate.tokens} trusted=${finalWireEstimate.trusted} limit=${boundaryContextLimit} degradations=${requestChangingDegradations.map((item) => item.site).join(",")}; not sending it`,
                     );
                     throw new DegradedPassRefusalError("served-request-over-limit", {
                         estimatedTokens: finalWireEstimate.tokens,

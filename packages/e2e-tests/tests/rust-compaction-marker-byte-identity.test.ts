@@ -21,6 +21,18 @@ function sha256(value: string): string {
     return createHash("sha256").update(value).digest("hex");
 }
 
+/** The session's published compartments, in order. */
+function contextHistoryRows(path: string, sessionId: string): Array<{ sequence: number; title: string }> {
+    const db = new Database(path, { readonly: true });
+    try {
+        return db
+            .query("SELECT sequence, title FROM compartments WHERE session_id = ? ORDER BY sequence")
+            .all(sessionId) as Array<{ sequence: number; title: string }>;
+    } finally {
+        db.close();
+    }
+}
+
 describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identity", () => {
     let h: RustTestHarness;
 
@@ -152,6 +164,33 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
                 opencodeDb.prepare("DELETE FROM message WHERE id = ?").run(summaryRows[0]!.id);
             })();
 
+            // The three probe passes below must all render the same session history.
+            // A historian run still in flight when the fixture loop above stops (on a
+            // slow runner the run covering the newest turn often is) would publish a
+            // compartment between the control pass and the marker pass, and the two
+            // would differ by that compartment rather than by the marker. Let every
+            // run finish, then stop the producer so no later run can publish while
+            // the passes are compared, and restart the module so the control pass,
+            // like the marker pass, is rendered by a module that has just read the
+            // store.
+            const historianDeadline = Date.now() + 120_000;
+            let historianState: string | undefined;
+            while (Date.now() < historianDeadline) {
+                const status = (await h.subc.moduleStatus(sessionId, h.env.workdir)) as {
+                    historian?: { state?: string };
+                };
+                historianState = status.historian?.state;
+                if (historianState === "idle") break;
+                await Bun.sleep(100);
+            }
+            expect(historianState).toBe("idle");
+            h.subc.killProducer();
+            await h.subc.waitForProducerDeath();
+            await h.subc.restartModule();
+            const publishedHistory = () =>
+                contextHistoryRows(join(h.env.dataDir, "cortexkit", "magic-context", "context.db"), sessionId);
+            const historyBeforeComparison = publishedHistory();
+
             const probe = "byte identity marker probe";
             const probeMessageId = "msg_01MKRBYT3ID3NT1TYPR0BE0000";
             await Bun.sleep(700);
@@ -219,6 +258,9 @@ describe.skipIf(!rustPrereqs.ok)("rust invariant: compaction marker byte identit
             const replaySerialized = h.lastMainWireSerialized();
             const replayHash = sha256(replaySerialized);
 
+            // No compartment may land while the passes are compared; the producer is
+            // gone, so a change here means the drain above missed a run.
+            expect(publishedHistory()).toEqual(historyBeforeComparison);
             console.log(`rust marker byte identity control sha256=${controlHash}`);
             console.log(`rust marker byte identity post-restart-1 sha256=${markerHash}`);
             console.log(`rust marker byte identity post-restart-2 sha256=${replayHash}`);
