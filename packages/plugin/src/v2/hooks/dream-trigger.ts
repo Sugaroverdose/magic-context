@@ -4,6 +4,7 @@ import { createDreamTaskExecutor } from "../../features/magic-context/dreamer/ta
 import { runDueTasksForProject } from "../../features/magic-context/dreamer/task-scheduler";
 import { openDatabase } from "../../features/magic-context/storage";
 import type { HiddenCompletionExecutor } from "../../hooks/magic-context/compartment-runner-types";
+import { log } from "../../shared/logger";
 import { selectRunnableDreamTasks } from "./dream-manual";
 import type { V2Context } from "./types";
 
@@ -58,12 +59,12 @@ export function startDreamTrigger(
                         }),
                     });
                 } catch (error) {
-                    console.warn("[magic-context] v2 dream scheduling failed", error);
+                    log("[magic-context] v2 dream scheduling failed", error);
                 }
             }
         } catch (error) {
             if (!controller.signal.aborted)
-                console.warn("[magic-context] v2 dream event subscription failed", error);
+                log("[magic-context] v2 dream event subscription failed", error);
         }
     })();
     return {

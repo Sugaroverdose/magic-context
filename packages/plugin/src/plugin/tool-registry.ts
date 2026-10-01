@@ -191,7 +191,7 @@ export function createToolRegistry(args: {
         createPromptSurfaceRuntime({
             harness: "opencode",
             directory: ctx.directory,
-            warn: (message) => console.warn(`[magic-context] config warning: ${message}`),
+            warn: (message) => log(`[magic-context] config warning: ${message}`),
         });
     // OpenCode materializes this map once per plugin process. Resolve only the
     // registration owner's default here: model/session routes cannot safely swap

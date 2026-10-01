@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+import * as logger from "../../shared/logger";
 import {
     deriveHistorianChunkTokens,
     deriveTriggerBudget,
@@ -106,17 +107,16 @@ describe("resolveHistorianContextLimit", () => {
     it("falls through to chain for provider-less override and returns a positive value", () => {
         // Provider-less override should warn and fall through to the chain
         // (rather than silently returning DEFAULT and losing the derivation).
-        const originalWarn = console.warn;
-        let warnedWith: string | undefined;
-        console.warn = (msg: unknown) => {
-            warnedWith = typeof msg === "string" ? msg : String(msg);
-        };
+        // The warning goes to the plugin log, never the host's console.
+        const logged = spyOn(logger, "log");
         try {
             const limit = resolveHistorianContextLimit("llama3-32k");
             expect(limit).toBeGreaterThan(0);
-            expect(warnedWith).toContain("llama3-32k");
+            expect(logged.mock.calls.some(([message]) => message.includes("llama3-32k"))).toBe(
+                true,
+            );
         } finally {
-            console.warn = originalWarn;
+            logged.mockRestore();
         }
     });
 });

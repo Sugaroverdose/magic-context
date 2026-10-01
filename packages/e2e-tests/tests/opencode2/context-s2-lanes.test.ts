@@ -18,7 +18,7 @@ import {
 	gaDatabasePath,
 	V2StoreReader,
 } from "../../../plugin/src/v2/store-reader";
-import { spawnOpencode2, waitForPluginActive } from '../../src/opencode2-runner/spawn';
+import { spawnOpencode2, waitForPluginActive, waitForPluginLog } from '../../src/opencode2-runner/spawn';
 
 const sha = (value: unknown) =>
 	createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -363,7 +363,9 @@ test("I9b hook_never_throws on a poisoned shared draft", async () => {
 				.filter((request) => request.body.model === "mock-model"),
 		).toHaveLength(1);
 		expect(host.stderr()).not.toContain("Failed to drain Session");
-		expect(host.stderr()).toContain("v2 context unavailable");
+		expect(await waitForPluginLog(host.env, "v2 context unavailable")).toContain(
+			"v2 context unavailable",
+		);
 	} finally {
 		await host.stop();
 	}

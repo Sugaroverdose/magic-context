@@ -7,7 +7,7 @@ import {
 } from "../../features/magic-context/storage";
 import type { PluginContext } from "../../plugin/types";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
-import { sessionLog } from "../../shared/logger";
+import { log, sessionLog } from "../../shared/logger";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import {
@@ -219,7 +219,7 @@ export function createSystemPromptHashHandler(deps: {
         deps.promptSurfaceRuntime ??
         createPromptSurfaceRuntime({
             userConfigDirectory: process.cwd(),
-            warn: (message) => console.warn(`[magic-context] config warning: ${message}`),
+            warn: (message) => log(`[magic-context] config warning: ${message}`),
         });
     const guidanceEpochs = createPromptSurfaceGuidanceEpochCache(promptSurfaceRuntime);
 
