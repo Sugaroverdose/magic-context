@@ -368,6 +368,19 @@ pub fn render_session_ref_compartment(c: &ReferenceCompartment) -> String {
 }
 
 pub fn render_session_references_block(all_compartments: &[ReferenceCompartment]) -> String {
+    render_session_references_block_window(all_compartments, SESSION_REF_WINDOW)
+}
+
+/// Render at most `window` (capped at [`SESSION_REF_WINDOW`]) of the most recent
+/// compartments, so a caller short of producer-window room can drop the oldest.
+pub fn render_session_references_block_window(
+    all_compartments: &[ReferenceCompartment],
+    window: usize,
+) -> String {
+    let window = window.min(SESSION_REF_WINDOW);
+    if window == 0 {
+        return String::new();
+    }
     let all_compartments: Vec<_> = all_compartments
         .iter()
         .filter(|c| {
@@ -381,7 +394,7 @@ pub fn render_session_references_block(all_compartments: &[ReferenceCompartment]
     if all_compartments.is_empty() {
         return String::new();
     }
-    let start = all_compartments.len().saturating_sub(SESSION_REF_WINDOW);
+    let start = all_compartments.len().saturating_sub(window);
     let body = all_compartments[start..]
         .iter()
         .map(|c| render_session_ref_compartment(c))
@@ -423,6 +436,23 @@ pub fn build_reference_blocks_from_stored(
 /// ids so `<memory-updates>` corrections can point at baseline lines. The TypeScript
 /// renderer (`renderHistorianMemoryBlock` in inject-compartments.ts) emits the same
 /// bytes; the historian prompt golden pins both lanes to this form.
+/// The memories [`render_historian_memory_block`] shows, in the order it shows them.
+/// Rendering any prefix reproduces the first lines of the full block, so a caller
+/// that must shrink the block to fit a model window drops the lowest-priority lines
+/// by taking a shorter prefix.
+pub fn order_historian_memories(memories: &[StoredMemory]) -> Vec<StoredMemory> {
+    let mut ordered = Vec::new();
+    for category in HISTORIAN_MEMORY_CATEGORY_PRIORITY {
+        ordered.extend(
+            memories
+                .iter()
+                .filter(|memory| memory.category == *category)
+                .cloned(),
+        );
+    }
+    ordered
+}
+
 pub fn render_historian_memory_block(memories: &[StoredMemory]) -> String {
     let mut by_category: HashMap<&str, Vec<&StoredMemory>> = HashMap::new();
     for memory in memories {
