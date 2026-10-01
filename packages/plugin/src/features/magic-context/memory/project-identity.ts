@@ -178,6 +178,20 @@ function directoryFallback(directory: string): string {
     return `dir:${hash}`;
 }
 
+/**
+ * Identity for a directory that has no git metadata (or no longer exists).
+ *
+ * A directory this plugin once resolved to `git:<root>` keeps that identity after its
+ * git metadata disappears, as happens when a linked worktree is removed but its folder
+ * is left behind. Computing a fresh `dir:` hash there would start a new, empty project
+ * pool and split the repository's memory. Only the sidecar for this exact path counts:
+ * borrowing an ancestor's sidecar could pull an unrelated folder under a home-directory
+ * repository into that repository's pool.
+ */
+function rememberedIdentityOrDirectoryFallback(canonical: string): string {
+    return readRememberedGitIdentity(canonical) ?? directoryFallback(canonical);
+}
+
 function assertDirectoryUsable(canonicalDirectory: string, rawDirectory: string): void {
     try {
         const stat = statSync(canonicalDirectory);
@@ -554,32 +568,29 @@ export function resolveProjectIdentity(
                 "Git identity unavailable; memory features paused until the retry cooldown expires",
             );
         }
-        return directoryFallback(canonical);
+        return rememberedIdentityOrDirectoryFallback(canonical);
     }
 
     try {
         return resolveProjectIdentityStrict(directory, allowHomeProject);
     } catch (error) {
         if (error instanceof ProjectIdentityError && shouldUseDirectoryFallback(error)) {
-            const fallback = directoryFallback(canonical);
             // Do not cache unborn fallbacks: the first commit must switch the identity to git:.
-            if (error.errorClass === "no_commits") return fallback;
-            const hasGitMetadata = hasGitDir(canonical);
-            if (!hasGitMetadata) {
+            if (error.errorClass === "no_commits") return directoryFallback(canonical);
+            if (!hasGitDir(canonical)) {
                 if (error.errorClass === "permission_denied") throw error;
-                directoryFallbackCache.set(canonical, fallback);
+                const resolved = rememberedIdentityOrDirectoryFallback(canonical);
+                directoryFallbackCache.set(canonical, resolved);
                 transientFailureCooldown.delete(canonical);
-            } else {
-                transientFailureCooldown.set(canonical, nowMs() + TRANSIENT_FAILURE_COOLDOWN_MS);
-                const cachedGitIdentity = reuseLastKnownGitIdentity(canonical);
-                if (error.errorClass === "dubious_ownership")
-                    recordDubiousOwnershipFallback(canonical);
-                if (cachedGitIdentity !== undefined) {
-                    return cachedGitIdentity;
-                }
-                throw error;
+                return resolved;
             }
-            return fallback;
+            transientFailureCooldown.set(canonical, nowMs() + TRANSIENT_FAILURE_COOLDOWN_MS);
+            const cachedGitIdentity = reuseLastKnownGitIdentity(canonical);
+            if (error.errorClass === "dubious_ownership") recordDubiousOwnershipFallback(canonical);
+            if (cachedGitIdentity !== undefined) {
+                return cachedGitIdentity;
+            }
+            throw error;
         }
         throw error;
     }
@@ -598,7 +609,7 @@ export function resolveProjectIdentityOrFallback(
             (error instanceof ProjectIdentityError && error.errorClass === "home_project_disabled")
         )
             throw error;
-        const fallback = directoryFallback(canonical);
+        const fallback = rememberedIdentityOrDirectoryFallback(canonical);
         const message = error instanceof Error ? error.message : String(error);
         log(
             `[magic-context] project identity resolution failed for ${canonical}; using directory fallback ${fallback}: ${message}`,

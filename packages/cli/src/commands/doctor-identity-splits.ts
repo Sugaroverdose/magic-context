@@ -1,7 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { existsSync, readdirSync, realpathSync, statSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { projectDirectoryKey } from "@magic-context/core/features/magic-context/memory/project-identity-cache";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import { resolveOpenCodeDbPath } from "@magic-context/core/shared/opencode-db-path";
@@ -21,6 +21,40 @@ export interface IdentitySplit {
 
 function tableExists(db: Database, table: string): boolean {
     return !!db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?").get(table);
+}
+
+function hasGitMetadataInAncestors(directory: string): boolean {
+    let current = resolve(directory);
+    while (true) {
+        if (existsSync(join(current, ".git"))) return true;
+        const parent = dirname(current);
+        if (parent === current) return false;
+        current = parent;
+    }
+}
+
+/**
+ * Why a recorded session directory is a leftover rather than a live project, or
+ * undefined when it may still be one.
+ *
+ * A path that no longer exists, or an empty folder with no git metadata in it or above
+ * it (what a removed worktree leaves behind), has nothing that resolves to a project:
+ * its live resolution is only a freshly computed `dir:` hash that owns no data. Such a
+ * path is reported as orphaned, never as an identity split to merge. Filesystem errors
+ * other than "missing" (for example permission denied) are not proof of a leftover.
+ */
+export function orphanedPathReason(directory: string): string | undefined {
+    let entries: string[];
+    try {
+        if (!statSync(directory).isDirectory()) return "path is no longer a directory";
+        entries = readdirSync(directory);
+    } catch (error) {
+        return (error as { code?: unknown }).code === "ENOENT"
+            ? "directory no longer exists"
+            : undefined;
+    }
+    if (entries.length > 0 || hasGitMetadataInAncestors(directory)) return undefined;
+    return "directory is empty and has no git metadata";
 }
 
 /** Report observed bindings and data left behind when a first commit changes the directory identity to git; never merge. */
@@ -136,14 +170,27 @@ export function findIdentitySplits(
 }
 
 export function formatIdentitySplits(splits: IdentitySplit[]): string[] {
-    return splits.flatMap((split) => [
-        `Project identity split: ${split.directory} (read-only; no merge performed)`,
-        "  Review with doctor merge-identities before choosing which identity to keep.",
-        ...split.identities.map(
-            (row) =>
-                `  ${row.identity}: ${row.sessions} sessions, ${row.memories} memories, ${row.notes} notes, ${row.dreamer} dreamer rows (identity-wide counts)`,
-        ),
-    ]);
+    return splits.flatMap((split) => {
+        const orphaned = orphanedPathReason(split.directory);
+        return orphaned
+            ? [
+                  `Orphaned project path: ${split.directory} (${orphaned}; read-only; no merge performed)`,
+                  "  Not an identity split: nothing at this path resolves to a project any more.",
+                  ...identityLines(split),
+              ]
+            : [
+                  `Project identity split: ${split.directory} (read-only; no merge performed)`,
+                  "  Review with doctor merge-identities before choosing which identity to keep.",
+                  ...identityLines(split),
+              ];
+    });
+}
+
+function identityLines(split: IdentitySplit): string[] {
+    return split.identities.map(
+        (row) =>
+            `  ${row.identity}: ${row.sessions} sessions, ${row.memories} memories, ${row.notes} notes, ${row.dreamer} dreamer rows (identity-wide counts)`,
+    );
 }
 
 export function diagnoseIdentitySplits(): string[] {
