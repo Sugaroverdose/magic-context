@@ -10,9 +10,10 @@
  */
 import { describe, expect, it, mock } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
 const CHILD = process.env.ADV_PI_LANE_CHILD;
 const DB_PATH = process.env.ADV_PI_LANE_DB;
@@ -144,12 +145,17 @@ describe("ADV Pi: SIGKILL between the HARD fold commit and the lane decision", (
 	for (const trigger of ["model", "identical"] as const) {
 		for (const variant of ["kill", "control"] as const) {
 			it(`parent: ${trigger} HARD, ${variant} child`, async () => {
-				const root = join(
-					process.env.ADV_ROOT ?? tmpdir(),
-					`pi-lane-sigkill-${trigger}-${variant}-${Date.now()}`,
+				const root = createTestTempDirFromPath(
+					join(
+						process.env.ADV_ROOT ?? tmpdir(),
+						`pi-lane-sigkill-${trigger}-${variant}-`,
+					),
 				);
 				mkdirSync(root, { recursive: true });
-				const dbPath = join(mkdtempSync(join(root, "db-")), "context.db");
+				const dbPath = join(
+					createTestTempDirFromPath(join(root, "db-")),
+					"context.db",
+				);
 				const out = join(root, "out");
 				const child = spawnSync(
 					process.execPath,
@@ -158,6 +164,7 @@ describe("ADV Pi: SIGKILL between the HARD fold commit and the lane decision", (
 						windowsHide: true,
 						env: {
 							...process.env,
+							TMPDIR: root,
 							ADV_PI_LANE_CHILD: `${trigger}:${variant}`,
 							ADV_PI_LANE_DB: dbPath,
 							ADV_PI_LANE_OUT: out,

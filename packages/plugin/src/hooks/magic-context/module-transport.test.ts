@@ -1,8 +1,9 @@
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { SingleStoreMigrationRequiredError } from "./single-store-refusal";
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -123,7 +124,7 @@ function deferred<T = void>(): {
 
 describe("SubcModuleTransport", () => {
     it("omits an ambient supervised identity while preserving route identity and flat request bytes", async () => {
-        const tempDir = mkdtempSync(join(tmpdir(), "module-subc-v2-"));
+        const tempDir = createTestTempDirFromPath(join(tmpdir(), "module-subc-v2-"));
         const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
         const daemonId = Uint8Array.from({ length: 16 }, (_, index) => 100 + index);
         const serverNonce = Uint8Array.from({ length: 32 }, (_, index) => 200 - index);
@@ -658,7 +659,7 @@ describe("SubcModuleTransport", () => {
     });
 
     it("reopens a route and retries when a restarted module leaves a stale route token", async () => {
-        const tempDir = mkdtempSync(join(tmpdir(), "module-subc-restart-"));
+        const tempDir = createTestTempDirFromPath(join(tmpdir(), "module-subc-restart-"));
         const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
         const daemonId = Uint8Array.from({ length: 16 }, (_, index) => 100 + index);
         const serverNonce = Uint8Array.from({ length: 32 }, (_, index) => 200 - index);

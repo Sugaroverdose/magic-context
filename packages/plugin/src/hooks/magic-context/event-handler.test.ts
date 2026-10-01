@@ -1,9 +1,10 @@
 import { promptAsyncAndWaitForIdle } from "../../shared/prompt-async-transport";
 import { drainNotifications } from "../../shared/rpc-notifications";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveProjectIdentityForSession } from "../../features/magic-context/memory/project-identity";
@@ -100,7 +101,7 @@ afterEach(() => {
 });
 
 function makeTempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     return dir;
 }
@@ -649,7 +650,7 @@ describe("createEventHandler", () => {
     it("binds host-created children without a transform and does not bind directoryless events", async () => {
         useTempDataHome("context-event-binding-");
         const handler = createEventHandler(createDeps(new Map()));
-        const directory = mkdtempSync(join(tmpdir(), "context-child-project-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "context-child-project-"));
         tempDirs.push(directory);
         for (const [id, parentID] of [
             ["ses-parent", ""],

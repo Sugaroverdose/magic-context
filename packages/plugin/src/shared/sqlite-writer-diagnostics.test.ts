@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 // The scenario runs in a child process with NODE_ENV=production because the
 // shared logger is silent under test. It imports storage-db for its side effect
@@ -50,7 +51,7 @@ function field(line: string, name: string): number {
 
 describe("sqlite writer diagnostics", () => {
     beforeAll(async () => {
-        root = mkdtempSync(join(tmpdir(), "mc-sqlite-writer-diagnostics-"));
+        root = createTestTempDirFromPath(join(tmpdir(), "mc-sqlite-writer-diagnostics-"));
         const logPath = join(root, "magic-context.log");
         const env: Record<string, string> = {
             ...(process.env as Record<string, string>),

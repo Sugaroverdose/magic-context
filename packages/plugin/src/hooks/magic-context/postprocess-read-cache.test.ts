@@ -1,11 +1,12 @@
 import { afterEach, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { insertTag, updateTagStatus } from "../../features/magic-context/storage-tags";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     postprocessOldestTags,
     postprocessReplaySnapshot,
@@ -21,7 +22,7 @@ afterEach(() => {
 });
 
 it("reuses attribution rows and invalidates on local writes and external commits", () => {
-    const directory = mkdtempSync(join(tmpdir(), "postprocess-tags-"));
+    const directory = createTestTempDirFromPath(join(tmpdir(), "postprocess-tags-"));
     directories.push(directory);
     const db = new Database(join(directory, "test.db"));
     databases.push(db);

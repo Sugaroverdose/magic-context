@@ -1,10 +1,11 @@
 import { expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { updateSessionMeta } from "@magic-context/core/features/magic-context/storage";
 import { getCurrentSystemPrompt, getCurrentTools } from "pi-ai-086";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
@@ -107,7 +108,7 @@ it("F no-system served arrays equal pre-fix master on every replay", () => {
 	// An empty directory as the session cwd — the same one the fixture was recorded
 	// against — so nothing about the machine running the replay can reach the
 	// served array.
-	const empty = mkdtempSync(join(tmpdir(), "issue-485-empty-"));
+	const empty = createTestTempDirFromPath(join(tmpdir(), "issue-485-empty-"));
 	try {
 		const child = Bun.spawnSync(
 			[process.execPath, "test", import.meta.path, "-t", "F pure replay child"],

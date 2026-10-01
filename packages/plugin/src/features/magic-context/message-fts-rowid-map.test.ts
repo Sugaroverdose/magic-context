@@ -1,12 +1,12 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     buildCanonicalChunkTextFromFts,
     MESSAGE_FTS_CHUNK_LOAD_SQL,
@@ -51,7 +51,7 @@ afterEach(() => {
 
 describe("message FTS rowid map", () => {
     test("backfills bounded windows and resumes from the persisted watermark after restart", () => {
-        const directory = mkdtempSync(join(tmpdir(), "message-fts-rowid-map-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "message-fts-rowid-map-"));
         tempDirectories.push(directory);
         const path = join(directory, "context.db");
         let db = createDb(path);

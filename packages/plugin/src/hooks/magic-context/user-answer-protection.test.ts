@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { applyFlushedStatuses, applyPendingOperations } from "./apply-operations";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import { buildSupersessionReclaimOps } from "./supersession-reclaim";
@@ -27,7 +28,7 @@ let messages: MessageLike[];
 beforeEach(() => {
     originalData = process.env.XDG_DATA_HOME;
     originalStorage = process.env.MAGIC_CONTEXT_STORAGE_DIR;
-    root = mkdtempSync(join(tmpdir(), "answer-protection-"));
+    root = createTestTempDirFromPath(join(tmpdir(), "answer-protection-"));
     process.env.XDG_DATA_HOME = root;
     process.env.MAGIC_CONTEXT_STORAGE_DIR = root;
     db = openDatabase()!;

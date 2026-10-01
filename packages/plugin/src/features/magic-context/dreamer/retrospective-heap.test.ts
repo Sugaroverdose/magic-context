@@ -1,9 +1,10 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeOpenCodeV1FixtureStore } from "../../../hooks/magic-context/opencode-v1-store-fixture";
 import { Database } from "../../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { advanceSessionActivity } from "../session-activity";
 import {
     assertRetrospectiveHeap,
@@ -23,7 +24,7 @@ afterEach(() => {
 });
 
 function fixture(turns: number, huge = false) {
-    const dir = mkdtempSync(join(tmpdir(), "mc-retro-heap-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-retro-heap-"));
     dirs.push(dir);
     const path = join(dir, "opencode.db");
     process.env.OPENCODE_DB = path;

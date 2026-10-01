@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { LATEST_SUPPORTED_VERSION } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import {
     CLI_SCHEMA_FLOOR_VERSION,
     OutdatedSchemaVersionError,
@@ -15,7 +16,7 @@ import {
 const tempDirs: string[] = [];
 
 function tempDir(): string {
-    const path = mkdtempSync(join(tmpdir(), "mc-cli-db-access-"));
+    const path = createTestTempDirFromPath(join(tmpdir(), "mc-cli-db-access-"));
     tempDirs.push(path);
     return path;
 }

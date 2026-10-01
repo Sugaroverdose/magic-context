@@ -1,8 +1,9 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     readRawSessionMessageRange,
     visitRawSessionMessages,
@@ -16,9 +17,7 @@ import {
 } from "./read-session-raw";
 
 test("keyset ranges and visitors equal OFFSET rows and filtered ordinals across timestamp ties and summaries", () => {
-    const root = join(tmpdir(), "magic-context", "issue-576");
-    mkdirSync(root, { recursive: true });
-    const dir = mkdtempSync(join(root, "equivalence-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "keyset-equivalence-"));
     const db = new Database(join(dir, "opencode.db"));
     try {
         db.exec(`CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INTEGER, time_updated INTEGER, data TEXT);

@@ -6,7 +6,7 @@
  * sidebar reads zero.
  */
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -15,6 +15,7 @@ import {
     projectDirectoryKey,
 } from "./project-directory-key";
 import { projectHash, rpcPortDirsForLookup } from "./rpc-utils";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 const created: string[] = [];
 
@@ -74,7 +75,7 @@ describe("one discovery directory per project directory", () => {
     });
 
     test("macOS /var and /private/var", () => {
-        const raw = mkdtempSync(join(tmpdir(), "mc-key-var-"));
+        const raw = createTestTempDirFromPath(join(tmpdir(), "mc-key-var-"));
         created.push(raw);
         const real = realpathSync(raw);
         if (process.platform === "darwin") expect(real.startsWith("/private/")).toBe(true);
@@ -82,7 +83,7 @@ describe("one discovery directory per project directory", () => {
     });
 
     test("a symlinked directory and its target", () => {
-        const root = realpathSync(mkdtempSync(join(tmpdir(), "mc-key-link-")));
+        const root = realpathSync(createTestTempDirFromPath(join(tmpdir(), "mc-key-link-")));
         created.push(root);
         const target = join(root, "Pictures", "project");
         mkdirSync(target, { recursive: true });
@@ -92,7 +93,7 @@ describe("one discovery directory per project directory", () => {
     });
 
     test("POSIX trailing slash", () => {
-        const root = realpathSync(mkdtempSync(join(tmpdir(), "mc-key-slash-")));
+        const root = realpathSync(createTestTempDirFromPath(join(tmpdir(), "mc-key-slash-")));
         created.push(root);
         expect(projectHash(`${root}/`)).toBe(projectHash(root));
     });

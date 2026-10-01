@@ -2,7 +2,7 @@
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -20,6 +20,7 @@ import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-
 import type { PluginContext } from "../../plugin/types";
 import { resetOpenCodeDbPathStateForTesting } from "../../shared/opencode-db-path";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { applyV2SystemPrompt } from "./context";
 import type { SessionContext } from "./types";
 
@@ -41,7 +42,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const originalOpenCodeDb = process.env.OPENCODE_DB;
 
 beforeEach(() => {
-    dataHome = mkdtempSync(join(tmpdir(), "v2-system-prompt-restart-"));
+    dataHome = createTestTempDirFromPath(join(tmpdir(), "v2-system-prompt-restart-"));
     process.env.XDG_DATA_HOME = dataHome;
     delete process.env.OPENCODE_DB;
     resetOpenCodeDbPathStateForTesting();

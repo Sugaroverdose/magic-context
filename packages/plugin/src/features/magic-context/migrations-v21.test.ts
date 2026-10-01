@@ -1,12 +1,13 @@
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { closeDatabase, openDatabase } from "./storage";
 
 describe("migration v21", () => {
     test("adds work metric columns idempotently", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-v21-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-v21-"));
         process.env.XDG_DATA_HOME = dir;
         try {
             const db = openDatabase();

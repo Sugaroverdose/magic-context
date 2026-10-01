@@ -1,12 +1,13 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { recordMessageFtsRowid } from "./message-fts-rowid-map";
 import {
     MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS,
@@ -20,7 +21,7 @@ import { initializeDatabase } from "./storage-db";
 const tempDirectories: string[] = [];
 
 function createOpenCodeDb(liveSessionIds: string[]): string {
-    const directory = mkdtempSync(join(tmpdir(), "message-index-orphan-source-"));
+    const directory = createTestTempDirFromPath(join(tmpdir(), "message-index-orphan-source-"));
     tempDirectories.push(directory);
     const path = join(directory, "opencode.db");
     const db = new Database(path);

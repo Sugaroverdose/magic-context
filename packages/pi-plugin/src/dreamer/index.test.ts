@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { execFileSync, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -27,6 +27,7 @@ import { getSubagentInvocations } from "@magic-context/core/features/magic-conte
 import * as logger from "@magic-context/core/shared/logger";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { __setPiHarnessKindForTesting } from "../pi-harness-kind";
 import { PiSubagentRunner } from "../subagent-runner";
 import {
@@ -393,7 +394,9 @@ describe("Pi dreamer wiring", () => {
 	// against project "" and log "registered project " with a blank name.
 	test("does not register a project with an empty identity", () => {
 		db = createDb();
-		const dir = mkdtempSync(join(tmpdir(), "mc-pi-dreamer-empty-identity-"));
+		const dir = createTestTempDirFromPath(
+			join(tmpdir(), "mc-pi-dreamer-empty-identity-"),
+		);
 		try {
 			let starts = 0;
 			__test.setStartDreamScheduleTimerFactory(async () => {
@@ -799,7 +802,7 @@ describe("Pi dreamer wiring", () => {
 	});
 
 	test("persists an OMP 18.1.11 dreamer task stream with tokens and task label", async () => {
-		const testDataDir = mkdtempSync(
+		const testDataDir = createTestTempDirFromPath(
 			join(tmpdir(), "mc-pi-dreamer-accounting-"),
 		);
 		const previousTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;

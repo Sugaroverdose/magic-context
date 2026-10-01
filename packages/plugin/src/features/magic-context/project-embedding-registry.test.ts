@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import type { EmbeddingConfig } from "../../config/schema/magic-context";
 import { formatEmbedStatusText } from "../../hooks/magic-context/format-embed-status";
 import { setEmbeddingSessionBusy } from "../../shared/embedding-activity";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     chunkCanonicalText,
     loadCompartmentChunkEmbeddingsForSearch,
@@ -257,7 +257,7 @@ describe("project embedding registry", () => {
     const originalHfEndpoint = process.env.HF_ENDPOINT;
 
     function useTempDb() {
-        const dir = mkdtempSync(join(tmpdir(), "project-embedding-registry-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "project-embedding-registry-"));
         tempDirs.push(dir);
         process.env.XDG_DATA_HOME = dir;
         return openDatabase();

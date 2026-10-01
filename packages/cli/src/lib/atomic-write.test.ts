@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { writeFileAtomic } from "./atomic-write";
 
 const roots: string[] = [];
@@ -14,7 +15,7 @@ afterEach(() => {
 
 describe("writeFileAtomic", () => {
     it("writes content and leaves no .tmp sibling", () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-atomic-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-atomic-"));
         roots.push(root);
         const target = join(root, "config.jsonc");
         writeFileAtomic(target, '{"ok":true}\n');
@@ -23,7 +24,7 @@ describe("writeFileAtomic", () => {
     });
 
     it("preserves file mode on replace", () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-atomic-mode-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-atomic-mode-"));
         roots.push(root);
         const target = join(root, "config.jsonc");
         writeFileAtomic(target, "v1\n");
@@ -34,7 +35,7 @@ describe("writeFileAtomic", () => {
     });
 
     it("creates missing parent directories (fresh CortexKit config location)", () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-atomic-mkdir-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-atomic-mkdir-"));
         roots.push(root);
         // Nested path whose parents do NOT exist yet — mirrors a first-ever setup
         // writing ~/.config/cortexkit/magic-context.jsonc on a clean machine.

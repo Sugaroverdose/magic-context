@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	__test,
 	capturePiServedArray,
@@ -22,7 +23,9 @@ afterEach(() => {
 });
 
 function temporaryDirectory(): string {
-	const directory = mkdtempSync(join(tmpdir(), "pi-served-array-ledger-"));
+	const directory = createTestTempDirFromPath(
+		join(tmpdir(), "pi-served-array-ledger-"),
+	);
 	temporaryDirectories.push(directory);
 	return directory;
 }

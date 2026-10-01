@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -33,6 +33,7 @@ import {
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
 import type { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	__test,
 	handlePiCloneSessionStart,
@@ -955,7 +956,9 @@ describe("Pi clone state inheritance", () => {
 	});
 
 	it("reads the source id from the previous JSONL header", async () => {
-		const directory = await mkdtemp(join(tmpdir(), "mc-clone-header-"));
+		const directory = await createTestTempDirFromPath(
+			join(tmpdir(), "mc-clone-header-"),
+		);
 		temporaryDirectories.push(directory);
 		const file = join(directory, "source.jsonl");
 		await writeFile(
@@ -971,7 +974,9 @@ describe("Pi clone state inheritance", () => {
 		seedMeta(database, {
 			pending_pi_compaction_marker_state: pending("u1", "a1", 2),
 		});
-		const directory = await mkdtemp(join(tmpdir(), "mc-clone-signal-"));
+		const directory = await createTestTempDirFromPath(
+			join(tmpdir(), "mc-clone-signal-"),
+		);
 		temporaryDirectories.push(directory);
 		const file = join(directory, "source.jsonl");
 		await writeFile(file, '{"type":"session","id":"source"}\n');

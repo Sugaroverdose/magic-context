@@ -1,10 +1,11 @@
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { runMigrations } from "./migrations";
 import { initializeDatabase, LATEST_SUPPORTED_VERSION } from "./storage-db";
 import {
@@ -123,7 +124,7 @@ describe("native replay storage", () => {
     });
 
     it("uses an existing v84 store without adding obsolete native columns", () => {
-        const directory = mkdtempSync(join(tmpdir(), "magic-context-v84-replay-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "magic-context-v84-replay-"));
         const path = join(directory, "context.db");
         try {
             const seed = new Database(path);
@@ -394,7 +395,7 @@ describe("native replay storage", () => {
     });
 
     it("replays exact tool bytes and reasoning ids after reopening the database", () => {
-        const directory = mkdtempSync(join(tmpdir(), "magic-context-native-replay-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "magic-context-native-replay-"));
         const path = join(directory, "context.db");
         const input = '{"path":"src/reopened.ts","range":{"start":1,"end":9}}';
         try {

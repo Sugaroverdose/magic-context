@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Database as DatabaseType } from "../../shared/sqlite";
 import { Database, withPrivilegedWriter } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     ensureContextStoreUuid,
     installAuthorityManagedMarker,
@@ -151,7 +152,7 @@ describe("authority-managed context.db schema", () => {
     });
 
     it("rejects a raw connection that has not entered a privilege bracket", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-authority-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-authority-"));
         tempDirs.push(dir);
         const path = join(dir, "context.db");
         const managed = freshDatabase(path);
@@ -172,7 +173,7 @@ describe("authority-managed context.db schema", () => {
     });
 
     it("does not leak privilege to a second connection during a paused bracket", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-authority-leak-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-authority-leak-"));
         tempDirs.push(dir);
         const path = join(dir, "context.db");
         const connA = freshDatabase(path);

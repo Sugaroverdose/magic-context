@@ -1,8 +1,7 @@
 import { describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { updateSessionMeta } from "../../features/magic-context/storage-meta";
@@ -10,6 +9,7 @@ import { recordDetectedContextLimit } from "../../features/magic-context/storage
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { clearWindowOverlayCacheForTest, setWindowOverlayPath } from "../../shared/window-geometry";
 import {
     historyBudgetPolicyIdentity,
@@ -151,7 +151,7 @@ describe("event-resolvers", () => {
             initializeDatabase(db);
             runMigrations(db);
             const sessionId = "ses-poisoned-overlay-floor";
-            const dir = mkdtempSync(join(tmpdir(), "mc-floor-overlay-"));
+            const dir = createTestTempDirFromPath(join(tmpdir(), "mc-floor-overlay-"));
             const overlayPath = join(dir, "window-overlay.json");
             try {
                 writeFileSync(

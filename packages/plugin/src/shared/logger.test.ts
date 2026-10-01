@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 type LoggerScenarioResult = {
     exists: boolean;
@@ -186,7 +187,7 @@ async function runLoggerScenario<T>(
         | "bounded"
         | "oversized",
 ): Promise<T> {
-    const root = mkdtempSync(path.join(os.tmpdir(), "magic-context-logger-test-"));
+    const root = createTestTempDirFromPath(path.join(os.tmpdir(), "magic-context-logger-test-"));
     scenarioRoots.push(root);
     const child = Bun.spawn({
         windowsHide: true,

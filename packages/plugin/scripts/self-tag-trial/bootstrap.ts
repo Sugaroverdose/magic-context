@@ -3,8 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 // Set isolation before importing modules that resolve storage or model caches.
-export function isolate(): string {
-    const base = join(tmpdir(), "magic-context", "self-tag-trial");
+export function isolate(base = join(tmpdir(), "magic-context", "self-tag-trial")): string {
     mkdirSync(base, { recursive: true });
     const root = mkdtempSync(join(base, "run-"));
     for (const name of ["data", "cache", "config", "home"]) mkdirSync(join(root, name));

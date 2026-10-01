@@ -1,3 +1,5 @@
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+
 /// <reference types="bun-types" />
 // Tests exercise server-side (Desktop) notification behavior — set OPENCODE_CLIENT
 // to prevent the TUI toast path from intercepting sendIgnoredMessage calls.
@@ -5,7 +7,7 @@ process.env.OPENCODE_CLIENT = "desktop";
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import type { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
@@ -86,7 +88,7 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 function makeTempDir(prefix: string): string {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     return dir;
 }

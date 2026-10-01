@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /**
  * Regression suite for `createSystemPromptHashHandler`'s drain semantics.
@@ -17,7 +18,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createAnthropic } from "@ai-sdk/anthropic";
@@ -58,7 +59,7 @@ const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 function useTempDataHome(prefix: string): void {
-    const dir = mkdtempSync(join(tmpdir(), prefix));
+    const dir = createTestTempDirFromPath(join(tmpdir(), prefix));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
 }
@@ -313,7 +314,7 @@ describe("system-prompt-hash fail-open (per-turn handler must never throw)", () 
 describe("system-prompt-hash v2 system prompt contents", () => {
     it("keeps project docs, user profile, and key files out of the system prompt", async () => {
         useTempDataHome("sph-v2-adjuncts-out-");
-        const directory = mkdtempSync(join(tmpdir(), "sph-docs-project-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "sph-docs-project-"));
         tempDirs.push(directory);
         writeFileSync(join(directory, "ARCHITECTURE.md"), "Alpha <closing-tag> & beta", "utf-8");
         const sessionId = "ses-v2-adjuncts-out";
@@ -956,7 +957,7 @@ describe("provisional ctx_reduce availability (pre-first-user race)", () => {
         // provisional fail-open true; persisting a hash computed from the
         // reduce-enabled guidance variant would flip (hash change → flush →
         // HARD fold) as soon as the real first user message denies the tool.
-        const dir = mkdtempSync(join(tmpdir(), "sph-provisional-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "sph-provisional-"));
         tempDirs.push(dir);
         process.env.XDG_DATA_HOME = dir;
         const { mkdirSync } = require("node:fs");
@@ -986,7 +987,7 @@ describe("provisional ctx_reduce availability (pre-first-user race)", () => {
     });
 
     it("persists the hash from the frozen deny-verdict variant once the first user row exists", async () => {
-        const dir = mkdtempSync(join(tmpdir(), "sph-frozen-deny-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "sph-frozen-deny-"));
         tempDirs.push(dir);
         process.env.XDG_DATA_HOME = dir;
 

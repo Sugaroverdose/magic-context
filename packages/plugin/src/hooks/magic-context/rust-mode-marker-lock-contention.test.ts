@@ -1,10 +1,9 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { openDatabase } from "../../features/magic-context/storage-db";
 import {
@@ -28,6 +27,7 @@ import {
     type SqliteWriteLocker,
     startSqliteWriteLocker,
 } from "../../shared/sqlite-write-locker-test-support";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { resetLkgSlotsForTest } from "./lkg-slot";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
@@ -36,8 +36,6 @@ import type { TransformDeps } from "./transform";
 import type { MessageLike } from "./transform-operations";
 import { RUST_MARKER_LOCK_SKIP_LOG } from "./transform-postprocess-phase";
 
-// Every test database lives under $TMPDIR/magic-context/ and is removed afterwards.
-const TEST_ROOT = join(tmpdir(), "magic-context", "rust-marker-lock-contention");
 const MODULE_TEXT = "module-rendered tail";
 
 const cleanups: Array<() => void> = [];
@@ -50,8 +48,7 @@ afterEach(() => {
 });
 
 function openFileDb(): { db: ContextDatabase; dbPath: string } {
-    mkdirSync(TEST_ROOT, { recursive: true });
-    const directory = mkdtempSync(join(TEST_ROOT, "run-"));
+    const directory = createTestTempDirFromPath(join(tmpdir(), "rust-marker-lock-contention-"));
     const dbPath = join(directory, "context.db");
     const db = openDatabase(dbPath) as ContextDatabase | null;
     if (!db) throw new Error("file-backed test database did not open");

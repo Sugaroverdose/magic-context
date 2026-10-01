@@ -1,9 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { Database } from "../shared/sqlite";
+import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import {
     discoverOwnHostService,
     type HostServiceOwner,
@@ -34,7 +34,7 @@ function stateHome(registrations: Array<Registration | string> = []): {
     dir: string;
     cleanup: () => void;
 } {
-    const root = mkdtempSync(join(tmpdir(), "mc-host-service-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-host-service-"));
     const env = { XDG_STATE_HOME: root } as NodeJS.ProcessEnv;
     const dir = join(root, "opencode");
     mkdirSync(dir, { recursive: true });
@@ -307,7 +307,7 @@ describe("OpenCode 2 host session removal", () => {
     });
 
     test("looks up only marked legacy children in the private v2 store", () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-legacy-host-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-legacy-host-"));
         const env = { XDG_DATA_HOME: root, OPENCODE_DB: "opencode2.db" } as NodeJS.ProcessEnv;
         const path = join(root, "opencode", "opencode2.db");
         mkdirSync(join(root, "opencode"));

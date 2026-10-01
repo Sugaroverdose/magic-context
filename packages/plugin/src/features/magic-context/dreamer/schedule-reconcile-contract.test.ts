@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 
 /**
  * Contract tests for reconciling one shared task_schedule_state row across
@@ -23,7 +24,7 @@
 
 import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../../shared/sqlite";
@@ -76,7 +77,7 @@ function freshDb(): Database {
 }
 
 function sharedDb(): Database {
-    tempDir = mkdtempSync(join(tmpdir(), "mc-schedule-reconcile-"));
+    tempDir = createTestTempDirFromPath(join(tmpdir(), "mc-schedule-reconcile-"));
     const file = join(tempDir, "context.db");
     const first = new Database(file);
     initializeDatabase(first);

@@ -1,9 +1,10 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import type { DiagnosticReport } from "./diagnostics-opencode";
 import {
     bundleIssueReport,
@@ -340,7 +341,7 @@ describe("extractHistorianFailureLines", () => {
 
 describe("bundleIssueReport secret redaction", () => {
     it("redacts secret-looking config keys before writing the issue bundle", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-issue-redaction-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-issue-redaction-"));
         tempDirs.push(root);
         const originalCwd = process.cwd();
         process.chdir(root);
@@ -447,7 +448,7 @@ describe("bundleIssueReport secret redaction", () => {
     });
 
     it("sanitizes title, description, config paths, and recent session titles", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-issue-sanitize-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-issue-sanitize-"));
         tempDirs.push(root);
         const originalCwd = process.cwd();
         process.chdir(root);
@@ -555,7 +556,7 @@ describe("bundleIssueReport secret redaction", () => {
 
 describe("bundleIssueReport size and session fallbacks", () => {
     it("writes the full sanitized bundle beside the capped body and records child linkage", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-issue-full-bundle-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-issue-full-bundle-"));
         tempDirs.push(root);
         const logPath = join(root, "opencode.log");
         writeFileSync(

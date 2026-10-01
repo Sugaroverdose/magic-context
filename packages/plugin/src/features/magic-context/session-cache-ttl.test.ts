@@ -1,16 +1,17 @@
 import { expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { formatCacheTtlDisplay, resolveCacheTtlDisplay } from "../../shared/cache-ttl-display";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { runMigrations } from "./migrations";
 import { readSessionCacheTtl, resolveSessionCacheTtl } from "./session-cache-ttl";
 import { initializeDatabase } from "./storage-db";
 import { getOrCreateSessionMeta } from "./storage-meta";
 
 it("freezes TTL policy across config changes and restart, with truthful status provenance", () => {
-    const root = mkdtempSync(join(tmpdir(), "mc-ttl-policy-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-ttl-policy-"));
     const path = join(root, "context.db");
     let db = new Database(path);
     try {

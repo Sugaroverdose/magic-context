@@ -1,8 +1,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parse, stringify } from "comment-json";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { checkPluginDuplicates } from "./doctor-opencode-plugin-duplicates";
 
 const FIXTURES = join(import.meta.dir, "fixtures/plugin-duplicates");
@@ -14,7 +15,7 @@ afterEach(() => {
 
 /** A local checkout whose package.json names the published plugin, as a dev registration does. */
 function makeDevCheckout(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mc-dup-dev-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-dup-dev-"));
     tempDirs.push(dir);
     const pluginDir = join(dir, "packages/plugin");
     mkdirSync(pluginDir, { recursive: true });
@@ -31,7 +32,7 @@ function makeDevCheckout(): string {
  * a change.
  */
 function runCheck(fixture: string, options: { fix?: boolean; devPath?: string } = {}) {
-    const dir = mkdtempSync(join(tmpdir(), "mc-dup-cfg-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-dup-cfg-"));
     tempDirs.push(dir);
     const path = join(dir, "opencode.jsonc");
     let text = readFileSync(join(FIXTURES, fixture), "utf-8");

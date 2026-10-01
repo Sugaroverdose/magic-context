@@ -1,13 +1,13 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     backfillMessageTimesBatch,
     getMessageTimeBackfillProgress,
@@ -63,7 +63,7 @@ function readerFor(rows: ReadonlyMap<string, RawMessage[]>): MessageTimeBackfill
 
 describe("message time backfill", () => {
     test("persists bounded progress and resumes after reopening the database", () => {
-        const directory = mkdtempSync(join(tmpdir(), "message-time-backfill-"));
+        const directory = createTestTempDirFromPath(join(tmpdir(), "message-time-backfill-"));
         tempDirectories.push(directory);
         const path = join(directory, "context.db");
         const rows = new Map<string, RawMessage[]>([

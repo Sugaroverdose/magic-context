@@ -1,9 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
 import { __test, TRANSFORM_DECISIONS_RETENTION } from "./transform-decision-log";
@@ -13,7 +14,7 @@ let dbPath: string;
 let db: Database;
 
 beforeEach(() => {
-    dir = mkdtempSync(join(tmpdir(), "mc-txn-decision-"));
+    dir = createTestTempDirFromPath(join(tmpdir(), "mc-txn-decision-"));
     dbPath = join(dir, "context.db");
     db = new Database(dbPath);
     initializeDatabase(db);

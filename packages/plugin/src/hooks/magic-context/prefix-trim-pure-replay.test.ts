@@ -1,4 +1,5 @@
 /// <reference types="bun-types" />
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 /**
  * Byte pins for prefix-trim shapes that must not change when the absent-boundary
@@ -11,7 +12,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -46,7 +47,7 @@ afterEach(() => {
 
 /** An XDG_DATA_HOME with no OpenCode store in it, so no ordinal can resolve. */
 function emptyDataHome(): void {
-    const dir = mkdtempSync(join(tmpdir(), "mc-prefix-trim-pure-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-prefix-trim-pure-"));
     process.env.XDG_DATA_HOME = dir;
     cleanup.push(() => rmSync(dir, { recursive: true, force: true }));
 }
@@ -206,8 +207,8 @@ it("keeps large tool, image, and signed thinking suffixes unchanged through appe
         "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, end_block_index, title, content, created_at) VALUES (?, 1, 1, 2, ?, ?, 0, 'partial', 'covered block', 1)",
     ).run(SESSION_ID, idOf(1), idOf(2));
     const suffixes = [
-        { type: "tool", content: "TOOL_UNCOVERED_" + "x".repeat(128_000) },
-        { type: "file", mime: "image/png", url: "data:image/png;base64," + "A".repeat(8_192) },
+        { type: "tool", content: `TOOL_UNCOVERED_${"x".repeat(128_000)}` },
+        { type: "file", mime: "image/png", url: `data:image/png;base64,${"A".repeat(8_192)}` },
         { type: "thinking", thinking: "SIGNED_UNCOVERED", signature: "signed-original-bytes" },
     ];
     for (const suffix of suffixes) {

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,13 +9,12 @@ import {
 } from "../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../hooks/magic-context/read-session-raw";
 import { Database } from "../shared/sqlite";
+import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { createV2RawMessageProvider, createV2RawMessageReader } from "./hooks/store";
 import { V2StoreReader } from "./store-reader";
 
 test("v2 carried cursors preserve filtered ordinals and watermark across seq gaps", () => {
-    const root = join(tmpdir(), "magic-context", "issue-576");
-    mkdirSync(root, { recursive: true });
-    const dir = mkdtempSync(join(root, "v2-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "v2-keyset-paging-"));
     const path = join(dir, "opencode.db");
     const db = new Database(path);
     try {

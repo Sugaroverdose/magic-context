@@ -1,5 +1,5 @@
 import { describe, expect, it, spyOn } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
@@ -21,6 +21,7 @@ import {
 	getInitialSystemMessage,
 } from "pi-ai-086";
 import { SessionManager as SessionManager086 } from "pi-coding-agent-086";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
 	clearContextHandlerSession,
 	registerPiContextHandler,
@@ -276,7 +277,7 @@ describe("Pi 0.86 provider contract", () => {
 		}
 	});
 	it("host marker consolidation preserves effective state and replay bytes through restart and LKG", async () => {
-		const dir = mkdtempSync(join(tmpdir(), "mc-system-086-"));
+		const dir = createTestTempDirFromPath(join(tmpdir(), "mc-system-086-"));
 		const manager = SessionManager086.create(process.cwd(), dir);
 		const sessionId = manager.getSessionId();
 		const db = createTestDb();

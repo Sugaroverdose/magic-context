@@ -1,9 +1,10 @@
 import { drainNotifications } from "../../shared/rpc-notifications";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 /// <reference types="bun-types" />
 
 import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
@@ -72,7 +73,7 @@ let tempDir: string | undefined;
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), "mc-compartment-phase-"));
+    tempDir = createTestTempDirFromPath(join(tmpdir(), "mc-compartment-phase-"));
     process.env.XDG_DATA_HOME = tempDir;
     __ignoredNotificationTest.setHoldDetector(() => false);
 });

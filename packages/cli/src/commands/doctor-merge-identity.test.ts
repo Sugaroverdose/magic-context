@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,6 +9,7 @@ import {
     runMigrations,
 } from "@magic-context/core/features/magic-context/storage";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { CLI_SCHEMA_FLOOR_VERSION, OutdatedSchemaVersionError } from "../lib/database-access";
 import { runMergeIdentityCli } from "./doctor-merge-identity";
 
@@ -17,7 +18,7 @@ const tempDirs: string[] = [];
 function tempDir(): string {
     const root = join(tmpdir(), "magic-context", "identity-merge-tests");
     mkdirSync(root, { recursive: true });
-    const path = realpathSync(mkdtempSync(join(root, "fixture-")));
+    const path = realpathSync(createTestTempDirFromPath(join(root, "fixture-")));
     tempDirs.push(path);
     return path;
 }

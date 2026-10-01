@@ -11,7 +11,6 @@ import { EventEmitter } from "node:events";
 import {
 	existsSync,
 	mkdirSync,
-	mkdtempSync,
 	readFileSync,
 	realpathSync,
 	rmSync,
@@ -32,6 +31,7 @@ import {
 import { getSubagentInvocations } from "@magic-context/core/features/magic-context/storage-subagent-invocations";
 import * as loggerModule from "@magic-context/core/shared/logger";
 import type { SubagentRunOptions } from "@magic-context/core/shared/subagent-runner";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 
 import { __setPiHarnessKindForTesting } from "./pi-harness-kind";
 import { __test, PiSubagentRunner } from "./subagent-runner";
@@ -219,7 +219,7 @@ function nextTick() {
 }
 
 function writePiCliFixture(bin: string, useBinShim = false) {
-	const root = mkdtempSync(join(tmpdir(), "mc-pi-cli-layout-"));
+	const root = createTestTempDirFromPath(join(tmpdir(), "mc-pi-cli-layout-"));
 	const packageRoot = join(
 		root,
 		"node_modules",
@@ -250,7 +250,7 @@ function writePiCliFixture(bin: string, useBinShim = false) {
 // without a standalone `pi` on PATH still spawns its own CLI instead of the
 // bare `pi` fallback (which ENOENTs).
 function writeOmpCliFixture(bin: string, useBinShim = false) {
-	const root = mkdtempSync(join(tmpdir(), "mc-omp-cli-layout-"));
+	const root = createTestTempDirFromPath(join(tmpdir(), "mc-omp-cli-layout-"));
 	const packageRoot = join(
 		root,
 		"node_modules",
@@ -452,7 +452,7 @@ describe("subagent-runner pure helpers", () => {
 	});
 
 	it("still resolves a string bin (no object map)", () => {
-		const root = mkdtempSync(join(tmpdir(), "mc-pi-string-bin-"));
+		const root = createTestTempDirFromPath(join(tmpdir(), "mc-pi-string-bin-"));
 		const packageRoot = join(
 			root,
 			"node_modules",
@@ -486,7 +486,7 @@ describe("subagent-runner pure helpers", () => {
 	});
 
 	it("falls through to the bare pi fallback when the manifest has neither bin.pi nor bin.omp", () => {
-		const root = mkdtempSync(join(tmpdir(), "mc-pi-no-bin-"));
+		const root = createTestTempDirFromPath(join(tmpdir(), "mc-pi-no-bin-"));
 		const packageRoot = join(
 			root,
 			"node_modules",
@@ -714,7 +714,9 @@ describe("subagent-runner pure helpers", () => {
 
 	it("uses PI_CODING_AGENT_DIR only for a positively identified OMP host", () => {
 		__setPiHarnessKindForTesting("omp");
-		const root = mkdtempSync(join(homedir(), ".mc-omp-host-test-"));
+		const root = createTestTempDirFromPath(
+			join(homedir(), ".mc-omp-host-test-"),
+		);
 		const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
 		const previousPackageDir = process.env.PI_PACKAGE_DIR;
 		writeFileSync(
@@ -745,7 +747,9 @@ describe("subagent-runner pure helpers", () => {
 
 	it("uses the OMP default agent dir when PI_CODING_AGENT_DIR is unset", () => {
 		__setPiHarnessKindForTesting("omp");
-		const root = mkdtempSync(join(homedir(), ".mc-omp-default-host-test-"));
+		const root = createTestTempDirFromPath(
+			join(homedir(), ".mc-omp-default-host-test-"),
+		);
 		const previous = {
 			agentDir: process.env.PI_CODING_AGENT_DIR,
 			packageDir: process.env.PI_PACKAGE_DIR,
@@ -789,7 +793,9 @@ describe("subagent-runner pure helpers", () => {
 
 	it("gives a named OMP profile precedence over a stale agent-dir override", () => {
 		__setPiHarnessKindForTesting("omp");
-		const root = mkdtempSync(join(homedir(), ".mc-omp-profile-host-test-"));
+		const root = createTestTempDirFromPath(
+			join(homedir(), ".mc-omp-profile-host-test-"),
+		);
 		const previous = {
 			agentDir: process.env.PI_CODING_AGENT_DIR,
 			packageDir: process.env.PI_PACKAGE_DIR,
@@ -855,7 +861,9 @@ describe("subagent-runner pure helpers", () => {
 
 	it("emits only OMP-supported startup flags and tool names on an OMP host", () => {
 		__setPiHarnessKindForTesting("omp");
-		const root = mkdtempSync(join(homedir(), ".mc-omp-argv-test-"));
+		const root = createTestTempDirFromPath(
+			join(homedir(), ".mc-omp-argv-test-"),
+		);
 		const previousPackageDir = process.env.PI_PACKAGE_DIR;
 		writeFileSync(
 			join(root, "package.json"),
@@ -1266,7 +1274,9 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		const { runner } = runnerWith(child, {
 			invocation: { command: "omp", prefixArgs: [], targetHarness: "omp" },
 		});
-		const testDataDir = mkdtempSync(join(tmpdir(), "mc-pi-accounting-"));
+		const testDataDir = createTestTempDirFromPath(
+			join(tmpdir(), "mc-pi-accounting-"),
+		);
 		const previousTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 		const previousXdgDataHome = process.env.XDG_DATA_HOME;
 		process.env.MAGIC_CONTEXT_TEST_DATA_DIR = testDataDir;
@@ -1347,7 +1357,9 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		const { runner } = runnerWith(child, {
 			invocation: { command: "omp", prefixArgs: [], targetHarness: "omp" },
 		});
-		const testDataDir = mkdtempSync(join(tmpdir(), "mc-pi-accounting-empty-"));
+		const testDataDir = createTestTempDirFromPath(
+			join(tmpdir(), "mc-pi-accounting-empty-"),
+		);
 		const previousTestDataDir = process.env.MAGIC_CONTEXT_TEST_DATA_DIR;
 		const previousXdgDataHome = process.env.XDG_DATA_HOME;
 		process.env.MAGIC_CONTEXT_TEST_DATA_DIR = testDataDir;
@@ -1724,7 +1736,7 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		// Default resolution must NOT spawn a bare "pi" (which ENOENTs on Windows
 		// because npm installs a pi.cmd shim, not a literal pi). It re-invokes the
 		// exact host CLI: process.execPath + process.argv[1], with no shell.
-		const root = mkdtempSync(join(tmpdir(), "mc-pi-cli-"));
+		const root = createTestTempDirFromPath(join(tmpdir(), "mc-pi-cli-"));
 		const distDir = join(
 			root,
 			"node_modules",
@@ -3278,7 +3290,9 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 
 describe("Pi subagent schema-fence probe", () => {
 	it("does not spawn a Pi child when the shared database is newer than this build", async () => {
-		const dataHome = mkdtempSync(join(tmpdir(), "mc-pi-fence-probe-"));
+		const dataHome = createTestTempDirFromPath(
+			join(tmpdir(), "mc-pi-fence-probe-"),
+		);
 		try {
 			process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
 			process.env.XDG_DATA_HOME = dataHome;

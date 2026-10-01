@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import golden from "./__fixtures__/log_format_golden.json";
 import opaqueMessages from "./__fixtures__/opaque-log-messages.json";
 
@@ -238,7 +239,7 @@ describe("parseLogLine", () => {
         it(`retains ${fixture.name} in historian failure extraction`, async () => {
             let line = fixture.line;
             if (fixture.name.startsWith("legacy")) {
-                const root = mkdtempSync(join(tmpdir(), "mc-opaque-log-"));
+                const root = createTestTempDirFromPath(join(tmpdir(), "mc-opaque-log-"));
                 roots.push(root);
                 const logPath = join(root, "writer.log");
                 const loggerPath = resolve(import.meta.dir, "../../../plugin/src/shared/logger.ts");
@@ -293,7 +294,7 @@ describe("parseLogLine", () => {
 
 describe("log path discovery", () => {
     it("enumerates an override, legacy harness path, fleet lane, and module log", () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-log-paths-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-log-paths-"));
         roots.push(root);
         process.env.MAGIC_CONTEXT_TEST_DATA_DIR = root;
         process.env.XDG_DATA_HOME = root;
@@ -308,7 +309,7 @@ describe("log path discovery", () => {
     });
 
     it("discovers a fleet log when no legacy file exists", () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-log-new-only-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-log-new-only-"));
         roots.push(root);
         const fleetPath = join(root, "storage", "logs", "magic-context.pi.log");
         mkdirSync(join(root, "storage", "logs"), { recursive: true });
@@ -330,7 +331,7 @@ describe("log path discovery", () => {
     });
 
     it("reports grammar and line count and merges existing files chronologically", () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-log-read-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-log-read-"));
         roots.push(root);
         const legacy = join(root, "legacy.log");
         const fleetR1 = join(root, "fleet-r1.log");
@@ -359,7 +360,7 @@ describe("log path discovery", () => {
     });
 
     it("resolves no dated segment, which is why the writer-side fixture sections are inert", () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-log-segments-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-log-segments-"));
         roots.push(root);
 
         // `segment_name` and `retention_prune` pin the WRITER: which file a

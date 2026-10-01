@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
@@ -61,6 +61,7 @@ import {
     withSqliteTransformPass,
 } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { deriveWindowGeometry } from "../../shared/window-geometry";
 import { createCtxSearchTools } from "../../tools/ctx-search/tools";
 import { primeCtxReduceSpawnPermission } from "./ctx-reduce-availability";
@@ -185,7 +186,7 @@ function makeDb(): ContextDatabase {
 }
 
 function makeFileDb(): ContextDatabase {
-    const directory = mkdtempSync(join(tmpdir(), "rust-mode-context-"));
+    const directory = createTestTempDirFromPath(join(tmpdir(), "rust-mode-context-"));
     availabilityDataHomes.push(directory);
     const db = openDatabase(join(directory, "context.db")) as ContextDatabase | null;
     if (!db) throw new Error("file-backed test database did not open");
@@ -283,7 +284,7 @@ function makeMeta(
 }
 
 function installAvailabilityDb(sessionId: string, firstUserTools?: Record<string, unknown>): void {
-    const dataHome = mkdtempSync(join(tmpdir(), "rust-mode-availability-"));
+    const dataHome = createTestTempDirFromPath(join(tmpdir(), "rust-mode-availability-"));
     availabilityDataHomes.push(dataHome);
     const dbPath = join(dataHome, "opencode", "opencode.db");
     mkdirSync(dirname(dbPath), { recursive: true });
@@ -576,7 +577,7 @@ describe("Rust mode authority adapter", () => {
     });
 
     it("sends each historian chain model's resolved window and output ceiling", async () => {
-        const root = mkdtempSync(join(tmpdir(), "mc-historian-model-limits-"));
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-historian-model-limits-"));
         const previous = process.env.XDG_DATA_HOME;
         try {
             process.env.XDG_DATA_HOME = root;
@@ -3345,7 +3346,7 @@ describe("Rust mode authority adapter", () => {
             const sessionId = "rust-hotpath-measure-session";
             sessions.push(sessionId);
             const db = makeDb();
-            const projectRoot = mkdtempSync(join(tmpdir(), `rust-hotpath-${label}-`));
+            const projectRoot = createTestTempDirFromPath(join(tmpdir(), `rust-hotpath-${label}-`));
             availabilityDataHomes.push(projectRoot);
             mkdirSync(join(projectRoot, ".git"), { recursive: true });
             const guidance = `## Magic Context\n\n${"Measured guidance. ".repeat(2_000)}`;

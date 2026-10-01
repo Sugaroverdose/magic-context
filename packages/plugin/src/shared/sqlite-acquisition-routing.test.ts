@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -9,10 +9,11 @@ import {
     withSqliteTransformPass,
 } from "./sqlite";
 import { startSqliteWriteLocker } from "./sqlite-write-locker-test-support";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 for (const mode of ["default", "immediate", "exclusive", "literal"] as const) {
     test(`shared SQLite retries ${mode} acquisition before running any writes`, async () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-routed-acquisition-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-routed-acquisition-"));
         const path = join(dir, "context.db");
         const db = new Database(path);
         db.exec(
@@ -75,7 +76,7 @@ test("routed transactions preserve nesting, receiver, arguments and rollback wit
 });
 
 test("exhausted routed acquisition never enters the callback or multiplies privileged retries", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mc-routed-exhaustion-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-routed-exhaustion-"));
     const path = join(dir, "context.db");
     const blocker = new Database(path);
     const db = new Database(path);

@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -12,6 +12,7 @@ import {
 } from "../../features/magic-context/storage";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     createV2RustCompactionMarkerStrategy,
     resolveBoundaryUserMessage,
@@ -23,7 +24,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 const openDatabases: ContextDatabase[] = [];
 
 function useTempDataHome(): ContextDatabase {
-    const dir = mkdtempSync(join(tmpdir(), "mc-v2-boundary-"));
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-v2-boundary-"));
     tempDirs.push(dir);
     process.env.XDG_DATA_HOME = dir;
     mkdirSync(join(dir, "cortexkit", "magic-context"), { recursive: true });

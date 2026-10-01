@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-
 import { parseJsonc } from "../shared/jsonc-parser";
+import { createTestTempDirFromPath } from "../shared/test-temp-dir";
 import { LiveConfigReader } from "./live-snapshot";
 
 test("one snapshot per run survives a malformed tier and adopts both tiers atomically", () => {
     const oldConfigHome = process.env.XDG_CONFIG_HOME;
-    const root = mkdtempSync(join(tmpdir(), "mc-live-config-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-live-config-"));
     const project = join(root, "project");
     const projectFile = join(project, ".cortexkit", "magic-context.jsonc");
     const userFile = join(root, "config", "cortexkit", "magic-context.jsonc");
@@ -53,7 +53,7 @@ test("one snapshot per run survives a malformed tier and adopts both tiers atomi
 });
 
 test("a write crossing the tier load boundary is not published as a mixed snapshot", () => {
-    const root = mkdtempSync(join(tmpdir(), "mc-live-crossing-"));
+    const root = createTestTempDirFromPath(join(tmpdir(), "mc-live-crossing-"));
     const previous = process.env.XDG_CONFIG_HOME;
     process.env.XDG_CONFIG_HOME = join(root, "config");
     const project = join(root, "project");

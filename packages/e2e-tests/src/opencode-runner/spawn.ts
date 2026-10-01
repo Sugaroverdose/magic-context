@@ -7,6 +7,8 @@
  * Returns the server URL and a handle with `kill()` for test cleanup.
  */
 
+import { createE2ETempDir, cleanupE2ETempDir } from "../temp-dir";
+
 import { type ChildProcess, spawn } from "node:child_process";
 import {
     existsSync,
@@ -18,7 +20,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { hostExtractCache } from '../host-extract-cache';
 import { prepareContextDatabase } from "../prepare-context-db";
 import { assertMockEndpoint, assertMockProviders, pinMockAgents } from "../mock-routing";
@@ -186,7 +188,7 @@ function installExitReapers(): void {
     if (exitReapersInstalled) return;
     exitReapersInstalled = true;
     // `exit` handlers must stay synchronous; process.kill is.
-    process.once("exit", () => {
+    process.prependOnceListener("exit", () => {
         for (const pid of liveChildGroups) killGroup(pid, "SIGKILL");
     });
     for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
@@ -206,7 +208,7 @@ let orphanSweepDone = false;
 
 /** cwd of a pid via lsof; null when unreadable (gone or not ours to see). */
 function processCwd(pid: number): string | null {
-    const res = Bun.spawnSync(["lsof", "-a", "-p", String(pid), "-d", "cwd", "-Fn"]);
+    const res = Bun.spawnSync(["lsof", "-a", "-p", String(pid), "-d", "cwd", "-Fn"], { windowsHide: true });
     if (res.exitCode !== 0) return null;
     const line = res.stdout
         .toString()
@@ -227,7 +229,7 @@ export function sweepOrphanedServes(): number {
     if (!Bun.which("ps")) return 0;
     let ps: ReturnType<typeof Bun.spawnSync>;
     try {
-        ps = Bun.spawnSync(["ps", "-axo", "pid=,ppid=,command="]);
+        ps = Bun.spawnSync(["ps", "-axo", "pid=,ppid=,command="], { windowsHide: true });
     } catch {
         return 0;
     }
@@ -266,8 +268,7 @@ export function sweepOrphanedServes(): number {
  * serve restart so opencode.db + context.db survive the restart.
  */
 export function createIsolatedEnv(): IsolatedEnv {
-    const unique = `opencode-e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const base = join(tmpdir(), unique);
+    const base = createE2ETempDir("opencode-e2e-");
     const configDir = join(base, "config");
     const dataDir = join(base, "data");
     const cacheDir = join(base, "cache");
@@ -656,187 +657,197 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
     // Reuse a caller-provided env for the Rust-mode harness (connection file
     // pre-placed, data dir shared across a serve restart); otherwise allocate.
     const env = resolvedOpts.existingEnv ?? createIsolatedEnv();
-    // Let OpenCode keep the listening socket it obtains from port 0. Selecting a
-    // free port in a separate process creates a release/rebind race with sibling
-    // test workers, which surfaces as an opaque ServeError under full-leg load.
-    let port = resolvedOpts.port ?? 0;
-
-    if (resolvedOpts.prepareContextDatabase !== false) prepareContextDatabase(env.dataDir);
-    writeConfigs(env, resolvedOpts.mockProviderURL, resolvedOpts);
-
-    // Explicitly strip any inherited OPENCODE_SERVER_PASSWORD from the parent shell —
-    // our tests run unsecured on a random localhost port, and inherited auth would
-    // force every SDK request to carry Basic auth headers we don't set.
-    // Also strip NODE_ENV=test: Bun's test runner sets it automatically and the
-    // plugin's logger (src/shared/logger.ts) silences all output when NODE_ENV=test.
-    // We want the subprocess to behave like a real install, so the log file gets
-    // populated normally for diagnostics.
-    const childEnv: Record<string, string> = {};
-    for (const [key, value] of Object.entries(process.env)) {
-        if (value === undefined) continue;
-        if (key === "OPENCODE_SERVER_PASSWORD") continue;
-        if (key === "OPENCODE_SERVER_USERNAME") continue;
-        if (key === "NODE_ENV") continue;
-        // Plugin unit-test preload sets this so bare openDatabase() cannot touch
-        // the developer's real DB. The OpenCode child must use the harness data
-        // dir instead; leaking the preload path makes the plugin look at a
-        // throwaway tree that is not the isolated session under test.
-        if (key === "MAGIC_CONTEXT_TEST_DATA_DIR") continue;
-        // Strip any inherited subc supervised-launch identity. When the test
-        // process is itself launched under a subc supervisor (e.g. an AFT/Alfonso
-        // worktree sets SUBC_MODULE_ID=aft), the plugin's Rust module client would
-        // present THAT supervised identity to our hermetic daemon, which rejects it
-        // ("consumer_identity for module_id 'aft' did not match a supervised launch
-        // nonce"). A real opencode install is never launched under a supervised subc
-        // identity, so clearing these matches production and lets the plugin connect
-        // as an ordinary client. Harmless for TS-mode suites, which never touch subc.
-        if (key === "SUBC_MODULE_ID") continue;
-        if (key === "SUBC_LAUNCH_NONCE") continue;
-        childEnv[key] = value;
-    }
-    childEnv.OPENCODE_CONFIG_DIR = env.configDir;
-    childEnv.XDG_CONFIG_HOME = env.configDir;
-    childEnv.XDG_DATA_HOME = env.dataDir;
-    childEnv.XDG_CACHE_HOME = env.cacheDir;
-    childEnv.XDG_STATE_HOME = join(env.dataDir, "state");
-    childEnv.XDG_RUNTIME_DIR = join(env.dataDir, "runtime");
-    childEnv.OPENCODE_DB = join(env.dataDir, "opencode", "opencode.db");
-    // The child must not inherit a storage override pointing outside its per-test data home.
-    childEnv.MAGIC_CONTEXT_STORAGE_DIR = join(env.dataDir, "cortexkit", "magic-context");
-    // Ensure anthropic doesn't bail for missing env vars — we use a fake key.
-    childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
-    // Caller overrides (e.g. MAGIC_CONTEXT_LOG_PATH pointing the plugin log at a
-    // per-suite file so Rust-mode scenarios can assert on transform decisions).
-    // Merged last so an explicit override wins over the inherited value.
-    for (const [key, value] of Object.entries(resolvedOpts.extraEnv ?? {})) {
-        childEnv[key] = value;
-    }
-    childEnv.TMPDIR = hostExtractCache();
-    const pluginLogPath =
-        childEnv.MAGIC_CONTEXT_LOG_PATH?.trim() ||
-        join(env.dataDir, "cortexkit", "magic-context-e2e.log");
-    childEnv.MAGIC_CONTEXT_LOG_PATH = pluginLogPath;
-    const pluginLogStartOffset = existsSync(pluginLogPath) ? statSync(pluginLogPath).size : 0;
-
-    installExitReapers();
-    if (!orphanSweepDone) {
-        orphanSweepDone = true;
-        sweepOrphanedServes();
-    }
-
-    // Hostname: 0.0.0.0 only on CI — empirically on GitHub-hosted runners,
-    // opencode binding to 127.0.0.1 sometimes results in Bun's `fetch()` timing
-    // out even though `curl` succeeds; binding all interfaces removes the
-    // loopback-specific stack-resolution edge case (IPv4-only AF_INET vs
-    // IPv4-mapped IPv6, AF_UNSPEC name resolution, etc.). Locally we keep the
-    // loopback bind so a leaked process never listens on external interfaces.
-    // Clients always connect to `127.0.0.1:${port}` either way.
-    const listenHost = process.env.CI ? "0.0.0.0" : "127.0.0.1";
-    // `detached: true` gives the child its own process group so kill()/reapers
-    // can signal the entire tree (serve + anything it forks) as one unit.
-    const child: ChildProcess = spawn(
-        "opencode",
-        ["serve", "--port", String(port), "--hostname", listenHost],
-        {
-            cwd: env.workdir,
-            env: childEnv,
-            stdio: ["ignore", "pipe", "pipe"],
-            detached: true,
-        },
-    );
-    if (child.pid) {
-        liveChildGroups.add(child.pid);
-        child.once("exit", () => {
-            if (child.pid) liveChildGroups.delete(child.pid);
-        });
-    }
-
-    let stdoutBuf = "";
-    let stderrBuf = "";
-    child.stdout?.on("data", (chunk: Buffer) => {
-        stdoutBuf += chunk.toString();
-    });
-    child.stderr?.on("data", (chunk: Buffer) => {
-        stderrBuf += chunk.toString();
-    });
-
-    let url = "";
     try {
-        if (port === 0) {
-            const portDeadline = Date.now() + 30_000;
-            while (Date.now() < portDeadline) {
-                const match = stdoutBuf.match(/opencode server listening on https?:\/\/[^:\s]+:(\d+)/);
-                if (match) {
-                    port = Number(match[1]);
-                    break;
-                }
-                if (child.exitCode !== null || child.signalCode !== null) {
-                    throw new Error(`opencode serve exited before reporting its bound port`);
-                }
-                await Bun.sleep(20);
-            }
-            if (port === 0) {
-                throw new Error(`opencode serve did not report its bound port within 30000ms`);
-            }
+        // Let OpenCode keep the listening socket it obtains from port 0. Selecting a
+        // free port in a separate process creates a release/rebind race with sibling
+        // test workers, which surfaces as an opaque ServeError under full-leg load.
+        let port = resolvedOpts.port ?? 0;
+
+        if (resolvedOpts.prepareContextDatabase !== false) prepareContextDatabase(env.dataDir);
+        writeConfigs(env, resolvedOpts.mockProviderURL, resolvedOpts);
+
+        // Explicitly strip any inherited OPENCODE_SERVER_PASSWORD from the parent shell —
+        // our tests run unsecured on a random localhost port, and inherited auth would
+        // force every SDK request to carry Basic auth headers we don't set.
+        // Also strip NODE_ENV=test: Bun's test runner sets it automatically and the
+        // plugin's logger (src/shared/logger.ts) silences all output when NODE_ENV=test.
+        // We want the subprocess to behave like a real install, so the log file gets
+        // populated normally for diagnostics.
+        const childEnv: Record<string, string> = {};
+        for (const [key, value] of Object.entries(process.env)) {
+            if (value === undefined) continue;
+            if (key === "OPENCODE_SERVER_PASSWORD") continue;
+            if (key === "OPENCODE_SERVER_USERNAME") continue;
+            if (key === "NODE_ENV") continue;
+            // Plugin unit-test preload sets this so bare openDatabase() cannot touch
+            // the developer's real DB. The OpenCode child must use the harness data
+            // dir instead; leaking the preload path makes the plugin look at a
+            // throwaway tree that is not the isolated session under test.
+            if (key === "MAGIC_CONTEXT_TEST_DATA_DIR") continue;
+            // Strip any inherited subc supervised-launch identity. When the test
+            // process is itself launched under a subc supervisor (e.g. an AFT/Alfonso
+            // worktree sets SUBC_MODULE_ID=aft), the plugin's Rust module client would
+            // present THAT supervised identity to our hermetic daemon, which rejects it
+            // ("consumer_identity for module_id 'aft' did not match a supervised launch
+            // nonce"). A real opencode install is never launched under a supervised subc
+            // identity, so clearing these matches production and lets the plugin connect
+            // as an ordinary client. Harmless for TS-mode suites, which never touch subc.
+            if (key === "SUBC_MODULE_ID") continue;
+            if (key === "SUBC_LAUNCH_NONCE") continue;
+            childEnv[key] = value;
         }
-        url = `http://127.0.0.1:${port}`;
-        await waitForReady(url, env.workdir, 300_000, {
-            expectedMagicContextState: resolvedOpts.expectedMagicContextState,
-            pluginLogPath,
-            pluginLogStartOffset,
-            mockProviderID: resolvedOpts.mockProviderID,
-            mockModelID: resolvedOpts.mockModelID,
-        });
-        const providers = await fetch(`${url}/config/providers`).then((response) => response.json());
-        assertMockProviders(providers, resolvedOpts.mockProviderURL);
-        if (process.env.MC_E2E_TRACE_PROVIDER === "1") {
-            const endpoints = (providers as { providers: Array<{ id: string; options?: { baseURL?: string } }> }).providers
-                .map((provider) => ({ id: provider.id, baseURL: provider.options?.baseURL }));
-            console.error(`[mock-effective-providers] ${JSON.stringify({ url, endpoints })}`);
+        childEnv.OPENCODE_CONFIG_DIR = env.configDir;
+        childEnv.XDG_CONFIG_HOME = env.configDir;
+        childEnv.XDG_DATA_HOME = env.dataDir;
+        childEnv.XDG_CACHE_HOME = env.cacheDir;
+        childEnv.XDG_STATE_HOME = join(env.dataDir, "state");
+        childEnv.XDG_RUNTIME_DIR = join(env.dataDir, "runtime");
+        childEnv.OPENCODE_DB = join(env.dataDir, "opencode", "opencode.db");
+        // The child must not inherit a storage override pointing outside its per-test data home.
+        childEnv.MAGIC_CONTEXT_STORAGE_DIR = join(env.dataDir, "cortexkit", "magic-context");
+        // Ensure anthropic doesn't bail for missing env vars — we use a fake key.
+        childEnv.ANTHROPIC_API_KEY = "test-key-not-real";
+        // Caller overrides (e.g. MAGIC_CONTEXT_LOG_PATH pointing the plugin log at a
+        // per-suite file so Rust-mode scenarios can assert on transform decisions).
+        // Merged last so an explicit override wins over the inherited value.
+        for (const [key, value] of Object.entries(resolvedOpts.extraEnv ?? {})) {
+            childEnv[key] = value;
         }
-    } catch (err) {
-        // Surface captured output on boot failure to help debugging.
-        child.kill("SIGTERM");
-        await resources?.stack.stop();
-        throw new Error(
-            `opencode serve failed to start.\n--- stdout ---\n${stdoutBuf}\n--- stderr ---\n${stderrBuf}\n\n${String(err)}`,
+        childEnv.TMPDIR = hostExtractCache();
+        const pluginLogPath =
+            childEnv.MAGIC_CONTEXT_LOG_PATH?.trim() ||
+            join(env.dataDir, "cortexkit", "magic-context-e2e.log");
+        childEnv.MAGIC_CONTEXT_LOG_PATH = pluginLogPath;
+        const pluginLogStartOffset = existsSync(pluginLogPath) ? statSync(pluginLogPath).size : 0;
+
+        installExitReapers();
+        if (!orphanSweepDone) {
+            orphanSweepDone = true;
+            sweepOrphanedServes();
+        }
+
+        // Hostname: 0.0.0.0 only on CI — empirically on GitHub-hosted runners,
+        // opencode binding to 127.0.0.1 sometimes results in Bun's `fetch()` timing
+        // out even though `curl` succeeds; binding all interfaces removes the
+        // loopback-specific stack-resolution edge case (IPv4-only AF_INET vs
+        // IPv4-mapped IPv6, AF_UNSPEC name resolution, etc.). Locally we keep the
+        // loopback bind so a leaked process never listens on external interfaces.
+        // Clients always connect to `127.0.0.1:${port}` either way.
+        const listenHost = process.env.CI ? "0.0.0.0" : "127.0.0.1";
+        // `detached: true` gives the child its own process group so kill()/reapers
+        // can signal the entire tree (serve + anything it forks) as one unit.
+        const child: ChildProcess = spawn(
+            "opencode",
+            ["serve", "--port", String(port), "--hostname", listenHost],
+            {
+                cwd: env.workdir,
+                env: childEnv,
+                stdio: ["ignore", "pipe", "pipe"],
+                detached: true,
+                windowsHide: true,
+            },
         );
-    }
-
-    let rustStackStopped = false;
-    const stopProvisionedRustStack = async (): Promise<void> => {
-        if (!resources || rustStackStopped) return;
-        rustStackStopped = true;
-        await resources.stack.stop();
-    };
-
-    return {
-        url,
-        port,
-        pid: child.pid!,
-        env,
-        stdout: () => stdoutBuf,
-        stderr: () => stderrBuf,
-        rustStack: resources?.stack,
-        kill: async () => {
-            try {
-                if (child.exitCode === null && child.signalCode === null && child.pid) {
-                    killGroup(child.pid, "SIGTERM");
-                    await new Promise<void>((resolveKill) => {
-                        const timer = setTimeout(() => {
-                            if (child.pid) killGroup(child.pid, "SIGKILL");
-                            resolveKill();
-                        }, 3000);
-                        child.once("exit", () => {
-                            clearTimeout(timer);
-                            resolveKill();
-                        });
-                    });
-                }
-            } finally {
+        const exited = new Promise<void>((resolveExit) => child.once("close", resolveExit));
+        if (child.pid) {
+            liveChildGroups.add(child.pid);
+            child.once("exit", () => {
                 if (child.pid) liveChildGroups.delete(child.pid);
-                await stopProvisionedRustStack();
+            });
+        }
+
+        let stdoutBuf = "";
+        let stderrBuf = "";
+        child.once("error", (error) => { stderrBuf += String(error); });
+        child.stdout?.on("data", (chunk: Buffer) => {
+            stdoutBuf += chunk.toString();
+        });
+        child.stderr?.on("data", (chunk: Buffer) => {
+            stderrBuf += chunk.toString();
+        });
+
+        let url = "";
+        try {
+            if (port === 0) {
+                const portDeadline = Date.now() + 30_000;
+                while (Date.now() < portDeadline) {
+                    const match = stdoutBuf.match(/opencode server listening on https?:\/\/[^:\s]+:(\d+)/);
+                    if (match) {
+                        port = Number(match[1]);
+                        break;
+                    }
+                    if (child.exitCode !== null || child.signalCode !== null) {
+                        throw new Error(`opencode serve exited before reporting its bound port`);
+                    }
+                    await Bun.sleep(20);
+                }
+                if (port === 0) {
+                    throw new Error(`opencode serve did not report its bound port within 30000ms`);
+                }
             }
-        },
-    };
+            url = `http://127.0.0.1:${port}`;
+            await waitForReady(url, env.workdir, 300_000, {
+                expectedMagicContextState: resolvedOpts.expectedMagicContextState,
+                pluginLogPath,
+                pluginLogStartOffset,
+                mockProviderID: resolvedOpts.mockProviderID,
+                mockModelID: resolvedOpts.mockModelID,
+            });
+            const providers = await fetch(`${url}/config/providers`).then((response) => response.json());
+            assertMockProviders(providers, resolvedOpts.mockProviderURL);
+            if (process.env.MC_E2E_TRACE_PROVIDER === "1") {
+                const endpoints = (providers as { providers: Array<{ id: string; options?: { baseURL?: string } }> }).providers
+                    .map((provider) => ({ id: provider.id, baseURL: provider.options?.baseURL }));
+                console.error(`[mock-effective-providers] ${JSON.stringify({ url, endpoints })}`);
+            }
+        } catch (err) {
+            // Surface captured output on boot failure to help debugging.
+            if (child.pid) killGroup(child.pid, "SIGKILL");
+            await exited;
+            await resources?.stack.stop();
+            throw new Error(
+                `opencode serve failed to start.\n--- stdout ---\n${stdoutBuf}\n--- stderr ---\n${stderrBuf}\n\n${String(err)}`,
+            );
+        }
+
+        let rustStackStopped = false;
+        const stopProvisionedRustStack = async (): Promise<void> => {
+            if (!resources || rustStackStopped) return;
+            rustStackStopped = true;
+            await resources.stack.stop();
+        };
+
+        return {
+            url,
+            port,
+            pid: child.pid!,
+            env,
+            stdout: () => stdoutBuf,
+            stderr: () => stderrBuf,
+            rustStack: resources?.stack,
+            kill: async () => {
+                try {
+                    if (child.exitCode === null && child.signalCode === null && child.pid) {
+                        killGroup(child.pid, "SIGTERM");
+                        await new Promise<void>((resolveKill) => {
+                            const timer = setTimeout(() => {
+                                if (child.pid) killGroup(child.pid, "SIGKILL");
+                            }, 3000);
+                            child.once("exit", () => {
+                                clearTimeout(timer);
+                                resolveKill();
+                            });
+                        });
+                    }
+                } finally {
+                    if (child.pid) liveChildGroups.delete(child.pid);
+                    try { await stopProvisionedRustStack(); } finally {
+                        if (!opts.existingEnv) cleanupE2ETempDir(dirname(env.configDir));
+                    }
+                }
+            },
+        };
+    } catch (error) {
+        if (!opts.existingEnv) cleanupE2ETempDir(dirname(env.configDir));
+        throw error;
+    }
 }

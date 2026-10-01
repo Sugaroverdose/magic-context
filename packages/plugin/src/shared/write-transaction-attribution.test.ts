@@ -1,7 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { createTestTempDirFromPath } from "./test-temp-dir";
 
 const repoRoot = resolve(import.meta.dir, "../../../../");
 const beginImmediate = /\b(?:[A-Za-z_$][\w$]*\.)?exec\("BEGIN IMMEDIATE"\)/g;
@@ -177,7 +178,9 @@ function assertCoveredBeginImmediate(
 
 describe("write transaction attribution fences", () => {
     beforeAll(async () => {
-        scenarioRoot = mkdtempSync(join(tmpdir(), "magic-context-write-attribution-"));
+        scenarioRoot = createTestTempDirFromPath(
+            join(tmpdir(), "magic-context-write-attribution-"),
+        );
         scenarioLogPath = join(scenarioRoot, "transactions.log");
         const scenario = `
             const timing = await import(${JSON.stringify(new URL("./write-transaction-timing.ts", import.meta.url).href)});

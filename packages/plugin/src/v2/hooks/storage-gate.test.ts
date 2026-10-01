@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it, test } from "bun:test";
 import type { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, type readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, type readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import {
@@ -20,6 +20,7 @@ import {
 import { __resetRpcIdentityTestHooks, __setRpcIdentityTestHooks } from "../../shared/rpc-utils";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     createV2StorageGate,
     probeV2StorageAtBoot,
@@ -62,7 +63,7 @@ function thrownBy(run: () => unknown): unknown {
 
 describe("createV2StorageGate", () => {
     it("restores the steady-state busy timeout after the nonblocking default open", async () => {
-        const dataHome = mkdtempSync(join(tmpdir(), "v2-storage-gate-timeout-"));
+        const dataHome = createTestTempDirFromPath(join(tmpdir(), "v2-storage-gate-timeout-"));
         tempDirs.push(dataHome);
         process.env.XDG_DATA_HOME = dataHome;
         process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
@@ -136,7 +137,7 @@ describe("createV2StorageGate", () => {
 
 describe("createV2StorageGate against a migration blocked by another live host", () => {
     function blockedStore(): { dbPath: string; blocker: string } {
-        const dataHome = mkdtempSync(join(tmpdir(), "v2-storage-gate-"));
+        const dataHome = createTestTempDirFromPath(join(tmpdir(), "v2-storage-gate-"));
         tempDirs.push(dataHome);
         process.env.XDG_DATA_HOME = dataHome;
         process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataHome;
