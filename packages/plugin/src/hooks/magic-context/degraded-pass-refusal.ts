@@ -16,7 +16,7 @@ export class DegradedPassRefusalError extends Error {
     readonly contextLimitTokens: number | undefined;
 
     constructor(
-        /** The pass-outcome degradation site that stopped the pass. */
+        /** The stage that failed, by the name the pass records for it (e.g. "tagging-persistence-failure"). */
         readonly site: string,
         options?: {
             cause?: unknown;

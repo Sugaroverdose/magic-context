@@ -124,8 +124,9 @@ export function recordSessionProjectIdentity(
 
 /**
  * Whether a project binding has been stored for this session. Bindings are
- * stored only from a directory the host returned for the session, so a session
- * without one has only ever been rendered with the launch-directory fallback.
+ * stored only from a directory the host returned for the session. A session
+ * without one has only ever been rendered with the directory OpenCode was
+ * launched from, which the transform falls back to when the host gives none.
  */
 export function hasRecordedSessionProjectIdentity(db: Database, sessionId: string): boolean {
     const row = db

@@ -114,10 +114,11 @@ describe("Pi context handler LKG replay", () => {
 						maxTokens: 68000,
 					},
 					// The host reports the same window as the model, so the raw
-					// messages (about 170K tokens) fit its 204K usable limit even
-					// though their byte proxy does not. Raw messages that are over
-					// the limit are refused; context-handler-degraded-pass.test.ts
-					// covers that.
+					// messages (about 170K tokens) fit its 204K usable limit, while
+					// their serialized bytes divided by four (the byte proxy the
+					// storage-busy fallback uses) do not. Raw messages whose tokens
+					// are over the limit are refused instead; that case is in
+					// context-handler-degraded-pass.test.ts.
 					getContextUsage: () => ({
 						tokens: 0,
 						percent: 0,

@@ -3197,7 +3197,8 @@ describe("createTransform", () => {
             },
         ];
 
-        //#when / #then: the wrapper replays the last good request or refuses.
+        //#when / #then: an unreadable session meta stops the pass; the messages
+        // wrapper then replays the last good request or refuses the turn.
         await expect(transform({}, { messages })).rejects.toMatchObject({
             name: "DegradedPassRefusalError",
             site: "session-meta-early-return",
