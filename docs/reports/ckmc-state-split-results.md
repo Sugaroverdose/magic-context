@@ -20,7 +20,7 @@ It used the hermetic historian producer. `PROBE_CLOCK_BASE_MS` pins the syntheti
 
 The two binaries were built from the same tree:
 - **Base** is `bd480c8`, the base of this branch.
-- **New** is this branch.
+- **New** is this branch at its first split commit (`f24fa9e`). Later commits move three more meta-only store readers (`set_todo_state`, `arm_soft_refresh`, `historian_state`) to the small row and add tests; none of them is on the transform path.
 
 Five runs: base pinned, new pinned, base pinned a second time (a determinism control), base unpinned and new unpinned. In all five, `served_sha256`, the decision and the returned `row_version` are equal on every one of the 15 passes. That includes the HARD pass (index 6), the historian run and publish (9 to 10) and the execute pass (12).
 

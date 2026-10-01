@@ -9822,7 +9822,7 @@ impl McStore {
     ) -> Result<TodoStateSetOutcome, McStoreError> {
         let mut last_conflict = None;
         for _ in 0..8 {
-            let loaded = self.load(session_id)?;
+            let loaded = self.load_meta(session_id)?;
             if loaded.meta.last_todo_state_owner_message_id.as_deref() == Some(owner_message_id)
                 && loaded.meta.last_todo_state_hash.as_deref() == Some(state_hash)
             {
@@ -9832,7 +9832,7 @@ impl McStore {
             meta.last_todo_state = Some(state_json.to_string());
             meta.last_todo_state_owner_message_id = Some(owner_message_id.to_string());
             meta.last_todo_state_hash = Some(state_hash.to_string());
-            match self.commit(session_id, loaded.row_version, &loaded.core, &meta) {
+            match self.commit_meta(session_id, loaded.row_version, &meta) {
                 Ok(row_version) => {
                     return Ok(TodoStateSetOutcome::Updated { row_version });
                 }
@@ -9849,13 +9849,13 @@ impl McStore {
     pub fn arm_soft_refresh(&self, session_id: &str) -> Result<bool, McStoreError> {
         let mut last_conflict = None;
         for _ in 0..8 {
-            let loaded = self.load(session_id)?;
+            let loaded = self.load_meta(session_id)?;
             if loaded.meta.soft_refresh_pending {
                 return Ok(true);
             }
             let mut meta = loaded.meta;
             meta.soft_refresh_pending = true;
-            match self.commit(session_id, loaded.row_version, &loaded.core, &meta) {
+            match self.commit_meta(session_id, loaded.row_version, &meta) {
                 Ok(_) => return Ok(true),
                 Err(error @ McStoreError::CasConflict { .. }) => last_conflict = Some(error),
                 Err(error) => return Err(error),

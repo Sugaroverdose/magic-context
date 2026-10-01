@@ -1059,7 +1059,7 @@ impl McStore {
 
     /// The durable historian state for one session, for tests and diagnostics.
     pub fn historian_state(&self, session_id: &str) -> Result<HistorianDurableState, McStoreError> {
-        Ok(self.load(session_id)?.meta.historian)
+        Ok(self.load_meta(session_id)?.meta.historian)
     }
 }
 
