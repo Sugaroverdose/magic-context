@@ -3157,8 +3157,8 @@ const MIGRATIONS: &[Migration] = &[
         // session for a few hundred bytes of change. `cache_codec` documents the layout; it is
         // the only reader and writer of the new tables and of `section_index`.
         //
-        // The pass-trace histories become ring rows in the same migration, so the fleet takes
-        // one fence move rather than two.
+        // The pass-trace histories become ring rows in the same migration, so deployed stores
+        // take one schema-version step (and one binary-rollback fence) rather than two.
         //
         // The text is the one `scripts/ckmc-write-probe/migcheck` ran unchanged against a
         // clone of a whole live store and verified row by row; a test pins the two copies to
@@ -10616,8 +10616,9 @@ impl McStore {
                 // Empty txn (commits nothing); the caller re-loads and re-steps.
                 return Ok(CommitOutcome::CasConflict(current.max(0) as u64));
             }
-            // Every refusal runs before the first write: the fenced transaction commits
-            // whatever ran before an `Ok` refusal is returned.
+            // Every refusal below returns before the first write. The fenced transaction
+            // commits on any `Ok`, refusals included, so a write placed above a refusal
+            // would land even when the commit is refused.
             let stored_index = tx
                 .query_row(
                     "SELECT section_index FROM mc_cache_state WHERE session_id = ?1",
