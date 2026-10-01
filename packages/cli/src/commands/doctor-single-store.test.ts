@@ -284,8 +284,22 @@ test("offline preflight upgrades v92 and seeds history revisions before invoking
     expect(called()).toBe(true);
     const upgraded = new Database(path);
     try {
-        expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: LATEST_SUPPORTED_VERSION });
-        expect(upgraded.prepare("SELECT version FROM compartment_history_versions WHERE session_id='older-history'").get()).toEqual({ version: 0 });
-        expect(upgraded.prepare("SELECT content FROM compartments WHERE session_id='older-history'").get()).toEqual({ content: "body" });
-    } finally { upgraded.close(); }
+        expect(
+            upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get(),
+        ).toEqual({ version: LATEST_SUPPORTED_VERSION });
+        expect(
+            upgraded
+                .prepare(
+                    "SELECT version FROM compartment_history_versions WHERE session_id='older-history'",
+                )
+                .get(),
+        ).toEqual({ version: 0 });
+        expect(
+            upgraded
+                .prepare("SELECT content FROM compartments WHERE session_id='older-history'")
+                .get(),
+        ).toEqual({ content: "body" });
+    } finally {
+        upgraded.close();
+    }
 });

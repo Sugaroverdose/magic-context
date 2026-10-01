@@ -2,7 +2,13 @@ import { spawnSync } from "node:child_process";
 import { existsSync, realpathSync, statfsSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { LATEST_SUPPORTED_VERSION, closeDatabase, getPersistedSchemaVersion, openDatabase, resolveDatabasePath } from '@magic-context/core/features/magic-context/storage-db';
+import {
+    closeDatabase,
+    getPersistedSchemaVersion,
+    LATEST_SUPPORTED_VERSION,
+    openDatabase,
+    resolveDatabasePath,
+} from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
 import { defaultInspectHolders } from "./doctor-repair-db";
