@@ -2512,6 +2512,21 @@
             ]
         },
         {
+            "path": "tests/historian-window-fit.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "real OpenCode 1.18.30 host with small mock historian windows: a 64k window keeps publishing compartments with chunks sized to fit, and a 32k window that cannot hold the historian system prompt fails once, backs off on later triggers, sends no historian request and opens no hidden child session; it needs the installed host binary and a throwaway TMPDIR, HOME and store paths, so it runs by hand outside the mode lanes",
+            "contract_refs": [
+                "HISTORIAN-WINDOW-FIT"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/opencode2/storage-boot-readiness.test.ts",
             "tier": "ts-only",
             "invocation": {

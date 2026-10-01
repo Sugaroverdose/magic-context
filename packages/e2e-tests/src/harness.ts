@@ -34,6 +34,8 @@ export interface TestHarnessOptions {
     omitConfigDirCompaction?: boolean;
     /** Override the mock model's context token limit. Default 200000. */
     modelContextLimit?: number;
+    /** Register a separate mock historian model with this window and pin the historian to it. */
+    historianMockModel?: { id: string; contextLimit: number };
     /** Set false only when the test intentionally verifies conflict-based self-disable behavior. */
     expectMagicContext?: boolean;
     /** Debug harnesses may boot the plugin with hooks configured off while retaining diagnostics. */
@@ -148,6 +150,7 @@ export class TestHarness implements HostHarness {
             openCodeGlobalConfigExtra: options.openCodeGlobalConfigExtra,
             omitConfigDirCompaction: options.omitConfigDirCompaction,
             modelContextLimit: options.modelContextLimit,
+            historianMockModel: options.historianMockModel,
             prepareContextDatabase: options.prepareContextDatabase ?? expectMagicContext,
             expectedMagicContextState,
         };
@@ -545,7 +548,13 @@ export class TestHarness implements HostHarness {
 
     assertHistorianRequestsUseMock(): void {
         if (this.expectMagicContext && this.hasContextDb()) {
-            assertHistorianMockRouting(this.contextDb(), "opencode", "mock-anthropic/mock-sonnet");
+            // A test that pins the historian to its own mock model routes there.
+            const historianModel = this.spawnOptions.historianMockModel;
+            assertHistorianMockRouting(
+                this.contextDb(),
+                "opencode",
+                `mock-anthropic/${historianModel?.id ?? "mock-sonnet"}`,
+            );
         }
     }
 
