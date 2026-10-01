@@ -1,11 +1,10 @@
 /// <reference types="bun-types" />
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadPersistedLkgSlot, saveLkgSlotToDb } from "../../hooks/magic-context/lkg-persist";
 import type { LkgSlot } from "../../hooks/magic-context/lkg-slot";
 import { Database } from "../../shared/sqlite";
+import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { LKG_PREFIX_CHUNK_CHARS, splitLkgPrefix } from "./lkg-prefix-chunks";
 import { MIGRATIONS, runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
@@ -27,12 +26,12 @@ const directories: string[] = [];
 
 afterEach(() => {
     for (const directory of directories.splice(0)) {
-        rmSync(directory, { recursive: true, force: true });
+        cleanupTestTempDir(directory);
     }
 });
 
 function tempDbPath(): string {
-    const directory = mkdtempSync(join(tmpdir(), "magic-context-v94-"));
+    const { dir: directory } = createTestTempDir("magic-context-v94-");
     directories.push(directory);
     return join(directory, "context.db");
 }

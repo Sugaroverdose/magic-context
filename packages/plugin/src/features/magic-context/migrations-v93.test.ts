@@ -1,9 +1,8 @@
 /// <reference types="bun-types" />
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
+import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { appendCompartments, getCompartments, replaceAllCompartments } from "./compartment-storage";
 import { MIGRATIONS, runMigrations } from "./migrations";
 import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
@@ -199,7 +198,7 @@ test("all body updates invalidate validation while owned hint updates and delete
 });
 
 test("v93 installer on a second open is read-only and leaves schema_version unchanged", () => {
-    const dir = mkdtempSync(join(tmpdir(), "mc-v93-idempotent-"));
+    const { dir } = createTestTempDir("mc-v93-idempotent-");
     const path = join(dir, "context.db");
     const writer = new Database(path);
     let opener: Database | undefined;
@@ -251,6 +250,6 @@ test("v93 installer on a second open is read-only and leaves schema_version unch
         if (writer.inTransaction) writer.exec("ROLLBACK");
         opener?.close();
         writer.close();
-        rmSync(dir, { recursive: true, force: true });
+        cleanupTestTempDir(dir);
     }
 });
