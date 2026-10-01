@@ -3202,6 +3202,8 @@ fn apply_additive_only(
             meta.m1_compartment_seq = Some(applied_m1_signal.max_compartment_seq);
             meta.m1_user_profile_version = meta.user_profile_version;
             meta.m1_external_revision = applied_m1_signal.external_revision;
+            meta.m1_history_revision = applied_m1_signal.history_revision;
+
             meta.project_memory_epoch_pending = false;
             meta.synthetic_todo = None;
             meta.m1_pending_since_ms = None;
@@ -3378,6 +3380,10 @@ fn apply_additive_only(
                 "epoch_change"
             } else if scheduler_outcome.idle_ttl_fired {
                 "ttl_expiry"
+            } else if external_revision_changed
+                && loaded.meta.m1_history_revision != m1_signal.history_revision
+            {
+                "compartment_history_revision"
             } else if external_revision_changed || project_memory_epoch_hard_due {
                 "project_memory_epoch"
             } else if cached_m1_missing(&loaded.core) {
@@ -4818,6 +4824,8 @@ fn apply_once(
         render_config_changed,
         profile_transition,
         project_memory_epoch_due: external_revision_changed || project_memory_epoch_hard_due,
+        history_revision_due: external_revision_changed
+            && loaded.meta.m1_history_revision != m1_signal.history_revision,
         first_fold_due,
         ttl_expired: scheduler_outcome.idle_ttl_fired,
         coverage_fold_due: system_absorb_hard_due,
@@ -5435,6 +5443,8 @@ fn apply_once(
                 meta.m1_compartment_seq = Some(applied_m1_signal.max_compartment_seq);
                 meta.m1_user_profile_version = loaded.meta.user_profile_version;
                 meta.m1_external_revision = applied_m1_signal.external_revision;
+                meta.m1_history_revision = applied_m1_signal.history_revision;
+
                 meta.project_memory_epoch_pending = false;
                 meta.m1_pending_since_ms = None;
             }
@@ -5653,6 +5663,8 @@ fn apply_once(
                     meta.m1_compartment_seq = Some(applied_m1_signal.max_compartment_seq);
                     meta.m1_user_profile_version = loaded.meta.user_profile_version;
                     meta.m1_external_revision = applied_m1_signal.external_revision;
+                    meta.m1_history_revision = applied_m1_signal.history_revision;
+
                     meta.project_memory_epoch_pending = false;
                     meta.m1_pending_since_ms = None;
                     commit_memory_revision = Some(comp.memory_revision);
@@ -15378,6 +15390,7 @@ struct MaterializeReasonInputs {
     /// The external revision moved (workspace, project memory epoch, or an in-place
     /// compartment rewrite by another writer), or a pending epoch was armed.
     project_memory_epoch_due: bool,
+    history_revision_due: bool,
     first_fold_due: bool,
     ttl_expired: bool,
     coverage_fold_due: bool,
@@ -15396,6 +15409,7 @@ fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<String>
         render_config_changed,
         profile_transition,
         project_memory_epoch_due,
+        history_revision_due,
         first_fold_due,
         ttl_expired,
         coverage_fold_due,
@@ -15415,6 +15429,8 @@ fn classify_materialize_reason(input: MaterializeReasonInputs) -> Option<String>
                 "profile_transition"
             } else if render_config_changed {
                 "epoch_change"
+            } else if history_revision_due {
+                "compartment_history_revision"
             } else if project_memory_epoch_due {
                 "project_memory_epoch"
             } else if coverage_fold_due || first_fold_due {
@@ -22649,7 +22665,7 @@ pub(crate) mod tests {
         assert_eq!(after_rewrite.action, "HARD");
         assert_eq!(
             after_rewrite.materialize_reason.as_deref(),
-            Some("project_memory_epoch")
+            Some("compartment_history_revision")
         );
     }
 
@@ -22663,6 +22679,7 @@ pub(crate) mod tests {
         let first = run(&s, &request, &spine());
         assert!(m0_bytes(&first).contains("SUMMARY"));
         assert_ne!(run(&s, &request, &spine()).action, "HARD");
+        let before = s.load("ses").unwrap();
         let writer = rusqlite::Connection::open(dir.path().join("context.db")).unwrap();
         let head: i64 = writer
             .query_row(
@@ -22690,6 +22707,51 @@ pub(crate) mod tests {
         assert_eq!(repaired.action, "HARD");
         assert!(m0_bytes(&repaired).contains("CHANGED"));
         assert!(!m0_bytes(&repaired).contains("SUMMARY"));
+        assert_eq!(
+            repaired.materialize_reason.as_deref(),
+            Some("compartment_history_revision")
+        );
+        let after = s.load("ses").unwrap();
+        let mut alternative_meta = before.meta;
+        // Reproduce the old generic label while keeping the same stale aggregate
+        // revision and input snapshot. Only diagnostic history tracking differs.
+        alternative_meta.m1_history_revision = after.meta.m1_history_revision;
+
+        s.commit_transform(
+            "ses",
+            TransformCommit {
+                expected: after.row_version,
+                core: &before.core,
+                meta: &alternative_meta,
+                consumed_drop_ids: &[],
+                first_applied_command_ids: &[],
+                memory_revision: None,
+                compartment_max_seq: None,
+                project_root: None,
+                first_divergence: None,
+                scheduler_observation: None,
+                scheduler_request_observed_at_ms: None,
+                scheduler_full_array_fingerprint: None,
+                scheduler_eligible_supersession_count: None,
+                scheduler_withheld_by_tag_window: None,
+                scheduler_withheld_by_exempt_message: None,
+                scheduler_applied_supersession_count: None,
+                scheduler_applied_reductions: false,
+                overlays: TransformOverlayBatch::default(),
+            },
+        )
+        .unwrap();
+        let generic = run(&s, &request, &spine());
+        assert_eq!(generic.action, "HARD");
+        assert_eq!(
+            generic.materialize_reason.as_deref(),
+            Some("project_memory_epoch")
+        );
+        assert_eq!(
+            serde_json::to_vec(repaired.messages()).unwrap(),
+            serde_json::to_vec(generic.messages()).unwrap(),
+            "reason labels must not change served bytes"
+        );
         assert_ne!(run(&s, &request, &spine()).action, "HARD");
     }
 
@@ -28886,6 +28948,7 @@ pub(crate) mod tests {
         let before = M1RevisionSignal {
             revision: 0xfeed,
             external_revision: 0xbeef,
+            history_revision: 0,
             max_compartment_seq: 47,
             max_memory_id: 9,
             max_memory_mutation_id: 3,

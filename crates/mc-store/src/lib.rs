@@ -4341,6 +4341,10 @@ fn bool_is_false(value: &bool) -> bool {
     !*value
 }
 
+fn u64_is_zero(value: &u64) -> bool {
+    *value == 0
+}
+
 fn u8_is_zero(value: &u8) -> bool {
     *value == 0
 }
@@ -4591,6 +4595,9 @@ pub struct ModuleMeta {
     /// remain eager-HARD and are kept separate from the deferred in-session lane.
     #[serde(default)]
     pub m1_external_revision: u64,
+    /// Last observed history signal, kept separately to identify its rebuild reason.
+    #[serde(default, skip_serializing_if = "u64_is_zero")]
+    pub m1_history_revision: u64,
     /// Latest project memory epoch received from TypeScript state-sync. A changed epoch
     /// arms an eager HARD on the next transform instead of silently becoming an m1 delta.
     #[serde(default)]

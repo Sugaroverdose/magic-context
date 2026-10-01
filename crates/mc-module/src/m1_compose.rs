@@ -147,6 +147,7 @@ pub struct M1RevisionSignal {
     pub revision: u64,
     /// External workspace lane; changes route to HARD, never SOFT.
     pub external_revision: u64,
+    pub history_revision: u64,
     /// Highest compartment sequence read while computing `revision`.
     pub max_compartment_seq: i64,
     pub max_memory_id: i64,
@@ -292,6 +293,16 @@ pub fn m1_revision_signal_parts_for_pass_timed(
     Ok(M1RevisionSignal {
         revision,
         external_revision: external.finish() | 1,
+        history_revision: if snapshot.compartment_history_revision.is_none()
+            && snapshot.m0_mutation_head == 0
+        {
+            0
+        } else {
+            let mut history = std::collections::hash_map::DefaultHasher::new();
+            snapshot.compartment_history_revision.hash(&mut history);
+            snapshot.m0_mutation_head.hash(&mut history);
+            history.finish() | 1
+        },
         max_compartment_seq,
         max_memory_id,
         max_memory_mutation_id,
