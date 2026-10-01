@@ -2,8 +2,9 @@ import { extractTiersFromInner } from "../../hooks/magic-context/compartment-par
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import { splitLkgSlotPrefixes, splitReplayDecisions } from "./migration-v94-write-split";
 import { repairOpenCode2HarnessLabels } from "./opencode2-relabel";
-import { installCompartmentHistoryVersions } from './storage-compartment-history-version';
+import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import { bumpEpochsForWorkspaceMemberSet } from "./workspaces";
 
@@ -3186,6 +3187,17 @@ export const MIGRATIONS: Migration[] = [
         description: "per-session compartment history revision for shared readers",
         up(db: Database): void {
             installCompartmentHistoryVersions(db);
+        },
+    },
+    {
+        version: 94,
+        description:
+            "store LKG prefixes as slices and replay decisions as rows instead of growing records",
+        up(db: Database): void {
+            // Both records grew on every pass and were rewritten whole each time;
+            // see migration-v94-write-split.ts.
+            splitLkgSlotPrefixes(db);
+            splitReplayDecisions(db);
         },
     },
 ];

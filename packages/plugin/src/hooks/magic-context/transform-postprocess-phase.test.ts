@@ -6872,9 +6872,11 @@ describe("final message representation", () => {
         initializeDatabase(db);
         const sessionId = "ses-trailing-refresh-cas-failure";
         addTrailingBlankDecisions(db, sessionId, [["assistant-target", "keep:3"]]);
+        // Each decision is its own row; ignoring the row update makes every
+        // compare-and-swap attempt lose.
         db.exec(`
             CREATE TRIGGER reject_trailing_blank_refresh
-            BEFORE UPDATE OF trailing_blank_decisions ON session_meta
+            BEFORE UPDATE ON session_replay_decisions
             WHEN NEW.session_id = '${sessionId}'
             BEGIN
                 SELECT RAISE(IGNORE);

@@ -89,7 +89,7 @@ describe("storage-meta", () => {
             // Retry marks are deleted before their compartment IDs disappear;
             // the session activity mark is removed after the table rows.
             expect(db.transaction).toHaveBeenCalledTimes(1);
-            expect(db.prepare).toHaveBeenCalledTimes(33);
+            expect(db.prepare).toHaveBeenCalledTimes(36);
         });
     });
 });

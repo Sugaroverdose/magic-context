@@ -19,7 +19,11 @@ import {
     getNativeToolInputs,
     saveNativeToolInputs,
 } from "./storage-native-replay";
-import { parseReplayDocument, serializeReplayDocument } from "./storage-replay-document";
+import {
+    parseReplayDocument,
+    readReplayDocument,
+    serializeReplayDocument,
+} from "./storage-replay-document";
 
 function createTestDb(): Database {
     const db = new Database(":memory:");
@@ -35,15 +39,35 @@ function replayDocumentRaw(db: Database, sessionId: string): string | null {
     return row?.trailing_blank_decisions ?? null;
 }
 
-function interleaveFirstReplayDocumentCas(db: Database, interleave: () => void): () => void {
+function decisionRows(
+    db: Database,
+    sessionId: string,
+): Array<{ message_id: string; decision: string }> {
+    return db
+        .prepare(
+            "SELECT message_id, decision FROM session_replay_decisions WHERE session_id = ? ORDER BY message_id",
+        )
+        .all(sessionId) as Array<{ message_id: string; decision: string }>;
+}
+
+// Statements that write a trailing-blank decision (one row each) or the replay
+// envelope column (the native lanes and other namespaces).
+const DECISION_WRITE_PREFIXES = [
+    "INSERT INTO session_replay_decisions",
+    "UPDATE session_replay_decisions",
+];
+const ENVELOPE_WRITE_PREFIX = "UPDATE session_meta SET trailing_blank_decisions = ?";
+
+function interleaveFirstReplayWrite(
+    db: Database,
+    prefixes: readonly string[],
+    interleave: () => void,
+): () => void {
     const originalPrepare = db.prepare;
     let interleaved = false;
     db.prepare = ((sql: string) => {
         const statement = originalPrepare.call(db, sql);
-        if (
-            !interleaved &&
-            sql.startsWith("UPDATE session_meta SET trailing_blank_decisions = ?")
-        ) {
+        if (!interleaved && prefixes.some((prefix) => sql.trimStart().startsWith(prefix))) {
             const mutableStatement = statement as unknown as {
                 run: (...args: unknown[]) => unknown;
             };
@@ -67,7 +91,11 @@ function exhaustReplayDocumentCas(db: Database): () => void {
     const originalPrepare = db.prepare;
     db.prepare = ((sql: string) => {
         const statement = originalPrepare.call(db, sql);
-        if (sql.startsWith("UPDATE session_meta SET trailing_blank_decisions = ?")) {
+        if (
+            [ENVELOPE_WRITE_PREFIX, ...DECISION_WRITE_PREFIXES].some((prefix) =>
+                sql.trimStart().startsWith(prefix),
+            )
+        ) {
             const mutableStatement = statement as unknown as {
                 run: (...args: unknown[]) => unknown;
             };
@@ -201,7 +229,11 @@ describe("native replay storage", () => {
         const secondInput = '{"path":"src/new.ts"}';
 
         expect(addTrailingBlankDecisions(db, "session", [["assistant-keep", "keep"]])).toBe(true);
-        expect(replayDocumentRaw(db, "session")).toBe('{"assistant-keep":"keep"}');
+        // A decision is a row of its own; the envelope column is not rewritten.
+        expect(decisionRows(db, "session")).toEqual([
+            { message_id: "assistant-keep", decision: "keep" },
+        ]);
+        expect(replayDocumentRaw(db, "session")).toBe("");
 
         saveNativeToolInputs(db, "session", new Map([["call-1", initialInput]]));
         addNativeReasoningIds(db, "session", ["assistant-1", "assistant-2"]);
@@ -281,7 +313,7 @@ describe("native replay storage", () => {
 
     it("retries a stale blank update after a native update without losing either namespace", () => {
         expect(addTrailingBlankDecisions(db, "session", [["existing", "keep"]])).toBe(true);
-        const restore = interleaveFirstReplayDocumentCas(db, () => {
+        const restore = interleaveFirstReplayWrite(db, DECISION_WRITE_PREFIXES, () => {
             saveNativeToolInputs(db, "session", new Map([["call-1", '{"path":"src/native.ts"}']]));
         });
         try {
@@ -303,7 +335,7 @@ describe("native replay storage", () => {
 
     it("retries a stale native update after a blank update without losing either namespace", () => {
         saveNativeToolInputs(db, "session", new Map([["call-existing", '{"path":"src/old.ts"}']]));
-        const restore = interleaveFirstReplayDocumentCas(db, () => {
+        const restore = interleaveFirstReplayWrite(db, [ENVELOPE_WRITE_PREFIX], () => {
             expect(addTrailingBlankDecisions(db, "session", [["blank", "keep"]])).toBe(true);
         });
         try {
@@ -322,6 +354,7 @@ describe("native replay storage", () => {
     it("surfaces CAS exhaustion without claiming either writer family persisted", () => {
         expect(addTrailingBlankDecisions(db, "session", [["assistant-keep", "keep"]])).toBe(true);
         const before = replayDocumentRaw(db, "session");
+        const rowsBefore = decisionRows(db, "session");
         const restore = exhaustReplayDocumentCas(db);
         try {
             expect(addTrailingBlankDecisions(db, "session", [["assistant-new", "strip"]])).toBe(
@@ -339,6 +372,7 @@ describe("native replay storage", () => {
         }
 
         expect(replayDocumentRaw(db, "session")).toBe(before);
+        expect(decisionRows(db, "session")).toEqual(rowsBefore);
     });
 
     it("fails closed on unknown envelopes and malformed native state without erasing stored data", () => {
@@ -377,7 +411,9 @@ describe("native replay storage", () => {
         expect(replayDocumentRaw(db, "malformed")).toBe(malformed);
 
         expect(addTrailingBlankDecisions(db, "malformed", [["later", "strip"]])).toBe(true);
-        const afterBlankWrite = parseReplayDocument(replayDocumentRaw(db, "malformed"));
+        // The new decision is a row; the stored envelope stays byte-identical.
+        expect(replayDocumentRaw(db, "malformed")).toBe(malformed);
+        const afterBlankWrite = readReplayDocument(db, "malformed");
         expect(afterBlankWrite.trailingBlank).toEqual({
             assistant: "keep",
             later: "strip",

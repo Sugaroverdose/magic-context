@@ -5,7 +5,7 @@ import {
 } from "../../shared/model-cache-ttl";
 import type { ContextDatabase } from "./storage-db";
 import { getOrCreateSessionMeta, updateSessionMeta } from "./storage-meta";
-import { readReplayDocument, updateReplayDocument } from "./storage-replay-document";
+import { readReplayEnvelope, updateReplayDocument } from "./storage-replay-document";
 
 interface SessionCacheTtl extends ResolvedCacheTtl {
     config: CacheTtlConfig;
@@ -15,7 +15,7 @@ export function readSessionCacheTtl(
     db: ContextDatabase,
     sessionId: string,
 ): SessionCacheTtl | undefined {
-    const saved = readReplayDocument(db, sessionId).cacheTtlPolicy as SessionCacheTtl | undefined;
+    const saved = readReplayEnvelope(db, sessionId).cacheTtlPolicy as SessionCacheTtl | undefined;
     return saved && typeof saved.value === "string" && saved.config !== undefined
         ? saved
         : undefined;

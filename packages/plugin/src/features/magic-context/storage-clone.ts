@@ -7,7 +7,7 @@ import { getNativeReplayState } from "./storage-native-replay";
 import {
     type ReplayDocument,
     readReplayDocument,
-    serializeReplayDocument,
+    writeReplayDocument,
 } from "./storage-replay-document";
 
 export interface CloneCompartmentRow {
@@ -630,9 +630,7 @@ export function copySessionStateForClone(
                 copiedToolCallIds,
                 filter,
             );
-            db.prepare(
-                "UPDATE session_meta SET trailing_blank_decisions = ? WHERE session_id = ?",
-            ).run(serializeReplayDocument(replayDocument), destinationSessionId);
+            writeReplayDocument(db, destinationSessionId, replayDocument);
         }
 
         const pendingOpsRow = db

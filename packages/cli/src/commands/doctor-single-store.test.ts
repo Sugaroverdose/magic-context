@@ -8,6 +8,7 @@ import { runMigrations } from "@magic-context/core/features/magic-context/migrat
 import {
     closeDatabase,
     initializeDatabase,
+    LATEST_SUPPORTED_VERSION,
 } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { runDoctorSingleStore } from "./doctor-single-store";
@@ -233,7 +234,9 @@ test("versions outside the offline pair refuse before engine invocation", () => 
     store.exec("INSERT INTO cortexkit_schema_version VALUES ('mc_cache', 62)");
     store.close();
     expect(run()).toBe(2);
-    expect(output()).toContain("single_store_version_mismatch: context.db v93; store.db v62");
+    expect(output()).toContain(
+        `single_store_version_mismatch: context.db v${LATEST_SUPPORTED_VERSION}; store.db v62`,
+    );
     expect(called()).toBe(false);
 });
 
@@ -272,7 +275,7 @@ test("offline preflight upgrades v92 and seeds history revisions before invoking
         DROP TRIGGER compartment_history_au;
         DROP TRIGGER compartment_history_ad;
         DROP TABLE compartment_history_versions;
-        DELETE FROM schema_migrations WHERE version=93;
+        DELETE FROM schema_migrations WHERE version>=93;
         INSERT INTO compartments(session_id,sequence,start_message,end_message,title,content,created_at)
         VALUES ('older-history',0,1,4,'title','body',1);
     `);
@@ -281,7 +284,7 @@ test("offline preflight upgrades v92 and seeds history revisions before invoking
     expect(called()).toBe(true);
     const upgraded = new Database(path);
     try {
-        expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: 93 });
+        expect(upgraded.prepare("SELECT MAX(version) AS version FROM schema_migrations").get()).toEqual({ version: LATEST_SUPPORTED_VERSION });
         expect(upgraded.prepare("SELECT version FROM compartment_history_versions WHERE session_id='older-history'").get()).toEqual({ version: 0 });
         expect(upgraded.prepare("SELECT content FROM compartments WHERE session_id='older-history'").get()).toEqual({ content: "body" });
     } finally { upgraded.close(); }

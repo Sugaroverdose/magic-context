@@ -670,13 +670,42 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             return;
         case 93:
             if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
-            expect(db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'compartment_history_%' ORDER BY name").all()).toEqual([
+            expect(
+                db
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'compartment_history_%' ORDER BY name",
+                    )
+                    .all(),
+            ).toEqual([
                 { name: "compartment_history_ad" },
                 { name: "compartment_history_ai" },
                 { name: "compartment_history_au" },
             ]);
             populateModuleOwnedRows(db, version, state);
-            expect(db.prepare("SELECT count(*) AS n FROM compartments c LEFT JOIN compartment_history_versions v ON v.session_id=c.session_id WHERE v.session_id IS NULL").get()).toEqual({ n: 0 });
+            expect(
+                db
+                    .prepare(
+                        "SELECT count(*) AS n FROM compartments c LEFT JOIN compartment_history_versions v ON v.session_id=c.session_id WHERE v.session_id IS NULL",
+                    )
+                    .get(),
+            ).toEqual({ n: 0 });
+            return;
+        case 94:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            // The LKG prefix and the trailing-blank decisions live in their own tables.
+            expect(
+                (db.prepare("PRAGMA table_info(lkg_slots)").all() as Array<{ name: string }>).map(
+                    (column) => column.name,
+                ),
+            ).not.toContain("json_prefix");
+            expect(
+                db
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type='table' AND name IN ('lkg_slot_chunks', 'session_replay_decisions') ORDER BY name",
+                    )
+                    .all(),
+            ).toEqual([{ name: "lkg_slot_chunks" }, { name: "session_replay_decisions" }]);
+            populateModuleOwnedRows(db, version, state);
             return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);

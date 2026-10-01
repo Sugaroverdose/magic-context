@@ -27,6 +27,7 @@ import {
     resolveCtxReduceAvailabilityFromMessages,
 } from "../hooks/magic-context/ctx-reduce-availability";
 import { clearInjectionCache, injectM0M1 } from "../hooks/magic-context/inject-compartments";
+import { saveLkgSlotToDb } from "../hooks/magic-context/lkg-persist";
 import { withRawMessageProvider } from "../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../hooks/magic-context/read-session-raw";
 import { createSystemPromptHashHandler } from "../hooks/magic-context/system-prompt-hash";
@@ -222,6 +223,21 @@ function ensureSession(sessionId: string, harness = "opencode"): void {
         sessionId,
         harness,
     );
+}
+
+/** A persisted replay slot whose prefix embeds the session's current ranges. */
+function seedLkgSlot(sessionId: string): void {
+    expect(
+        saveLkgSlotToDb(db, sessionId, {
+            jsonPrefix: "[]",
+            inputIdSeq: [],
+            inputContentDigests: [],
+            lastInputMessageId: "msg_a_006_a3",
+            modelKey: null,
+            providerKey: null,
+            capturedAt: 1,
+        }),
+    ).toBe(true);
 }
 
 function runRebase(sessionId: string, generation: CoordinateGeneration, messages: RawMessage[]) {
@@ -543,11 +559,7 @@ test("chunk windows, depth records and the replay slot are rebuilt rather than r
     db.prepare(
         "INSERT INTO compression_depth (session_id, message_ordinal, depth, harness) VALUES (?, 4, 2, 'opencode')",
     ).run("ses_a");
-    db.prepare(
-        `INSERT INTO lkg_slots
-            (session_id, json_prefix, input_id_seq, input_content_digests, last_input_message_id, captured_at)
-         VALUES (?, '[]', '[]', '[]', 'msg_a_006_a3', 1)`,
-    ).run("ses_a");
+    seedLkgSlot("ses_a");
     ensureMessagesIndexed(db, "ses_a", () => v1Projection("ses_a"));
 
     const outcome = runRebase("ses_a", "v2", v2Projection(syntheticSplit));
@@ -569,6 +581,11 @@ test("chunk windows, depth records and the replay slot are rebuilt rather than r
     ).toEqual({ count: 0 });
     expect(
         db.prepare("SELECT COUNT(*) AS count FROM lkg_slots WHERE session_id = ?").get("ses_a"),
+    ).toEqual({ count: 0 });
+    expect(
+        db
+            .prepare("SELECT COUNT(*) AS count FROM lkg_slot_chunks WHERE session_id = ?")
+            .get("ses_a"),
     ).toEqual({ count: 0 });
     // The next pass must rebuild the prefix from the corrected rows rather than
     // replay bytes that embed the old ranges.
@@ -1085,11 +1102,7 @@ test("a session whose coordinates already match the projection pays only the sta
     db.prepare(
         "INSERT INTO compression_depth (session_id, message_ordinal, depth, harness) VALUES (?, 4, 2, 'opencode')",
     ).run("ses_a");
-    db.prepare(
-        `INSERT INTO lkg_slots
-            (session_id, json_prefix, input_id_seq, input_content_digests, last_input_message_id, captured_at)
-         VALUES (?, '[]', '[]', '[]', 'msg_a_006_a3', 1)`,
-    ).run("ses_a");
+    seedLkgSlot("ses_a");
     // coordinate_generation stays NULL: this is an existing session meeting the
     // rebase for the first time after the upgrade, on the same host it has
     // always run on.
