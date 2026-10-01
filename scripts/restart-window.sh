@@ -49,8 +49,12 @@ say() { echo "[$(date -u +%T)] $*"; }
 notify() { echo; echo "==> $1"; }
 status() { [ "$DRY_RUN" -eq 1 ] || echo "$1 $(date -u +%FT%TZ) $BK" > "$STATUS"; }
 holders() { lsof "$DATA/context.db" "$DATA/context.db-wal" "$DATA/store.db" "$DATA/store.db-wal" 2>/dev/null | awk 'NR>1{print $1"/"$2}' | sort -u; }
-context_version() { sqlite3 "file:$DATA/context.db?mode=ro" 'SELECT MAX(version) FROM schema_migrations'; }
-store_versions() { sqlite3 "file:$DATA/store.db?mode=ro" 'SELECT namespace||":"||MAX(version) FROM cortexkit_schema_version GROUP BY namespace' | tr '\n' ' '; }
+# A read-only open of a cleanly closed WAL database (no -wal file) fails with
+# SQLITE_CANTOPEN, so such a file is opened immutable instead. Every reader here
+# runs with the hosts and ck-mc stopped, so nothing changes it underneath.
+ro_uri() { if [ -e "$1-wal" ]; then echo "file:$1?mode=ro"; else echo "file:$1?immutable=1"; fi; }
+context_version() { sqlite3 "$(ro_uri "$DATA/context.db")" 'SELECT MAX(version) FROM schema_migrations'; }
+store_versions() { sqlite3 "$(ro_uri "$DATA/store.db")" 'SELECT namespace||":"||MAX(version) FROM cortexkit_schema_version GROUP BY namespace' | tr '\n' ' '; }
 sentinels_back() {
     for s in "${SENTINELS[@]}"; do
         launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/$s.plist" 2>/dev/null || true
@@ -97,6 +101,8 @@ if [ -n "$others" ]; then
     for h in $others; do ps -o pid=,command= -p "${h#*/}" 2>/dev/null | cut -c1-120; done
     exit 2
 fi
+[ -n "$(context_version)" ] || { echo "cannot read the context.db schema version" >&2; exit 2; }
+[ -n "$(store_versions)" ] || { echo "cannot read the store.db schema versions" >&2; exit 2; }
 say "preflight ok: context.db $(context_version) -> $CONTEXT_FENCE, store.db $(store_versions)-> $STORE_FENCE, ck-mc $SHA"
 if [ "$DRY_RUN" -eq 1 ]; then
     notify "Dry run: preflight passed. Nothing changed."
