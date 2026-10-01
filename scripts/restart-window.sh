@@ -91,8 +91,12 @@ done
     || { echo "$DISTS is not checked out at $SHA" >&2; exit 2; }
 [ -z "$(git -C "$DISTS" status --porcelain --untracked-files=no)" ] || { echo "$DISTS has uncommitted changes" >&2; exit 2; }
 [ -x "$STAGED" ] || { echo "staged ck-mc missing: $STAGED" >&2; exit 2; }
-codesign -d --verbose=2 "$STAGED" 2>&1 | grep -q "flags=.*runtime" || { echo "staged ck-mc is not signed with hardened runtime" >&2; exit 2; }
-"$STAGED" --version 2>/dev/null | grep -q "$SHA" || { echo "staged ck-mc --version does not report $SHA" >&2; exit 2; }
+# Capture first, then match: under pipefail, `cmd | grep -q` fails whenever grep
+# exits on its match before cmd finishes writing (cmd gets SIGPIPE).
+sig=$(codesign -d --verbose=2 "$STAGED" 2>&1)
+[[ "$sig" == *"flags="*"runtime"* ]] || { echo "staged ck-mc is not signed with hardened runtime" >&2; exit 2; }
+ver=$("$STAGED" --version 2>/dev/null)
+[[ "$ver" == *"$SHA"* ]] || { echo "staged ck-mc --version does not report $SHA" >&2; exit 2; }
 command -v bun >/dev/null || { echo "bun not on PATH" >&2; exit 2; }
 
 others=$(holders | grep -v '^ck-mc/' || true)
@@ -157,7 +161,7 @@ PLACE_CK_MC_POLL_SECONDS=5 bash "$REPO/scripts/place-ck-mc.sh" --source-ref "$SH
 rc=$?
 [ "$rc" -eq 0 ] || post_fail "ck-mc placement exited $rc"
 got=$(store_versions)
-echo "$got" | grep -qE ":${STORE_FENCE}([^0-9]|$)" || post_fail "store.db is at $got after placement, expected $STORE_FENCE"
+[[ "$got" =~ :${STORE_FENCE}([^0-9]|$) ]] || post_fail "store.db is at $got after placement, expected $STORE_FENCE"
 say "schema after: context=$(context_version) store=$got"
 
 sentinels_back
