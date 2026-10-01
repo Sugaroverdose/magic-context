@@ -132,6 +132,19 @@ fn matches_canonical_id(raw: &str, index: Option<i64>, module_id: &str) -> bool 
     }
 }
 
+#[derive(Default)]
+pub(crate) struct BoundaryValidationCache {
+    entries: std::collections::VecDeque<BoundaryValidationEntry>,
+}
+
+struct BoundaryValidationEntry {
+    session: String,
+    source_json: String,
+    domain: std::sync::Arc<dyn crate::ContextDomain>,
+    revision: (String, i64, i64, bool),
+    valid: Vec<ResolvedContextBoundary>,
+}
+
 impl McStore {
     /// Whether every shared row has exact block indices or matching cached host
     /// coordinates, so reconnecting need not scan the raw messages again.
@@ -166,6 +179,25 @@ impl McStore {
         Ok(true)
     }
 
+    pub(crate) fn compartment_history_revision_tx(
+        conn: &rusqlite::Connection,
+        session: &str,
+    ) -> rusqlite::Result<Option<(String, i64, i64, bool)>> {
+        let has_revision_table: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='compartment_history_versions')",
+            [], |row| row.get(0),
+        )?;
+        if !has_revision_table {
+            return Ok(None);
+        }
+        conn.query_row(
+            "SELECT generation, version, rewrite_version, seeded FROM compartment_history_versions WHERE session_id=?1",
+            params![session],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()
+    }
+
     pub(crate) fn cached_context_boundaries(
         &self,
         session: &str,
@@ -173,23 +205,73 @@ impl McStore {
         let json: Option<String> = self.inner.with_conn(|conn| {
             conn.query_row("SELECT COALESCE(json_extract(meta, '$.resolved_compartment_boundaries'), '[]') FROM mc_cache_state WHERE session_id=?1", params![session], |row| row.get(0)).optional()
         })?;
-        let cached: Vec<ResolvedContextBoundary> = json
-            .map(|value| {
-                serde_json::from_str(&value).map_err(|error| McStoreError::Serde(error.to_string()))
-            })
-            .transpose()?
-            .unwrap_or_default();
-        if cached.is_empty() {
-            return Ok(cached);
+        let json = json.unwrap_or_else(|| "[]".into());
+        if json == "[]" {
+            return Ok(Vec::new());
         }
-        let rows = self.load_raw_context_compartments(session)?;
+        let mut cache = self
+            .context_boundary_cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let domain = self.context_domain()?;
+        // Cache the validation of host coordinates against canonical compartment rows.
+        // Triggers increment only this session's counter for any row change, atomically
+        // with the data. Its random generation distinguishes recreated counters after
+        // cleanup. Other tables/sessions must not force us to reread summary bodies.
+        // Snapshot the counter and bodies together. Persisted store.db coordinate JSON
+        // is a separate key because the host can replace it without changing context.db.
+        let (revision, rows, hit) = self.context_read(|conn| {
+            // Older schemas lack the mutation counter: validate against actual bodies
+            // every time rather than reusing a possibly outdated coordinate validation.
+            let revision = Self::compartment_history_revision_tx(conn, session)?;
+            let hit = revision.as_ref().and_then(|revision| {
+                cache.entries.iter().position(|entry| {
+                    entry.session == session
+                        && entry.source_json == json
+                        && std::sync::Arc::ptr_eq(&entry.domain, &domain)
+                        && &entry.revision == revision
+                })
+            });
+            if hit.is_some() {
+                return Ok((revision, Vec::new(), hit));
+            }
+            let rows = self.load_raw_context_compartments_tx(conn, session)?;
+            Ok((revision, rows, None))
+        })?;
+        tracing::debug!(target: "magic-context.perf", session, cache_hit = hit.is_some(), "mc-boundary-validation-cache");
+        if let Some(index) = hit {
+            let entry = cache.entries.remove(index).expect("cache hit index");
+            let valid = entry.valid.clone();
+            cache.entries.push_back(entry);
+            return Ok(valid);
+        }
+        let cached: Vec<ResolvedContextBoundary> =
+            serde_json::from_str(&json).map_err(|error| McStoreError::Serde(error.to_string()))?;
+        let mut by_sequence = std::collections::HashMap::new();
+        for row in &rows {
+            by_sequence.entry(row.sequence).or_insert(row);
+        }
         let mut valid = Vec::new();
         for boundary in cached {
-            if let Some(row) = rows.iter().find(|row| row.sequence == boundary.sequence) {
+            if let Some(row) = by_sequence.get(&boundary.sequence) {
                 if boundary.identifies(row)? {
                     valid.push(boundary);
                 }
             }
+        }
+        if let Some(revision) = revision {
+            cache.entries.retain(|entry| entry.session != session);
+            // Keep only validated coordinates, not summary bodies; bound interleaved sessions.
+            if cache.entries.len() >= 8 {
+                cache.entries.pop_front();
+            }
+            cache.entries.push_back(BoundaryValidationEntry {
+                session: session.into(),
+                source_json: json,
+                domain,
+                revision,
+                valid: valid.clone(),
+            });
         }
         Ok(valid)
     }
@@ -301,6 +383,207 @@ mod tests {
     fn seed(store: &McStore) {
         store.with_context_conn_for_test(|conn| conn.execute_batch("INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES ('raw', 0, 2, 5, 'm1', 'm4', 'summary', 'body', 1)")).unwrap();
     }
+    #[test]
+    fn stable_boundary_validation_reads_bodies_once_and_reloads_external_publications() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        let expected = store.cached_context_boundaries("raw").unwrap();
+        let before = store
+            .compartment_payload_query_count
+            .load(Ordering::Relaxed);
+        for _ in 0..12 {
+            assert_eq!(store.cached_context_boundaries("raw").unwrap(), expected);
+            assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 4);
+        }
+        assert_eq!(
+            store
+                .compartment_payload_query_count
+                .load(Ordering::Relaxed),
+            before,
+            "stable passes must not reload summary bodies"
+        );
+        let writer = Connection::open(dir.path().join("context.db")).unwrap();
+        // A direct same-count, same-sequence repair bypasses semantic revision logs.
+        writer
+            .execute(
+                "UPDATE compartments SET content='updated body' WHERE session_id='raw'",
+                [],
+            )
+            .unwrap();
+        assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 5);
+        assert_eq!(
+            store.load_compartments("raw").unwrap()[0].content,
+            "updated body"
+        );
+        writer.execute_batch("INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, created_at) VALUES ('raw', 1, 6, 9, 'm5', 'm8', 'later', 'published elsewhere', 2)").unwrap();
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 9);
+    }
+
+    #[test]
+    fn unrelated_context_commits_from_host_and_module_writer_keep_validation_cached() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        let expected = store.cached_context_boundaries("raw").unwrap();
+        let before = store
+            .compartment_payload_query_count
+            .load(Ordering::Relaxed);
+        let host = Connection::open(dir.path().join("context.db")).unwrap();
+        host.execute_batch("INSERT INTO session_meta(session_id,counter) VALUES ('raw',0)")
+            .unwrap();
+        for pass in 0..12 {
+            host.execute(
+                "UPDATE session_meta SET counter=?1 WHERE session_id='raw'",
+                [pass],
+            )
+            .unwrap();
+            store
+                .with_context_conn_for_test(|conn| {
+                    conn.execute(
+                        "UPDATE session_meta SET last_response_time=?1 WHERE session_id='raw'",
+                        [pass],
+                    )?;
+                    Ok(())
+                })
+                .unwrap();
+            host.execute_batch("INSERT INTO compartments(session_id,sequence,start_message,end_message,title,content,created_at) VALUES ('other',0,1,4,'other','body',1) ON CONFLICT(session_id,sequence) DO UPDATE SET content='BODY'").unwrap();
+            assert_eq!(store.cached_context_boundaries("raw").unwrap(), expected);
+            assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 4);
+        }
+        assert_eq!(
+            store
+                .compartment_payload_query_count
+                .load(Ordering::Relaxed),
+            before,
+            "unrelated commits must not reload this session's bodies"
+        );
+    }
+
+    #[test]
+    fn recreated_revision_generation_and_v92_fallback_do_not_reuse_old_validation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        assert_eq!(store.cached_context_boundaries("raw").unwrap().len(), 1);
+        let host = Connection::open(dir.path().join("context.db")).unwrap();
+        let old: (String, i64) = host.query_row("SELECT generation,version FROM compartment_history_versions WHERE session_id='raw'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        // Session cleanup removes counters. Reusing a session id must not reuse its cache.
+        host.execute_batch("DELETE FROM compartments WHERE session_id='raw'; DELETE FROM compartment_history_versions WHERE session_id='raw'; INSERT INTO compartments(session_id,sequence,start_message,end_message,start_message_id,end_message_id,title,content,created_at) VALUES ('raw',0,1,5,'m0','m4','raw title','updated body',1)").unwrap();
+        let new: (String, i64) = host.query_row("SELECT generation,version FROM compartment_history_versions WHERE session_id='raw'", [], |row| Ok((row.get(0)?,row.get(1)?))).unwrap();
+        assert_eq!(new.1, old.1);
+        assert_ne!(new.0, old.0);
+        assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
+        host.execute_batch("DROP TRIGGER compartment_history_ai; DROP TRIGGER compartment_history_au; DROP TRIGGER compartment_history_ad; DROP TABLE compartment_history_versions").unwrap();
+        let before = store
+            .compartment_payload_query_count
+            .load(Ordering::Relaxed);
+        for _ in 0..3 {
+            assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
+        }
+        assert_eq!(
+            store
+                .compartment_payload_query_count
+                .load(Ordering::Relaxed),
+            before + 3,
+            "v92 without triggers must use exact uncached validation"
+        );
+    }
+
+    #[test]
+    fn boundary_validation_reloads_when_only_cached_coordinates_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        seed(&store);
+        store
+            .apply_authority_state_sync(request(&[boundary()], 0))
+            .unwrap();
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 4);
+        store.inner.with_conn(|conn| conn.execute_batch(
+            "UPDATE mc_cache_state SET meta=json_set(meta, '$.resolved_compartment_boundaries[0].end_message', 3) WHERE session_id='raw'"
+        )).unwrap();
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 3);
+        // Preserve the earlier coordinate if legacy metadata repeats a sequence.
+        store.inner.with_conn(|conn| conn.execute_batch(
+            "UPDATE mc_cache_state SET meta=json_insert(meta, '$.resolved_compartment_boundaries[#]', json_set(json_extract(meta, '$.resolved_compartment_boundaries[0]'), '$.end_message', 7)) WHERE session_id='raw'"
+        )).unwrap();
+        assert_eq!(store.max_compartment_end_ordinal("raw").unwrap(), 3);
+    }
+
+    #[test]
+    #[ignore = "set MC_PLANNING_CLONE to an APFS clone root under the system temporary directory"]
+    fn cloned_boundary_validation_profile() {
+        let root =
+            std::path::PathBuf::from(std::env::var_os("MC_PLANNING_CLONE").expect("clone root"));
+        let root = root.canonicalize().unwrap();
+        assert!(root.starts_with(
+            std::env::temp_dir()
+                .canonicalize()
+                .unwrap()
+                .join("magic-context/perf-planning")
+        ));
+        let store = McStore::open(&descriptor(&root.join("data/cortexkit/magic-context"))).unwrap();
+        store.install_context_domain(Arc::new(
+            SqliteContextDomain::open(&root.join("data/cortexkit/magic-context/context.db"))
+                .unwrap(),
+        ));
+        let output = std::process::Command::new("lsof")
+            .args(["-p", &std::process::id().to_string()])
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+        for line in String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .filter(|line| line.contains(".db"))
+        {
+            assert!(
+                line.contains(root.to_str().unwrap()),
+                "non-clone database opened: {line}"
+            );
+            println!("boundary-profile-lsof {line}");
+        }
+        println!(
+            "profile pid={} clone={}",
+            std::process::id(),
+            root.display()
+        );
+        for session in [
+            "ses_227ce5788ffeRPA9THoPLOQreO",
+            "ses_313660571ffeZTsf4koSJwk50Q",
+        ] {
+            let mut samples = Vec::new();
+            for pass in 0..13 {
+                let started = std::time::Instant::now();
+                let first = store.cached_context_boundaries(session).unwrap();
+                let end = store.max_compartment_end_ordinal(session).unwrap();
+                let second = store.cached_context_boundaries(session).unwrap();
+                assert_eq!(first, second);
+                samples.push(started.elapsed().as_secs_f64() * 1000.0);
+                println!(
+                    "boundary-profile session={session} pass={pass} ms={:.3} rows={} end={end}",
+                    samples[pass],
+                    first.len()
+                );
+            }
+            samples.remove(0);
+            samples.sort_by(f64::total_cmp);
+            println!(
+                "boundary-profile session={session} warm_median_ms={:.3}",
+                (samples[5] + samples[6]) / 2.0
+            );
+        }
+    }
+
     #[test]
     fn echoed_materialized_boundary_is_retained_when_a_newer_compartment_exists() {
         let dir = tempfile::tempdir().unwrap();

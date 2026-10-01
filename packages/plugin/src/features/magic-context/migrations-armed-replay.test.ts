@@ -668,6 +668,16 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             ]);
             populateModuleOwnedRows(db, version, state);
             return;
+        case 93:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            expect(db.prepare("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'compartment_history_%' ORDER BY name").all()).toEqual([
+                { name: "compartment_history_ad" },
+                { name: "compartment_history_ai" },
+                { name: "compartment_history_au" },
+            ]);
+            populateModuleOwnedRows(db, version, state);
+            expect(db.prepare("SELECT count(*) AS n FROM compartments c LEFT JOIN compartment_history_versions v ON v.session_id=c.session_id WHERE v.session_id IS NULL").get()).toEqual({ n: 0 });
+            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }

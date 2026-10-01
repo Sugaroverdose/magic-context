@@ -21,6 +21,8 @@ export const SESSION_SCOPED_TABLES: readonly SessionScopedTableDefinition[] = [
     { table: "session_projects", harnessScoped: true },
     { table: "compartment_chunk_embeddings", harnessScoped: true },
     { table: "compartments", harnessScoped: true },
+    // Deleting compartments advances their revision, so remove the counter afterward.
+    { table: "compartment_history_versions" },
     { table: "compression_depth", harnessScoped: true },
     { table: "session_facts", harnessScoped: true },
     { table: "compartment_state_lease" },

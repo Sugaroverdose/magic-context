@@ -282,6 +282,12 @@ pub fn m1_revision_signal_parts_for_pass_timed(
     // rebuild m0, which is what a changed external revision asks for.
     snapshot.project_memory_epoch.hash(&mut external);
     snapshot.m0_mutation_head.hash(&mut external);
+    // External SQL repairs can bypass m0_mutation_log. Their update counter makes
+    // changed summary text rebuild the frozen m0 prompt prefix even if coordinates
+    // and text lengths are unchanged. Migration-seeded histories also validate once.
+    if let Some(revision) = &snapshot.compartment_history_revision {
+        revision.hash(&mut external);
+    }
 
     Ok(M1RevisionSignal {
         revision,
