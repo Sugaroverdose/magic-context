@@ -274,7 +274,7 @@ export function findLastAssistantModelKeyFromBranch(
 	if (!Array.isArray(entries)) return undefined;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const e = entries[i] as { type?: unknown; message?: unknown } | null;
-		if (!e || typeof e !== "object" || e.type !== "message") continue;
+		if (typeof e !== "object" || e?.type !== "message") continue;
 		const m = e.message as
 			| { role?: unknown; provider?: unknown; model?: unknown }
 			| undefined;

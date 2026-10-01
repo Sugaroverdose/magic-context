@@ -25,6 +25,7 @@ import type { ModelHarness } from "@magic-context/core/shared/model-resolution";
 import type { CompletedSubagentToolCall } from "@magic-context/core/shared/subagent-runner";
 import { HiddenAgentStepLimit } from "@magic-context/core/v2/hooks/hidden-child";
 import { ensureProjectRegisteredFromPiDirectory } from "../embedding-bootstrap";
+import { isPiModelRegistered } from "../model-chain-health";
 import { PiSubagentRunner } from "../subagent-runner";
 import { createPiPrimerRawProviderFactory } from "./primer-raw-provider-pi";
 import { PiRetrospectiveRawProvider } from "./retrospective-raw-provider-pi";
@@ -150,15 +151,7 @@ export function validatePiDreamerModels(
 			if (harness === "omp" && model.startsWith("@")) return true;
 			let available = resolved.get(model);
 			if (available === undefined) {
-				const separator = model.indexOf("/");
-				available =
-					separator > 0 &&
-					Boolean(
-						registry.find(
-							model.slice(0, separator),
-							model.slice(separator + 1),
-						),
-					);
+				available = isPiModelRegistered(model, registry, harness);
 				resolved.set(model, available);
 			}
 			if (available) return true;

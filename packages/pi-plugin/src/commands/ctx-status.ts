@@ -1,4 +1,7 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionCommandContext,
+} from "@earendil-works/pi-coding-agent";
 import type { MagicContextConfig } from "@magic-context/core/config/schema/magic-context";
 import type { getDreamTaskBacklogs } from "@magic-context/core/features/magic-context/dreamer/task-gates";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
@@ -20,7 +23,9 @@ import { createCtxStatusSender, resolveSessionId } from "./pi-command-utils";
 export interface RegisterCtxStatusDeps {
 	db: ContextDatabase;
 	projectIdentity: string;
-	resolveStatusDeps?: (ctx: { cwd: string }) => CtxStatusRuntimeDeps;
+	resolveStatusDeps?: (
+		ctx: Pick<ExtensionCommandContext, "cwd" | "sessionManager">,
+	) => CtxStatusRuntimeDeps;
 	resolveProject?: (ctx: { cwd: string }) => {
 		projectDir: string;
 		projectIdentity: string;
