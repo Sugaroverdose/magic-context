@@ -1,3 +1,4 @@
+import { withContentLanguageDirective } from "../../agents/language-directive";
 import { embedAndStoreCompartmentChunks } from "../../features/magic-context/compartment-embedding";
 import { insertCompartmentEvents } from "../../features/magic-context/compartment-events";
 import { isCompartmentLeaseHeld } from "../../features/magic-context/compartment-lease";
@@ -51,7 +52,6 @@ import { insertUserMemoryCandidates } from "../../features/magic-context/user-me
 import { normalizeSDKResponse } from "../../shared";
 import { describeError } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
-import { getSdkOutputLimit } from "../../shared/models-dev-cache";
 import {
     claimOpenCodeDbDiagnosticOnce,
     openCodeDbPathExists,
@@ -61,30 +61,35 @@ import { toModelEntry } from "../../shared/resolve-fallbacks";
 import { beginSqliteWriterAsync } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { updateCompactionMarkerAfterPublication } from "./compaction-marker-manager";
-import { buildCompartmentAgentPrompt } from "./compartment-prompt";
+import { buildCompartmentAgentPrompt, COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./compartment-prompt";
 import { queueDropsForCompartmentalizedMessages } from "./compartment-runner-drop-queue";
 import { runValidatedHistorianPass } from "./compartment-runner-historian";
 import type { HiddenCompartmentRunnerDeps } from "./compartment-runner-types";
 import {
     buildHistorianFailureNotice,
+    buildHistorianWindowTooSmallNotice,
     buildStoredCompartmentsInvalidNotice,
     HISTORIAN_BOUNDARY_HEALING_SLACK,
     shouldDiscardLastHistorianCompartment,
     validateChunkCoverage,
     validateStoredCompartments,
 } from "./compartment-runner-validation";
-import { producerSourceLocalBudget, resolveHistorianProducerLimits } from "./derive-budgets";
+import { producerSourceLocalBudget } from "./derive-budgets";
+import {
+    describeHistorianPromptTrim,
+    fitHistorianPrompt,
+    resolveHistorianProducerWindow,
+} from "./historian-prompt-fit";
 import {
     finishHistorianPublishStage,
     startHistorianPublishStage,
 } from "./historian-publish-stage-logger";
 import { snapTerminalCompartmentToServedRow } from "./host-served-rows";
-import { clearInjectionCache, renderHistorianMemoryBlock } from "./inject-compartments";
+import { clearInjectionCache } from "./inject-compartments";
 import { onNoteTrigger } from "./note-nudger";
 import { persistFilteredNoise } from "./persist-filtered-noise";
 import {
     fitAtomicHistorianSourceToProducerWindow,
-    historianProducerReserve,
     producerInputTokenLimit,
     producerWindowFailureReason,
 } from "./producer-window-guard";
@@ -108,7 +113,6 @@ import {
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { isStrictGapHealingMessage } from "./read-session-raw";
-import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendStatusNotification } from "./send-session-notification";
 
 const inconsistentProducerWindows = new Set<string>();
@@ -519,6 +523,64 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             return;
         }
 
+        // Size the prompt to the producer model before reserving drain budget or
+        // reading the chunk: the fixed prompt parts and the output reserve come off
+        // the window first, and the chunk gets what is left.
+        const producerModel = toModelEntry(deps.model)?.model ?? deps.fallbackModelId;
+        const producerWindow = resolveHistorianProducerWindow(
+            producerModel,
+            deps.historianMaxOutputTokens,
+            deps.historianContextLimit,
+        );
+        const producerContext = producerWindow.contextLimitTokens;
+        const producerLimits = { input: producerWindow.inputLimitTokens };
+        const producerReserve = producerWindow.maxOutputTokens;
+        const projectPath = resolveProjectIdentity(directory ?? process.cwd());
+        const memories = getMemoriesByProject(db, projectPath, ["active", "permanent"]);
+        const promptFit = fitHistorianPrompt({
+            window: producerWindow,
+            systemPrompt: withContentLanguageDirective(
+                COMPARTMENT_AGENT_SYSTEM_PROMPT,
+                deps.language,
+            ),
+            requestedChunkTokens: historianChunkTokens,
+            sessionId,
+            chunkStart: Math.max(1, offset),
+            lastOrdinal: eligibleEndOrdinal - 1,
+            sessionCompartments: priorCompartments,
+            memories,
+            memoryEnabled: deps.memoryEnabled !== false,
+        });
+        if (!promptFit.ok) {
+            telemetry.failureReason = promptFit.reason;
+            if (getHistorianFailureState(db, sessionId).lastError === promptFit.reason) {
+                // The same model and window already failed this way. Nothing but a
+                // model, window or instruction change alters the reason, so running
+                // again would only repeat the failure and its notice.
+                telemetry.status = "noop";
+                sessionLog(
+                    sessionId,
+                    `historian no-op: prompt still cannot fit the historian model (${promptFit.reason}); waiting for a model or window change`,
+                );
+                return;
+            }
+            sessionLog(
+                sessionId,
+                `historian failure: source=prompt-fit reason="${promptFit.reason}"`,
+            );
+            incrementHistorianFailure(db, sessionId, promptFit.reason);
+            retainDrainReservationForRetryThrottle = true;
+            await notifyHistorianIssue(buildHistorianWindowTooSmallNotice());
+            return;
+        }
+        const chunkTokens = promptFit.chunkTokens;
+        if (promptFit.trimmed || chunkTokens < historianChunkTokens) {
+            sessionLog(
+                sessionId,
+                `historian prompt fit: sized to ${producerModel ?? "unknown"} (${describeHistorianPromptTrim(promptFit)}; requestedChunkTokens=${historianChunkTokens})`,
+            );
+        }
+
         const perRunCap = selectPerRunCap(boundarySnapshot);
         const usable = Math.max(
             1,
@@ -546,7 +608,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         }
         drainReservation = reserve.reservation;
 
-        const chunk = readSessionChunk(sessionId, historianChunkTokens, offset, eligibleEndOrdinal);
+        const chunk = readSessionChunk(sessionId, chunkTokens, offset, eligibleEndOrdinal);
         const forceKeepLastCompartmentForChunk =
             deps.forceKeepLastCompartment === true && !chunk.hasMore;
         telemetry.chunkStartOrdinal = chunk.startIndex;
@@ -576,19 +638,6 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             rollbackDrainReservation();
             return;
         }
-        const producerModel = toModelEntry(deps.model)?.model ?? deps.fallbackModelId;
-        const modelParts = producerModel?.split("/");
-        const producerLimits = resolveHistorianProducerLimits(producerModel);
-        const producerContext =
-            producerLimits.context ??
-            (producerLimits.input === undefined ? deps.historianContextLimit : undefined);
-        const producerReserve = historianProducerReserve(
-            producerContext,
-            deps.historianMaxOutputTokens,
-            modelParts && modelParts.length > 1
-                ? getSdkOutputLimit(modelParts[0], modelParts.slice(1).join("/"))
-                : undefined,
-        );
         const fittedAtomicSource = chunk.oversizeAtomicUnit
             ? fitAtomicHistorianSourceToProducerWindow({
                   text: chunk.text,
@@ -596,16 +645,17 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
                   contextLimitTokens: producerContext,
                   inputLimitTokens: producerLimits.input,
                   maxOutputTokens: producerReserve,
+                  maxSourceTokens: promptFit.roomTokens,
               })
             : null;
         const chunkText = chunk.oversizeAtomicUnit
             ? (fittedAtomicSource?.text ?? chunk.text)
-            : truncateHistorianInputIfNeeded(chunk.text, historianChunkTokens);
+            : truncateHistorianInputIfNeeded(chunk.text, chunkTokens);
         const producerSourceTokens = estimateTokens(chunkText);
         if (boundarySnapshot.oversizeAtomicUnit || chunk.oversizeAtomicUnit) {
             sessionLog(
                 sessionId,
-                `historian oversize admission: range=${chunk.startIndex}-${chunk.endIndex} rawComponentTokens=${boundarySnapshot.diagnostics?.head.completedFence.tokenMass ?? "unknown"} perRunCap=${perRunCap} producerSourceTokens=${producerSourceTokens} historianChunkTokens=${historianChunkTokens}; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
+                `historian oversize admission: range=${chunk.startIndex}-${chunk.endIndex} rawComponentTokens=${boundarySnapshot.diagnostics?.head.completedFence.tokenMass ?? "unknown"} perRunCap=${perRunCap} producerSourceTokens=${producerSourceTokens} historianChunkTokens=${chunkTokens}; ${describeBoundaryDiagnostics(boundarySnapshot)}`,
             );
         }
         if (fittedAtomicSource && fittedAtomicSource.removedTokens > 0) {
@@ -644,7 +694,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         if (chunkText !== chunk.text) {
             sessionLog(
                 sessionId,
-                `historian pre-flight: truncated formatted input for ${chunk.startIndex}-${chunk.endIndex} to fit ${historianChunkTokens} tokens`,
+                `historian pre-flight: truncated formatted input for ${chunk.startIndex}-${chunk.endIndex} to fit ${chunkTokens} tokens`,
             );
         }
 
@@ -677,27 +727,16 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         //   - 4 rotating cross-project seeds + last-6 recency compartments (no
         //     embedding at historian time), built from this session's prior
         //     compartments.
-        //   - <project-memory> for fact dedup (consolidation-bounded).
-        // No temp-file offload needed — the bounded blocks stay well within
-        // serialization limits.
-        const projectPath = resolveProjectIdentity(directory ?? process.cwd());
-        const memories = getMemoriesByProject(db, projectPath, ["active", "permanent"]);
-        // The historian dedups facts by content and never addresses a memory by
-        // id, so its block uses the id-free historian renderer (not the m0/m1
-        // `#id` wire that <memory-updates> corrections address). Byte-parity
-        // with the Rust port is pinned by the historian prompt golden.
-        const projectMemory = renderHistorianMemoryBlock(memories) ?? "";
-
-        const references = buildReferenceBlocks({
-            sessionId,
-            chunkStart: chunk.startIndex,
-            sessionCompartments: priorCompartments,
-        });
-
+        //   - <project-memory> for fact dedup, rendered id-free because the
+        //     historian dedups by content and never addresses a memory by id.
+        //     Byte-parity with the Rust port is pinned by the historian prompt
+        //     golden.
+        // The prompt fit above rendered these blocks, trimmed if the producer
+        // window needed room for the chunk.
         const prompt = buildCompartmentAgentPrompt({
-            seedExamples: references.seedExamples,
-            sessionReferences: references.sessionReferences,
-            projectMemory,
+            seedExamples: promptFit.seedExamples,
+            sessionReferences: promptFit.sessionReferences,
+            projectMemory: promptFit.projectMemory,
             inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunkText}`,
             memoryEnabled: deps.memoryEnabled !== false,
         });
@@ -745,16 +784,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             twoPass: deps.historianTwoPass,
             language: deps.language,
         });
-        if (
-            !validatedPass.ok &&
-            /producer_prompt_(?:exceeds_window|fit_unavailable)/.test(validatedPass.error)
-        ) {
-            telemetry.failureReason = validatedPass.error;
-            retainDrainReservationForRetryThrottle = false;
-            rollbackDrainReservation();
-            sessionLog(sessionId, `historian producer admission refused: ${validatedPass.error}`);
-            return;
-        }
+        // A prompt-fit refusal from a fallback model is an ordinary failure: it is
+        // counted, surfaced, and keeps the drain reservation as a retry throttle
+        // like any other, instead of retrying on the next trigger.
         if (!validatedPass.ok) {
             // Always track historian failures regardless of usage percentage.
             // The emergency abort path at 95% checks failureCount > 0, so failures

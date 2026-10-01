@@ -268,6 +268,22 @@ export function renderMemoryBlock(memories: Memory[]): string | null {
  * renders the same bytes, and the historian prompt golden
  * (crates/mc-module/testdata/historian-prompt-golden.json) pins byte parity.
  */
+/**
+ * The memories `renderHistorianMemoryBlock` would show, in the order it shows
+ * them. Rendering any prefix of this list reproduces the first lines of the full
+ * block, so a caller that must shrink the block to fit a model window can drop
+ * the lowest-priority lines by taking a shorter prefix.
+ */
+export function orderHistorianMemories(memories: Memory[]): Memory[] {
+    const ordered: Memory[] = [];
+    for (const category of CATEGORY_PRIORITY) {
+        for (const memory of memories) {
+            if (memory.category === category) ordered.push(memory);
+        }
+    }
+    return ordered;
+}
+
 export function renderHistorianMemoryBlock(memories: Memory[]): string | null {
     const byCategory = new Map<string, Memory[]>();
     for (const m of memories) {

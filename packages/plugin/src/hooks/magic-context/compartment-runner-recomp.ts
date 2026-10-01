@@ -40,6 +40,7 @@ import {
     validateStoredCompartments,
 } from "./compartment-runner-validation";
 import { invalidateAutoEmbedSession } from "./embed-session-state";
+import { describeHistorianPromptTrim, fitRecompHistorianPrompt } from "./historian-prompt-fit";
 import { clearInjectionCache } from "./inject-compartments";
 import {
     createDefaultBoundarySnapshotForTests,
@@ -50,7 +51,6 @@ import {
     getRawSessionTagKeysThrough,
     readSessionChunk,
 } from "./read-session-chunk";
-import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendStatusNotification } from "./send-session-notification";
 
 function insertRecompCompartmentRows(
@@ -365,9 +365,51 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         }
 
         while (offset < protectedTailStart) {
+            // Size the chunk to the producer window after the fixed prompt parts;
+            // the reference blocks below come from the same fit.
+            const promptFit = fitRecompHistorianPrompt({
+                model: deps.model,
+                fallbackModelId: deps.fallbackModelId,
+                language: deps.language,
+                requestedChunkTokens: currentTokenBudget,
+                sessionId,
+                chunkStart: offset,
+                lastOrdinal: protectedTailStart - 1,
+                sessionCompartments: candidateCompartments,
+            });
+            if (!promptFit.ok) {
+                recordHistorianRun(db, {
+                    sessionId,
+                    harness: getHarness(),
+                    subagentInvocationId: null,
+                    runKind: "recomp",
+                    status: "failed",
+                    failureReason: promptFit.reason,
+                    chunkStartOrdinal: offset,
+                    chunkEndOrdinal: null,
+                    compartmentsProduced: 0,
+                });
+                sessionLog(
+                    sessionId,
+                    `recomp failed code=${userFacingFailureCode("historian_window_too_small")} reason="${promptFit.reason}"`,
+                );
+                const partial = await promoteAndFinalize(
+                    `the history model's window cannot hold a historian prompt: ${promptFit.reason}`,
+                );
+                if (partial) {
+                    return `## Magic Recomp — Partial\n\n${partial}`;
+                }
+                return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("historian_window_too_small")}`;
+            }
+            if (promptFit.trimmed || promptFit.chunkTokens < currentTokenBudget) {
+                sessionLog(
+                    sessionId,
+                    `recomp prompt fit: ${describeHistorianPromptTrim(promptFit)} requestedChunkTokens=${currentTokenBudget}`,
+                );
+            }
             const chunk = readSessionChunk(
                 sessionId,
-                currentTokenBudget,
+                promptFit.chunkTokens,
                 offset,
                 protectedTailStart,
             );
@@ -403,15 +445,9 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // continuity). Recomp is a structural rebuild and emits no durable
             // facts (see below), so <project-memory> is omitted — there's
             // nothing to dedup against.
-            const references = buildReferenceBlocks({
-                sessionId,
-                chunkStart: chunk.startIndex,
-                sessionCompartments: candidateCompartments,
-            });
-
             const prompt = buildCompartmentAgentPrompt({
-                seedExamples: references.seedExamples,
-                sessionReferences: references.sessionReferences,
+                seedExamples: promptFit.seedExamples,
+                sessionReferences: promptFit.sessionReferences,
                 projectMemory: "",
                 inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
                 // Recomp is a structural rebuild only — it must NOT emit facts
@@ -473,7 +509,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 },
             });
             if (!validatedPass.ok) {
-                const reducedBudget = getReducedRecompTokenBudget(currentTokenBudget);
+                const reducedBudget = getReducedRecompTokenBudget(promptFit.chunkTokens);
                 if (reducedBudget !== null) {
                     const smallerChunk = readSessionChunk(
                         sessionId,

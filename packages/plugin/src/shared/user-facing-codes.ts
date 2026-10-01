@@ -24,6 +24,12 @@ export const USER_FACING_FAILURES = {
             "This request was not sent: the message that marks where this session's history summary ends is missing from the OpenCode store, and without it the request is larger than the model's context window.",
         action: "Run /ctx-recomp to rebuild the history summary.",
     },
+    historian_window_too_small: {
+        code: "MC-H05",
+        sentence:
+            "History compression is paused because the history model's context window is too small for its instructions.",
+        action: "Set historian.model in magic-context.jsonc to a model with a larger context window.",
+    },
     recomp_unavailable: {
         code: "MC-R01",
         sentence: "History compression could not be rebuilt.",

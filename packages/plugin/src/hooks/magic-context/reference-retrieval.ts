@@ -202,10 +202,14 @@ function renderSessionRefCompartment(c: ReferenceCompartment): string {
  * list (ascending by sequence/endMessage). Empty string when the session has
  * no prior compartments (young session — seeds carry calibration alone).
  */
-export function renderSessionReferencesBlock(allCompartments: ReferenceCompartment[]): string {
+export function renderSessionReferencesBlock(
+    allCompartments: ReferenceCompartment[],
+    window: number = SESSION_REF_WINDOW,
+): string {
     allCompartments = allCompartments.filter((c) => !isNoContentCompartment(c));
-    if (allCompartments.length === 0) return "";
-    const recent = allCompartments.slice(-SESSION_REF_WINDOW);
+    const count = Math.max(0, Math.min(SESSION_REF_WINDOW, Math.floor(window)));
+    if (allCompartments.length === 0 || count === 0) return "";
+    const recent = allCompartments.slice(-count);
     const body = recent.map(renderSessionRefCompartment).join("\n\n");
     return `<session_references>\n${body}\n</session_references>`;
 }

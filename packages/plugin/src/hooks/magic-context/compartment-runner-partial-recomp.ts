@@ -33,9 +33,9 @@ import {
     validateChunkCoverage,
     validateStoredCompartments,
 } from "./compartment-runner-validation";
+import { describeHistorianPromptTrim, fitRecompHistorianPrompt } from "./historian-prompt-fit";
 import { clearInjectionCache } from "./inject-compartments";
 import { readSessionChunk } from "./read-session-chunk";
-import { buildReferenceBlocks } from "./reference-retrieval";
 import { sendStatusNotification } from "./send-session-notification";
 
 export interface PartialRecompRange {
@@ -392,9 +392,32 @@ export async function executePartialRecompInternal(
 
         // ── Main loop: rebuild snapStart..snapEnd in historian chunks ──────
         while (offset <= snapEnd) {
+            // Size the chunk to the producer window after the fixed prompt parts;
+            // the reference blocks below come from the same fit.
+            const promptFit = fitRecompHistorianPrompt({
+                model: deps.model,
+                fallbackModelId: deps.fallbackModelId,
+                language: deps.language,
+                requestedChunkTokens: currentTokenBudget,
+                sessionId,
+                chunkStart: offset,
+                lastOrdinal: snapEnd,
+                sessionCompartments: candidateCompartments,
+            });
+            if (!promptFit.ok) {
+                log(
+                    `[magic-context] partial recomp failed session=${sessionId} code=${userFacingFailureCode("historian_window_too_small")} reason="${promptFit.reason}"`,
+                );
+                return `## Magic Recomp — Failed\n\n${renderUserFacingFailure("historian_window_too_small")}`;
+            }
+            if (promptFit.trimmed || promptFit.chunkTokens < currentTokenBudget) {
+                log(
+                    `[magic-context] partial recomp prompt fit session=${sessionId}: ${describeHistorianPromptTrim(promptFit)} requestedChunkTokens=${currentTokenBudget}`,
+                );
+            }
             const chunk = readSessionChunk(
                 sessionId,
-                currentTokenBudget,
+                promptFit.chunkTokens,
                 offset,
                 snapEnd + 1, // exclusive upper bound — readSessionChunk stops before this ordinal
             );
@@ -413,15 +436,9 @@ export async function executePartialRecompInternal(
             // v2 bounded reference model: 4 rotating seeds + last-6 recency
             // (the compartments rebuilt so far in this partial-recomp run provide
             // continuity). Structural rebuild → no <project-memory> dedup block.
-            const references = buildReferenceBlocks({
-                sessionId,
-                chunkStart: chunk.startIndex,
-                sessionCompartments: candidateCompartments,
-            });
-
             const prompt = buildCompartmentAgentPrompt({
-                seedExamples: references.seedExamples,
-                sessionReferences: references.sessionReferences,
+                seedExamples: promptFit.seedExamples,
+                sessionReferences: promptFit.sessionReferences,
                 projectMemory: "",
                 inputSource: `Messages ${chunk.startIndex}-${chunk.endIndex}:\n\n${chunk.text}`,
                 // Partial recomp is structural-only — never emit facts (locked
@@ -471,7 +488,7 @@ export async function executePartialRecompInternal(
                 },
             });
             if (!validatedPass.ok) {
-                const reducedBudget = getReducedRecompTokenBudget(currentTokenBudget);
+                const reducedBudget = getReducedRecompTokenBudget(promptFit.chunkTokens);
                 if (reducedBudget !== null) {
                     const smallerChunk = readSessionChunk(
                         sessionId,
