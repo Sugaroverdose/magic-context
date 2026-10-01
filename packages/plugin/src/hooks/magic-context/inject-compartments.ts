@@ -251,6 +251,23 @@ export function renderMemoryBlock(memories: Memory[]): string | null {
 }
 
 /**
+ * Return the memories `renderHistorianMemoryBlock` renders, in the order it
+ * renders them (by category priority, then input order). Rendering any prefix
+ * of this list reproduces the first lines of the full block, so a caller that
+ * must shrink the block to fit a model window can drop the lowest-priority
+ * lines by taking a shorter prefix.
+ */
+export function orderHistorianMemories(memories: Memory[]): Memory[] {
+    const ordered: Memory[] = [];
+    for (const category of CATEGORY_PRIORITY) {
+        for (const memory of memories) {
+            if (memory.category === category) ordered.push(memory);
+        }
+    }
+    return ordered;
+}
+
+/**
  * The historian's `<project-memory>` block. Canonical form: category-grouped
  * `- <fact>` lines WITHOUT memory ids, ordered by CATEGORY_PRIORITY (v2
  * taxonomy first, then the legacy categories so pre-v2 rows remain visible);

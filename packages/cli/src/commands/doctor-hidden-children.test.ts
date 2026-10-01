@@ -70,6 +70,10 @@ test("doctor only deletes marked sessions listed as retired, with a backup and c
         expect(reports).toEqual([
             expect.stringContaining("2 retired hidden sessions are waiting for deletion"),
         ]);
+        // The cleanup is for older hosts only, and the report says so.
+        expect(reports[0]).toContain(
+            "newer hosts that let plugins remove sessions clean up hidden runs on their own",
+        );
         const result = await cleanupRetiredHiddenChildren(options);
         expect(result).toMatchObject({ waiting: 2, deleted: 1 });
         expect(existsSync(result.backup!)).toBe(true);

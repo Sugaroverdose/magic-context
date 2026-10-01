@@ -139,7 +139,7 @@ export function registerIssue424CapacityTests(
         });
     }
 
-    test(`issue 467 ${harness} refuses a raw-window-clipped atomic component when the complete calibrated prompt cannot fit`, async () => {
+    test(`issue 467 ${harness} clips a raw-window-sized atomic component to the room the fixed prompt parts leave`, async () => {
         const fixture = issue424Fixture(60, 1);
         const steeringText = `${"oversize steering value\n".repeat(20_000)}OVERSIZE_STEERING_END`;
         fixture.raw.splice(3, 0, {
@@ -215,31 +215,27 @@ export function registerIssue424CapacityTests(
                 historianContextLimit,
                 maxOutputTokens,
             });
-            // Source was clipped against unscaled local counts. The unknown-model fit margin plus historian system/instruction text still exceed this fixture's window.
-            expect(firstPrompts).toHaveLength(0);
-            // An admission refusal is a geometry outcome, not a historian failure: it
-            // must not stamp the failure backoff that would keep the force-band drain
-            // shut for a session whose next chunk may fit.
-            expect(getHistorianFailureState(db, sessionId).lastError ?? null).toBeNull();
+            // The component fills the raw window on its own, so with the system
+            // prompt, references and the unknown-model fit margin added it cannot be
+            // sent whole. It used to be clipped to the raw window only, and the full
+            // prompt was then refused on every run. Clipping it to the room the fixed
+            // parts leave sends one prompt and publishes the whole range.
+            expect(firstPrompts).toHaveLength(1);
+            expect(firstPrompts[0]).toContain("OVERSIZE_STEERING_END");
+            expect(firstPrompts[0]).toContain("tokens truncated by Magic Context");
+            expect(estimateTokens(firstPrompts[0] ?? "")).toBeLessThan(sourceTokens);
+            expect(getHistorianFailureState(db, sessionId).lastError ?? "").not.toMatch(
+                /producer_prompt/,
+            );
             expect(
                 getCompartments(db, sessionId).map((compartment) => [
                     compartment.startMessage,
                     compartment.endMessage,
                 ]),
-            ).toEqual([[1, 1]]);
-
-            const secondPrompts = await run({
-                db,
-                sessionId,
-                raw,
-                boundary,
-                xml,
-                holderId,
-                historianChunkTokens,
-                historianContextLimit,
-                maxOutputTokens,
-            });
-            expect(secondPrompts).toHaveLength(0);
+            ).toEqual([
+                [1, 1],
+                [2, chunk.endIndex],
+            ]);
         } finally {
             dispose();
             db.close();

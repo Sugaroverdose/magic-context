@@ -179,8 +179,10 @@ export async function cleanupRetiredHiddenChildren(options: HiddenChildCleanupOp
         context.close();
         host.close();
     }
+    // Only OpenCode 2 hosts whose plugin API lacks session.remove (releases up to 2.0.21) leave
+    // hidden sessions behind; newer hosts remove each one when its run ends.
     options.report?.(
-        `${waiting} retired hidden sessions are waiting for deletion${fix ? "" : "; run `doctor --fix` with OpenCode closed"}`,
+        `${waiting} retired hidden sessions are waiting for deletion${fix ? "" : "; run `doctor --fix` with OpenCode closed"}. Only older OpenCode 2 hosts (2.0.21 and earlier) leave these behind; newer hosts that let plugins remove sessions clean up hidden runs on their own.`,
     );
     if (!fix || candidates.length === 0) return { waiting, deleted: 0 };
 
