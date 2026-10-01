@@ -17,7 +17,9 @@ import { createMessagesTransformHandler } from "../../plugin/messages-transform"
 import type { PluginContext } from "../../plugin/types";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
+import * as autoSearchRunner from "./auto-search-runner";
 import { DegradedPassRefusalError } from "./degraded-pass-refusal";
+import * as injectCompartments from "./inject-compartments";
 import { dropSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { STORAGE_BUSY_MESSAGE } from "./storage-busy-refusal";
 import { createTransform } from "./transform";
@@ -362,11 +364,21 @@ describe("the served-request size guard", () => {
         },
     ];
 
-    function smallWindowTransform(sessionId: string, client?: PluginContext["client"]) {
+    function smallWindowTransform(
+        sessionId: string,
+        client?: PluginContext["client"],
+        options: {
+            tagger?: ReturnType<typeof createTagger>;
+            schedulerDecision?: "defer" | "execute";
+            directory?: string;
+            autoSearch?: boolean;
+        } = {},
+    ) {
         useTempDataHome("mc-degraded-size-guard-");
+        const decision = options.schedulerDecision ?? "defer";
         return createTransform({
-            tagger: createTagger(),
-            scheduler: { shouldExecute: mock(() => "defer" as const) },
+            tagger: options.tagger ?? createTagger(),
+            scheduler: { shouldExecute: mock(() => decision) },
             contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
                 [
                     sessionId,
@@ -381,21 +393,113 @@ describe("the served-request size guard", () => {
             protectedTokens: 0,
             historianRunnable: false,
             ...(client ? { client } : {}),
+            ...(options.directory ? { directory: options.directory } : {}),
+            ...(options.autoSearch
+                ? { autoSearch: { enabled: true, scoreThreshold: 0, minPromptChars: 1 } }
+                : {}),
         });
     }
 
-    it("refuses a degraded pass whose request is over the context limit", async () => {
-        const sessionId = "ses-size-guard-degraded";
-        // The host returns no directory: a degradation that is served when it fits.
+    /** A host that resolves the session to `directory`, so the pass has a project. */
+    function resolvedProject(): { client: PluginContext["client"]; directory: string } {
+        const directory = createTestTempDir("mc-size-guard-project-").dir;
+        tempDirs.push(directory);
         const client = {
-            session: { get: mock(async () => ({ data: {} })) },
+            session: { get: mock(async () => ({ data: { directory } })) },
         } as unknown as PluginContext["client"];
-        const transform = smallWindowTransform(sessionId, client);
+        return { client, directory };
+    }
+
+    it("refuses a pass whose failed stage can change the request when it is over the context limit", async () => {
+        const sessionId = "ses-size-guard-degraded";
+        const { client, directory } = resolvedProject();
+        const transform = smallWindowTransform(sessionId, client, { directory });
+        // m[0]/m[1] cannot be rendered: the pass is recorded as degraded and
+        // goes on with a different history block than a healthy pass serves.
+        const inject = spyOn(injectCompartments, "injectM0M1").mockImplementation(() => {
+            throw new Error("m[0]/m[1] render failed");
+        });
+        try {
+            await expect(transform({}, { messages: oversized(sessionId) })).rejects.toMatchObject({
+                name: "DegradedPassRefusalError",
+                site: "served-request-over-limit",
+                contextLimitTokens: 2_000,
+            });
+            expect(inject).toHaveBeenCalled();
+        } finally {
+            inject.mockRestore();
+        }
+    }, 30_000);
+
+    it("refuses a pass whose tagging failed, over the context limit", async () => {
+        const sessionId = "ses-size-guard-tagging";
+        const baseTagger = createTagger();
+        const tagger = {
+            ...baseTagger,
+            initFromDb: () => {
+                throw new Error("UNIQUE constraint failed: tags.session_id, tags.tag_number");
+            },
+        };
+        const transform = smallWindowTransform(sessionId, undefined, { tagger });
         await expect(transform({}, { messages: oversized(sessionId) })).rejects.toMatchObject({
             name: "DegradedPassRefusalError",
-            site: "served-request-over-limit",
-            contextLimitTokens: 2_000,
+            site: "tagging-persistence-failure",
         });
+    }, 30_000);
+
+    it("serves a session's first pass over the context limit while the system prompt is still unmeasured", async () => {
+        const sessionId = "ses-size-guard-first-pass";
+        const { client, directory } = resolvedProject();
+        const transform = smallWindowTransform(sessionId, client, { directory });
+        // Nothing has measured the system prompt yet, so this first render's
+        // own estimate is incomplete (untrusted). That is not a degradation.
+        expect(getOrCreateSessionMeta(openDatabase(), sessionId).systemPromptTokens).toBe(0);
+        const messages = oversized(sessionId);
+        await transform({}, { messages });
+        expect(JSON.stringify(messages)).toContain("BULKY-TOOL-OUTPUT");
+        expect(messages.some((message) => message.info.syntheticHead === true)).toBe(true);
+    }, 30_000);
+
+    it("serves a pass over the context limit whose only degradation is an auto-search timeout", async () => {
+        const sessionId = "ses-size-guard-auto-search";
+        const { client, directory } = resolvedProject();
+        const transform = smallWindowTransform(sessionId, client, { directory, autoSearch: true });
+        const search = spyOn(autoSearchRunner, "runAutoSearchHint").mockResolvedValue({
+            ok: false,
+            kind: "timeout",
+        });
+        try {
+            // A short first turn, then a defer pass whose new turn alone is over
+            // the window and whose hint search times out.
+            await transform({}, { messages: history(sessionId).slice(0, 1) });
+            const messages: Message[] = [
+                ...history(sessionId).slice(0, 1),
+                {
+                    info: {
+                        id: "a-short",
+                        time: { created: 2 },
+                        role: "assistant",
+                        sessionID: sessionId,
+                        finish: "stop",
+                    },
+                    parts: [{ type: "text", text: "ok" }],
+                },
+                {
+                    info: {
+                        id: "u-bulky",
+                        time: { created: 3 },
+                        role: "user",
+                        sessionID: sessionId,
+                    },
+                    parts: [{ type: "text", text: BULKY }],
+                },
+            ];
+            await transform({}, { messages });
+            expect(search).toHaveBeenCalled();
+            expect(JSON.stringify(messages)).toContain("BULKY-TOOL-OUTPUT");
+        } finally {
+            search.mockRestore();
+        }
     }, 30_000);
 
     it("leaves a healthy pass of the same size to the existing emergency machinery", async () => {
