@@ -6,7 +6,10 @@ import {
 	getSessionFacts,
 } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
-import { getMemoriesByProject } from "@magic-context/core/features/magic-context/memory/storage-memory";
+import {
+	getMemoriesByProject,
+	insertMemory,
+} from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
 	getHistorianFailureState,
 	getOverflowState,
@@ -17,7 +20,9 @@ import {
 	reserveProtectedTailDrainTokens,
 } from "@magic-context/core/features/magic-context/storage";
 import { getUserMemoryCandidates } from "@magic-context/core/features/magic-context/user-memory/storage-user-memory";
+import { producerPromptFailureReason } from "@magic-context/core/hooks/magic-context/producer-window-guard";
 import type { ProtectedTailBoundarySnapshot } from "@magic-context/core/hooks/magic-context/protected-tail-boundary";
+import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import type { RawMessage } from "@magic-context/core/hooks/magic-context/read-session-raw";
 import * as loggerModule from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -362,9 +367,12 @@ describe("runPiHistorian", () => {
 		});
 		try {
 			expect(runner.run).not.toHaveBeenCalled();
-			expect(
-				getHistorianFailureState(db, "ses-historian").lastError,
-			).toBeNull();
+			// A window that cannot hold even the fixed prompt parts is a failure
+			// the next run cannot fix, so it is recorded (and backed off on), but
+			// the prompt is sized before any drain budget is reserved.
+			expect(getHistorianFailureState(db, "ses-historian").lastError).toContain(
+				"producer_prompt_unfit",
+			);
 			expect(
 				loadProtectedTailMeta(db, "ses-historian").protectedTailDrainTokens,
 			).toBe(0);
@@ -391,9 +399,11 @@ describe("runPiHistorian", () => {
 		});
 		try {
 			expect(refusedRunner.run).toHaveBeenCalledTimes(0);
+			// An uncalibrated model counts the historian system prompt double, so
+			// this window cannot hold it: one recorded failure, no spawn.
 			expect(
 				getHistorianFailureState(refused.db, "ses-historian").lastError,
-			).toBeNull();
+			).toContain("producer_prompt_unfit");
 		} finally {
 			closeQuietly(refused.db);
 		}
@@ -1237,4 +1247,119 @@ it("persists a boundary-only marker for a fully filtered Pi head without spawnin
 	} finally {
 		closeQuietly(db);
 	}
+});
+
+describe("Pi historian prompt sized to the producer window", () => {
+	it("counts a window too small for the fixed prompt as one failure and backs off until the window changes", async () => {
+		const db = createTestDb();
+		const holderId = "unfit-holder";
+		expect(
+			acquireCompartmentLease(db, "ses-historian", holderId),
+		).not.toBeNull();
+		const notices: string[] = [];
+		const runner = runnerReturning([successXml()]);
+		const run = (historianContextLimit: number) =>
+			runPiHistorian({
+				db,
+				sessionId: "ses-historian",
+				directory: process.cwd(),
+				provider: { readMessages: () => rawMessages() },
+				runner,
+				historianModel: "test/model",
+				historianChunkTokens: 20_000,
+				historianContextLimit,
+				producerContextLimits: new Map([["test/model", historianContextLimit]]),
+				maxOutputTokens: 30_000,
+				notifyIssue: async (message) => {
+					notices.push(message);
+				},
+				compartmentLeaseHolderId: holderId,
+			});
+		try {
+			clearPiHistorianAlertState("ses-historian");
+			// 32k window with a 30k output reserve: not even the system prompt fits.
+			await run(32_001);
+			expect(getHistorianFailureState(db, "ses-historian").failureCount).toBe(
+				1,
+			);
+			expect(getHistorianFailureState(db, "ses-historian").lastError).toContain(
+				"producer_prompt_unfit",
+			);
+			expect(notices.filter((text) => text.includes("(MC-H05)"))).toHaveLength(
+				1,
+			);
+
+			// Nothing changed: no second failure, no spawn.
+			clearPiHistorianAlertState("ses-historian");
+			await run(32_001);
+			await run(32_001);
+			expect(getHistorianFailureState(db, "ses-historian").failureCount).toBe(
+				1,
+			);
+			expect(notices).toHaveLength(1);
+			expect(runner.run).not.toHaveBeenCalled();
+
+			// A larger window changes the outcome, so the historian runs again.
+			await run(1_000_000);
+			expect(runner.run).toHaveBeenCalledTimes(1);
+			expect(
+				getCompartments(db, "ses-historian").map((row) => [
+					row.startMessage,
+					row.endMessage,
+				]),
+			).toEqual([[1, 2]]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("trims the memory block so the chunk fits a window the full prompt would overflow", async () => {
+		const memoryCount = 600;
+		const runner = runnerReturning([successXml()]);
+		const { db } = await runHistorianWith({
+			runner,
+			historianContextLimit: 100_000,
+			maxOutputTokens: 8_000,
+			beforeRun: (database) => {
+				const projectPath = resolveProjectIdentity(process.cwd());
+				for (let index = 0; index < memoryCount; index += 1) {
+					insertMemory(database, {
+						projectPath,
+						category: "ARCHITECTURE",
+						content: `Remembered architecture fact number ${index}: ${"the module keeps a durable ledger of every decision it made ".repeat(4)}`,
+					});
+				}
+			},
+		});
+		try {
+			expect(runner.run).toHaveBeenCalledTimes(1);
+			const options = (
+				runner.run as unknown as {
+					mock: { calls: Array<[Parameters<SubagentRunner["run"]>[0]]> };
+				}
+			).mock.calls[0]?.[0];
+			const user = options?.userMessage ?? "";
+			const keptLines = user
+				.split("\n")
+				.filter((line) => line.startsWith("- Remembered"));
+			expect(keptLines.length).toBeGreaterThan(0);
+			expect(keptLines.length).toBeLessThan(memoryCount);
+			expect(user).toContain("User request 1");
+			expect(
+				producerPromptFailureReason({
+					sourceLocal: estimateTokens(user),
+					systemLocal: estimateTokens(options?.systemPrompt ?? ""),
+					toolsLocal: 0,
+					modelKey: "test/model",
+					contextLimitTokens: 100_000,
+					maxOutputTokens: 8_000,
+				}),
+			).toBeNull();
+			expect(getHistorianFailureState(db, "ses-historian").failureCount).toBe(
+				0,
+			);
+		} finally {
+			closeQuietly(db);
+		}
+	});
 });

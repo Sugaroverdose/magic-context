@@ -264,6 +264,19 @@ export function buildStoredCompartmentsInvalidNotice(): string {
     ].join("\n");
 }
 
+/**
+ * User-facing notice for a historian model whose window cannot hold even the
+ * fixed instructions plus a minimal chunk. Retrying cannot help, so the notice
+ * names the model setting instead of promising an automatic retry.
+ */
+export function buildHistorianWindowTooSmallNotice(): string {
+    return [
+        "## Magic Context — History compression",
+        "",
+        renderUserFacingFailure("historian_window_too_small"),
+    ].join("\n");
+}
+
 export function buildHistorianRepairPrompt(
     originalPrompt: string,
     previousOutput: string,

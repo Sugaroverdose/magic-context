@@ -65,6 +65,7 @@ describe("mode manifest validator", () => {
             "tests/dreamer-verify-budget.test.ts",
             "tests/dreamer-verify-token-budget-oc1.test.ts",
             "tests/historian-no-tools.test.ts",
+            "tests/historian-window-fit.test.ts",
             "tests/issue-538-engine-wall.test.ts",
             "tests/issue-570-home-project.test.ts",
             "tests/issue-574-unborn-project.test.ts",

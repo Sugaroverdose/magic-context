@@ -584,6 +584,46 @@ export class HistorianHostRunner {
         };
     }
 
+    /**
+     * Why the claim's prompt cannot be sent to `key`, or null when it fits or the
+     * model's window is unknown (the prompt then goes out unguarded).
+     */
+    private admissionFailure(claim: HistorianHostClaim, key: string | undefined): string | null {
+        if (!key) return null;
+        const [provider, ...parts] = key.split("/");
+        const known = resolveKnownHistorianContextLimit(key);
+        const learned =
+            provider && parts.length
+                ? getSdkWindowGeometry(provider, parts.join("/"))?.derivation.window
+                : undefined;
+        const window =
+            known === undefined
+                ? learned
+                : learned === undefined
+                  ? known
+                  : Math.min(known, learned);
+        if (window === undefined && !this.unknownWindows.has(key)) {
+            this.unknownWindows.add(key);
+            this.log(`producer window unknown for ${key}: sending unguarded`);
+        }
+        const output =
+            provider && parts.length ? getSdkOutputLimit(provider, parts.join("/")) : undefined;
+        const producerLimits = resolveHistorianProducerLimits(key);
+        const context =
+            producerLimits.context ?? (producerLimits.input === undefined ? window : undefined);
+        const reserve = historianProducerReserve(context, undefined, output);
+        const failure = producerPromptFailureReason({
+            sourceLocal: estimateTokens(claim.user),
+            systemLocal: estimateTokens(claim.system),
+            toolsLocal: 0,
+            modelKey: key,
+            contextLimitTokens: context,
+            inputLimitTokens: producerLimits.input,
+            maxOutputTokens: reserve,
+        });
+        return failure ? `${key}: ${failure}` : null;
+    }
+
     private async runCompletion(
         claim: HistorianHostClaim,
         budgetMs: number,
@@ -600,6 +640,18 @@ export class HistorianHostRunner {
             typeof configuredAttemptMs === "number" && configuredAttemptMs > 0
                 ? Math.min(budgetMs, configuredAttemptMs)
                 : budgetMs;
+        // Admit the prompt before opening a child: when no model in the chain can
+        // hold it, every attempt would be refused, and opening first left one more
+        // hidden session behind per refused claim.
+        const admissionFailures = claim.modelChain.map((model) =>
+            this.admissionFailure(claim, model),
+        );
+        if (
+            admissionFailures.length > 0 &&
+            admissionFailures.every((failure) => failure !== null)
+        ) {
+            throw new Error(admissionFailures[0] ?? "historian prompt does not fit any model");
+        }
         const handle = await executor.open({
             parentSessionId: claim.sessionId,
             agent: "historian",
@@ -644,42 +696,8 @@ export class HistorianHostRunner {
                                 model?.providerID && model?.modelID
                                     ? `${model.providerID}/${model.modelID}`
                                     : head;
-                            const [provider, ...parts] = key.split("/");
-                            const known = resolveKnownHistorianContextLimit(key);
-                            const learned =
-                                provider && parts.length
-                                    ? getSdkWindowGeometry(provider, parts.join("/"))?.derivation
-                                          .window
-                                    : undefined;
-                            const window =
-                                known === undefined
-                                    ? learned
-                                    : learned === undefined
-                                      ? known
-                                      : Math.min(known, learned);
-                            if (window === undefined && !this.unknownWindows.has(key)) {
-                                this.unknownWindows.add(key);
-                                this.log(`producer window unknown for ${key}: sending unguarded`);
-                            }
-                            const output =
-                                provider && parts.length
-                                    ? getSdkOutputLimit(provider, parts.join("/"))
-                                    : undefined;
-                            const producerLimits = resolveHistorianProducerLimits(key);
-                            const context =
-                                producerLimits.context ??
-                                (producerLimits.input === undefined ? window : undefined);
-                            const reserve = historianProducerReserve(context, undefined, output);
-                            const failure = producerPromptFailureReason({
-                                sourceLocal: estimateTokens(claim.user),
-                                systemLocal: estimateTokens(claim.system),
-                                toolsLocal: 0,
-                                modelKey: key,
-                                contextLimitTokens: context,
-                                inputLimitTokens: producerLimits.input,
-                                maxOutputTokens: reserve,
-                            });
-                            if (failure) throw new Error(`${key}: ${failure}`);
+                            const failure = this.admissionFailure(claim, key);
+                            if (failure) throw new Error(failure);
                             attemptStartedAt = Date.now();
                             return executor.attempt(handle, request);
                         },

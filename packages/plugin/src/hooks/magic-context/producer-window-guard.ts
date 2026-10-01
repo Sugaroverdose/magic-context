@@ -124,6 +124,12 @@ export function fitAtomicHistorianSourceToProducerWindow(args: {
     contextLimitTokens?: number;
     inputLimitTokens?: number;
     maxOutputTokens: number;
+    /**
+     * Room left for the source once the rest of the prompt is counted. Without
+     * it the source alone is fitted to the whole input limit, and the full
+     * prompt can still overflow.
+     */
+    maxSourceTokens?: number;
 }): FittedHistorianSource {
     const producerInputLimitTokens = producerInputTokenLimit(
         args.contextLimitTokens,
@@ -131,11 +137,11 @@ export function fitAtomicHistorianSourceToProducerWindow(args: {
         args.inputLimitTokens,
     );
     const originalTokens = estimateTokens(args.text);
-    if (
-        producerInputLimitTokens === undefined ||
-        originalTokens < producerInputLimitTokens ||
-        producerInputLimitTokens <= 0
-    ) {
+    const target =
+        producerInputLimitTokens === undefined
+            ? undefined
+            : Math.min(producerInputLimitTokens, args.maxSourceTokens ?? Infinity);
+    if (target === undefined || originalTokens < target || target <= 0) {
         return { text: args.text, producerInputLimitTokens, removedTokens: 0 };
     }
 
@@ -151,7 +157,6 @@ export function fitAtomicHistorianSourceToProducerWindow(args: {
     const left = args.text.slice(0, splitOffset);
     const right = args.text.slice(splitOffset);
     const markers = splitMarkerPair();
-    const target = producerInputLimitTokens;
 
     let lo = 0;
     let hi = 1;
