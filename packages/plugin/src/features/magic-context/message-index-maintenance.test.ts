@@ -365,18 +365,43 @@ test("a harness-scoped orphan sweep retains counters until the last harness's co
     try {
         setHarness("opencode");
         const source = createOpenCodeDb([]);
-        const sweep = () => sweepOrphanedOpenCodeMessageIndexes(db, () => new Database(source), { now: 10_000, safetyAgeMs: 0, cooldownMs: 0 });
+        const sweep = () =>
+            sweepOrphanedOpenCodeMessageIndexes(db, () => new Database(source), {
+                now: 10_000,
+                safetyAgeMs: 0,
+                cooldownMs: 0,
+            });
         db.prepare(`INSERT INTO compartments(session_id,sequence,start_message,end_message,title,content,created_at,harness)
             VALUES (?,0,1,4,'title','opencode body',1,'opencode')`).run("shared-session");
         db.prepare(`INSERT INTO compartments(session_id,sequence,start_message,end_message,title,content,created_at,harness)
             VALUES (?,1,5,8,'title','claude body',1,'opencode2')`).run("shared-session");
-        const before = db.prepare("SELECT generation,version FROM compartment_history_versions WHERE session_id=?").get("shared-session") as { generation: string; version: number };
+        const before = db
+            .prepare(
+                "SELECT generation,version FROM compartment_history_versions WHERE session_id=?",
+            )
+            .get("shared-session") as { generation: string; version: number };
         expect(sweep().deleted).toBe(1);
-        expect(db.prepare("SELECT harness,content FROM compartments WHERE session_id=?").all("shared-session")).toEqual([{ harness: "opencode2", content: "claude body" }]);
-        expect(db.prepare("SELECT generation,version FROM compartment_history_versions WHERE session_id=?").get("shared-session")).toEqual({ ...before, version: before.version + 1 });
+        expect(
+            db
+                .prepare("SELECT harness,content FROM compartments WHERE session_id=?")
+                .all("shared-session"),
+        ).toEqual([{ harness: "opencode2", content: "claude body" }]);
+        expect(
+            db
+                .prepare(
+                    "SELECT generation,version FROM compartment_history_versions WHERE session_id=?",
+                )
+                .get("shared-session"),
+        ).toEqual({ ...before, version: before.version + 1 });
         _resetHarnessForTesting();
         setHarness("opencode2");
         expect(sweep().deleted).toBe(1);
-        expect(db.prepare("SELECT generation FROM compartment_history_versions WHERE session_id=?").get("shared-session")).toBeNull();
-    } finally { db.close(); }
+        expect(
+            db
+                .prepare("SELECT generation FROM compartment_history_versions WHERE session_id=?")
+                .get("shared-session"),
+        ).toBeNull();
+    } finally {
+        db.close();
+    }
 });
