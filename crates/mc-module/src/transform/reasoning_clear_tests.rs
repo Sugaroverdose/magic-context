@@ -304,7 +304,7 @@ fn opencode_canonical_anthropic_does_not_use_the_removal_lane() {
 }
 
 #[test]
-fn opencode_removal_selection_is_a_contiguous_prefix_on_prefix_bound_models() {
+fn opencode_removal_selects_nothing_on_prefix_bound_unresolved_or_openrouter_routes() {
     let mut request =
         opencode_openai_removal_request(6, "google-vertex-anthropic", "claude-opus-5-5@20260930");
     // a2 keeps only its reasoning, so removing it would leave no content.
@@ -316,9 +316,16 @@ fn opencode_removal_selection_is_a_contiguous_prefix_on_prefix_bound_models() {
         .map(|(index, message)| (message.mid.clone(), index as u64 + 1))
         .collect();
     let none = HashSet::new();
-    let bound = opencode_reasoning_removal_mids(&request, &tags, Some(6), &none);
-    assert_eq!(bound, HashSet::from(["a0", "a1"]));
+    assert!(opencode_reasoning_removal_mids(&request, &tags, Some(6), &none).is_empty());
+    request.provider_id = None;
     request.model_key = Some("openai/gpt-6.1-sol".to_string());
+    assert!(opencode_reasoning_removal_mids(&request, &tags, Some(6), &none).is_empty());
+    request.provider_id = Some("openrouter".to_string());
+    request.model_key = Some("openrouter/anthropic/claude-haiku-4.5".to_string());
+    assert!(opencode_reasoning_removal_mids(&request, &tags, Some(6), &none).is_empty());
+    request.provider_id = Some("openai".to_string());
+    request.model_key = Some("openai/gpt-6.1-sol".to_string());
+    // An ineligible message (a2) does not stop the walk on unbound models.
     let unbound = opencode_reasoning_removal_mids(&request, &tags, Some(6), &none);
     assert_eq!(unbound, HashSet::from(["a0", "a1", "a3", "a4"]));
     assert!(is_prefix_bound_thinking_model(Some("amazon-bedrock/us.anthropic.claude-fable-5-1-v1:0")));

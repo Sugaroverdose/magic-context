@@ -551,7 +551,7 @@ describe("piReasoningClearCutoff", () => {
 		expect(thinkingOf(messages[4])).toBe("reasoning 4");
 	});
 
-	it("keeps the cleared set a contiguous oldest prefix on prefix-bound models", () => {
+	it("clears nothing new on prefix-bound models", () => {
 		const { messages, messageIdToMaxTag } = build({ redactedAt: 2 });
 		const bound = piReasoningClearCutoff({
 			messages,
@@ -560,8 +560,8 @@ describe("piReasoningClearCutoff", () => {
 			piMessageStableId,
 			prefixBound: true,
 		});
-		// The redacted block at tag 3 cannot be cleared, so nothing after it is.
-		expect(bound).toBe(2);
+		// Clearing any older block would invalidate every newer signed block.
+		expect(bound).toBe(0);
 		const unbound = piReasoningClearCutoff({
 			messages,
 			messageIdToMaxTag,

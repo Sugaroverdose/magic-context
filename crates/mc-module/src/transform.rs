@@ -4515,6 +4515,18 @@ fn apply_once(
         || scheduler_outcome.pass == scheduler::PassDecision::Emergency95
         || loaded.meta.soft_refresh_pending;
     let pass_already_busting = supersession_ride_available;
+    // The emergency minimum is waived only by a rebuild that is not the emergency itself;
+    // the force-band edge and the 95% backstop permit a rewrite but do not pay for one.
+    let emergency_minimum_waived = (prefix_materialization_enabled
+        && (!loaded.meta.initialized
+            || render_config_changed
+            || cached_m1_missing(&loaded.core)
+            || hard_fold_prices_mutations
+            || reconcile_hard_due
+            || lineage_state.force_hard
+            || (scheduler_outcome.pass != scheduler::PassDecision::Defer
+                && current_m1_digest != applied_m1_revision)))
+        || loaded.meta.soft_refresh_pending;
     let calibration_candidate = crate::decision_calibration::DecisionCalibration::freeze_for_model(
         req.model_key.as_deref(),
     );
@@ -4677,6 +4689,7 @@ fn apply_once(
                 first_applied_agent_drop_ids,
                 pass_already_busting,
                 supersession_ride_available,
+                emergency_minimum_waived,
                 emergency_window_yields: scheduler_outcome.pass
                     == scheduler::PassDecision::Emergency95,
                 tag_window_protected_block_ids: tag_window_protected_block_ids.clone(),
@@ -12746,9 +12759,16 @@ pub(crate) fn is_prefix_bound_thinking_model(model_key: Option<&str>) -> bool {
 /// OpenCode assistant mids whose reasoning blocks are newly removed on this bust pass.
 /// Mirrors TS `selectReasoningRemovals`: tag at or below the age cutoff, a reasoning
 /// block present, not the newest assistant (nor the newest with replayable content), and
-/// some non-reasoning content left after removal. On prefix-bound models the forward walk
-/// stops at the first reasoning-bearing assistant that is neither already frozen nor
-/// eligible, so the removed set stays a contiguous oldest prefix.
+/// some non-reasoning content left after removal.
+///
+/// Selects nothing when:
+/// - the model is prefix-bound (Fable 5.1, Opus 5.5, Sonnet 5.5): a signed block stays
+///   valid only while everything before it is unchanged, so removing an older block
+///   invalidates every newer one (docs/reports/anthropic-thinking-binding.md);
+/// - the provider is unresolved, since the session may be canonical Anthropic;
+/// - the route is OpenRouter, whose adapter also sends the reasoning as
+///   `reasoning_details` copied onto the tool calls. TS strips those copies; this lane
+///   does not, so it stays off rather than change bytes without shrinking the request.
 fn opencode_reasoning_removal_mids<'a>(
     req: &'a TransformRequest,
     tag_numbers: &BTreeMap<String, u64>,
@@ -12759,9 +12779,19 @@ fn opencode_reasoning_removal_mids<'a>(
     let Some(cutoff) = age_cutoff.filter(|cutoff| *cutoff > 0) else {
         return selected;
     };
+    let provider = req
+        .provider_id
+        .as_deref()
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    if provider.is_empty()
+        || provider.contains("openrouter")
+        || is_prefix_bound_thinking_model(req.model_key.as_deref())
+    {
+        return selected;
+    }
     let newest = latest_assistant_mid(&req.messages);
     let exempt = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
-    let prefix_bound = is_prefix_bound_thinking_model(req.model_key.as_deref());
     for message in &req.messages {
         if message.ck.meta.synthetic
             || message.ck.role != "assistant"
@@ -12782,8 +12812,6 @@ fn opencode_reasoning_removal_mids<'a>(
             && message.ck.content.iter().any(has_meaningful_content);
         if eligible {
             selected.insert(mid);
-        } else if prefix_bound {
-            break;
         }
     }
     selected
@@ -15196,7 +15224,9 @@ fn reasoning_clear_cutoff_with_tags(
     is_bust_pass: bool,
     tag_numbers: &BTreeMap<String, u64>,
 ) -> Option<u64> {
-    if !is_bust_pass {
+    // Prefix-bound models never take the age lane: removing an older signed block
+    // invalidates every newer one.
+    if !is_bust_pass || is_prefix_bound_thinking_model(req.model_key.as_deref()) {
         return None;
     }
     let profile_supported = match profile {
@@ -20250,6 +20280,7 @@ pub(crate) mod tests {
             // The observed pass was Force85, not the scheduler's Emergency95 backstop.
             pass_already_busting: true,
             supersession_ride_available: true,
+            emergency_minimum_waived: false,
             emergency_window_yields: false,
             tag_window_protected_block_ids: protected,
             exempt_message_protected_block_ids: HashSet::new(),
@@ -20394,7 +20425,9 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         bootstrap_covering_a(&s);
-        let huge = "x".repeat(50_000);
+        // Large enough that the force batch clears the emergency minimum achievable
+        // reclaim; this test is about when the producer gate runs.
+        let huge = "x".repeat(100_000);
         let force_messages = vec![
             item("a", 1, "raw"),
             assistant_tool_call("force_old", 2, "force_old_call"),
@@ -21629,6 +21662,70 @@ pub(crate) mod tests {
         assert!(s.load_pending_agent_drops("ses").unwrap().is_empty());
     }
 
+    /// At the 95% backstop with an earlier emergency drop already persisted, a selection
+    /// that reclaims less than the minimum is skipped. Neither the backstop nor the
+    /// force-band edge counts as an already-paid rewrite.
+    #[test]
+    fn emergency_backstop_skips_a_sub_minimum_selection_with_drops_already_persisted() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        bootstrap_covering_a(&s);
+        let context = smart_pctx();
+        let bash_call = |mid: &str, ordinal: u64| {
+            let mut call = assistant_tool_call(mid, ordinal, mid);
+            if let ck_wire::CkKind::ToolCall { name, .. } = &mut call.ck.content[0].kind {
+                *name = "bash".into();
+            }
+            call
+        };
+        let mut request = with_usage(
+            req(
+                "ses",
+                "cfg0",
+                vec![
+                    item("a", 1, "raw"),
+                    bash_call("early", 2),
+                    tool_result("early-result", 3, "early", &"e".repeat(20_000)),
+                    item("protected", 4, &"tail content ".repeat(30_000)),
+                    item("newest-1", 5, "tail"),
+                ],
+            ),
+            167_000,
+            167_000,
+        );
+        request.protected_tokens_effective = Some(30_000);
+        request.protected_tags = 0;
+        transform(&s, &request, &context).unwrap();
+        let first = s.load("ses").unwrap();
+        assert!(
+            first
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:early#0"),
+            "the first backstop pass drops the large arc: {:?}",
+            first.meta.emergency_drop_assessment
+        );
+
+        request.messages.push(bash_call("fresh", 6));
+        request
+            .messages
+            .push(tool_result("fresh-result", 7, "fresh", &"f".repeat(2_000)));
+        request = with_usage(request, 167_000, 167_000);
+        transform(&s, &request, &context).unwrap();
+        let second = s.load("ses").unwrap();
+        assert!(
+            !second
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key == "red:fresh#0"),
+            "a ~500-token fresh result must not be dropped at the backstop"
+        );
+        let assessment = second.meta.emergency_drop_assessment.unwrap();
+        assert!(assessment.skipped_below_minimum_reclaim, "{assessment:?}");
+    }
+
     #[test]
     fn force_episode_submargin_dip_does_not_price_second_batch() {
         for percentages in [
@@ -21909,7 +22006,9 @@ pub(crate) mod tests {
     fn subagent_emergency_sample_latch_prevents_repeat_selection() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
-        let huge = "x".repeat(50_000);
+        // Large enough that the first batch clears the emergency minimum achievable
+        // reclaim; this test is about the same-sample latch, not that minimum.
+        let huge = "x".repeat(100_000);
         let messages = vec![
             item("head", 1, "raw"),
             assistant_tool_call("old", 2, "old_call"),
@@ -21934,7 +22033,8 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         assert!(
             !first_red.is_empty(),
-            "the first emergency pass should select drops"
+            "the first emergency pass should select drops: {:?}",
+            s.load("subagent").unwrap().meta.emergency_drop_assessment
         );
         let first_bytes = serde_json::to_vec(&first.ck_messages).unwrap();
 
@@ -40006,6 +40106,7 @@ pub(crate) mod tests {
                 first_applied_agent_drop_ids: HashSet::new(),
                 pass_already_busting: true,
                 supersession_ride_available: false,
+                emergency_minimum_waived: false,
                 emergency_window_yields: false,
                 tag_window_protected_block_ids: HashSet::new(),
                 exempt_message_protected_block_ids: HashSet::new(),
@@ -40277,6 +40378,7 @@ pub(crate) mod tests {
                 first_applied_agent_drop_ids: HashSet::new(),
                 pass_already_busting: false,
                 supersession_ride_available: true,
+                emergency_minimum_waived: false,
                 emergency_window_yields: false,
                 tag_window_protected_block_ids: HashSet::new(),
                 exempt_message_protected_block_ids: HashSet::new(),

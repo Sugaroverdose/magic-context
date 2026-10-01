@@ -111,15 +111,15 @@ export function buildMessageIdToMaxTag(
 /**
  * Highest tag the typed-reasoning clear (and the inline strip that shares its
  * watermark) may cover on this execute pass. Replay re-clears every assistant
- * whose tag is at or below the persisted watermark, so the cutoff itself must
- * keep two things out of reach on every later defer pass:
+ * whose tag is at or below the persisted watermark, so the cutoff stays below
+ * the newest assistant's tag and that message's reasoning is never touched on
+ * any later pass.
  *
- *   - the newest assistant message, whose reasoning is never touched: the
- *     cutoff stays below its tag;
- *   - on prefix-bound models (signed thinking bound to the request prefix),
- *     every reasoning block after the first one that cannot be cleared (a
- *     redacted block, or an untagged message): the cutoff stays below that
- *     message, so the cleared set is always a contiguous oldest prefix.
+ * Prefix-bound models (signed thinking bound to the request prefix: Fable 5.1,
+ * Opus 5.5, Sonnet 5.5) get no new clearing at all. A block stays valid only
+ * while everything before it is unchanged, so clearing an older block would
+ * invalidate every newer one (docs/reports/anthropic-thinking-binding.md). The
+ * proactive thinking strip removes every block on a busting pass instead.
  */
 export function piReasoningClearCutoff(args: {
 	messages: unknown[];
@@ -128,51 +128,19 @@ export function piReasoningClearCutoff(args: {
 	piMessageStableId: (msg: unknown, index: number) => string | undefined;
 	prefixBound: boolean;
 }): number {
+	if (args.prefixBound) return 0;
 	let maxTag = 0;
 	for (const t of args.messageIdToMaxTag.values()) if (t > maxTag) maxTag = t;
 	let cutoff = maxTag - args.clearReasoningAge;
 	if (maxTag === 0 || cutoff <= 0) return 0;
 
-	const tagOf = (raw: unknown, index: number): number => {
-		const id = args.piMessageStableId(raw, index);
-		return id ? (args.messageIdToMaxTag.get(id) ?? 0) : 0;
-	};
-	let newestIndex = -1;
 	for (let i = args.messages.length - 1; i >= 0; i--) {
 		const raw = args.messages[i] as { role?: unknown } | null;
-		if (raw && typeof raw === "object" && raw.role === "assistant") {
-			newestIndex = i;
-			break;
-		}
-	}
-	if (newestIndex >= 0) {
-		const newestTag = tagOf(args.messages[newestIndex], newestIndex);
+		if (!raw || typeof raw !== "object" || raw.role !== "assistant") continue;
+		const id = args.piMessageStableId(raw, i);
+		const newestTag = id ? (args.messageIdToMaxTag.get(id) ?? 0) : 0;
 		if (newestTag > 0) cutoff = Math.min(cutoff, newestTag - 1);
-	}
-	if (args.prefixBound) {
-		let highestEarlierTag = 0;
-		for (let i = 0; i < args.messages.length; i++) {
-			const raw = args.messages[i];
-			if (!raw || typeof raw !== "object") continue;
-			const tag = tagOf(raw, i);
-			const msg = raw as PiAssistantMessage;
-			if (msg.role === "assistant" && Array.isArray(msg.content)) {
-				const thinking = msg.content.filter(
-					(part) =>
-						part &&
-						typeof part === "object" &&
-						(part as { type?: unknown }).type === "thinking",
-				) as PiThinkingContent[];
-				const blocked =
-					thinking.length > 0 &&
-					(tag === 0 || thinking.some((part) => part.redacted === true));
-				if (blocked) {
-					cutoff = Math.min(cutoff, tag > 0 ? tag - 1 : highestEarlierTag);
-					break;
-				}
-			}
-			if (tag > highestEarlierTag) highestEarlierTag = tag;
-		}
+		break;
 	}
 	return Math.max(0, cutoff);
 }

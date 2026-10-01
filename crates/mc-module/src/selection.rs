@@ -250,6 +250,12 @@ pub struct SelectionContext {
     /// True when supersession can ride concrete work already scheduled for this pass.
     /// Unlike `pass_already_busting`, a held emergency latch alone does not set this.
     pub supersession_ride_available: bool,
+    /// True only when a rebuild that is independent of the emergency itself (a fold, an
+    /// m[1] or render-config change, a pending soft refresh) already rewrites the cached
+    /// prefix on this pass. The force-band edge and the 95% backstop are permissions to
+    /// rewrite, not rewrites that are already paid for, so they never set this. Only this
+    /// flag waives the emergency minimum achievable reclaim.
+    pub emergency_minimum_waived: bool,
     /// At the scheduler's >=95% backstop, the token window and tier reserve yield.
     pub emergency_window_yields: bool,
     /// Persisted token-window protection expressed as exact block ids.
@@ -1366,7 +1372,7 @@ fn select_emergency(
     // Price the selection before committing it. Skipping leaves the pressure episode
     // armed, so the candidates can still ride a later rewrite.
     let skipped_below_minimum_reclaim = !selected.is_empty()
-        && !ctx.pass_already_busting
+        && !ctx.emergency_minimum_waived
         && reclaimed < EMERGENCY_MIN_ACHIEVABLE_RECLAIM_TOKENS;
     if skipped_below_minimum_reclaim {
         tracing::info!(
@@ -2169,8 +2175,10 @@ mod tests {
     }
 
     /// The live worker shape: the fixed floor (~326K) is already above the ceiling
-    /// (~251K) and the only candidate is a fresh result worth ~149 tokens. The pass is
-    /// skipped unless another mutation already prices it. Mirrors the TS planner tests.
+    /// (~251K) and the only candidate is a fresh result worth ~149 tokens. At the 95%
+    /// backstop production sets both `emergency_window_yields` and `pass_already_busting`;
+    /// neither waives the minimum, so the pass is skipped. Only an independent rebuild
+    /// (`emergency_minimum_waived`) lets the small selection ride. Mirrors the TS tests.
     #[test]
     fn emergency_skips_a_selection_below_the_minimum_achievable_reclaim() {
         let items = vec![
@@ -2184,6 +2192,7 @@ mod tests {
         ctx.current_total_input_tokens = 335_200.0;
         ctx.ceiling_tokens = 251_000.0;
         ctx.emergency_window_yields = true;
+        ctx.pass_already_busting = true;
         let mut assessment = None;
         let selected = select_emergency(&arcs, &ctx, 9_200.0, &HashMap::new(), &mut assessment);
         let report = assessment.as_ref().unwrap();
@@ -2192,7 +2201,7 @@ mod tests {
         assert!(report.floor_above_ceiling);
         assert_eq!(report.selected_reclaim_tokens, 0.0);
 
-        ctx.pass_already_busting = true;
+        ctx.emergency_minimum_waived = true;
         let selected = select_emergency(&arcs, &ctx, 9_200.0, &HashMap::new(), &mut assessment);
         let report = assessment.as_ref().unwrap();
         assert_eq!(selected.len(), 1);
@@ -2444,6 +2453,7 @@ mod tests {
             first_applied_agent_drop_ids: HashSet::new(),
             pass_already_busting: false,
             supersession_ride_available: false,
+            emergency_minimum_waived: false,
             emergency_window_yields: false,
             tag_window_protected_block_ids: HashSet::new(),
             exempt_message_protected_block_ids: HashSet::new(),
@@ -2726,6 +2736,7 @@ mod tests {
                 first_applied_agent_drop_ids: HashSet::new(),
                 pass_already_busting: case.smart_drops || case.ctx.pass_already_busting,
                 supersession_ride_available: case.smart_drops || case.ctx.pass_already_busting,
+                emergency_minimum_waived: false,
                 emergency_window_yields: false,
                 tag_window_protected_block_ids: golden_ordinal_threshold_to_row_identities(
                     &items,
@@ -4393,6 +4404,7 @@ mod tests {
             has_prior_drop: true,
             pass_already_busting: true,
             supersession_ride_available: true,
+            emergency_minimum_waived: false,
             ..base_ctx(PassClass::Execute)
         };
 

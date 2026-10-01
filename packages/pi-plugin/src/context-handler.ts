@@ -3613,12 +3613,10 @@ export function registerPiContextHandler(
 							endOfPassOrder: true,
 						})
 					: startOfPassBindingRecovery;
-			// Subagents are left out, as in OpenCode.
-			if (
-				!options.compactionOff &&
-				!sessionMeta.isSubagent &&
-				bindingStripOrder === "end"
-			) {
+			// Subagents are included, as in OpenCode: on prefix-bound models the age
+			// lane no longer clears thinking, so this strip is their only reasoning
+			// reclaim, and their busting passes invalidate signed blocks too.
+			if (!options.compactionOff && bindingStripOrder === "end") {
 				try {
 					applyPiProactiveThinkingStrip({
 						db: options.db,
