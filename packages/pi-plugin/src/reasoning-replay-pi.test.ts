@@ -12,6 +12,7 @@ import {
 	buildMessageIdToMaxTag,
 	clearOldReasoningPi,
 	piMessageStableId,
+	piReasoningClearCutoff,
 	replayClearedReasoningPi,
 	replayStrippedInlineThinkingPi,
 	stripInlineThinkingPi,
@@ -488,5 +489,126 @@ describe("replayStrippedInlineThinkingPi", () => {
 			piMessageStableId,
 		});
 		expect(stripped).toBe(0);
+	});
+});
+
+describe("piReasoningClearCutoff", () => {
+	// Five assistant steps; assistant i carries tag i + 1. A user turn after them
+	// carries tag 40, so the age rule alone would cover every assistant.
+	const build = (options: { redactedAt?: number } = {}) => {
+		const messages: Array<Record<string, unknown>> = [];
+		for (let step = 0; step < 5; step++) {
+			messages.push({
+				role: "assistant",
+				timestamp: step + 1,
+				content: [
+					{
+						type: "thinking",
+						thinking: `reasoning ${step}`,
+						thinkingSignature: `sig-${step}`,
+						...(options.redactedAt === step ? { redacted: true } : {}),
+					},
+					{ type: "text", text: `reply ${step}` },
+				],
+			});
+		}
+		messages.push({
+			role: "user",
+			timestamp: 99,
+			content: [{ type: "text", text: "next" }],
+		});
+		const messageIdToMaxTag = new Map<string, number>();
+		messages.forEach((message, index) => {
+			messageIdToMaxTag.set(
+				requireId(message, index),
+				index < 5 ? index + 1 : 40,
+			);
+		});
+		return { messages, messageIdToMaxTag };
+	};
+	const thinkingOf = (message: Record<string, unknown>) =>
+		(message.content as Array<{ thinking?: string }>)[0].thinking;
+
+	it("stays below the newest assistant even when the age rule covers it", () => {
+		const { messages, messageIdToMaxTag } = build();
+		const cutoff = piReasoningClearCutoff({
+			messages,
+			messageIdToMaxTag,
+			clearReasoningAge: 3,
+			piMessageStableId,
+			prefixBound: false,
+		});
+		expect(cutoff).toBe(4);
+		const outcome = clearOldReasoningPi({
+			messages,
+			messageIdToMaxTag,
+			clearReasoningAge: 3,
+			piMessageStableId,
+			maxCutoff: cutoff,
+		});
+		expect(outcome.newWatermark).toBe(4);
+		expect(thinkingOf(messages[3])).toBe("");
+		expect(thinkingOf(messages[4])).toBe("reasoning 4");
+	});
+
+	it("keeps the cleared set a contiguous oldest prefix on prefix-bound models", () => {
+		const { messages, messageIdToMaxTag } = build({ redactedAt: 2 });
+		const bound = piReasoningClearCutoff({
+			messages,
+			messageIdToMaxTag,
+			clearReasoningAge: 3,
+			piMessageStableId,
+			prefixBound: true,
+		});
+		// The redacted block at tag 3 cannot be cleared, so nothing after it is.
+		expect(bound).toBe(2);
+		const unbound = piReasoningClearCutoff({
+			messages,
+			messageIdToMaxTag,
+			clearReasoningAge: 3,
+			piMessageStableId,
+			prefixBound: false,
+		});
+		expect(unbound).toBe(4);
+	});
+
+	it("replays exactly the executed clear on a rebuilt array, newest assistant untouched", () => {
+		const db = makeDb();
+		try {
+			const sessionId = "ses-pi-cutoff-replay";
+			const first = build();
+			const cutoff = piReasoningClearCutoff({
+				messages: first.messages,
+				messageIdToMaxTag: first.messageIdToMaxTag,
+				clearReasoningAge: 3,
+				piMessageStableId,
+				prefixBound: false,
+			});
+			const outcome = clearOldReasoningPi({
+				messages: first.messages,
+				messageIdToMaxTag: first.messageIdToMaxTag,
+				clearReasoningAge: 3,
+				piMessageStableId,
+				maxCutoff: cutoff,
+			});
+			getOrCreateSessionMeta(db, sessionId);
+			updateSessionMeta(db, sessionId, {
+				clearedReasoningThroughTag: outcome.newWatermark,
+			});
+			const rebuilt = build();
+			replayClearedReasoningPi({
+				db,
+				sessionId,
+				messages: rebuilt.messages,
+				messageIdToMaxTag: rebuilt.messageIdToMaxTag,
+				piMessageStableId,
+			});
+			expect(JSON.stringify(rebuilt.messages)).toBe(
+				JSON.stringify(first.messages),
+			);
+			expect(thinkingOf(rebuilt.messages[4])).toBe("reasoning 4");
+		} finally {
+			db.close();
+		}
 	});
 });

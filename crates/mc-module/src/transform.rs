@@ -12585,12 +12585,22 @@ fn new_frozen_strip_units(
     let age_cutoff = tag_age_cutoff(req, tag_numbers);
     let reasoning_mutation_exempt_mid =
         latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
-    let cc_reasoning_cutoff = if SerializerProfile::parse(&req.serializer_profile)
-        == Some(SerializerProfile::ClaudeCodeAnthropic)
-    {
+    let profile = SerializerProfile::parse(&req.serializer_profile);
+    let cc_reasoning_cutoff = if profile == Some(SerializerProfile::ClaudeCodeAnthropic) {
         reasoning_clear_cutoff
     } else {
         None
+    };
+    // OpenCode on any provider other than canonical `anthropic` removes whole old reasoning
+    // blocks through the same frozen `reasoning_age` unit. Canonical Anthropic keeps its
+    // `reasoning_clear` empty-shell lane, which its adapter filters before the wire.
+    let opencode_removal_mids = if profile == Some(SerializerProfile::OpencodeAiSdk)
+        && req.serve_native
+        && !request_accepts_empty_content(req)
+    {
+        opencode_reasoning_removal_mids(req, tag_numbers, age_cutoff, &existing_keys)
+    } else {
+        HashSet::new()
     };
     let mut units = BTreeMap::<String, FrozenUnit>::new();
     let mut has_assistant_response = false;
@@ -12643,14 +12653,14 @@ fn new_frozen_strip_units(
             // then remove whole reasoning blocks at render time. The unit is first minted only on
             // this already-busting pass and replays unchanged on defers; selection.rs continues to
             // exclude every reasoning block from ReductionDecision targets.
-            if message.ck.role == "assistant"
+            let cc_aged = message.ck.role == "assistant"
                 && reasoning_mutation_exempt_mid != Some(message.mid.as_str())
                 && cc_reasoning_cutoff.is_some_and(|cutoff| {
                     let tag = message_tag_number(message, tag_numbers);
                     tag > 0 && tag <= cutoff
                 })
-                && blocks.iter().any(is_reasoning_block)
-            {
+                && blocks.iter().any(is_reasoning_block);
+            if cc_aged || opencode_removal_mids.contains(message.mid.as_str()) {
                 let unit = strip_unit("reasoning_age", &message.mid, "");
                 if !existing_keys.contains(unit.key.as_str()) {
                     units.insert(unit.key.clone(), unit);
@@ -12712,6 +12722,71 @@ fn new_frozen_strip_units(
         }
     }
     units.into_values().collect()
+}
+
+/// True for Claude models whose signed thinking is bound to the request prefix, on any
+/// route. Mirrors TS `isPrefixBoundThinkingModel` and its `PREFIX_BOUND_THINKING_MODELS`
+/// (Fable 5.1, Opus 5.5, Sonnet 5.5); the provider is deliberately ignored.
+pub(crate) fn is_prefix_bound_thinking_model(model_key: Option<&str>) -> bool {
+    static PATTERN: OnceLock<Regex> = OnceLock::new();
+    let Some(key) = model_key else {
+        return false;
+    };
+    let model = key.split_once('/').map_or(key, |(_, model)| model);
+    PATTERN
+        .get_or_init(|| {
+            Regex::new(
+                r"(?i)(?:^|[-_.:/])(?:fable[-_.]?5[-_.]1|opus[-_.]?5[-_.]5|sonnet[-_.]?5[-_.]5)(?:$|[-_.:/@])",
+            )
+            .unwrap()
+        })
+        .is_match(model)
+}
+
+/// OpenCode assistant mids whose reasoning blocks are newly removed on this bust pass.
+/// Mirrors TS `selectReasoningRemovals`: tag at or below the age cutoff, a reasoning
+/// block present, not the newest assistant (nor the newest with replayable content), and
+/// some non-reasoning content left after removal. On prefix-bound models the forward walk
+/// stops at the first reasoning-bearing assistant that is neither already frozen nor
+/// eligible, so the removed set stays a contiguous oldest prefix.
+fn opencode_reasoning_removal_mids<'a>(
+    req: &'a TransformRequest,
+    tag_numbers: &BTreeMap<String, u64>,
+    age_cutoff: Option<u64>,
+    existing_keys: &HashSet<&str>,
+) -> HashSet<&'a str> {
+    let mut selected = HashSet::new();
+    let Some(cutoff) = age_cutoff.filter(|cutoff| *cutoff > 0) else {
+        return selected;
+    };
+    let newest = latest_assistant_mid(&req.messages);
+    let exempt = latest_assistant_reasoning_mutation_exempt_mid(&req.messages);
+    let prefix_bound = is_prefix_bound_thinking_model(req.model_key.as_deref());
+    for message in &req.messages {
+        if message.ck.meta.synthetic
+            || message.ck.role != "assistant"
+            || !message.ck.content.iter().any(is_reasoning_block)
+        {
+            continue;
+        }
+        let mid = message.mid.as_str();
+        if existing_keys.contains(format!("strip:reasoning_age:{mid}").as_str()) {
+            continue;
+        }
+        let tag = message_tag_number(message, tag_numbers);
+        let eligible = !mid.is_empty()
+            && Some(mid) != newest
+            && Some(mid) != exempt
+            && tag > 0
+            && tag <= cutoff
+            && message.ck.content.iter().any(has_meaningful_content);
+        if eligible {
+            selected.insert(mid);
+        } else if prefix_bound {
+            break;
+        }
+    }
+    selected
 }
 
 struct ReasoningMutationPolicy {

@@ -109,6 +109,75 @@ export function buildMessageIdToMaxTag(
 }
 
 /**
+ * Highest tag the typed-reasoning clear (and the inline strip that shares its
+ * watermark) may cover on this execute pass. Replay re-clears every assistant
+ * whose tag is at or below the persisted watermark, so the cutoff itself must
+ * keep two things out of reach on every later defer pass:
+ *
+ *   - the newest assistant message, whose reasoning is never touched: the
+ *     cutoff stays below its tag;
+ *   - on prefix-bound models (signed thinking bound to the request prefix),
+ *     every reasoning block after the first one that cannot be cleared (a
+ *     redacted block, or an untagged message): the cutoff stays below that
+ *     message, so the cleared set is always a contiguous oldest prefix.
+ */
+export function piReasoningClearCutoff(args: {
+	messages: unknown[];
+	messageIdToMaxTag: Map<string, number>;
+	clearReasoningAge: number;
+	piMessageStableId: (msg: unknown, index: number) => string | undefined;
+	prefixBound: boolean;
+}): number {
+	let maxTag = 0;
+	for (const t of args.messageIdToMaxTag.values()) if (t > maxTag) maxTag = t;
+	let cutoff = maxTag - args.clearReasoningAge;
+	if (maxTag === 0 || cutoff <= 0) return 0;
+
+	const tagOf = (raw: unknown, index: number): number => {
+		const id = args.piMessageStableId(raw, index);
+		return id ? (args.messageIdToMaxTag.get(id) ?? 0) : 0;
+	};
+	let newestIndex = -1;
+	for (let i = args.messages.length - 1; i >= 0; i--) {
+		const raw = args.messages[i] as { role?: unknown } | null;
+		if (raw && typeof raw === "object" && raw.role === "assistant") {
+			newestIndex = i;
+			break;
+		}
+	}
+	if (newestIndex >= 0) {
+		const newestTag = tagOf(args.messages[newestIndex], newestIndex);
+		if (newestTag > 0) cutoff = Math.min(cutoff, newestTag - 1);
+	}
+	if (args.prefixBound) {
+		let highestEarlierTag = 0;
+		for (let i = 0; i < args.messages.length; i++) {
+			const raw = args.messages[i];
+			if (!raw || typeof raw !== "object") continue;
+			const tag = tagOf(raw, i);
+			const msg = raw as PiAssistantMessage;
+			if (msg.role === "assistant" && Array.isArray(msg.content)) {
+				const thinking = msg.content.filter(
+					(part) =>
+						part &&
+						typeof part === "object" &&
+						(part as { type?: unknown }).type === "thinking",
+				) as PiThinkingContent[];
+				const blocked =
+					thinking.length > 0 &&
+					(tag === 0 || thinking.some((part) => part.redacted === true));
+				if (blocked) {
+					cutoff = Math.min(cutoff, tag > 0 ? tag - 1 : highestEarlierTag);
+					break;
+				}
+			}
+			if (tag > highestEarlierTag) highestEarlierTag = tag;
+		}
+	}
+	return Math.max(0, cutoff);
+}
+
+/**
  * Clear local typed reasoning on assistant messages whose tag number is older
  * than `(maxTag - clearReasoningAge)`. Returns the highest tag number that was
  * actually cleared, so the caller can persist the local watermark via
@@ -121,6 +190,8 @@ export function clearOldReasoningPi(args: {
 	messageIdToMaxTag: Map<string, number>;
 	clearReasoningAge: number;
 	piMessageStableId: (msg: unknown, index: number) => string | undefined;
+	/** Upper bound from piReasoningClearCutoff; omitted means age only. */
+	maxCutoff?: number;
 }): { cleared: number; newWatermark: number } {
 	const { messages, messageIdToMaxTag, clearReasoningAge, piMessageStableId } =
 		args;
@@ -129,7 +200,10 @@ export function clearOldReasoningPi(args: {
 	for (const t of messageIdToMaxTag.values()) if (t > maxTag) maxTag = t;
 	if (maxTag === 0) return { cleared: 0, newWatermark: 0 };
 
-	const ageCutoff = maxTag - clearReasoningAge;
+	const ageCutoff = Math.min(
+		maxTag - clearReasoningAge,
+		args.maxCutoff ?? Number.POSITIVE_INFINITY,
+	);
 	if (ageCutoff <= 0) return { cleared: 0, newWatermark: 0 };
 
 	let cleared = 0;
@@ -194,6 +268,8 @@ export function stripInlineThinkingPi(args: {
 	messageIdToMaxTag: Map<string, number>;
 	clearReasoningAge: number;
 	piMessageStableId: (msg: unknown, index: number) => string | undefined;
+	/** Upper bound from piReasoningClearCutoff; omitted means age only. */
+	maxCutoff?: number;
 }): { stripped: number; newWatermark: number } {
 	const { messages, messageIdToMaxTag, clearReasoningAge, piMessageStableId } =
 		args;
@@ -202,7 +278,10 @@ export function stripInlineThinkingPi(args: {
 	for (const t of messageIdToMaxTag.values()) if (t > maxTag) maxTag = t;
 	if (maxTag === 0) return { stripped: 0, newWatermark: 0 };
 
-	const ageCutoff = maxTag - clearReasoningAge;
+	const ageCutoff = Math.min(
+		maxTag - clearReasoningAge,
+		args.maxCutoff ?? Number.POSITIVE_INFINITY,
+	);
 	if (ageCutoff <= 0) return { stripped: 0, newWatermark: 0 };
 
 	let stripped = 0;

@@ -53,6 +53,7 @@ import {
 	scheduleIncrementalIndex,
 	scheduleReconciliation,
 } from "@magic-context/core/features/magic-context/message-index-async";
+import { isPrefixBoundThinkingModel } from "@magic-context/core/features/magic-context/overflow-detection";
 import {
 	encodePiContentDecision,
 	freezePiContentDecision,
@@ -302,6 +303,7 @@ import {
 import {
 	buildMessageIdToMaxTag,
 	clearOldReasoningPi,
+	piReasoningClearCutoff,
 	replayClearedReasoningPi,
 	replayStrippedInlineThinkingPi,
 	stripInlineThinkingPi,
@@ -3348,6 +3350,12 @@ export function registerPiContextHandler(
 						options.heuristics?.clearReasoningAge ??
 						DEFAULT_CLEAR_REASONING_AGE,
 					nativeReasoningMayClear: canClearNativeReasoning(ctx.model),
+					prefixBound: isPrefixBoundThinkingModel(
+						typeof ctx.model?.provider === "string"
+							? ctx.model.provider
+							: undefined,
+						typeof ctx.model?.id === "string" ? ctx.model.id : undefined,
+					),
 					preserveReasoningToolArcs:
 						ctx.model?.api !== "openai-codex-responses" &&
 						ctx.model?.api !== "openai-responses",
@@ -4980,6 +4988,8 @@ interface RunPipelineArgs {
 		clearReasoningAge: number;
 		nativeReasoningMayClear: boolean;
 		preserveReasoningToolArcs: boolean;
+		/** Model binds signed thinking to the request prefix (Fable 5.1, Opus 5.5, Sonnet 5.5). */
+		prefixBound?: boolean;
 	};
 	/** True only when the active provider filters empty sentinel content safely. */
 	canUseEmptySentinels: boolean;
@@ -6094,6 +6104,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 									currentTotalInputTokens: args.contextUsage.inputTokens,
 									ceilingTokens: args.emergencyCeilingTokens,
 									usagePercentage: args.contextUsage.percentage,
+									passAlreadyPriced: independentMutationBeforeHeuristics,
 								}
 							: undefined,
 					caveman: args.isSubagent ? undefined : args.heuristics.caveman,
@@ -6236,17 +6247,29 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		try {
 			const tClearReasoning = performance.now();
 			const prevWatermark = args.sessionMeta.clearedReasoningThroughTag ?? 0;
+			// Both lanes share one replayed watermark, so both use the same bound:
+			// below the newest assistant, and a contiguous oldest prefix on
+			// prefix-bound models.
+			const maxCutoff = piReasoningClearCutoff({
+				messages: workingMessages,
+				messageIdToMaxTag,
+				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
+				piMessageStableId: stableIdResolver,
+				prefixBound: args.reasoningClearing.prefixBound === true,
+			});
 			const clearOutcome = clearOldReasoningPi({
 				messages: workingMessages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
 				piMessageStableId: stableIdResolver,
+				maxCutoff,
 			});
 			const stripOutcome = stripInlineThinkingPi({
 				messages: workingMessages,
 				messageIdToMaxTag,
 				clearReasoningAge: args.reasoningClearing.clearReasoningAge,
 				piMessageStableId: stableIdResolver,
+				maxCutoff,
 			});
 			const combinedWatermark = Math.max(
 				clearOutcome.newWatermark,
