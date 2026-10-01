@@ -7,7 +7,7 @@ import {
 import { openDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { setHarness } from "@magic-context/core/shared/harness";
 import { createTestTempDir } from "@magic-context/core/shared/test-temp-dir";
-
+import prefixBoundGolden from "../../../crates/mc-module/testdata/prefix-bound-reasoning-trim.json";
 import {
 	buildMessageIdToMaxTag,
 	clearOldReasoningPi,
@@ -17,8 +17,6 @@ import {
 	replayStrippedInlineThinkingPi,
 	stripInlineThinkingPi,
 } from "./reasoning-replay-pi";
-
-import prefixBoundGolden from "../../../crates/mc-module/testdata/prefix-bound-reasoning-trim.json";
 
 setHarness("pi");
 
@@ -692,7 +690,10 @@ describe("piReasoningClearCutoff", () => {
 			});
 			const after = messages
 				.slice(1)
-				.map((message, step) => ({ step: `a${step}`, thinking: thinkingOf(message) }))
+				.map((message, step) => ({
+					step: `a${step}`,
+					thinking: thinkingOf(message),
+				}))
 				.filter(({ step, thinking }) => thinking === "" || gone.has(step))
 				.map(({ step }) => step)
 				.sort();

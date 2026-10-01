@@ -2116,8 +2116,9 @@ export async function runPostTransformPhase(
     let deferredMaterializedSuccessfully = false;
     let pendingOpsDidMutate = false;
     let heuristicOrReasoningDidMutate = false;
-    // The same mutations without the oldest-prefix reasoning removal, which on
-    // a prefix-bound model leaves every newer signed block valid.
+    // Like heuristicOrReasoningDidMutate, but leaving out the oldest-prefix
+    // reasoning removal, which on a prefix-bound model leaves every newer
+    // signed block valid.
     let heuristicOrReasoningEditBesidesTrim = false;
     let droppedCount = 0;
     let droppedTokens = 0;
@@ -3316,7 +3317,9 @@ export async function runPostTransformPhase(
     // any stripped bytes. The newest assistant is excluded from both detection
     // and replay because Anthropic requires its signed blocks byte-identically.
     const mergedReasoningStrippedIds = new Set(replaySnapshot?.mergedReasoningStrippedIds ?? []);
-    // Edits made from here on that change bytes before a newer signed block.
+    // Set by the frozen-decision lanes below (binding recovery, merged-reasoning
+    // strip, trailing-blank decisions) when they change bytes that sit before
+    // a newer signed thinking block.
     let lateEditBeforeNewestThinking = false;
     const thinkingBindingRecoveryMessageIds = new Set<string>();
     let thinkingBindingRecovery: ThinkingBindingRecoveryApplication | null = null;
@@ -3381,8 +3384,9 @@ export async function runPostTransformPhase(
                             mergedReasoningStrippedIds.add(id);
                         }
                         bustedThisPass = true;
-                        // This lane keeps the first block of a run and strips the
-                        // later ones: a removal from the middle.
+                        // The merged-reasoning strip keeps the first block of a run of
+                        // consecutive assistants and strips the later ones: a removal
+                        // from the middle of the history.
                         lateEditBeforeNewestThinking = true;
                     } else {
                         args.passOutcome?.record("merged-reasoning-strip-persistence-failure");
@@ -3501,12 +3505,10 @@ export async function runPostTransformPhase(
                         if (decision) trailingBlankDecisions.set(id, decision);
                     }
                     if (isCacheBustingPass) bustedThisPass = true;
-                    // Only the newest assistant's shape may be settled without
-                    // editing bytes some newer thinking block depends on.
-                    if (
-                        isCacheBustingPass &&
-                        candidates.some(([id]) => id !== newestAssistantId)
-                    ) {
+                    // A trailing-blank decision for the newest assistant edits no
+                    // byte before a newer thinking block; one for an older
+                    // assistant does.
+                    if (isCacheBustingPass && candidates.some(([id]) => id !== newestAssistantId)) {
                         lateEditBeforeNewestThinking = true;
                     }
                 } else {

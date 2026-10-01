@@ -33,7 +33,6 @@ import {
     updateTagDropMode,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
-import { getRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
 import {
     addMergedReasoningStrippedIds,
     addTrailingBlankDecisions,
@@ -50,6 +49,7 @@ import {
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
 } from "../../features/magic-context/storage-meta-persisted";
+import { getRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
 import {
     markWhitespaceAssistantTagInert,
     updateTagStatus,
@@ -9536,7 +9536,11 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
                         type: "tool",
                         tool: "bash",
                         callID: `call-${step}`,
-                        state: { status: "completed", input: {}, output: `out ${step} `.repeat(200) },
+                        state: {
+                            status: "completed",
+                            input: {},
+                            output: `out ${step} `.repeat(200),
+                        },
                     },
                 ],
             } as unknown as MessageLike;
@@ -9642,9 +9646,7 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
         const pass = boundLoop(sessionId, 8);
         const result = await serve(sessionId, pass, { flush: true });
         expect(getRemovedReasoningIds(db, sessionId)).toEqual(new Set(AGED));
-        expect(result.proactiveThinkingStrip?.messageIds).toEqual(
-            expect.arrayContaining(NEWER),
-        );
+        expect(result.proactiveThinkingStrip?.messageIds).toEqual(expect.arrayContaining(NEWER));
         for (const m of pass.messages.slice(1)) expect(reasoningCount(m)).toBe(0);
     });
 

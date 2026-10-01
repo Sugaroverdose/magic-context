@@ -7343,7 +7343,8 @@ describe("Pi proactive strip of invalidated thinking", () => {
 			// A force-band pass whose only edit is the oldest-prefix thinking clear.
 			const trim = await pass(10, 96);
 			const cleared = trim.filter(
-				(message, index) => index % 2 === 1 && index >= 4 && liveThinking(message) === 0,
+				(message, index) =>
+					index % 2 === 1 && index >= 4 && liveThinking(message) === 0,
 			);
 			expect(cleared.length).toBeGreaterThan(0);
 			// Cleared thinking is a contiguous oldest prefix of the kept turns...
@@ -7354,11 +7355,16 @@ describe("Pi proactive strip of invalidated thinking", () => {
 			expect(kept).toEqual([...kept].sort((a, b) => a - b));
 			expect(kept.at(-1)).toBe(1);
 			// ...and nothing newer was stripped: the newer turns are byte-identical.
-			expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(strippedBefore);
-			const firstKept = trim.findIndex(
-				(message, index) => index >= 4 && index % 2 === 1 && liveThinking(message) === 1,
+			expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
+				strippedBefore,
 			);
-			expect(sha256(trim.slice(firstKept))).toBe(sha256(served.slice(firstKept)));
+			const firstKept = trim.findIndex(
+				(message, index) =>
+					index >= 4 && index % 2 === 1 && liveThinking(message) === 1,
+			);
+			expect(sha256(trim.slice(firstKept))).toBe(
+				sha256(served.slice(firstKept)),
+			);
 
 			const defer = await pass(10, 10);
 			expect(sha256(defer)).toBe(sha256(trim));

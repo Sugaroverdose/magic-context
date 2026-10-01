@@ -3617,7 +3617,10 @@ export function registerPiContextHandler(
 						getPersistedTodoSyntheticAnchor(options.db, sessionId),
 					) !== todoAnchorBefore;
 			} catch {
-				// Unknown: keep the strip, which is the safe direction.
+				// The reminder and todo state could not be read, so whether this
+				// pass edited an earlier message is unknown. Treat it as edited:
+				// stripping a still-valid block costs a cache rewrite, keeping an
+				// invalidated one costs a rejected request.
 			}
 			const outputEntryIds = resolvePiLkgOutputEntryIds(
 				outputMessages,
@@ -5213,7 +5216,8 @@ async function runCompactionOffPipeline(
 		emergency: false,
 		bustedThisPass: injectionResult?.m0Materialized === true,
 		agentDropsAppliedThisPass: false,
-		// Compaction-off never runs the proactive strip; keep the safe default.
+		// Compaction-off passes never reach the proactive strip. True is the
+		// value that would strip if one ever did.
 		prefixEditBesidesReasoningTrim: true,
 		targetCount: 0,
 		reasoningWatermark: args.sessionMeta.clearedReasoningThroughTag ?? 0,

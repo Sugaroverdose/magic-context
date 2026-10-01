@@ -5111,7 +5111,9 @@ fn apply_once(
             .min(tag_rows.len());
         tag_rows[pending_overlays.tag_mint_start.min(mint_end)..mint_end]
             .iter()
-            .any(|row| overlay_target_was_served(&loaded.meta.served_output_fingerprint, &row.block_id))
+            .any(|row| {
+                overlay_target_was_served(&loaded.meta.served_output_fingerprint, &row.block_id)
+            })
     };
     let served_user_hint_this_pass = pending_overlays.user_hint.as_ref().is_some_and(|hint| {
         !hint.hint_text.is_empty() && user_hint_target_was_served(&loaded.meta, &hint.block_id)
@@ -5127,9 +5129,10 @@ fn apply_once(
                 .is_some_and(|mid| Some(mid) != current_exempt_mid)
         });
     // A bust applies system-injection strips that earlier defers held back.
-    let applies_held_system_strip = loaded.core.frozen_units.iter().any(|unit| {
-        unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX) && !unit.reset_rule.is_empty()
-    });
+    let applies_held_system_strip =
+        loaded.core.frozen_units.iter().any(|unit| {
+            unit.key.starts_with(SYSTEM_STRIP_BLOCK_PREFIX) && !unit.reset_rule.is_empty()
+        });
     let reasoning_trim_only_candidate = is_bust_pass
         && serializer_profile == Some(SerializerProfile::OpencodeAiSdk)
         && is_prefix_bound_thinking_model(req.model_key.as_deref())

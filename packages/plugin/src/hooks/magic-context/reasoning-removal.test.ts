@@ -2,6 +2,7 @@
 
 import { afterEach, describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
+import prefixBoundGolden from "../../../../../crates/mc-module/testdata/prefix-bound-reasoning-trim.json";
 import {
     getActiveTagsBySession,
     getOrCreateSessionMeta,
@@ -35,7 +36,6 @@ import { replayClearedReasoning } from "./strip-content";
 import type { MessageLike } from "./tag-messages";
 import { type TagTarget, tagMessages } from "./tag-messages";
 import { runPostTransformPhase } from "./transform-postprocess-phase";
-import prefixBoundGolden from "../../../../../crates/mc-module/testdata/prefix-bound-reasoning-trim.json";
 
 type PostTransformArgs = Parameters<typeof runPostTransformPhase>[0];
 
@@ -211,9 +211,7 @@ describe("selectReasoningRemovals", () => {
                 const step = message.info.id?.replace("assistant-", "a");
                 if (step && scenario.untagged.includes(step)) tags.delete(message);
             }
-            const removed = scenario.already_removed.map((step) =>
-                step.replace("a", "assistant-"),
-            );
+            const removed = scenario.already_removed.map((step) => step.replace("a", "assistant-"));
             const selected = selectReasoningRemovals({
                 messages,
                 messageTagNumbers: tags,

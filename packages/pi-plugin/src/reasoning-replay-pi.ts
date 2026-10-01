@@ -267,9 +267,7 @@ export function piPrefixBoundReasoningCutoff(args: {
 			const newestTag = tagAt(newestIndex);
 			if (newestTag > 0) cutoff = Math.min(cutoff, newestTag - 1);
 		}
-		const late = walk
-			.slice(0, stop)
-			.findIndex((entry) => entry.tag > cutoff);
+		const late = walk.slice(0, stop).findIndex((entry) => entry.tag > cutoff);
 		if (late < 0) return Math.max(0, cutoff);
 		stop = late;
 	}
