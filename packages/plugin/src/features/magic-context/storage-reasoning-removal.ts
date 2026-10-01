@@ -2,7 +2,7 @@ import { isRecord } from "../../shared/record-type-guard";
 import type { Database } from "../../shared/sqlite";
 import {
     type ReplayDocument,
-    readReplayDocument,
+    readReplayEnvelope,
     updateReplayDocument,
 } from "./storage-replay-document";
 
@@ -72,9 +72,14 @@ function writeState(doc: ReplayDocument, state: ReasoningRemovalState): void {
  * malformed primary namespace is read from the backup copy. When neither copy
  * (or the document itself) can be read this throws: the caller must not serve
  * an empty set, which would bring removed reasoning back.
+ *
+ * Both namespaces live in the envelope column, so this reads the envelope only.
+ * The trailing-blank decision rows grow by one per assistant message and are
+ * never needed here; reading them would cost a walk of every row on each pass,
+ * and one invalid row would fail this read.
  */
 export function getReasoningRemovalState(db: Database, sessionId: string): ReasoningRemovalState {
-    const doc = readReplayDocument(db, sessionId);
+    const doc = readReplayEnvelope(db, sessionId);
     try {
         return parseState(doc, sessionId);
     } catch (error) {

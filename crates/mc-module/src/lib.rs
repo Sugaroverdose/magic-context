@@ -11248,6 +11248,7 @@ impl McHandler {
                     "todo_synthetic_anchor_seeded": result.todo_synthetic_anchor_seeded,
                     "emergency_latches_seeded": result.emergency_latches_seeded,
                     "strip_seeds_skipped": result.strip_seeds_skipped,
+                    "seeds_skipped_frozen_discarded": result.seeds_skipped_frozen_discarded,
                 }))
             }
             Err(ModuleStateSyncError::GenerationMismatch { expected, found }) => {

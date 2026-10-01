@@ -10,13 +10,16 @@ import {
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
+    addTrailingBlankDecisions,
     getEmergencyInputSample,
     setEmergencyDropSample,
 } from "../../features/magic-context/storage-meta-persisted";
 import {
     addRemovedReasoningIds,
+    getReasoningRemovalState,
     getRemovedReasoningIds,
 } from "../../features/magic-context/storage-reasoning-removal";
+import { readReplayDocument } from "../../features/magic-context/storage-replay-document";
 import { createTagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
@@ -648,6 +651,64 @@ describe("reasoning removal through postprocess", () => {
         await expect(
             pass(database, sessionId, toolLoop(8), { busting: false, providerID: "openai" }),
         ).rejects.toBeInstanceOf(EmergencyFailClosedError);
+    });
+
+    it("reads the removal set from the envelope without reading any trailing-blank decision row", () => {
+        const database = openDb();
+        const sessionId = "ses-removal-many-decisions";
+        const DECISIONS = 2_000;
+        expect(
+            addTrailingBlankDecisions(
+                database,
+                sessionId,
+                Array.from({ length: DECISIONS }, (_, index) => [`a-${index}`, "strip"] as const),
+            ),
+        ).toBe(true);
+        expect(addRemovedReasoningIds(database, sessionId, ["assistant-0", "assistant-1"])).toBe(
+            true,
+        );
+        // A decision row whose value is not a valid decision. The removal read
+        // never needs the decision rows, so this row must not make it fail.
+        database
+            .prepare(
+                "INSERT INTO session_replay_decisions (session_id, message_id, decision) VALUES (?, ?, ?)",
+            )
+            .run(sessionId, "a-invalid", "bogus");
+        // The rows are really there: the strict full-document read refuses them.
+        expect(() => readReplayDocument(database, sessionId)).toThrow();
+
+        const counters = { statements: 0, rowsRead: 0 };
+        const originalPrepare = database.prepare;
+        database.prepare = ((sql: string) => {
+            const statement = originalPrepare.call(database, sql);
+            if (!/FROM\s+session_replay_decisions/i.test(sql)) return statement;
+            counters.statements += 1;
+            const mutable = statement as unknown as {
+                all: (...args: unknown[]) => unknown[];
+                get: (...args: unknown[]) => unknown;
+            };
+            const all = mutable.all.bind(statement);
+            const get = mutable.get.bind(statement);
+            mutable.all = (...args: unknown[]) => {
+                const rows = all(...args);
+                counters.rowsRead += rows.length;
+                return rows;
+            };
+            mutable.get = (...args: unknown[]) => {
+                const row = get(...args);
+                if (row !== undefined && row !== null) counters.rowsRead += 1;
+                return row;
+            };
+            return statement;
+        }) as typeof database.prepare;
+        try {
+            const state = getReasoningRemovalState(database, sessionId);
+            expect(state.messageIds).toEqual(new Set(["assistant-0", "assistant-1"]));
+            expect(state.dropLeavesReasoning).toBe(false);
+        } finally {
+            database.prepare = originalPrepare;
+        }
+        expect(counters).toEqual({ statements: 0, rowsRead: 0 });
     });
 
     it("does not rearm the emergency episode for replayed drop statuses", async () => {

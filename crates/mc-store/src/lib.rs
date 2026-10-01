@@ -5792,7 +5792,8 @@ pub struct ModuleStateSyncResult {
     pub shadow_generation: u64,
     pub shadow_seq: u64,
     pub row_version: u64,
-    /// Number of TS drop rows that could not be materialized into frozen module units.
+    /// Number of drop rows from the TypeScript host that did not land as frozen module units: rows that could not
+    /// be materialized, plus the rows counted in `seeds_skipped_frozen_discarded`.
     pub drop_seeds_skipped: usize,
     pub pending_agent_drops_seeded: usize,
     pub pending_agent_drops_skipped: usize,
@@ -5801,8 +5802,14 @@ pub struct ModuleStateSyncResult {
     pub note_nudge_anchors_seeded: usize,
     pub todo_synthetic_anchor_seeded: bool,
     pub emergency_latches_seeded: bool,
-    /// Number of TS strip rows that could not be materialized into frozen module units.
+    /// Number of strip rows from the TypeScript host that did not land as frozen module units: rows that could not
+    /// be materialized, plus the rows counted in `seeds_skipped_frozen_discarded`.
     pub strip_seeds_skipped: usize,
+    /// Drop and strip rows that were valid but were not stored, because the stored frozen
+    /// list failed its checks on load. The sync keeps those stored rows as they are so the
+    /// next transform rebuilds the list with a HARD pass; the seeds are not written. These
+    /// rows are already included in `drop_seeds_skipped` and `strip_seeds_skipped`.
+    pub seeds_skipped_frozen_discarded: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -7331,13 +7338,16 @@ fn seeded_drop_unit(
 /// Materialize the TypeScript drop snapshot before the first transform. A tag
 /// may name a tool arc, so its paired result receives the module's normal drop
 /// unit while the call block keeps the requested skeleton or edit marker kind.
+/// Returns the skipped count (starting from `initial_skipped`) and the number of seed rows
+/// whose primary unit was valid.
 fn materialize_drop_seed_units(
     core: &mut CoreState,
     session_id: &str,
     seeds: &[ModuleDropSeedRow],
     initial_skipped: usize,
-) -> usize {
+) -> (usize, usize) {
     let mut skipped = initial_skipped;
+    let mut accepted = 0usize;
     let mut candidates = BTreeMap::<String, FrozenUnit>::new();
     for seed in seeds {
         let Some(primary) = seeded_drop_unit(
@@ -7353,6 +7363,7 @@ fn materialize_drop_seed_units(
             );
             continue;
         };
+        accepted += 1;
         let primary_key = primary.key.clone();
         if let Some(existing) = candidates.get(&primary_key) {
             if existing != &primary {
@@ -7394,7 +7405,7 @@ fn materialize_drop_seed_units(
     }
 
     if candidates.is_empty() {
-        return skipped;
+        return (skipped, accepted);
     }
     // Candidate keys are unique. Index the retained units once rather than scanning
     // the growing vector for every tag in a large cold seed. Reverse collection keeps
@@ -7420,7 +7431,7 @@ fn materialize_drop_seed_units(
         }
         core.frozen_units.push(unit);
     }
-    skipped
+    (skipped, accepted)
 }
 
 fn valid_strip_seed_kind(kind: &str) -> bool {
@@ -7433,13 +7444,17 @@ fn valid_strip_seed_kind(kind: &str) -> bool {
 /// Materialize frozen message-level strips from the TypeScript authority. The unit
 /// payload is only a compatibility marker; the transform chooses the provider-aware
 /// sentinel at egress, while the unit key keeps detection/replay id-keyed.
+///
+/// Returns the skipped count (starting from `initial_skipped`) and the number of valid seed
+/// rows.
 fn materialize_strip_seed_units(
     core: &mut CoreState,
     session_id: &str,
     seeds: &[ModuleStripSeedRow],
     initial_skipped: usize,
-) -> usize {
+) -> (usize, usize) {
     let mut skipped = initial_skipped;
+    let mut accepted = 0usize;
     let mut candidates = BTreeMap::<String, FrozenUnit>::new();
     for seed in seeds {
         if seed.message_id.is_empty()
@@ -7454,6 +7469,7 @@ fn materialize_strip_seed_units(
             );
             continue;
         }
+        accepted += 1;
         let key = format!("strip:{}:{}", seed.strip_kind, seed.message_id);
         candidates.entry(key.clone()).or_insert(FrozenUnit {
             key,
@@ -7464,7 +7480,7 @@ fn materialize_strip_seed_units(
         });
     }
     if candidates.is_empty() {
-        return skipped;
+        return (skipped, accepted);
     }
     // Candidate keys are unique. Index the retained units once rather than scanning
     // the growing vector for every tag in a large cold seed. Reverse collection keeps
@@ -7490,7 +7506,7 @@ fn materialize_strip_seed_units(
         }
         core.frozen_units.push(unit);
     }
-    skipped
+    (skipped, accepted)
 }
 
 /// Register the SQL functions the triggers of older migrations call.
@@ -11150,7 +11166,7 @@ impl McStore {
             }
 
             let drop_started = std::time::Instant::now();
-            let drop_seeds_skipped = materialize_drop_seed_units(
+            let (mut drop_seeds_skipped, drop_seeds_accepted) = materialize_drop_seed_units(
                 &mut core,
                 request.session_id,
                 request.drop_seeds,
@@ -11219,7 +11235,7 @@ impl McStore {
             if let Some(state) = request.channel2_nudge_state {
                 meta.channel2_nudge_state = state.to_string();
             }
-            let strip_seeds_skipped = materialize_strip_seed_units(
+            let (mut strip_seeds_skipped, strip_seeds_accepted) = materialize_strip_seed_units(
                 &mut core,
                 request.session_id,
                 request.strip_seeds,
@@ -11278,6 +11294,23 @@ impl McStore {
                 Some(SectionState::Discarded(_)) => cache_codec::FrozenWrite::Keep,
                 _ => cache_codec::FrozenWrite::Write,
             };
+            // The seeds materialized above were added to a list that is not written, so they
+            // did not land. Report them as skipped, with their own count, so the host can see
+            // that its seeds were not stored.
+            let mut seeds_skipped_frozen_discarded = 0usize;
+            if matches!(frozen_write, cache_codec::FrozenWrite::Keep) {
+                seeds_skipped_frozen_discarded = drop_seeds_accepted + strip_seeds_accepted;
+                drop_seeds_skipped = drop_seeds_skipped.saturating_add(drop_seeds_accepted);
+                strip_seeds_skipped = strip_seeds_skipped.saturating_add(strip_seeds_accepted);
+                if seeds_skipped_frozen_discarded > 0 {
+                    tracing::warn!(
+                        "mc-store: state sync did not store {} drop and {} strip seeds for session {}: the stored frozen list failed its checks and is kept for a HARD rebuild",
+                        drop_seeds_accepted,
+                        strip_seeds_accepted,
+                        request.session_id
+                    );
+                }
+            }
             let index_json = cache_codec::write_sections(
                 tx,
                 request.session_id,
@@ -11311,6 +11344,7 @@ impl McStore {
                 todo_synthetic_anchor_seeded,
                 emergency_latches_seeded,
                 strip_seeds_skipped,
+                seeds_skipped_frozen_discarded,
             }))
         })?;
 

@@ -6,8 +6,16 @@ import {
     FAIL_CLOSED_DOCTOR_COMMAND,
     isFailClosedBlockingError,
 } from "../features/magic-context/fail-closed-block";
-import { initializeDatabase } from "../features/magic-context/storage-db";
 import {
+    __resetSchemaFenceStateForTests,
+    closeDatabase,
+    getPersistedSchemaVersion,
+    initializeDatabase,
+    LATEST_SUPPORTED_VERSION,
+    openDatabase,
+} from "../features/magic-context/storage-db";
+import {
+    addTrailingBlankDecisions,
     recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
 } from "../features/magic-context/storage-meta-persisted";
@@ -372,6 +380,116 @@ describe("createMessagesTransformHandler — compaction-off fail-closed inertnes
             thrown = error;
         }
         expect(isFailClosedBlockingError(thrown)).toBe(true);
+    });
+});
+
+/**
+ * A long-lived process opened context.db while its schema was within this
+ * build's fence, then another process migrated it past that fence. The process
+ * keeps its cached handle, and its inner transform writes through that handle
+ * (replay decisions, LKG slots). The per-pass admission open re-runs the fence
+ * against the cached handle; a rejection there must stop the pass before any
+ * write, not just skip the admission.
+ */
+describe("createMessagesTransformHandler — schema fence on a cached handle", () => {
+    const FENCE_ENV = "MAGIC_CONTEXT_LATEST_SUPPORTED_VERSION";
+    let savedFence: string | undefined;
+
+    function openStaleProcessDb(): Database {
+        closeDatabase();
+        __resetSchemaFenceStateForTests();
+        // This open migrates the throwaway test database to the current schema
+        // and caches the handle, as a process does at startup.
+        const db = openDatabase();
+        if (!db) throw new Error("test database did not open");
+        expect(getPersistedSchemaVersion(db)).toBe(LATEST_SUPPORTED_VERSION);
+        // From here on this process behaves like the previous build: its code
+        // fence is one version below the schema another process migrated to.
+        savedFence = process.env[FENCE_ENV];
+        process.env[FENCE_ENV] = String(LATEST_SUPPORTED_VERSION - 1);
+        return db;
+    }
+
+    afterEach(() => {
+        if (savedFence === undefined) delete process.env[FENCE_ENV];
+        else process.env[FENCE_ENV] = savedFence;
+        savedFence = undefined;
+        closeDatabase();
+        __resetSchemaFenceStateForTests();
+    });
+
+    function writingTransform(db: Database, calls: { inner: number }) {
+        return {
+            "experimental.chat.messages.transform": async () => {
+                calls.inner += 1;
+                addTrailingBlankDecisions(db, "ses_test", [["assistant-stale", "strip"]]);
+            },
+        };
+    }
+
+    function decisionRows(db: Database): number {
+        return (
+            db
+                .prepare("SELECT COUNT(*) AS n FROM session_replay_decisions WHERE session_id = ?")
+                .get("ses_test") as { n: number }
+        ).n;
+    }
+
+    it("blocks the turn before the inner transform writes, and keeps blocking", async () => {
+        const db = openStaleProcessDb();
+        const calls = { inner: 0 };
+        const failClosed = createFailClosedController();
+        const handler = createMessagesTransformHandler({
+            magicContext: writingTransform(db, calls),
+            failClosed,
+            failClosedBlockingEnabled: true,
+        });
+
+        let thrown: unknown;
+        try {
+            await handler({}, makeOutput());
+        } catch (error) {
+            thrown = error;
+        }
+        expect(isFailClosedBlockingError(thrown)).toBe(true);
+        expect(failClosed.getReason()).toEqual({
+            kind: "schema_fence",
+            persistedVersion: LATEST_SUPPORTED_VERSION,
+            supportedVersion: LATEST_SUPPORTED_VERSION - 1,
+        });
+        await expect(handler({}, makeOutput())).rejects.toThrow();
+        expect(calls.inner).toBe(0);
+        expect(decisionRows(db)).toBe(0);
+    });
+
+    it("passes the input through without writing when blocking is disabled", async () => {
+        const db = openStaleProcessDb();
+        const calls = { inner: 0 };
+        const handler = createMessagesTransformHandler({
+            magicContext: writingTransform(db, calls),
+            failClosed: createFailClosedController(),
+            failClosedBlockingEnabled: false,
+        });
+        const output = makeOutput();
+        await handler({}, output);
+        expect(calls.inner).toBe(0);
+        expect(decisionRows(db)).toBe(0);
+        expect(output.messages).toHaveLength(1);
+        expect(output.messages[0].info.id).toBe("m1");
+    });
+
+    it("still runs the inner transform while the schema is within the fence", async () => {
+        const db = openStaleProcessDb();
+        process.env[FENCE_ENV] = String(LATEST_SUPPORTED_VERSION);
+        const calls = { inner: 0 };
+        const handler = createMessagesTransformHandler({
+            magicContext: writingTransform(db, calls),
+            failClosed: createFailClosedController(),
+            failClosedBlockingEnabled: true,
+        });
+        await handler({}, makeOutput());
+        expect(calls.inner).toBe(1);
+        expect(decisionRows(db)).toBe(1);
     });
 });
 
