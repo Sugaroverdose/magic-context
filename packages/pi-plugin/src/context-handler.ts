@@ -281,6 +281,7 @@ import {
 	reconcilePiLkgEntryIds,
 	resolvePiLkgOutputEntryIds,
 } from "./pi-lkg";
+import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
 import {
 	clearPiLiveUsageClassification,
 	formatPiPressureForLog,
@@ -2089,8 +2090,8 @@ function runImmediateTransaction<T>(db: ContextDatabase, fn: () => T): T {
 	if (databaseIsInTransaction(db)) {
 		return db.transaction(fn).immediate();
 	}
-	const transactionStartedAt = performance.now();
 	db.exec("BEGIN IMMEDIATE");
+	const transactionStartedAt = performance.now();
 	try {
 		const result = fn();
 		db.exec("COMMIT");
@@ -3926,7 +3927,19 @@ export function registerPiContextHandler(
 				assertTailHygieneLastWriter();
 			}
 			if (!lkgCompactionOff && lkgPassSnapshot) {
+				let hostEnvelopeSignature: string | undefined;
+				try {
+					hostEnvelopeSignature = readPiLkgFitEnvelope(
+						ctx,
+						pi,
+						resolvePiContextModelKey(ctx),
+						sessionDecisionCalibration(baseOptions.db, sessionId),
+					)?.envelopeSignature;
+				} catch {
+					/* Missing optional attribution must not prevent capturing the good prefix. */
+				}
 				lkgCoordinator.captureAppliedPass({
+					hostEnvelopeSignature,
 					snapshot: lkgPassSnapshot,
 					outputMessages,
 					outputEntryIds: resolvePiLkgOutputEntryIds(
@@ -3997,7 +4010,10 @@ export function registerPiContextHandler(
 				!lkgEmergencyRecoveryArmed
 			) {
 				try {
-					const replay = lkgCoordinator.replay(lkgPassSnapshot);
+					const replay = lkgCoordinator.replay(
+						lkgPassSnapshot,
+						(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
+					);
 					if (replay.ok) {
 						// A valid stored prefix does not bound the newly appended raw tail.
 						assertPiRawFallbackFits(
@@ -4008,6 +4024,13 @@ export function registerPiContextHandler(
 									logPiLkgRecovery(sessionIdForError, line);
 							},
 							err,
+							readPiLkgFitEnvelope(
+								ctx,
+								pi,
+								resolvePiContextModelKey(ctx),
+								sessionDecisionCalibration(baseOptions.db, sessionIdForError),
+							),
+							replay.measuredPrefix,
 						);
 						const reason = piStorageErrorReason(err);
 						logPiLkgRecovery(
@@ -4021,13 +4044,13 @@ export function registerPiContextHandler(
 					}
 					logPiLkgRecovery(
 						sessionIdForError,
-						`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); checking raw ${rawMessageCount}-message input`,
+						`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); ${transientStorageFailure ? `refusing unreduced ${rawMessageCount}-message input` : `checking raw ${rawMessageCount}-message input`}`,
 					);
 				} catch (replayError) {
 					if (replayError instanceof PiStorageBusyError) throw replayError;
 					logPiLkgRecovery(
 						sessionIdForError,
-						`${failureLabel} ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); checking raw ${rawMessageCount}-message input`,
+						`${failureLabel} ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); ${transientStorageFailure ? `refusing unreduced ${rawMessageCount}-message input` : `checking raw ${rawMessageCount}-message input`}`,
 					);
 				}
 			} else if (replayOrRefuse && sessionIdForError) {
@@ -4038,11 +4061,12 @@ export function registerPiContextHandler(
 						: (lkgPassSnapshot?.preparationFailure ?? "lkg_miss");
 				logPiLkgRecovery(
 					sessionIdForError,
-					`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); checking raw ${rawMessageCount}-message input`,
+					`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); ${transientStorageFailure ? `refusing unreduced ${rawMessageCount}-message input` : `checking raw ${rawMessageCount}-message input`}`,
 				);
 			}
 			// Keep refusal outside the replay try/catch: it must reach Pi, not be
 			// mistaken for another replay failure and swallowed into raw fallthrough.
+			if (transientStorageFailure) throw new PiStorageBusyError({ cause: err });
 			if (replayOrRefuse) {
 				assertPiRawFallbackFits(
 					event.messages,

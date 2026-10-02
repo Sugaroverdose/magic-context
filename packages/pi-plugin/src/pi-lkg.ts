@@ -11,16 +11,18 @@ import {
 	incrementalLkgContentDigests,
 	type LkgContentField,
 	type LkgEntryNote,
+	type LkgSlot,
 	lkgContentDigestFromFields,
 	lkgContentFields,
 	registerLkgPersistence,
 	signatureForFields,
 } from "@magic-context/core/hooks/magic-context/lkg-slot";
 import type { MessageLike } from "@magic-context/core/hooks/magic-context/transform-operations";
+import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import { isRecord } from "@magic-context/core/shared/record-type-guard";
 import type { Database } from "@magic-context/core/shared/sqlite";
-
+import type { PiMeasuredPrefixFit } from "./pi-raw-fallback";
 import { isPiSystemEntry } from "./system-entry-pi";
 
 interface PiLkgInputSnapshot {
@@ -42,7 +44,7 @@ export interface PiLkgPassSnapshot {
 }
 
 export type PiLkgReplayResult =
-	| { ok: true; messages: MessageLike[] }
+	| { ok: true; messages: MessageLike[]; measuredPrefix?: PiMeasuredPrefixFit }
 	| { ok: false; reason: string };
 
 export interface PiLkgCaptureTiming {
@@ -55,6 +57,10 @@ interface PiLkgSessionState {
 	captureSequence: number;
 	syncCaptureRequired: boolean;
 	acceptedInputs: readonly PiLkgInputSnapshot[] | null;
+	capturedRequest?: PiLkgCapturePlan & {
+		envelopeSignature: string;
+		usage?: { signature: string; inputTokens: number };
+	};
 }
 
 interface PiLkgCapturePlan {
@@ -68,6 +74,104 @@ interface PiLkgCapturePlan {
 }
 
 const piLkgSessionStates = new Map<string, PiLkgSessionState>();
+
+function completedProviderUsage(message: unknown):
+	| {
+			signature: string;
+			inputTokens: number;
+			modelKey: string;
+			providerKey: string;
+			timestamp: number;
+	  }
+	| undefined {
+	if (
+		!isRecord(message) ||
+		message.role !== "assistant" ||
+		!["stop", "length", "toolUse"].includes(String(message.stopReason)) ||
+		typeof message.provider !== "string" ||
+		!message.provider ||
+		typeof message.model !== "string" ||
+		!message.model ||
+		typeof message.timestamp !== "number" ||
+		!Number.isFinite(message.timestamp) ||
+		!isRecord(message.usage)
+	)
+		return;
+	const usage = message.usage;
+	const counts = [usage.input, usage.cacheRead, usage.cacheWrite];
+	if (
+		!counts.every(
+			(count) =>
+				typeof count === "number" && Number.isSafeInteger(count) && count >= 0,
+		)
+	)
+		return;
+	let inputTokens =
+		(usage.input as number) +
+		(usage.cacheRead as number) +
+		(usage.cacheWrite as number);
+	if (
+		typeof usage.totalTokens === "number" &&
+		Number.isSafeInteger(usage.totalTokens) &&
+		typeof usage.output === "number" &&
+		Number.isSafeInteger(usage.output) &&
+		usage.output >= 0
+	) {
+		inputTokens = Math.max(inputTokens, usage.totalTokens - usage.output);
+	}
+	if (!Number.isSafeInteger(inputTokens) || inputTokens <= 0) return;
+	return {
+		inputTokens,
+		modelKey: `${message.provider}/${message.model}`,
+		providerKey: message.provider,
+		timestamp: message.timestamp,
+		signature: JSON.stringify([
+			message.provider,
+			message.model,
+			message.timestamp,
+			message.stopReason,
+			usage.input,
+			usage.cacheRead,
+			usage.cacheWrite,
+			usage.output,
+			usage.totalTokens,
+		]),
+	};
+}
+
+/** Observe a terminal provider reply before Pi appends it to JSONL. The leaf must
+ * still be the captured request's last real input, never an inferred position. */
+export function notePiLkgProviderUsage(
+	sessionId: string,
+	parentInputId: string | null,
+	message: unknown,
+): boolean {
+	try {
+		const state = piLkgSessionStates.get(sessionId);
+		const request = state?.capturedRequest;
+		const usage = completedProviderUsage(message);
+		if (
+			!request ||
+			request.usage ||
+			!usage ||
+			request.captureSequence !== state?.captureSequence ||
+			!parentInputId ||
+			parentInputId.startsWith("pi-lkg-unmapped:") ||
+			parentInputId !== request.inputs.at(-1)?.id ||
+			usage.timestamp < request.capturedAt ||
+			usage.modelKey !== request.modelKey ||
+			usage.providerKey !== request.providerKey
+		)
+			return false;
+		request.usage = {
+			signature: usage.signature,
+			inputTokens: usage.inputTokens,
+		};
+		return true;
+	} catch {
+		return false;
+	}
+}
 
 export function clearPiLkgSessionState(sessionId: string): void {
 	const state = piLkgSessionStates.get(sessionId);
@@ -83,12 +187,16 @@ export interface PiLkgCoordinator {
 		modelKey: string | null;
 		providerKey: string | null;
 	}): PiLkgPassSnapshot;
-	replay(snapshot: PiLkgPassSnapshot): PiLkgReplayResult;
+	replay(
+		snapshot: PiLkgPassSnapshot,
+		parentOf?: (id: string) => string | null | undefined,
+	): PiLkgReplayResult;
 	captureAppliedPass(args: {
 		snapshot: PiLkgPassSnapshot;
 		outputMessages: readonly unknown[];
 		outputEntryIds?: readonly (string | null | undefined)[];
 		cacheBusting: boolean;
+		hostEnvelopeSignature?: string;
 	}): void;
 }
 
@@ -325,7 +433,57 @@ export function createPiLkgCoordinator(
 		}
 	};
 
-	const replay: PiLkgCoordinator["replay"] = (snapshot) => {
+	const measuredPrefixFor = (
+		snapshot: PiLkgPassSnapshot,
+		slot: LkgSlot | undefined,
+		parentOf?: (id: string) => string | null | undefined,
+	): PiMeasuredPrefixFit | undefined => {
+		const request = stateFor(snapshot.sessionId).capturedRequest;
+		const anchor = snapshot.replayAnchorInputIndex;
+
+		if (
+			!request?.usage ||
+			!slot ||
+			!parentOf ||
+			anchor === null ||
+			!snapshot.pristineTail ||
+			request.captureSequence !==
+				stateFor(snapshot.sessionId).captureSequence ||
+			request.captureSequence !== slot.captureSequence ||
+			request.capturedAt !== slot.capturedAt ||
+			request.jsonPrefix !== slot.jsonPrefix ||
+			!request.modelKey ||
+			request.modelKey !== slot.modelKey ||
+			request.modelKey !== snapshot.modelKey ||
+			request.providerKey !== slot.providerKey ||
+			request.providerKey !== snapshot.providerKey ||
+			slot.lastInputMessageId !== request.inputs.at(-1)?.id ||
+			snapshot.inputs[anchor]?.id !== slot.lastInputMessageId
+		)
+			return;
+		const assistantId = snapshot.inputs[anchor + 1]?.id;
+		const usage = completedProviderUsage(snapshot.pristineTail[0]);
+		if (
+			!assistantId ||
+			assistantId.startsWith("pi-lkg-unmapped:") ||
+			usage?.signature !== request.usage.signature
+		)
+			return;
+		try {
+			if (parentOf(assistantId) !== slot.lastInputMessageId) return;
+		} catch {
+			return;
+		}
+		// The accepted assistant reply is new input on this replay, so it remains
+		// in the tail priced above the provider's prior-request input count.
+		return {
+			modelKey: piModelRefToCanonical(request.modelKey).toLowerCase(),
+			inputTokens: request.usage.inputTokens,
+			envelopeSignature: request.envelopeSignature,
+			appendedMessages: snapshot.pristineTail,
+		};
+	};
+	const replay: PiLkgCoordinator["replay"] = (snapshot, parentOf) => {
 		if (snapshot.replayFailure) {
 			if (snapshot.replayFailure === "lkg_invalidated_reshape") {
 				dropSlot(snapshot.sessionId, snapshot.replayFailure);
@@ -371,8 +529,10 @@ export function createPiLkgCoordinator(
 				return { ok: false, reason: "lkg_content_mismatch" };
 			const removed = new Set(slot.inputIdSeq.slice(0, start));
 			const prefix = JSON.parse(slot.jsonPrefix) as MessageLike[];
+			const measuredPrefix = measuredPrefixFor(snapshot, slot, parentOf);
 			return {
 				ok: true,
+				...(measuredPrefix ? { measuredPrefix } : {}),
 				messages: [
 					...prefix.filter(
 						(message, index) =>
@@ -404,7 +564,10 @@ export function createPiLkgCoordinator(
 			skipSeamValidation: true,
 		});
 		if (!result.ok) stateFor(snapshot.sessionId).acceptedInputs = null;
-		return result;
+		const measuredPrefix = result.ok
+			? measuredPrefixFor(snapshot, slot, parentOf)
+			: undefined;
+		return result.ok && measuredPrefix ? { ...result, measuredPrefix } : result;
 	};
 
 	const captureAppliedPass: PiLkgCoordinator["captureAppliedPass"] = (args) => {
@@ -460,6 +623,9 @@ export function createPiLkgCoordinator(
 			capturedAt: Date.now(),
 			captureSequence: state.captureSequence,
 		};
+		state.capturedRequest = args.hostEnvelopeSignature
+			? { ...plan, envelopeSignature: args.hostEnvelopeSignature }
+			: undefined;
 		if (args.cacheBusting) {
 			dropSlot(snapshot.sessionId, "lkg_cache_bust_pending_capture");
 			state.acceptedInputs = null;
@@ -582,8 +748,8 @@ export function createPiLkgCoordinator(
 					.map((message) => JSON.stringify(message)),
 			};
 		},
-		replay(snapshot) {
-			const result = replay(snapshot);
+		replay(snapshot, parentOf) {
+			const result = replay(snapshot, parentOf);
 			if (!result.ok) return result;
 			const systems = result.messages
 				.filter(isPiSystemEntry)

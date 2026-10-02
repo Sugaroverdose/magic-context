@@ -1433,8 +1433,8 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				{ db },
 			);
 			let published = false;
-			const transactionStartedAt = performance.now();
 			db.exec("BEGIN IMMEDIATE");
+			const transactionStartedAt = performance.now();
 			try {
 				if (!isCompartmentLeaseHeld(db, sessionId, compartmentLeaseHolderId)) {
 					db.exec("ROLLBACK");

@@ -14,7 +14,6 @@ import {
     clearDetectedContextLimit,
     clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
-    clearSession,
     deleteIndexedMessage,
     deleteTagsByMessageId,
     getHistorianFailureState,
@@ -37,6 +36,7 @@ import {
     getChannel2NudgeState,
     getPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
+import { clearSession } from "../../features/magic-context/storage-meta-session";
 import type { Tagger } from "../../features/magic-context/tagger";
 import {
     clearTransformDecisionSession,

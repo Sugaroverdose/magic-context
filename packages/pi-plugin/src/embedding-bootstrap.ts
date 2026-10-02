@@ -11,6 +11,7 @@ import {
 	unregisterProjectShadowEmbedding,
 } from "@magic-context/core/features/magic-context/memory/embedding";
 import { resolveProjectIdentityForSession } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { drainProjectEmbeddingIdentityMaintenance } from "@magic-context/core/features/magic-context/project-embedding-registry";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
 	handleUntrustedLoad,
@@ -82,7 +83,11 @@ export async function ensureProjectRegisteredFromPiDirectory(
 		registrationFingerprintsByDatabase.set(db, registrationFingerprints);
 	}
 	const cached = registrationFingerprints.get(projectIdentity);
-	if (cached && configFingerprint(cached.paths) === cached.fingerprint) return;
+	if (cached && configFingerprint(cached.paths) === cached.fingerprint) {
+		// Config caching must not cache away resumable database maintenance.
+		await drainProjectEmbeddingIdentityMaintenance(db, projectIdentity);
+		return;
+	}
 
 	if (isConfigLoadUntrusted(detailed)) {
 		handleUntrustedLoad(db, projectIdentity, directory, detailed);

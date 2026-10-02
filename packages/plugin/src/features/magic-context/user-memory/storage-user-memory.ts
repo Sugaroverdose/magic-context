@@ -52,8 +52,9 @@ export function insertUserMemoryCandidates(
     const stmt = db.prepare(
         "INSERT INTO user_memory_candidates (content, session_id, source_compartment_start, source_compartment_end, created_at) VALUES (?, ?, ?, ?, ?)",
     );
-    const transactionStartedAt = performance.now();
+    let transactionStartedAt = 0;
     db.transaction(() => {
+        transactionStartedAt = performance.now();
         for (const c of candidates) {
             stmt.run(
                 c.content,

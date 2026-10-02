@@ -1,7 +1,11 @@
 import { Buffer } from "node:buffer";
 import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
-import type { Database } from "../../shared/sqlite";
+import {
+    type Database,
+    withoutSqliteTransformPass,
+    withSqliteBackgroundWriter,
+} from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { resolveIsSubagentFromOpenCodeDb } from "./resolve-subagent-fallback";
 import {
@@ -227,10 +231,14 @@ export function retryPendingSessionCleanups(
     let cleared = 0;
     for (const row of rows) {
         try {
-            db.prepare(
-                "UPDATE pending_session_cleanup SET last_attempt_at = ? WHERE session_id = ?",
-            ).run(Date.now(), row.session_id);
-            clearSession(db, row.session_id);
+            withoutSqliteTransformPass(() =>
+                withSqliteBackgroundWriter(() => {
+                    db.prepare(
+                        "UPDATE pending_session_cleanup SET last_attempt_at = ? WHERE session_id = ?",
+                    ).run(Date.now(), row.session_id);
+                    clearSession(db, row.session_id);
+                }),
+            );
             cleared += 1;
         } catch {
             failedSessionIds.push(row.session_id);
@@ -265,9 +273,15 @@ export async function retryPendingRustSessionCleanupsForProject(
     let cleared = 0;
     for (const row of rows) {
         try {
-            db.prepare(
-                "UPDATE pending_session_cleanup SET last_attempt_at = ? WHERE session_id = ?",
-            ).run(Date.now(), row.session_id);
+            withoutSqliteTransformPass(() =>
+                withSqliteBackgroundWriter(() =>
+                    db
+                        .prepare(
+                            "UPDATE pending_session_cleanup SET last_attempt_at = ? WHERE session_id = ?",
+                        )
+                        .run(Date.now(), row.session_id),
+                ),
+            );
             await deleteSession(row.session_id);
             clearSession(db, row.session_id, true);
             cleared += 1;
@@ -283,11 +297,18 @@ export function clearSession(
     sessionId: string,
     rustModuleCleanupAcknowledged = false,
 ): void {
-    const transactionStartedAt = performance.now();
-    db.transaction(() => {
-        deleteSessionScopedRows(db, [sessionId], undefined, {
-            rustModuleCleanupAcknowledged,
-        });
-    }).immediate();
+    let transactionStartedAt = 0;
+    withoutSqliteTransformPass(() =>
+        withSqliteBackgroundWriter(() =>
+            db
+                .transaction(() => {
+                    transactionStartedAt = performance.now();
+                    deleteSessionScopedRows(db, [sessionId], undefined, {
+                        rustModuleCleanupAcknowledged,
+                    });
+                })
+                .immediate(),
+        ),
+    );
     logSlowWriteTransaction("clear-session", transactionStartedAt);
 }

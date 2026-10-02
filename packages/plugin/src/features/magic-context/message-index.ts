@@ -6,7 +6,12 @@ import {
 } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import { getHarness, type HarnessId } from "../../shared/harness";
-import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import {
+    type Database,
+    type Statement as PreparedStatement,
+    withoutSqliteTransformPass,
+    withSqliteBackgroundWriter,
+} from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { removeSystemReminders } from "../../shared/system-directive";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
@@ -512,8 +517,9 @@ export function clearIndexedMessagesInTransaction(db: Database, sessionId: strin
 }
 
 export function clearIndexedMessages(db: Database, sessionId: string): void {
-    const transactionStartedAt = performance.now();
+    let transactionStartedAt = 0;
     db.transaction(() => {
+        transactionStartedAt = performance.now();
         clearIndexedMessagesInTransaction(db, sessionId);
     }).immediate();
     logSlowWriteTransaction("message_index_clear", transactionStartedAt);
@@ -650,8 +656,8 @@ export function indexSingleMessage(db: Database, sessionId: string, message: Raw
     // plain FTS5 table with NO UNIQUE constraint, and the dedup is checked inside
     // the body. Taking the writer lock up front serializes concurrent terminal
     // updates so the second transaction sees the first transaction's source state.
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let committed = false;
     try {
         const result = indexSingleMessageInTransaction(
@@ -715,8 +721,8 @@ function indexItemsAfterOrdinal<T extends { ordinal: number }>(
     // The writer lock protects both duplicate checks and the progress row. Each
     // caller supplies only one bounded source page, so lock hold time is bounded
     // by that page rather than the full session history.
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let committed = false;
     try {
         const currentWatermark = getLastIndexedOrdinal(db, sessionId);
@@ -902,7 +908,7 @@ function getOpenCodeSessionScopedCandidateSourceSql(harness: "opencode" | "openc
  * the cursor survives restarts and only resets after a complete pass. Pi rows
  * need a separate sweep against Pi's session files and are excluded here.
  */
-export function sweepOrphanedOpenCodeMessageIndexes(
+function sweepOrphanedOpenCodeMessageIndexesInBackground(
     db: Database,
     openReadableOpenCodeDb: () => Database | null,
     options: MessageHistoryOrphanSweepOptions = {},
@@ -988,8 +994,8 @@ export function sweepOrphanedOpenCodeMessageIndexes(
                 : (candidates[candidates.length - 1]?.session_id ?? cursor);
         const completedAt = candidates.length < batchSize ? now : null;
 
-        const transactionStartedAt = performance.now();
         db.exec("BEGIN IMMEDIATE");
+        const transactionStartedAt = performance.now();
         let committed = false;
         let deleted = 0;
         try {
@@ -1033,4 +1039,16 @@ export function sweepOrphanedOpenCodeMessageIndexes(
     } finally {
         closeQuietly(openCodeDb);
     }
+}
+
+export function sweepOrphanedOpenCodeMessageIndexes(
+    db: Database,
+    openReadableOpenCodeDb: () => Database | null,
+    options: MessageHistoryOrphanSweepOptions = {},
+): MessageHistoryOrphanSweepResult {
+    return withoutSqliteTransformPass(() =>
+        withSqliteBackgroundWriter(() =>
+            sweepOrphanedOpenCodeMessageIndexesInBackground(db, openReadableOpenCodeDb, options),
+        ),
+    );
 }

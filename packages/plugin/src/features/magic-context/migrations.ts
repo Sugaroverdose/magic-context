@@ -3344,9 +3344,10 @@ export function runMigrations(db: Database): void {
             // retryable MigrationLockBusyError classification below.
             migration = undefined;
 
-            const transactionStartedAt = performance.now();
+            let transactionStartedAt = 0;
             const applied = db
                 .transaction(() => {
+                    transactionStartedAt = performance.now();
                     currentVersion = getCurrentVersion(db);
                     // Keep the append-only version boundary for legacy databases whose
                     // bookkeeping contains only a current-version row. Within the pending
@@ -3419,8 +3420,11 @@ export function runMigrations(db: Database): void {
 
     if (touchedLegacyAuthorityBatch) {
         try {
-            const transactionStartedAt = performance.now();
-            db.transaction(() => installLatestAuthorityTriggers(db)).immediate();
+            let transactionStartedAt = 0;
+            db.transaction(() => {
+                transactionStartedAt = performance.now();
+                installLatestAuthorityTriggers(db);
+            }).immediate();
             logSlowWriteTransaction("migration-runner", transactionStartedAt);
         } catch (error) {
             throw new Error(

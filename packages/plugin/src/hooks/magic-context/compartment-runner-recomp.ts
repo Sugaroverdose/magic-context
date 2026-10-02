@@ -100,8 +100,8 @@ export function promoteRecompStagingWithM0Mutation(
     facts: Array<{ category: string; content: string }>;
 } | null {
     const now = Date.now();
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let finished = false;
     try {
         if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {

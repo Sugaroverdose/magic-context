@@ -6,7 +6,6 @@ const SESSION_CHUNK_REPAIR_BATCH_SIZE = 100;
 
 const upsertSessionProjectStatements = new WeakMap<Database, PreparedStatement>();
 const repairSessionChunkProjectStatements = new WeakMap<Database, PreparedStatement>();
-const repairProjectChunkProjectStatements = new WeakMap<Database, PreparedStatement>();
 const misScopedProjectChunkStatements = new WeakMap<Database, PreparedStatement>();
 
 // Each branch starts at a project index instead of scanning every chunk.
@@ -67,21 +66,15 @@ function getRepairSessionChunkProjectStatement(db: Database): PreparedStatement 
     return stmt;
 }
 
-function getRepairProjectChunkProjectStatement(db: Database): PreparedStatement {
-    let stmt = repairProjectChunkProjectStatements.get(db);
-    if (!stmt) {
-        stmt = db.prepare(
-            `UPDATE compartment_chunk_embeddings
-             SET project_path = (
-                 SELECT sp.project_path FROM session_projects sp
-                 WHERE sp.session_id = compartment_chunk_embeddings.session_id
-                   AND sp.harness = compartment_chunk_embeddings.harness
-             )
-             WHERE id IN (${MIS_SCOPED_PROJECT_CHUNK_IDS_SQL})`,
-        );
-        repairProjectChunkProjectStatements.set(db, stmt);
-    }
-    return stmt;
+export function findMisScopedCompartmentChunkEmbeddingIdsForProject(
+    db: Database,
+    projectPath: string,
+): number[] {
+    return (
+        db
+            .prepare(`SELECT id FROM (${MIS_SCOPED_PROJECT_CHUNK_IDS_SQL}) LIMIT 25`)
+            .all(projectPath, projectPath) as Array<{ id: number }>
+    ).map(({ id }) => id);
 }
 
 /**
@@ -139,12 +132,25 @@ export function hasRecordedSessionProjectIdentity(db: Database, sessionId: strin
  * Heal historical chunk rows whose stored project differs from their session owner
  * when either the stored or the correct project is this project. Both
  * partitions use indexes, and the precheck avoids a write on the common miss.
+ * Repair one slice per observation; later registrations resume the remaining rows.
  */
 export function repairMisScopedCompartmentChunkEmbeddingsForProject(
     db: Database,
     projectPath: string,
+    ids = findMisScopedCompartmentChunkEmbeddingIdsForProject(db, projectPath),
 ): number {
-    if (!projectPath) return 0;
-    if (!hasMisScopedCompartmentChunkEmbeddingsForProject(db, projectPath)) return 0;
-    return getRepairProjectChunkProjectStatement(db).run(projectPath, projectPath).changes;
+    if (!projectPath || ids.length === 0) return 0;
+    return db
+        .prepare(`UPDATE compartment_chunk_embeddings
+        SET project_path = (SELECT sp.project_path FROM session_projects sp
+            WHERE sp.session_id = compartment_chunk_embeddings.session_id
+              AND sp.harness = compartment_chunk_embeddings.harness)
+        WHERE id IN (${ids.map(() => "?").join(",")}) AND EXISTS (
+            SELECT 1 FROM session_projects sp
+            WHERE sp.session_id = compartment_chunk_embeddings.session_id
+              AND sp.harness = compartment_chunk_embeddings.harness
+              AND sp.project_path <> compartment_chunk_embeddings.project_path
+              AND (sp.project_path = ? OR compartment_chunk_embeddings.project_path = ?)
+        )`)
+        .run(...ids, projectPath, projectPath).changes;
 }

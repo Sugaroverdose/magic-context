@@ -184,6 +184,8 @@ process.stdin.destroy();
 			entrypoints: [entry],
 			outdir: dir,
 			target: "node",
+			format: "esm",
+			splitting: true,
 			external: ["node:sqlite", "bun:sqlite"],
 		});
 		expect(built.success).toBe(true);
@@ -196,7 +198,10 @@ process.stdin.destroy();
 		const reader = (child.stdout as ReadableStream<Uint8Array>).getReader();
 		const decoder = new TextDecoder();
 		const ready = decoder.decode((await reader.read()).value);
-		expect(ready).toContain("READY 5000");
+		expect(
+			ready,
+			ready ? undefined : await new Response(child.stderr).text(),
+		).toContain("READY 5000");
 		blocker.exec("BEGIN IMMEDIATE");
 		(child.stdin as { write(data: string): unknown }).write("go\n");
 		expect(decoder.decode((await reader.read()).value)).toContain("ADMITTING");

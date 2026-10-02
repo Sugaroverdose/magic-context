@@ -1,9 +1,9 @@
 import { createHash } from "node:crypto";
-
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { withoutSqliteTransformPass, withSqliteBackgroundWriter } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
-export const MESSAGE_FTS_ROWID_MAP_BACKFILL_BATCH_SIZE = 500;
+export const MESSAGE_FTS_ROWID_MAP_BACKFILL_BATCH_SIZE = 100;
 
 const BACKFILL_STATE_ID = 1;
 const EMPTY_INDEX_CONTENT_HASH = createHash("sha256").update("").digest("hex");
@@ -124,33 +124,32 @@ export function backfillMessageFtsRowidMapBatch(
     db: Database,
     batchSize = MESSAGE_FTS_ROWID_MAP_BACKFILL_BATCH_SIZE,
 ): MessageFtsRowidMapBackfillProgress {
-    const boundedBatchSize = Math.max(1, Math.floor(batchSize));
+    const boundedBatchSize = Number.isFinite(batchSize)
+        ? Math.min(MESSAGE_FTS_ROWID_MAP_BACKFILL_BATCH_SIZE, Math.max(1, Math.floor(batchSize)))
+        : MESSAGE_FTS_ROWID_MAP_BACKFILL_BATCH_SIZE;
     let progress: MessageFtsRowidMapBackfillProgress = {
         processed: 0,
         watermarkRowid: 0,
         completed: false,
     };
 
-    const transactionStartedAt = performance.now();
+    let transactionStartedAt = 0;
     db.transaction(() => {
+        transactionStartedAt = performance.now();
+        db.prepare(`INSERT OR IGNORE INTO message_fts_rowid_map_backfill_state
+            (id, watermark_rowid, completed) VALUES (?, 0, 0)`).run(BACKFILL_STATE_ID);
         const state = getBackfillState(db);
         if (state.completed) {
             progress = state;
             return;
         }
-
+        // Keep the bounded read and mapping atomic: a concurrent FTS delete/insert
+        // could recycle a rowid between discovery and recording its owner.
         const rows = db
-            .prepare(
-                `SELECT rowid AS ftsRowid,
-                        session_id AS sessionId,
-                        message_ordinal AS messageOrdinal
-                 FROM message_history_fts
-                 WHERE rowid > ?
-                 ORDER BY rowid ASC
-                 LIMIT ?`,
-            )
+            .prepare(`SELECT rowid AS ftsRowid,
+            session_id AS sessionId, message_ordinal AS messageOrdinal
+            FROM message_history_fts WHERE rowid > ? ORDER BY rowid ASC LIMIT ?`)
             .all(state.watermarkRowid, boundedBatchSize) as BackfillFtsRow[];
-
         let watermarkRowid = state.watermarkRowid;
         for (const row of rows) {
             const ftsRowid = Number(row.ftsRowid);
@@ -188,6 +187,7 @@ export function backfillMessageFtsRowidMapBatch(
 
 /** Drain legacy FTS rows in bounded turns so SQLite never owns the host loop. */
 export async function runMessageFtsRowidMapBackfill(db: Database): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     for (;;) {
         const progress = backfillMessageFtsRowidMapBatch(db);
         if (progress.completed) return;
@@ -199,7 +199,9 @@ export async function runMessageFtsRowidMapBackfill(db: Database): Promise<void>
 export function startMessageFtsRowidMapBackfill(db: Database): Promise<void> {
     const active = activeBackfills.get(db);
     if (active) return active;
-    const run = runMessageFtsRowidMapBackfill(db).finally(() => {
+    const run = withoutSqliteTransformPass(() =>
+        withSqliteBackgroundWriter(() => runMessageFtsRowidMapBackfill(db)),
+    ).finally(() => {
         activeBackfills.delete(db);
     });
     activeBackfills.set(db, run);

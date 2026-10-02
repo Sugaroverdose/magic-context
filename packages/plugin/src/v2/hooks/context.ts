@@ -24,7 +24,6 @@ import { detectOverflow } from "../../features/magic-context/overflow-detection"
 import { createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
 import {
-    clearSession,
     getOrCreateSessionMeta,
     getOverflowState,
     isDatabasePersisted,
@@ -34,6 +33,7 @@ import {
     recordOverflowDetected,
 } from "../../features/magic-context/storage";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
+import { clearSession } from "../../features/magic-context/storage-meta-session";
 import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
 import {

@@ -442,8 +442,8 @@ export function replaceAllCompartmentStateAndBumpDepth(
     depthEndOrdinal: number,
 ): boolean {
     const now = Date.now();
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let finished = false;
     try {
         if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {
@@ -679,8 +679,8 @@ export function promoteRecompStaging(
             .immediate();
     }
 
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let finished = false;
     try {
         if (!isCompartmentLeaseHeld(db, sessionId, holderId)) {

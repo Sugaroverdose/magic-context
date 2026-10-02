@@ -2602,8 +2602,8 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
 
     let m1Text = M1_EMPTY_PLACEHOLDER;
     let m1Bytes = Buffer.from(m1Text, "utf8");
-    const transactionStartedAt = performance.now();
     options.db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     try {
         const currentWorkspace = resolveWorkspaceRenderContext({
             db: options.db,
@@ -3224,8 +3224,8 @@ function replayCachedM1(state: M0M1State): string {
 }
 
 function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
-    const transactionStartedAt = performance.now();
     options.db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     try {
         const row = readCachedM0M1Row(options.db, options.sessionId);
         if (!row || !cachedRowMatchesState(row, options.state)) {

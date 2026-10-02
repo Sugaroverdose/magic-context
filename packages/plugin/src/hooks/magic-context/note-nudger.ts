@@ -52,8 +52,11 @@ export function recordNoteNudgeDeliveryTime(sessionId: string): void {
  * Signal that a trigger event occurred. Call from hook layer when any of the 3 triggers fire.
  */
 export function onNoteTrigger(db: Database, sessionId: string, trigger: NoteNudgeTrigger): void {
-    const transactionStartedAt = performance.now();
-    setPersistedNoteNudgeTrigger(db, sessionId);
+    let transactionStartedAt = 0;
+    db.transaction(() => {
+        transactionStartedAt = performance.now();
+        setPersistedNoteNudgeTrigger(db, sessionId);
+    }).immediate();
     logSlowWriteTransaction("note_nudge_trigger", transactionStartedAt);
     sessionLog(sessionId, `note-nudge: trigger fired (${trigger}), triggerPending=true`);
 }

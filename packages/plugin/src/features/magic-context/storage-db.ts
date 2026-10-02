@@ -36,8 +36,11 @@ import {
 import {
     Database,
     detectSqliteRuntime,
+    isTransientSqliteError,
     registerSlowWriteReporter,
     registerSqliteDiagnosticSink,
+    withoutSqliteTransformPass,
+    withSqliteBackgroundWriter,
 } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { shouldEnforcePrivateStoragePermissions } from "../../shared/storage-permissions";
@@ -1086,39 +1089,51 @@ function finishDatabaseOpen(
     // only context.db and runs in every harness.
     if (!explicitDbPath) {
         const readsOpenCodeStore = harnessOwnsOpenCodeStore();
-        const runBackfills = () => {
-            if (readsOpenCodeStore) {
-                try {
-                    runToolOwnerBackfill(db);
-                } catch (error) {
-                    log(
-                        `[magic-context] tool-owner backfill failed (continuing with lazy adoption fallback): ${getErrorMessage(error)}`,
-                    );
-                }
-            }
-            void startMessageFtsRowidMapBackfill(db)
-                .then(async () => {
-                    if (!readsOpenCodeStore) return;
-                    const [
-                        { readRawSessionMessagePage, readRawSessionMessages },
-                        { startMessageTimeBackfill },
-                    ] = await Promise.all([
-                        import("../../hooks/magic-context/read-session-chunk"),
-                        import("./message-time-backfill"),
-                    ]);
-                    await startMessageTimeBackfill(
-                        db,
-                        Object.assign(readRawSessionMessages, {
-                            readPage: readRawSessionMessagePage,
-                        }),
-                    );
-                })
-                .catch((error) => {
-                    log(
-                        `[magic-context] message-index backfill failed (will resume next startup): ${getErrorMessage(error)}`,
-                    );
-                });
-        };
+        let busyRetryMs = 100;
+        const runBackfills = () =>
+            withoutSqliteTransformPass(() =>
+                withSqliteBackgroundWriter(() => {
+                    if (readsOpenCodeStore) {
+                        try {
+                            runToolOwnerBackfill(db);
+                        } catch (error) {
+                            log(
+                                `[magic-context] tool-owner backfill failed (continuing with lazy adoption fallback): ${getErrorMessage(error)}`,
+                            );
+                        }
+                    }
+                    void startMessageFtsRowidMapBackfill(db)
+                        .then(async () => {
+                            if (!readsOpenCodeStore) return;
+                            const { readRawSessionMessagePage, readRawSessionMessages } =
+                                await import("../../hooks/magic-context/read-session-chunk");
+                            const { startMessageTimeBackfill } = await import(
+                                "./message-time-backfill"
+                            );
+                            await startMessageTimeBackfill(
+                                db,
+                                Object.assign(readRawSessionMessages, {
+                                    readPage: readRawSessionMessagePage,
+                                }),
+                            );
+                        })
+                        .catch((error) => {
+                            if (isTransientSqliteError(error)) {
+                                // Durable cursors advance only with their data. Retry the complete
+                                // chain after yielding, without sharing an interactive turn's lock-wait limit.
+                                withoutSqliteTransformPass(() => {
+                                    const timer = setTimeout(runBackfills, busyRetryMs);
+                                    timer.unref();
+                                });
+                                busyRetryMs = Math.min(30000, busyRetryMs * 2);
+                                return;
+                            }
+                            log(
+                                `[magic-context] message-index backfill failed (will resume next startup): ${getErrorMessage(error)}`,
+                            );
+                        });
+                }),
+            );
         if (bootQuietRemainingMs() > 0) scheduleAfterBootQuiet(runBackfills);
         else runBackfills();
     }
