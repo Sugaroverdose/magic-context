@@ -8,7 +8,24 @@ import { isEmbeddingHostBusy } from "../../shared/embedding-activity";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
-import { type CompartmentChunkBackfillCandidate, type SaveCompartmentChunkEmbeddingInput, buildCanonicalChunkTextFromFts, buildCompartmentSummaryFallbackText, chunkCanonicalText, chunkEmbeddingWindowsAreCurrent, chunkWindowSourceKey, countSessionCompartmentEmbedCoverage, countSessionCompartmentEmbedCoveragePolite, countUnembeddedSessionCompartmentsPolite, loadUnembeddedCompartmentChunkCandidatesPolite, loadUnembeddedSessionChunkCandidatesPolite, loadUnembeddedShadowChunkCandidates, normalizeCompartmentChunkMaxInputTokens, recordChunkEmbedBackoff, replaceCompartmentChunkEmbeddings } from './compartment-chunk-embedding';
+import {
+    buildCanonicalChunkTextFromFts,
+    buildCompartmentSummaryFallbackText,
+    type CompartmentChunkBackfillCandidate,
+    chunkCanonicalText,
+    chunkEmbeddingWindowsAreCurrent,
+    chunkWindowSourceKey,
+    countSessionCompartmentEmbedCoverage,
+    countSessionCompartmentEmbedCoveragePolite,
+    countUnembeddedSessionCompartmentsPolite,
+    loadUnembeddedCompartmentChunkCandidatesPolite,
+    loadUnembeddedSessionChunkCandidatesPolite,
+    loadUnembeddedShadowChunkCandidates,
+    normalizeCompartmentChunkMaxInputTokens,
+    recordChunkEmbedBackoff,
+    replaceCompartmentChunkEmbeddings,
+    type SaveCompartmentChunkEmbeddingInput,
+} from "./compartment-chunk-embedding";
 import {
     countEmbeddedCommits,
     loadUnembeddedCommits,

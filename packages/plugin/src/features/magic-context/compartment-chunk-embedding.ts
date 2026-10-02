@@ -1143,6 +1143,9 @@ type ChunkCoverageDefect = "missing" | "stale" | "renumber" | "deferred" | null;
 // The window memo below keys on canonical transcript text, token budget and
 // embedding model. If indexed message text or the summary changes, old window
 // hashes cannot be reused. Its size limit prevents unbounded transcript retention.
+// CHUNKER_VERSION is also part of every persisted window source key: bump it
+// whenever chunkCanonicalText can return different windows for the same input,
+// so windows recorded by an older build are re-checked by chunking.
 const CHUNKER_VERSION = 1;
 const BACKOFF_PREFIX = "chunk_embed_backoff:";
 
@@ -1344,7 +1347,10 @@ function recordChunkWindowSource(
     sourceKey: string,
     windows: Iterable<readonly [number, string]>,
 ): void {
-    const record: ChunkWindowSourceRecord = { source: sourceKey, windows: windowSetDigest(windows) };
+    const record: ChunkWindowSourceRecord = {
+        source: sourceKey,
+        windows: windowSetDigest(windows),
+    };
     const kept = readChunkWindowSources(db, compartmentId).filter(
         (entry) => entry.source !== sourceKey,
     );

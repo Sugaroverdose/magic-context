@@ -1,9 +1,10 @@
 // Measure the cold (first call in a fresh process) and warm cost of history
 // embedding coverage on a fully embedded session whose compartments carry
-// realistic amounts of text: 394 compartments of 60 messages each, about 7 MB of
-// canonical text and several windows per compartment. The one-line compartments
-// in issue-564-bench.ts cannot show this cost, because it grows with the amount
-// of text rather than with the number of compartments.
+// realistic amounts of text: 394 compartments of 60 messages each, about 10 MB of
+// message text and over a dozen windows per compartment. Benchmarks built from
+// one-line compartments (such as issue-564-bench.ts next to this file) cannot
+// show this cost, because it grows with the amount of text rather than with the
+// number of compartments.
 //
 // Every measurement runs in a child process so the process-local window memo
 // starts empty, exactly as after a host restart. All data lives in a throwaway

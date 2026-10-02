@@ -1467,7 +1467,14 @@ describe("recorded window sources skip re-chunking after a restart", () => {
                 // Same shape as the seeded text, so only the window hashes change.
                 Array.from({ length: 320 }, (_, word) => `x1-token-${word}`).join(" "),
             );
-            writeRows(db, sessionId, projectPath, modelId, legacyCurrent, input(legacyCurrent).windows);
+            writeRows(
+                db,
+                sessionId,
+                projectPath,
+                modelId,
+                legacyCurrent,
+                input(legacyCurrent).windows,
+            );
             writeRows(
                 db,
                 sessionId,
