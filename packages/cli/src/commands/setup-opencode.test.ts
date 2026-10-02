@@ -153,6 +153,66 @@ describe("setup-opencode per-harness config", () => {
     });
 });
 
+describe("setup-opencode keeps magic-context.jsonc comments", () => {
+    it("retains top-level, nested and trailing comments when rewriting choices", () => {
+        const path = join(tempDir(), "magic-context.jsonc");
+        writeFileSync(
+            path,
+            `{
+  // why this historian
+  "historian": {
+    // pinned for cost
+    "opencode": { "model": "old/historian" } // trailing note
+  },
+  /* keep the dreamer */
+  "dreamer": { "opencode": { "model": "old/dreamer" } },
+  "sidekick": { "enabled": true }
+}
+`,
+        );
+
+        writeMagicContextConfig(path, {
+            historianModel: "new/historian",
+            dreamerEnabled: true,
+            dreamerModel: "new/dreamer",
+            claudeMax: false,
+        });
+
+        const text = readFileSync(path, "utf-8");
+        for (const comment of [
+            "// why this historian",
+            "// pinned for cost",
+            "// trailing note",
+            "/* keep the dreamer */",
+        ]) {
+            expect(text).toContain(comment);
+        }
+        const config = parseJsonc(text) as Record<string, unknown> & {
+            historian?: { opencode?: { model?: string } };
+            dreamer?: { opencode?: { model?: string } };
+        };
+        expect(config.historian?.opencode?.model).toBe("new/historian");
+        expect(config.dreamer?.opencode?.model).toBe("new/dreamer");
+        // The retired agent block is still removed.
+        expect(config).not.toHaveProperty("sidekick");
+    });
+
+    it("still refuses a prototype-pollution key", () => {
+        const path = join(tempDir(), "magic-context.jsonc");
+        const original = `{ "__proto__": { "polluted": true } }\n`;
+        writeFileSync(path, original);
+        expect(() =>
+            writeMagicContextConfig(path, {
+                historianModel: "new/historian",
+                dreamerEnabled: false,
+                dreamerModel: null,
+                claudeMax: false,
+            }),
+        ).toThrow(/prototype-pollution/);
+        expect(readFileSync(path, "utf-8")).toBe(original);
+    });
+});
+
 describe("setup-opencode DCP preflight", () => {
     it("is tuple-safe and only matches canonical opencode-dcp entries", () => {
         const plugins: unknown[] = [

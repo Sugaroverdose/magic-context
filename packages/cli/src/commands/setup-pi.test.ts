@@ -187,6 +187,45 @@ describe("setup-pi per-harness config", () => {
     });
 });
 
+describe("setup-pi keeps magic-context.jsonc comments", () => {
+    it("retains comments when rewriting Pi choices", () => {
+        const path = join(makeTempRoot(), "magic-context.jsonc");
+        writeFileSync(
+            path,
+            `{
+  // shared historian notes
+  "historian": {
+    // OpenCode keeps its own model
+    "opencode": { "model": "oc/historian" }
+  },
+  "embedding": { "provider": "local" } // local is fine
+}
+`,
+        );
+
+        writeMagicContextConfig(path, {
+            historianModel: "new/historian",
+            dreamerEnabled: false,
+            embedding: { provider: "local", model: "Xenova/all-MiniLM-L6-v2" },
+            modelRefToCanonical: (model) => model,
+        });
+
+        const text = readFileSync(path, "utf-8");
+        for (const comment of [
+            "// shared historian notes",
+            "// OpenCode keeps its own model",
+            "// local is fine",
+        ]) {
+            expect(text).toContain(comment);
+        }
+        const config = parseJsonc(text) as {
+            historian?: { opencode?: { model?: string }; pi?: { model?: string } };
+        };
+        expect(config.historian?.pi?.model).toBe("new/historian");
+        expect(config.historian?.opencode?.model).toBe("oc/historian");
+    });
+});
+
 describe("runSetup", () => {
     it("aborts before writing when an existing target is malformed", async () => {
         const root = makeTempRoot();
