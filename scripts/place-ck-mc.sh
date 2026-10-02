@@ -2,15 +2,21 @@
 # Check the live context.db and store.db versions and source epoch constants before placement.
 set -euo pipefail
 
-usage() { echo "usage: $0 [--dry-run] [--require-epochs-unchanged] [--source-ref REF] STAGED_BINARY" >&2; exit 2; }
+usage() { echo "usage: $0 [--dry-run] [--no-restart] [--require-epochs-unchanged] [--source-ref REF] STAGED_BINARY" >&2; exit 2; }
 die() { echo "place-ck-mc: $*" >&2; exit 1; }
 dry_run=0
+# --no-restart places and checks the file and stops there. It is for a window in
+# which the subc daemon itself is replaced, which restarts every module anyway, so
+# ck-mc restarts once instead of twice. Nothing here waits for that restart: the
+# script prints the provenance and health commands to run once it has happened.
+no_restart=0
 require_epochs=0
 source_ref=
 staged=
 while (($#)); do
     case "$1" in
         --dry-run) dry_run=1 ;;
+        --no-restart) no_restart=1 ;;
         --require-epochs-unchanged) require_epochs=1 ;;
         --source-ref) (($# >= 2)) || usage; source_ref=$2; shift ;;
         --*) usage ;;
@@ -132,6 +138,14 @@ cp -p "$staged" "$tmp"
 [[ $(shasum -a 256 "$tmp" | cut -d' ' -f1) == "$staged_digest" ]] || die "staged binary changed during placement"
 mv -f "$tmp" "$deployed"
 trap 'echo "placement verification failed; rollback binary only when both stores are compatible: $rollback_cmd" >&2' ERR
+if ((no_restart)); then
+    [[ "$(sha_from "$deployed")" == "$staged_sha" ]] || false
+    [[ "$(shasum -a 256 "$deployed" | cut -d' ' -f1)" == "$staged_digest" ]] || false
+    require_hardened "$deployed"
+    trap - ERR
+    echo "placed ck-mc $staged_sha on disk without restarting; the running module still uses the previous build until magic-context restarts. Verify after that restart: ck --json provenance magic-context (build $staged_sha) and ck --json health magic-context. Rollback: $rollback_cmd"
+    exit 0
+fi
 ck module restart magic-context
 # The restart returns while the old process drains, before the new one has declared its
 # build. Wait for the new process to report a build instead of reading a half-started state.

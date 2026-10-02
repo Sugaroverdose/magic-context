@@ -52,7 +52,7 @@ esac
             "codesign": '#!/bin/sh\ncase "$1" in --verify) exit 0;; -dv) if [ "${FAKE_UNHARDENED:-}" = 1 ]; then f="0x2(adhoc)"; else f="0x10002(adhoc,runtime)"; fi; printf "Executable=x\\nIdentifier=ck-mc\\nFormat=Mach-O\\nCodeDirectory v=20500 size=1 flags=$f hashes=1+0 location=embedded\\n" >&2;; esac\n',
             "ck": '''#!/bin/sh
 case "$*" in
-  'module restart magic-context') exit 0 ;;
+  'module restart magic-context') [ -n "${FAKE_RESTART_LOG:-}" ] && echo restarted >> "$FAKE_RESTART_LOG"; exit 0 ;;
   '--json provenance magic-context')
     # FAKE_DRAINING_POLLS makes the first N reads look like a restart still in progress:
     # the new process has not declared its build yet.
@@ -146,6 +146,21 @@ python3 -c 'import os; p=os.environ["FAKE_DEPLOYED"]; print("i" + str(os.stat(p)
         self.assertIn("cp ", run.stderr)
         self.assertIn("ck module restart magic-context", run.stderr)
         self.assertNotEqual((self.bin / "ck-mc").read_bytes(), before)
+
+    def test_no_restart_places_and_checks_the_file_without_restarting(self):
+        restart_log = self.home / "restart-log"
+        env = dict(self.env, FAKE_RESTART_LOG=str(restart_log))
+        run = subprocess.run(["bash", str(SCRIPT), "--no-restart", str(self.staged)], env=env,
+                             cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn("on disk without restarting", run.stdout)
+        self.assertFalse(restart_log.exists(), "--no-restart must not restart the module")
+        self.assertEqual((self.bin / "ck-mc").read_bytes(), self.staged.read_bytes())
+        self.assertTrue((self.bin / "staging" / ("ck-mc.rollback." + OLD)).exists())
+        placed = subprocess.run(["bash", str(SCRIPT), str(self.staged)], env=env,
+                                cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(placed.returncode, 0, placed.stderr)
+        self.assertTrue(restart_log.exists(), "a normal placement restarts the module")
 
     def test_unhardened_build_is_refused_before_anything_moves(self):
         before = (self.bin / "ck-mc").read_bytes()
