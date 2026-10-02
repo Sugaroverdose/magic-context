@@ -25,13 +25,16 @@
  *   of silent drift;
  * - each example text equals the Rust module's shipped guidance asset for the
  *   same variant (`crates/mc-module/assets/`);
- * - every capability tag passes the tool-provider role's tag check;
+ * - every capability tag passes the tool-provider role's tag check, and
+ *   `system_text.tool_names` matches the sorted, deduplicated Magic Context
+ *   composition entry whenever guidance text is present;
  * - `ctx_reduce` keeps its frozen name and structural schema;
- * - this file's JCS and schema-digest code reproduces the digests in the
- *   commons and prefrontal test vectors, read with `git show` at pinned
- *   commits. The two repositories are looked up next to the main checkout of
- *   this one, or at `MC_CATALOG_COMMONS_REPO` and `MC_CATALOG_PREFRONTAL_REPO`.
- *   When one is missing the run says so and skips that cross-check.
+ * - this file's JCS and schema-digest code reproduces the canonical JSON and
+ *   schema hashes published in the commons role-contract and prefrontal fetch-plan
+ *   test vectors. The generator reads those repositories with `git show` at pinned
+ *   commits. They are looked up next to this repository's main checkout, or at
+ *   `MC_CATALOG_COMMONS_REPO` and `MC_CATALOG_PREFRONTAL_REPO`; when one is missing,
+ *   the run says so and skips that cross-check.
  *
  * Besides the example payloads it writes
  * `crates/mc-module/testdata/tool-catalog-guidance-matrix.json`: the digest of
@@ -803,11 +806,16 @@ function answer(request: CatalogRequest, config: ResolvedConfig): JsonObject {
     content.tools = catalogTools(request, config);
     if (request.system_text) {
         const text = guidanceText(request, config);
+        const toolNames = [...ownToolNames(request, servedToolIds(request, config))].sort();
+        if (jcs(toolNames) !== jcs([...new Set(toolNames)].sort())) {
+            throw new Error("system_text.tool_names must be sorted and deduplicated");
+        }
         const systemText: JsonObject = {
             text,
             item_digest: sha256Hex(text),
             preflight_digest: preflightDigest(request.system_text, config),
         };
+        systemText.tool_names = toolNames;
         if (compositionDigest) systemText.composition_digest = compositionDigest;
         content.system_text = systemText;
     }
