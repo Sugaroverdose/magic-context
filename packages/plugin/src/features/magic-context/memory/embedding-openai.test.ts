@@ -772,3 +772,72 @@ describe("OpenAICompatibleEmbeddingProvider classified failures", () => {
         });
     });
 });
+
+describe("OpenAICompatibleEmbeddingProvider response ordering", () => {
+    let fetchSpy: ReturnType<typeof spyOn<typeof globalThis, "fetch">>;
+
+    beforeEach(() => {
+        fetchSpy = spyOn(globalThis, "fetch");
+    });
+    afterEach(() => {
+        fetchSpy.mockRestore();
+    });
+
+    function respondWith(data: unknown[]): void {
+        fetchSpy.mockImplementation(
+            (async () =>
+                new Response(JSON.stringify({ data }), {
+                    status: 200,
+                    headers: { "content-type": "application/json" },
+                })) as FetchLike,
+        );
+    }
+
+    function provider(): OpenAICompatibleEmbeddingProvider {
+        return new OpenAICompatibleEmbeddingProvider({
+            endpoint: "http://127.0.0.1:65535",
+            model: "text-embedding-3-small",
+        });
+    }
+
+    test("places each vector by its data[].index, not its array position", async () => {
+        respondWith([
+            { index: 2, embedding: [2] },
+            { index: 0, embedding: [0] },
+            { index: 1, embedding: [1] },
+        ]);
+
+        const vectors = await provider().embedBatch(["zero", "one", "two"]);
+
+        expect(vectors.map((vector) => (vector ? Array.from(vector) : null))).toEqual([
+            [0],
+            [1],
+            [2],
+        ]);
+    });
+
+    test("keeps array order when the endpoint sends no index", async () => {
+        respondWith([{ embedding: [0] }, { embedding: [1] }]);
+
+        const vectors = await provider().embedBatch(["zero", "one"]);
+
+        expect(vectors.map((vector) => (vector ? Array.from(vector) : null))).toEqual([[0], [1]]);
+    });
+
+    test("refuses a response whose indexes cannot be trusted", async () => {
+        for (const data of [
+            [
+                { index: 0, embedding: [0] },
+                { index: 0, embedding: [1] },
+            ],
+            [
+                { index: 0, embedding: [0] },
+                { index: 5, embedding: [1] },
+            ],
+            [{ index: 1, embedding: [1] }, { embedding: [0] }],
+        ]) {
+            respondWith(data);
+            expect(await provider().embedBatch(["zero", "one"])).toEqual([null, null]);
+        }
+    });
+});

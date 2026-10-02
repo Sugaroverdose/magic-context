@@ -29,12 +29,44 @@ interface OpenAICompatibleEmbeddingProviderOptions {
 interface EmbeddingResponseBody {
     data?: Array<{
         embedding?: number[];
+        /** Position of the input this vector belongs to. */
+        index?: unknown;
     }>;
     /** The model the endpoint actually served. OpenAI and most compatible
      *  servers echo back the requested model; LMStudio/Ollama return the model
      *  they ACTUALLY ran, which can differ from the request when the requested
      *  model isn't loaded and the server substitutes a loaded one. */
     model?: string;
+}
+
+/**
+ * Map each response item to the input it embeds. The OpenAI contract tags
+ * every item with `index`, and a proxy may return items out of order, so the
+ * tag wins over array position; storing a vector against the wrong text would
+ * silently corrupt the index. Items without any `index` keep array order.
+ * Returns null when the tags are partial, duplicated or out of range.
+ */
+function responseSlots(items: readonly { index?: unknown }[], inputCount: number): number[] | null {
+    if (items.every((item) => item?.index === undefined)) {
+        return items.map((_, position) => position);
+    }
+    const slots: number[] = [];
+    const seen = new Set<number>();
+    for (const item of items) {
+        const index = item?.index;
+        if (
+            typeof index !== "number" ||
+            !Number.isInteger(index) ||
+            index < 0 ||
+            index >= inputCount ||
+            seen.has(index)
+        ) {
+            return null;
+        }
+        seen.add(index);
+        slots.push(index);
+    }
+    return slots;
 }
 
 function capEmbeddingInput(
@@ -402,10 +434,29 @@ export class OpenAICompatibleEmbeddingProvider implements EmbeddingProvider {
                 return Array.from({ length: texts.length }, () => null);
             }
 
-            const items = body.data;
-            const results = Array.from({ length: texts.length }, (_, index) => {
-                const embedding = items[index]?.embedding;
-                return Array.isArray(embedding) ? Float32Array.from(embedding) : null;
+            const slots = responseSlots(body.data, texts.length);
+            if (!slots) {
+                const failure = this.failure(
+                    "invalid_envelope",
+                    "response data[].index values were missing, duplicated or out of range",
+                    false,
+                );
+                log(
+                    `[magic-context] openai-compatible embedding request failed: ${failure.reason}`,
+                );
+                this.recordFailure(isProbe, failure);
+                return Array.from({ length: texts.length }, () => null);
+            }
+            const results: (Float32Array | null)[] = Array.from(
+                { length: texts.length },
+                () => null,
+            );
+            body.data.forEach((item, position) => {
+                const embedding = item?.embedding;
+                const slot = slots[position];
+                if (slot !== undefined && slot < results.length && Array.isArray(embedding)) {
+                    results[slot] = Float32Array.from(embedding);
+                }
             });
 
             // A response with no usable vectors is still a failure — the
