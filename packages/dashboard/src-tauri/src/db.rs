@@ -5253,6 +5253,25 @@ pub fn get_memories(
             enrich_memories_workspace_source(conn, workspace_filter, &mut memories)?;
             Ok(memories)
         }
+        Ok(empty) if use_fts && !use_like_fallback && offset > 0 && {
+            // An empty page past the first one only falls back to LIKE when FTS
+            // matches nothing at all. Otherwise it is just the end of the FTS
+            // results, and a LIKE page at the same offset would splice a
+            // different result set onto the pages already shown.
+            let mut probe: Vec<&dyn rusqlite::types::ToSql> = params[..params.len() - 2]
+                .iter()
+                .map(|p| p.as_ref())
+                .collect();
+            probe.push(&1i64);
+            probe.push(&0i64);
+            conn.prepare(&sql)?
+                .query(probe.as_slice())?
+                .next()?
+                .is_some()
+        } =>
+        {
+            Ok(empty)
+        }
         Ok(_empty) if use_fts && !use_like_fallback => {
             // FTS returned nothing — retry with LIKE for better partial matching
             let like_sql = format!(
@@ -11836,6 +11855,39 @@ mod memory_project_filter_tests {
             .expect("get_memories");
         assert_eq!(rows.len(), 1, "windows path search: {rows:?}");
         assert!(rows[0].content.contains(r"C:\Users\dev"));
+    }
+
+    #[test]
+    fn a_page_past_the_fts_results_does_not_switch_to_like_results() {
+        let conn = make_memory_db();
+        for i in 0..3 {
+            insert_memory_with_content(&conn, &format!("alpha fact {i}"), 1000 + i);
+        }
+        // LIKE '%alpha%' also matches these; FTS's whole-token match does not.
+        for i in 0..3 {
+            insert_memory_with_content(&conn, &format!("alphabet soup {i}"), 2000 + i);
+        }
+
+        let page = |offset| {
+            get_memories(&conn, None, None, None, None, Some("alpha"), 2, offset)
+                .expect("get_memories")
+                .into_iter()
+                .map(|m| m.content)
+                .collect::<Vec<_>>()
+        };
+        let mut seen = page(0);
+        seen.extend(page(2));
+        assert_eq!(seen.len(), 3);
+        assert!(seen.iter().all(|c| c.starts_with("alpha fact")), "{seen:?}");
+        assert_eq!(page(4), Vec::<String>::new());
+
+        // With no FTS match at all, every page comes from LIKE consistently.
+        let like_page = |offset| {
+            get_memories(&conn, None, None, None, None, Some("phabe"), 2, offset)
+                .expect("get_memories")
+                .len()
+        };
+        assert_eq!((like_page(0), like_page(2), like_page(4)), (2, 1, 0));
     }
 
     #[test]
