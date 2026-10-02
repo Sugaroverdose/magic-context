@@ -1662,6 +1662,30 @@ describe("PiSubagentRunner spawn lifecycle", () => {
 		});
 	});
 
+	it("keeps a multibyte stderr character intact when it spans two chunks", async () => {
+		const child = createMockChild();
+		const { runner } = runnerWith(child);
+		const progressChunks: string[] = [];
+
+		const resultPromise = runner.run({
+			...baseOptions,
+			onProgress: (event) => {
+				if (event.type === "stderr") progressChunks.push(event.chunk);
+			},
+		});
+		// "é" is 0xC3 0xA9 in UTF-8; a pipe may deliver the two bytes apart.
+		const bytes = Buffer.from("café — failed\n", "utf8");
+		child.stderr.write(bytes.subarray(0, 4));
+		child.stderr.write(bytes.subarray(4));
+		child.emitClose(1);
+
+		const result = await resultPromise;
+
+		expect(result.ok).toBe(false);
+		expect(result.meta?.stderr).toBe("café — failed\n");
+		expect(progressChunks.join("")).toBe("café — failed\n");
+	});
+
 	it("preserves an explicit zero historian temperature in the child environment", async () => {
 		const child = createMockChild();
 		const { runner, spawnImpl } = runnerWith(child, { piBinary: "custom-pi" });

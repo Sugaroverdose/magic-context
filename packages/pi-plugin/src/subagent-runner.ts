@@ -19,6 +19,7 @@ import {
 	sep,
 } from "node:path";
 import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import {
 	createDreamTokenBudget,
@@ -1499,8 +1500,12 @@ export class PiSubagentRunner implements SubagentRunner {
 			// otherwise).
 			let stderr = "";
 			let stderrLine = "";
+			// Pipe chunks split anywhere, including inside a multibyte UTF-8
+			// character; the decoder carries the partial bytes into the next chunk.
+			const stderrDecoder = new StringDecoder("utf8");
 			child.stderr?.on("data", (chunk: Buffer) => {
-				const text = chunk.toString("utf8");
+				const text = stderrDecoder.write(chunk);
+				if (text.length === 0) return;
 				// Pi 0.87 redirects extension stdout writes to stderr to protect its
 				// protocol. Accept only our content-free provenance event there.
 				stderrLine += text;
