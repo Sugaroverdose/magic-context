@@ -525,6 +525,17 @@ const HISTORIAN_CALIBRATION_ENTRY_PATH = resolveSiblingEntryPath(
  */
 const TERMINAL_DRAIN_GRACE_MS = 2_000;
 
+/**
+ * How long (ms) the runner waits for the child's stdio to close after the
+ * child process itself has exited. Node fires `close` only once every process
+ * holding the child's stdout/stderr has let go, and Pi can start processes
+ * that inherit those pipes and outlive it (a user extension's helper, an MCP
+ * stdio server). Without this bound such a process would keep the run
+ * unsettled forever. One second is ample for the pipe to deliver the output
+ * Pi wrote before it exited.
+ */
+const EXIT_STDIO_GRACE_MS = 1_000;
+
 export const MAGIC_CONTEXT_PI_SUBAGENT_ENV = "MAGIC_CONTEXT_PI_SUBAGENT";
 
 function isOmpHostProcess(): boolean {
@@ -1768,6 +1779,29 @@ export class PiSubagentRunner implements SubagentRunner {
 					ms: elapsedMs,
 				});
 
+				// Pi retries a transient provider error (429, 529, 5xx) inside the
+				// same child: the failed attempt's message_end and agent_end (with
+				// willRetry: true) are followed by auto_retry_start, a backoff of
+				// retry.baseDelayMs (2 s by default) and a fresh attempt. The failed
+				// turn is not the run's answer, so forget it, stop the drain before
+				// it kills the retry, and restore the hard timeout for the time left.
+				// The retried attempt's own terminal turn arms the drain again.
+				if (
+					e.type === "auto_retry_start" ||
+					(e.type === "agent_end" &&
+						(event as { willRetry?: unknown }).willRetry === true)
+				) {
+					sawAgentEnd = false;
+					agentEndMessages = null;
+					drainTimerStarted = false;
+					if (drainTimerHandle) {
+						clearTimeout(drainTimerHandle);
+						drainTimerHandle = undefined;
+					}
+					armHardTimeout();
+					return;
+				}
+
 				// Backwards-compat: if Pi (or any pi-compatible runner) ever
 				// does emit `agent_end` with the full messages array, treat
 				// it as authoritative. Older Pi versions may have done this.
@@ -1874,36 +1908,49 @@ export class PiSubagentRunner implements SubagentRunner {
 
 			// Hard timeout. We use SIGTERM first so the child can flush
 			// stdout cleanly, with SIGKILL as a backstop in case it hangs.
+			// The deadline is fixed at spawn: the drain timer replaces it once a
+			// terminal turn arrives, and a Pi auto-retry re-arms it for whatever
+			// time is left, so a retrying child stays bounded by timeoutMs.
 			let timeoutHandle: ReturnType<typeof setTimeout> | undefined;
-			if (typeof options.timeoutMs === "number" && options.timeoutMs > 0) {
-				timeoutHandle = setTimeout(() => {
-					if (settled) return;
-					terminateChild(child);
-					// Build a diagnostic suffix so callers can tell whether
-					// the subagent was hung silent (auth/network/no events)
-					// vs actively producing output but slow (model just
-					// taking too long). Without this, every timeout looks
-					// the same and operators can't distinguish them.
-					const sinceLastEvent =
-						lastEventTimestamp > 0 ? Date.now() - lastEventTimestamp : -1;
-					const progressSuffix =
-						eventCount === 0
-							? " — no events received from child (silent hang: spawn/auth/network or model never started streaming)"
-							: ` — saw ${eventCount} events; last event type=${lastEventType ?? "?"} ${sinceLastEvent}ms before timeout (model was emitting events but no terminal stopReason reached)`;
-					settle({
-						ok: false,
-						reason: "timeout",
-						error: `pi subagent timed out after ${options.timeoutMs}ms${progressSuffix}${stderr.length > 0 ? ` | stderr: ${summarizeChildStderr(stderr)}` : ""}`,
-						durationMs: Date.now() - startTime,
-						meta: {
-							stderr: stderr.length > 0 ? stderr : undefined,
-							eventCount,
-							lastEventType: lastEventType ?? undefined,
-							msSinceLastEvent: sinceLastEvent,
-						},
-					});
-				}, options.timeoutMs);
-			}
+			const hardDeadline =
+				typeof options.timeoutMs === "number" && options.timeoutMs > 0
+					? Date.now() + options.timeoutMs
+					: undefined;
+			const onHardTimeout = () => {
+				if (settled) return;
+				terminateChild(child);
+				// Build a diagnostic suffix so callers can tell whether
+				// the subagent was hung silent (auth/network/no events)
+				// vs actively producing output but slow (model just
+				// taking too long). Without this, every timeout looks
+				// the same and operators can't distinguish them.
+				const sinceLastEvent =
+					lastEventTimestamp > 0 ? Date.now() - lastEventTimestamp : -1;
+				const progressSuffix =
+					eventCount === 0
+						? " — no events received from child (silent hang: spawn/auth/network or model never started streaming)"
+						: ` — saw ${eventCount} events; last event type=${lastEventType ?? "?"} ${sinceLastEvent}ms before timeout (model was emitting events but no terminal stopReason reached)`;
+				settle({
+					ok: false,
+					reason: "timeout",
+					error: `pi subagent timed out after ${options.timeoutMs}ms${progressSuffix}${stderr.length > 0 ? ` | stderr: ${summarizeChildStderr(stderr)}` : ""}`,
+					durationMs: Date.now() - startTime,
+					meta: {
+						stderr: stderr.length > 0 ? stderr : undefined,
+						eventCount,
+						lastEventType: lastEventType ?? undefined,
+						msSinceLastEvent: sinceLastEvent,
+					},
+				});
+			};
+			const armHardTimeout = () => {
+				if (hardDeadline === undefined || timeoutHandle) return;
+				timeoutHandle = setTimeout(
+					onHardTimeout,
+					Math.max(0, hardDeadline - Date.now()),
+				);
+			};
+			armHardTimeout();
 
 			// Caller-driven abort (e.g. dreamer lease loss).
 			const onAbort = () => {
@@ -1930,9 +1977,17 @@ export class PiSubagentRunner implements SubagentRunner {
 				});
 			});
 
-			child.on("close", (code, signal) => {
+			let exitGraceHandle: ReturnType<typeof setTimeout> | undefined;
+			let childExitHandled = false;
+			const finishAfterChildExit = (
+				code: number | null,
+				signal: NodeJS.Signals | null,
+			) => {
+				if (childExitHandled) return;
+				childExitHandled = true;
 				if (timeoutHandle) clearTimeout(timeoutHandle);
 				if (drainTimerHandle) clearTimeout(drainTimerHandle);
+				if (exitGraceHandle) clearTimeout(exitGraceHandle);
 				options.signal?.removeEventListener("abort", onAbort);
 				emitProgress({
 					type: "child_exit",
@@ -2101,6 +2156,25 @@ export class PiSubagentRunner implements SubagentRunner {
 						sawProtocolOutput: eventCount > 0,
 					},
 				});
+			};
+
+			child.on("close", finishAfterChildExit);
+
+			// The child has exited but its stdio may still be held open by a
+			// process it started. Give the pipes a short grace to deliver what
+			// Pi wrote, then stop reading and settle from the exit status.
+			child.on("exit", (code, signal) => {
+				if (settled || exitGraceHandle) return;
+				exitGraceHandle = setTimeout(() => {
+					if (settled) return;
+					rl.close();
+					child.stdout?.destroy();
+					child.stderr?.destroy();
+					finishAfterChildExit(code, signal);
+				}, EXIT_STDIO_GRACE_MS);
+				if (typeof exitGraceHandle.unref === "function") {
+					exitGraceHandle.unref();
+				}
 			});
 		});
 	}
