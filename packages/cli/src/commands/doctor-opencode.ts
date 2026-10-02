@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { isCompactionEnabled } from "@magic-context/core/config/agent-disable";
 import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
@@ -67,7 +67,7 @@ import {
     UnsupportedSchemaVersionError,
 } from "../lib/database-access";
 import { formatDatabaseRepairGuidance } from "../lib/database-repair-guidance";
-import { collectDiagnostics } from "../lib/diagnostics-opencode";
+import { collectDiagnostics, type DiagnosticReport } from "../lib/diagnostics-opencode";
 import {
     checkLocalEmbeddingRuntime,
     formatLocalEmbeddingRuntimeDoctorWarning,
@@ -605,7 +605,33 @@ function openBrowser(url: string): void {
     }
 }
 
-async function runIssueFlow(): Promise<number> {
+export async function runIssueFlow(
+    options: { reportPath?: string } = {},
+    deps: { collectDiagnostics: () => Promise<DiagnosticReport> } = { collectDiagnostics },
+): Promise<number> {
+    if (options.reportPath) {
+        // Scripted runs (CI, bug templates) need a report without prompts.
+        try {
+            const report = await deps.collectDiagnostics();
+            const bundled = await bundleIssueReport(
+                report,
+                "Generated non-interactively by `doctor --issue --report`.",
+                "Magic Context diagnostic report",
+                null,
+                { outputPath: resolve(process.cwd(), options.reportPath) },
+            );
+            log.info(
+                bundled.fullPath
+                    ? `Report written to ${bundled.path}; full bundle at ${bundled.fullPath}`
+                    : `Report written to ${bundled.path}`,
+            );
+            return 0;
+        } catch (error) {
+            log.error(error instanceof Error ? error.message : String(error));
+            return 1;
+        }
+    }
+
     intro("Magic Context Issue Report");
 
     const title = await text("Issue title", {
@@ -621,7 +647,7 @@ async function runIssueFlow(): Promise<number> {
     s.start("Collecting diagnostics");
 
     try {
-        const report = await collectDiagnostics();
+        const report = await deps.collectDiagnostics();
         s.stop("Diagnostics collected");
 
         // Ask the user which session this issue relates to. Only show the
@@ -985,12 +1011,18 @@ export function describeOpenCode2SessionAPIRequirement(hostVersion: string): str
 }
 
 export async function runDoctor(
-    options: { force?: boolean; fix?: boolean; issue?: boolean } & V22BackfillCommandArgs = {},
+    options: {
+        force?: boolean;
+        fix?: boolean;
+        issue?: boolean;
+        /** With `issue`, write the report here without prompting. */
+        report?: string;
+    } & V22BackfillCommandArgs = {},
 ): Promise<number> {
     migrateConfigLocationsForCli(process.cwd(), log);
 
     if (options.issue) {
-        return runIssueFlow();
+        return runIssueFlow({ reportPath: options.report });
     }
 
     let v22Db: ReturnType<typeof openExistingContextDatabase> = null;
