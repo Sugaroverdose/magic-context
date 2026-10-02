@@ -594,9 +594,9 @@ to r1's recommendation, so it stands as written.
     the reason in §2.2. No planned hook asked for `replace` on a Magic Context
     tool.
 
-### 7.2 Still open
+### 7.2 Decided by Magic Context after the room review
 
-One item, found while applying decision 2. Owner: Magic Context.
+One item, found while applying decision 2. Owner and ruler: Magic Context.
 
 - **The no-reduce text describes Magic Context's own compaction.** It was
   written for a session Magic Context compacts while the model can't stamp. It
@@ -604,11 +604,12 @@ One item, found while applying decision 2. Owner: Magic Context.
   older work as `<session-history>`, and that `ctx_expand(message=N)` brings a
   cleared item back whole. Under `tools-only` another provider compacts, or
   none does, so those sentences describe machinery the session doesn't have.
-  v1 serves the no-reduce text under `tools-only`, as ruled. *Proposed:* before
-  Magic Context declares `tool-provider/v1`, build a `tools-only` text from the
-  same fragments without the compaction paragraphs, through the text split
-  decision 3 already requires, and bring it to the extensibility room for a
-  ruling.
+  *Decided:* `tools-only` gets its own text, built from the same fragments
+  without the compaction paragraphs, through the text split decision 3 already
+  requires. It is in place before Magic Context declares `tool-provider/v1`;
+  until then no session is served `tools-only`. The text is Magic Context's to
+  choose, since it reads only Magic Context's own entry, so the room needs no
+  ruling; it sees the bytes when the payloads are regenerated.
 
 ## 8. What implementing this would touch
 
