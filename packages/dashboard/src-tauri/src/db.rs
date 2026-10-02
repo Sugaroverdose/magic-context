@@ -5001,6 +5001,23 @@ fn enrich_memories_workspace_source(
     Ok(())
 }
 
+/// A `LIKE ... ESCAPE '\'` pattern that matches `raw` literally anywhere in the
+/// value. The escape character itself must be escaped first: an unescaped `\`
+/// would swallow the next character, so a Windows path like `C:\Users` would
+/// only match `C:Users`.
+fn like_contains_pattern(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len() + 2);
+    escaped.push('%');
+    for ch in raw.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('%');
+    escaped
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn get_memories(
     conn: &Connection,
@@ -5056,7 +5073,7 @@ pub fn get_memories(
     // For very short queries (< 3 chars) or if FTS sanitization produces nothing,
     // fall back to LIKE which handles partial matches better
     let use_like_fallback = has_search && (!use_fts || raw_search.len() < 3);
-    let like_pattern = format!("%{}%", raw_search.replace('%', "\\%").replace('_', "\\_"));
+    let like_pattern = like_contains_pattern(&raw_search);
 
     // Build WHERE clauses and params dynamically
     let mut conditions = Vec::new();
@@ -11728,6 +11745,50 @@ mod memory_project_filter_tests {
         insert_memory(&conn, "/tmp/archived-only", "X", "archived");
         let rows = enumerate_memory_projects(&conn).expect("enumerate");
         assert!(rows.is_empty(), "archived-only project leaked: {rows:?}");
+    }
+
+    fn insert_memory_with_content(conn: &Connection, content: &str, updated_at: i64) -> i64 {
+        conn.execute(
+            "INSERT INTO memories
+                (project_path, category, content, normalized_hash,
+                 source_type, seen_count, retrieval_count,
+                 first_seen_at, last_seen_at, verification_status,
+                 status, created_at, updated_at)
+             VALUES ('/tmp/search', 'CONSTRAINTS', ?1, ?2,
+                     'historian', 1, 0,
+                     1000, 1000, 'unverified',
+                     'active', 1000, ?3)",
+            (content, format!("{:x}", md5::compute(content)), updated_at),
+        )
+        .expect("insert memory");
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, content, category) VALUES (?1, ?2, 'CONSTRAINTS')",
+            (id, content),
+        )
+        .expect("index memory");
+        id
+    }
+
+    #[test]
+    fn like_search_matches_a_backslash_literally() {
+        // Two-character queries take the LIKE path. `\n` must find the memory
+        // containing a literal backslash-n, not every memory containing an `n`.
+        let conn = make_memory_db();
+        let literal = insert_memory_with_content(&conn, r"join lines with \n here", 1000);
+        insert_memory_with_content(&conn, "nothing special", 2000);
+        insert_memory_with_content(&conn, r"the tree lives under C:\Users\dev", 3000);
+
+        let rows = get_memories(&conn, None, None, None, None, Some(r"\n"), 100, 0)
+            .expect("get_memories");
+        assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), vec![literal]);
+
+        // A Windows path whose FTS tokens match nothing exactly falls back to
+        // LIKE, which must also treat the backslash literally.
+        let rows = get_memories(&conn, None, None, None, None, Some(r"C:\Users\de"), 100, 0)
+            .expect("get_memories");
+        assert_eq!(rows.len(), 1, "windows path search: {rows:?}");
+        assert!(rows[0].content.contains(r"C:\Users\dev"));
     }
 
     #[test]
