@@ -892,3 +892,55 @@ describe("loadPiConfig", () => {
 		});
 	});
 });
+
+// Parity with the OpenCode loader: an invalid project value must not displace
+// the user's value and then fall to the schema default in recovery.
+describe("loadPiConfig — project config cannot reset user settings", () => {
+	function load(user: unknown, project: unknown) {
+		const cwd = makeTempRoot("mc-pi-cwd-");
+		const home = makeTempRoot("mc-pi-home-");
+		withHome(home);
+		writeUserConfig(home, JSON.stringify(user));
+		writeProjectConfig(cwd, JSON.stringify(project));
+		return loadPiConfigDetailed({ cwd }, false);
+	}
+
+	it("keeps the user's compaction block when the project sets compaction:false", () => {
+		const result = load(
+			{ compaction: { enabled: false } },
+			{ compaction: false },
+		);
+		expect(result.config.compaction).toMatchObject({ enabled: false });
+		expect(result.recoveredTopLevelKeys).toContain("compaction");
+	});
+
+	it("keeps the user's historian model when the project sets historian:1", () => {
+		const result = load(
+			{ historian: { pi: { model: "anthropic/claude-x" } } },
+			{ historian: 1 },
+		);
+		expect(result.config.historian?.pi?.model).toBe("anthropic/claude-x");
+	});
+
+	it("does not lower a user threshold of 88 to a project value of 81", () => {
+		const result = load(
+			{ execute_threshold_percentage: 88 },
+			{ execute_threshold_percentage: 81 },
+		);
+		expect(result.config.execute_threshold_percentage).toBe(88);
+	});
+
+	it("keeps the user's threshold when the project value is invalid", () => {
+		const result = load(
+			{
+				execute_threshold_percentage: 80,
+				execute_threshold_tokens: { default: 300_000 },
+			},
+			{ execute_threshold_percentage: 10, execute_threshold_tokens: 5 },
+		);
+		expect(result.config.execute_threshold_percentage).toBe(80);
+		expect(result.config.execute_threshold_tokens).toEqual({
+			default: 300_000,
+		});
+	});
+});

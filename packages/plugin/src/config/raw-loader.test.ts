@@ -1,5 +1,15 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { chmodSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+    chmodSync,
+    lstatSync,
+    readdirSync,
+    readFileSync,
+    readlinkSync,
+    rmSync,
+    statSync,
+    symlinkSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { parseJsonc } from "../shared/jsonc-parser";
@@ -363,6 +373,32 @@ describe("per-harness raw config migration", () => {
         expect(loaded?.migrated).toBe(true);
         expect(readFileSync(backupPath)).toEqual(original);
         expect(statSync(backupPath).ino).toBe(backupInode);
+    });
+
+    // stow, chezmoi and home-manager link the user config into a dotfiles repo.
+    // Replacing the link with a regular file would silently stop later edits
+    // from reaching that repo, so the migration writes through to the target.
+    it("keeps a symlinked user config a symlink and migrates its target", () => {
+        const directory = temporaryDirectory();
+        const dotfiles = temporaryDirectory();
+        const targetPath = join(dotfiles, "magic-context.jsonc");
+        const configPath = join(directory, "magic-context.jsonc");
+        const original = Buffer.from('{ "historian": { "model": "provider/model" } }\n');
+        writeFileSync(targetPath, original);
+        chmodSync(targetPath, 0o600);
+        symlinkSync(targetPath, configPath);
+
+        const loaded = loadRawConfigFile({ configPath, tier: "user" });
+
+        expect(loaded?.migrated).toBe(true);
+        expect(lstatSync(configPath).isSymbolicLink()).toBe(true);
+        expect(readlinkSync(configPath)).toBe(targetPath);
+        expect(readFileSync(targetPath)).toEqual(loaded?.bytes);
+        expect(hasFlatKeys(readFileSync(targetPath))).toBe(false);
+        expect(statSync(targetPath).mode & 0o777).toBe(0o600);
+        expect(readFileSync(`${configPath}.pre-per-harness.bak`)).toEqual(original);
+        expect(readdirSync(dotfiles).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+        expect(readdirSync(directory).filter((name) => name.endsWith(".tmp"))).toEqual([]);
     });
 
     it("reloads the winning candidate when a concurrent loader replaces the target", () => {
