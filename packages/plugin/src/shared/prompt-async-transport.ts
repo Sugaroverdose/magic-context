@@ -72,6 +72,18 @@ function sessionApi(client: Client): SessionApi | undefined {
     return (client as { session?: SessionApi } | undefined)?.session;
 }
 
+/** Marks the error the wait throws when the host reported a session error for the child. */
+const HOST_SESSION_ERROR = Symbol("promptAsyncHostSessionError");
+
+/** True for the error the wait throws when the host recorded a session error for the child. */
+export function isHostSessionError(error: unknown): boolean {
+    return (
+        error !== null &&
+        typeof error === "object" &&
+        (error as { [HOST_SESSION_ERROR]?: unknown })[HOST_SESSION_ERROR] === true
+    );
+}
+
 /** True when the host client can send without waiting and report session status. */
 export function supportsPromptAsync(client: Client): boolean {
     const session = sessionApi(client);
@@ -276,6 +288,7 @@ export async function promptAsyncAndWaitForIdle(
                 Object.assign(error, {
                     name: "DreamerProviderOutputFailureError",
                     transient: true,
+                    [HOST_SESSION_ERROR]: true,
                 });
                 throw error;
             }

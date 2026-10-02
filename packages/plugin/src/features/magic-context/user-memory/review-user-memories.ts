@@ -310,6 +310,9 @@ If no promotions are warranted, return empty arrays. Always consume reviewed can
                 },
             },
             {
+                // Send without holding a request open for the whole run, so the
+                // deadline below is the only timer (see prompt-async-transport.ts).
+                transport: shared.createPromptAsyncTransport(client, childSessionId),
                 // The executor owns the per-task deadline (config.timeoutMinutes);
                 // honor the remaining budget, do NOT silently re-cap at 5 minutes.
                 timeoutMs: remainingMs,

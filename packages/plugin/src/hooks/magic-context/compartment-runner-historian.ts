@@ -170,11 +170,15 @@ export function createV1HiddenCompletionExecutor(
     db: Database,
     directory: string,
 ): HiddenCompletionExecutor {
-    // Dreamer tasks run long tool loops. Their children send with prompt_async and
-    // poll for idle so no single request stays open long enough to meet the host
-    // client's request timer; the caller's slice stays the only timer. Historian
-    // runs keep the synchronous prompt.
-    const asyncChildren = new Set<string>();
+    // Every hidden child (historian, historian editor, dreamer task) sends with
+    // prompt_async and polls for idle. A synchronous prompt holds one HTTP request
+    // open for the whole run, and some OpenCode 1 builds give plugins a client
+    // whose fetch keeps Bun's default request timer, which rejects that request
+    // with TimeoutError after 300-360 s. A slow model then never gets the
+    // configured historian_timeout_ms. With short requests, the caller's timeout is
+    // the only timer, and it still aborts the child when it fires. Clients without
+    // prompt_async (the Pi facades) keep the synchronous prompt.
+    const historianChildren = new Set<string>();
     return {
         capabilities: { tools: true, harness: "opencode" },
         async open(run) {
@@ -190,15 +194,28 @@ export function createV1HiddenCompletionExecutor(
                 preferResponseOnMissingData: true,
             });
             const id = typeof created?.id === "string" ? created.id : "";
-            if (id && run.kind === "dreamer-task") asyncChildren.add(id);
-            if (id && run.kind !== "dreamer-task")
+            if (id && run.kind !== "dreamer-task") {
+                historianChildren.add(id);
                 rememberHistorianOutputCap(id, run.maxOutputTokens);
+            }
             return { id, childSessionId: id || undefined };
         },
         async attempt(handle, request) {
             if (!client) throw new Error("Hidden completion client is unavailable");
-            if (asyncChildren.has(handle.id) && shared.supportsPromptAsync(client)) {
-                await shared.promptAsyncAndWaitForIdle(client, request);
+            if (shared.supportsPromptAsync(client)) {
+                try {
+                    await shared.promptAsyncAndWaitForIdle(client, request);
+                } catch (error) {
+                    // A provider error the host recorded ends the historian's run. The
+                    // synchronous prompt returned normally in that case and collect()
+                    // reported the failed assistant message, so the historian moved to
+                    // its next model in a fresh child. Keep that: rethrowing here would
+                    // make the historian's retry loop send the same prompt again into
+                    // this child.
+                    if (historianChildren.has(handle.id) && shared.isHostSessionError(error))
+                        return;
+                    throw error;
+                }
                 return;
             }
             await client.session.prompt(request as Parameters<typeof client.session.prompt>[0]);
@@ -251,7 +268,7 @@ export function createV1HiddenCompletionExecutor(
         },
         async close(handle, settlement) {
             if (handle?.id) {
-                asyncChildren.delete(handle.id);
+                historianChildren.delete(handle.id);
                 forgetHistorianOutputCap(handle.id);
             }
             if (!client) return;
