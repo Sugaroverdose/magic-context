@@ -1000,7 +1000,7 @@ const COMMONS_REF = "42949fc331d8c318225d8ffa0faa024584237c57";
  * prefrontal at a commit whose fetch-plan vectors (compositions and plans, each
  * as pretty JSON, JCS bytes and SHA-256) the design document cites.
  */
-const PREFRONTAL_REF = "35c8e5f7cec5b5fc3564f51f9888b2e290c0c023";
+const PREFRONTAL_REF = process.env.MC_CATALOG_PREFRONTAL_REF ?? "35c8e5f7cec5b5fc3564f51f9888b2e290c0c023";
 
 function git(repo: string, args: string[]): string | undefined {
     const run = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8", maxBuffer: 64 << 20 });
@@ -1091,6 +1091,25 @@ function crossCheckCommons(repo: string, out: CrossCheck): void {
     );
 }
 
+function checkPrefrontalMagicContextTags(value: Json, vectorFile: string, out: CrossCheck): void {
+    const object = value as JsonObject;
+    const composition = (object.composition ?? value) as JsonObject;
+    const providers = composition?.providers;
+    if (!Array.isArray(providers)) return;
+    for (const provider of providers) {
+        if (provider === null || typeof provider !== "object" || provider.provider !== MODULE_ID || !Array.isArray(provider.tools)) continue;
+        for (const entry of provider.tools) {
+            if (entry === null || typeof entry !== "object" || typeof entry.name !== "string" || !Array.isArray(entry.capabilities)) continue;
+            const definition = TOOL_DEFINITIONS.get(entry.name);
+            const expected = definition?.capabilities ?? [];
+            const actual = entry.capabilities;
+            if (jcs(expected) !== jcs(actual)) {
+                out.failures.push(`prefrontal ${vectorFile} tool ${entry.name}: expected tags ${JSON.stringify(expected)}, actual tags ${JSON.stringify(actual)}`);
+            }
+        }
+    }
+}
+
 function crossCheckPrefrontal(repo: string, out: CrossCheck): void {
     const dir = "test-vectors/fetch-plan-v1";
     const listing = git(repo, ["ls-tree", "-r", "--name-only", PREFRONTAL_REF, "--", dir]);
@@ -1113,6 +1132,7 @@ function crossCheckPrefrontal(repo: string, out: CrossCheck): void {
             continue;
         }
         checked++;
+        checkPrefrontalMagicContextTags(value, stem.slice(dir.length + 1), out);
         if (jcs(value) !== bytes || sha256Hex(bytes) !== digest.trim()) {
             out.failures.push(`prefrontal ${stem.slice(dir.length + 1)}`);
         }
