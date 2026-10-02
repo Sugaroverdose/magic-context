@@ -1196,10 +1196,19 @@ function copyMagicContextState(args: {
                 // Advance the journal phase INSIDE this transaction: the sweep's
                 // roll-forward arm (db_committed ⇒ shared state committed) is
                 // only true because the two writes commit atomically.
-                stmt(
+                const advanced = stmt(
                     args.cortexkitDb,
                     "UPDATE migration_pending SET phase = 'db_committed' WHERE migration_key = ?",
-                ).run(journalKey);
+                ).run(journalKey) as { changes?: number | bigint };
+                // A journal sweep in another process (plain `doctor`, or a second
+                // `doctor migrate`) may have rolled this staged row back, and its
+                // stage file with it, after this run staged. Committing anyway
+                // would leave shared state for a session file that never lands.
+                if (Number(advanced.changes ?? 0) !== 1) {
+                    throw new Error(
+                        "The migration journal row was reconciled by another process (a concurrent doctor or doctor migrate run) while this migration was running; nothing was committed. Re-run doctor migrate for this session.",
+                    );
+                }
             }
             args.cortexkitDb.exec("COMMIT");
         } catch (error) {
