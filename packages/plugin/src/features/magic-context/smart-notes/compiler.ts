@@ -53,6 +53,7 @@ export interface CompileSmartNoteSuccess {
 }
 
 export interface CompileSmartNoteFailure {
+    retryAt?: number;
     ok: false;
     cancelled: boolean;
     error: string;
@@ -241,6 +242,9 @@ Remember: output only the JSON object described by the system prompt.`;
                 cancelled: dryRun.cancelled,
                 error,
                 persistent: !dryRun.cancelled && dryRun.persistent,
+                ...(!dryRun.cancelled && dryRun.retryAt !== undefined
+                    ? { retryAt: dryRun.retryAt }
+                    : {}),
             };
         }
         recordInvocation({ status: "completed", messages: outputMessages });

@@ -1,4 +1,5 @@
 import { lookup as dnsLookup } from "node:dns/promises";
+import type { IncomingHttpHeaders } from "node:http";
 import * as https from "node:https";
 import { isIP, type LookupFunction } from "node:net";
 import { domainToASCII } from "node:url";
@@ -51,7 +52,8 @@ export interface GuardedSmartNoteHttpGetOptions {
 
 const DNS_TIMEOUT_MS = 3_000;
 const DEFAULT_HTTP_TIMEOUT_MS = 5_000;
-const DEFAULT_HTTP_BODY_LIMIT_BYTES = 64 * 1024;
+// Bound streamed network input independently of compiler/model output limits.
+const DEFAULT_HTTP_BODY_LIMIT_BYTES = 1024 * 1024;
 const MAX_HTTP_ADDRESS_CANDIDATES = 4;
 const MAX_HTTP_REDIRECTS = 5;
 const HTTP_REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
@@ -125,9 +127,9 @@ export async function guardedSmartNoteHttpGet(
     const deadline = performance.now() + timeoutMs;
     let timer: ReturnType<typeof setTimeout> | undefined;
 
-    const follow = async (): Promise<{ status: number; body: string }> => {
-        let currentUrl = input;
-        let remainingBytes = bodyLimitBytes;
+    let remainingBytes = bodyLimitBytes;
+    const follow = async (target: string): Promise<{ status: number; body: string }> => {
+        let currentUrl = target;
         for (let redirects = 0; ; redirects++) {
             throwIfAborted(controller.signal);
             const validation = await validateSmartNoteHttpUrl(currentUrl, {
@@ -162,10 +164,13 @@ export async function guardedSmartNoteHttpGet(
             if (!response) throw toNetworkError(lastError, "all validated addresses failed");
             remainingBytes -= response.bytesRead ?? Buffer.byteLength(response.body);
             if (remainingBytes < 0) {
-                throw new SmartNoteNetworkError("SMART_NOTE_NETWORK: response body too large", {
-                    terminal: true,
-                    persistent: true,
-                });
+                throw new SmartNoteNetworkError(
+                    `SMART_NOTE_NETWORK: response body too large at ${validation.url.href} (received at least ${bodyLimitBytes - remainingBytes} bytes; limit ${bodyLimitBytes})`,
+                    {
+                        terminal: true,
+                        persistent: true,
+                    },
+                );
             }
             if (!HTTP_REDIRECT_STATUSES.has(response.status)) {
                 return { status: response.status, body: response.body };
@@ -194,7 +199,27 @@ export async function guardedSmartNoteHttpGet(
         // A wall-clock deadline also covers DNS and trickling response bodies;
         // socket inactivity timeouts alone cannot bound the whole redirect chain.
         return await Promise.race([
-            follow(),
+            (async () => {
+                const response = await follow(input);
+                assertReadableHttpStatus(response.status, input);
+                if (response.status === 404 || response.status === 410) {
+                    const parent = readableParentUrl(new URL(input));
+                    if (parent) {
+                        // Verify the GitHub repository or npm package is readable before
+                        // treating its watched resource as missing. Reuse the resource
+                        // request's SSRF policy, byte budget and wall-clock deadline.
+                        const container = await follow(parent);
+                        assertReadableHttpStatus(container.status, parent);
+                        if (container.status < 200 || container.status >= 300) {
+                            throw new SmartNoteNetworkError(
+                                `SMART_NOTE_NETWORK: source container is not publicly readable at ${parent} (HTTP ${container.status}); cannot check ${input}`,
+                                { terminal: true, persistent: true },
+                            );
+                        }
+                    }
+                }
+                return response;
+            })(),
             new Promise<never>((_, reject) => {
                 timer = setTimeout(() => {
                     reject(
@@ -211,6 +236,59 @@ export async function guardedSmartNoteHttpGet(
         options.signal.removeEventListener("abort", onAbort);
         controller.abort();
     }
+}
+
+function rateLimitRetryAt(headers: IncomingHttpHeaders): number {
+    const now = Date.now();
+    const retryAfter = String(headers["retry-after"] ?? "");
+    const delaySeconds = retryAfter.trim() ? Number(retryAfter) : NaN;
+    const retryAt = Number.isFinite(delaySeconds)
+        ? now + Math.max(0, delaySeconds) * 1000
+        : Date.parse(retryAfter);
+    const resetSeconds = Number(headers["x-ratelimit-reset"]);
+    const resetAt = Number.isFinite(resetSeconds) ? resetSeconds * 1000 : NaN;
+    // Missing/malformed Retry-After or X-RateLimit-Reset headers use the five-minute
+    // minimum retry delay; rate limiting does not require reauthoring the check.
+    return Math.max(
+        now + 5 * 60 * 1000,
+        Number.isFinite(retryAt) ? retryAt : 0,
+        Number.isFinite(resetAt) ? resetAt : 0,
+    );
+}
+
+function assertReadableHttpStatus(status: number, url: string): void {
+    if (status === 401 || status === 403 || status === 451) {
+        throw new SmartNoteNetworkError(
+            `SMART_NOTE_NETWORK: source is not publicly readable at ${url} (HTTP ${status})`,
+            { terminal: true, persistent: true },
+        );
+    }
+    if (status === 408 || status === 429 || status >= 500) {
+        throw new SmartNoteNetworkError(`SMART_NOTE_NETWORK: transient HTTP ${status} at ${url}`);
+    }
+}
+
+function readableParentUrl(url: URL): string | null {
+    const segments = url.pathname.split("/").filter(Boolean);
+    if (url.hostname === "api.github.com" && segments[0] === "repos" && segments.length >= 3) {
+        return `https://api.github.com/repos/${segments[1]}/${segments[2]}`;
+    }
+    if (url.hostname === "raw.githubusercontent.com" && segments.length >= 2) {
+        return `https://api.github.com/repos/${segments[0]}/${segments[1]}`;
+    }
+    if (url.hostname === "github.com" && segments.length >= 2) {
+        return `https://api.github.com/repos/${segments[0]}/${segments[1]}`;
+    }
+    if (url.hostname === "registry.npmjs.org" && segments.length > 0) {
+        // Scoped package names can be encoded as one segment or written with a slash.
+        const name =
+            segments[0].startsWith("@") && !/%2f/i.test(segments[0])
+                ? `${segments[0]}/${segments[1] ?? ""}`
+                : segments[0];
+        return `https://registry.npmjs.org/${name}`;
+    }
+    // Generic document origins have no reliable repository/package metadata API.
+    return null;
 }
 
 async function resolveHostToValidatedGlobalAddresses(
@@ -371,6 +449,20 @@ export function requestValidatedAddress(
                 });
                 response.on("end", () => {
                     const status = response.statusCode ?? 0;
+                    const rateLimited =
+                        (status === 401 || status === 403 || status === 429) &&
+                        (status === 429 ||
+                            response.headers["x-ratelimit-remaining"] === "0" ||
+                            response.headers["retry-after"] !== undefined);
+                    if (rateLimited) {
+                        reject(
+                            new SmartNoteNetworkError(
+                                `SMART_NOTE_NETWORK: rate-limited HTTP ${status} at ${url.href}`,
+                                { terminal: true, retryAt: rateLimitRetryAt(response.headers) },
+                            ),
+                        );
+                        return;
+                    }
                     if (status >= 500) {
                         reject(
                             new SmartNoteNetworkError(

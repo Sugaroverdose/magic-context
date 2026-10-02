@@ -45,18 +45,21 @@ export interface SmartNoteCheckResult {
 export interface SmartNoteNetworkErrorOptions {
     terminal?: boolean;
     persistent?: boolean;
+    retryAt?: number;
 }
 
 export class SmartNoteNetworkError extends Error {
     readonly isSmartNoteNetworkError = true;
     readonly terminal: boolean;
     readonly persistent: boolean;
+    readonly retryAt?: number;
 
     constructor(message: string, options: SmartNoteNetworkErrorOptions = {}) {
         super(message);
         this.name = "SmartNoteNetworkError";
         this.terminal = options.terminal ?? false;
         this.persistent = options.persistent ?? false;
+        this.retryAt = options.retryAt;
     }
 }
 
