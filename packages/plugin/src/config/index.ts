@@ -29,6 +29,7 @@ import {
     attachProtectedTokensTierOverrides,
     constrainProjectThresholdOverrides,
     dropInheritedEmbeddingKeyOnRedirect,
+    restoreTrustedValuesOverInvalidProjectValues,
     stripUnsafeProjectConfigFields,
 } from "./project-security";
 import { pruneNestedConfigLeaf } from "./prune-config-leaf";
@@ -589,6 +590,29 @@ export function parsePluginConfig(
     };
 }
 
+/**
+ * Every schema issue path the loader's real parse would report for `rawConfig`,
+ * after the same pre-schema migrations parsePluginConfig runs (their warnings
+ * are discarded here; the real parse reports them). Empty when valid.
+ */
+function collectSchemaIssuePaths(rawConfig: Record<string, unknown>): PropertyKey[][] {
+    const scratch: string[] = [];
+    const migrated = migrateLegacyAgentEnabledInMemory(
+        migrateDreamerV2(
+            migrateLegacyExperimental(stripRemovedAgentConfig(rawConfig, scratch), scratch),
+            scratch,
+        ),
+        scratch,
+    );
+    const parsed = MagicContextConfigSchema.safeParse(migrated);
+    if (parsed.success) return [];
+    return parsed.error.issues.flatMap((issue) =>
+        issue.code === "unrecognized_keys"
+            ? issue.keys.map((key) => [...issue.path, key])
+            : [[...issue.path]],
+    );
+}
+
 export function loadPluginConfig(
     directory: string,
 ): MagicContextPluginConfig & { configWarnings?: string[] } {
@@ -767,6 +791,7 @@ export function loadPluginConfigDetailed(
     // a cloned repo may delay compaction, but it may not lower thresholds in a
     // way that forces extra historian work on the user's account.
     const trustedBaseConfig = parsePluginConfig(trustedProfiledRaw);
+    let projectRestoredTopLevelKeys: string[] = [];
 
     if (projectLoaded) {
         mergedRaw = deepMergeRawConfig(mergedRaw, profileResolution.projectBase);
@@ -784,11 +809,27 @@ export function loadPluginConfigDetailed(
         })) {
             allWarnings.push(`[project config] ${warning}`);
         }
+        const restoredOverProject = restoreTrustedValuesOverInvalidProjectValues({
+            mergedRaw,
+            trustedRaw: trustedProfiledRaw,
+            projectRaw: profileResolution.projectBase,
+            collectIssuePaths: collectSchemaIssuePaths,
+        });
+        for (const warning of restoredOverProject.warnings) {
+            allWarnings.push(`[project config] ${warning}`);
+        }
+        projectRestoredTopLevelKeys = restoredOverProject.restoredTopLevelKeys;
     }
 
     const recoveredTopLevelKeys: string[] = [];
     const cacheTtlConfigured = Object.hasOwn(mergedRaw, "cache_ttl");
     const config = parsePluginConfig(mergedRaw, recoveredTopLevelKeys);
+    // An ignored invalid project value is still a config the user must fix, so
+    // keep reporting it as schema recovery (live reload keeps the last good
+    // config on that outcome, as it did before the user's value was restored).
+    for (const key of projectRestoredTopLevelKeys) {
+        if (!recoveredTopLevelKeys.includes(key)) recoveredTopLevelKeys.push(key);
+    }
     attachProtectedTokensTierOverrides(config, {
         trustedUser: trustedBaseConfig.protected_tokens,
         project: projectLoaded ? profileResolution.projectBase.protected_tokens : undefined,
