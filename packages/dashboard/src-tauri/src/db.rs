@@ -1607,18 +1607,65 @@ pub struct TableCount {
 
 // ── Helpers ───────────────────────────────────────────────────
 
-/// Compute a normalized hash matching the plugin's dedup logic:
-/// lowercase → trim whitespace → hash as hex string.
-/// Uses std::hash for portability (no SHA crate in deps); the exact
-/// hash algorithm doesn't matter as long as it's consistent within
-/// the dashboard. The plugin uses its own Bun-based hash path.
-/// Match the plugin's `computeNormalizedHash`: lowercase → collapse whitespace → trim → MD5 hex.
+/// Match the plugin's `computeNormalizedHash` (`normalize-hash.ts`): lowercase,
+/// replace every JS `\s+` run with one space, trim, then MD5 hex. The whitespace
+/// set must be JavaScript's, not Rust's `char::is_whitespace`: the two disagree on
+/// U+0085 (Rust only) and U+FEFF (JS only), and any disagreement gives the same
+/// memory two hashes, which defeats the `UNIQUE(project_path, category,
+/// normalized_hash)` dedup the plugin relies on.
 fn normalize_hash(content: &str) -> String {
-    let normalized = content.to_lowercase();
-    // Collapse all whitespace runs into a single space (mirrors JS /\s+/g → " ")
-    let normalized: String = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowered = content.to_lowercase();
+    let normalized = lowered
+        .split(is_js_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     let digest = md5::compute(normalized.as_bytes());
     format!("{:032x}", digest)
+}
+
+/// The characters matched by a JavaScript regex `\s`: ECMAScript WhiteSpace
+/// (including U+FEFF and the Unicode `Zs` spaces) plus LineTerminator.
+fn is_js_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0009}'..='\u{000D}'
+            | '\u{0020}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
+    )
+}
+
+#[cfg(test)]
+mod normalize_hash_tests {
+    use super::normalize_hash;
+
+    #[test]
+    fn memory_hash_uses_the_plugin_whitespace_set() {
+        // Expected digests come from the plugin's own code path:
+        // createHash("md5").update(s.toLowerCase().replace(/\s+/g, " ").trim()).
+        // U+0085 is not JS whitespace, so it stays inside the word.
+        assert_eq!(
+            normalize_hash("a\u{0085}b"),
+            "7337d246dc3bfd7109e19d37193e7f19"
+        );
+        // U+FEFF is JS whitespace: it collapses and trims away.
+        assert_eq!(
+            normalize_hash("\u{FEFF}User  Prefers\u{00A0}Bun\u{FEFF}"),
+            "c35b4c1bcc1a2fabeb3e9efa7bac6597"
+        );
+        assert_eq!(
+            normalize_hash("x\u{2028}y\u{3000}z\t"),
+            "a0971f3c1fc2d4c967b3cd362cc29f48"
+        );
+    }
 }
 
 fn format_timestamp_iso(timestamp: i64) -> String {
@@ -4156,14 +4203,14 @@ fn get_pi_session_cache_events(
     };
     let mut rows: Vec<RawDbCacheEvent> = detail
         .messages
-        .into_iter()
+        .iter()
         .filter(|message| message.role == "assistant")
         .filter_map(|message| {
-            let usage = message.usage?;
+            let usage = message.usage.as_ref()?;
             let (provider, model) = pi_message_provider_model(&message.raw_json);
-            (usage.total > 0).then_some(RawDbCacheEvent {
+            (usage.total > 0).then(|| RawDbCacheEvent {
                 harness,
-                message_id: message.entry_id,
+                message_id: message.entry_id.clone(),
                 session_id: session_id.to_string(),
                 timestamp: message.timestamp_ms,
                 input_tokens: usage.input as i64,
@@ -4171,7 +4218,7 @@ fn get_pi_session_cache_events(
                 cache_write: usage.cache_write as i64,
                 total_tokens: usage.total as i64,
                 agent: None,
-                finish: message.stop_reason,
+                finish: message.stop_reason.clone(),
                 native_turn_id: None,
                 context_limit: None,
                 provider,
@@ -5001,6 +5048,23 @@ fn enrich_memories_workspace_source(
     Ok(())
 }
 
+/// A `LIKE ... ESCAPE '\'` pattern that matches `raw` literally anywhere in the
+/// value. The escape character itself must be escaped first: an unescaped `\`
+/// would swallow the next character, so a Windows path like `C:\Users` would
+/// only match `C:Users`.
+fn like_contains_pattern(raw: &str) -> String {
+    let mut escaped = String::with_capacity(raw.len() + 2);
+    escaped.push('%');
+    for ch in raw.chars() {
+        if matches!(ch, '\\' | '%' | '_') {
+            escaped.push('\\');
+        }
+        escaped.push(ch);
+    }
+    escaped.push('%');
+    escaped
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn get_memories(
     conn: &Connection,
@@ -5056,7 +5120,7 @@ pub fn get_memories(
     // For very short queries (< 3 chars) or if FTS sanitization produces nothing,
     // fall back to LIKE which handles partial matches better
     let use_like_fallback = has_search && (!use_fts || raw_search.len() < 3);
-    let like_pattern = format!("%{}%", raw_search.replace('%', "\\%").replace('_', "\\_"));
+    let like_pattern = like_contains_pattern(&raw_search);
 
     // Build WHERE clauses and params dynamically
     let mut conditions = Vec::new();
@@ -5188,6 +5252,25 @@ pub fn get_memories(
         Ok(mut memories) if !memories.is_empty() || !use_fts => {
             enrich_memories_workspace_source(conn, workspace_filter, &mut memories)?;
             Ok(memories)
+        }
+        Ok(empty) if use_fts && !use_like_fallback && offset > 0 && {
+            // An empty page past the first one only falls back to LIKE when FTS
+            // matches nothing at all. Otherwise it is just the end of the FTS
+            // results, and a LIKE page at the same offset would splice a
+            // different result set onto the pages already shown.
+            let mut probe: Vec<&dyn rusqlite::types::ToSql> = params[..params.len() - 2]
+                .iter()
+                .map(|p| p.as_ref())
+                .collect();
+            probe.push(&1i64);
+            probe.push(&0i64);
+            conn.prepare(&sql)?
+                .query(probe.as_slice())?
+                .next()?
+                .is_some()
+        } =>
+        {
+            Ok(empty)
         }
         Ok(_empty) if use_fts && !use_like_fallback => {
             // FTS returned nothing — retry with LIKE for better partial matching
@@ -7000,7 +7083,7 @@ pub fn get_pi_session_detail(
         notes,
         meta,
         token_breakdown,
-        pi_compaction_entries: detail.compaction_entries,
+        pi_compaction_entries: detail.compaction_entries.clone(),
     })
 }
 
@@ -11728,6 +11811,83 @@ mod memory_project_filter_tests {
         insert_memory(&conn, "/tmp/archived-only", "X", "archived");
         let rows = enumerate_memory_projects(&conn).expect("enumerate");
         assert!(rows.is_empty(), "archived-only project leaked: {rows:?}");
+    }
+
+    fn insert_memory_with_content(conn: &Connection, content: &str, updated_at: i64) -> i64 {
+        conn.execute(
+            "INSERT INTO memories
+                (project_path, category, content, normalized_hash,
+                 source_type, seen_count, retrieval_count,
+                 first_seen_at, last_seen_at, verification_status,
+                 status, created_at, updated_at)
+             VALUES ('/tmp/search', 'CONSTRAINTS', ?1, ?2,
+                     'historian', 1, 0,
+                     1000, 1000, 'unverified',
+                     'active', 1000, ?3)",
+            (content, format!("{:x}", md5::compute(content)), updated_at),
+        )
+        .expect("insert memory");
+        let id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO memories_fts(rowid, content, category) VALUES (?1, ?2, 'CONSTRAINTS')",
+            (id, content),
+        )
+        .expect("index memory");
+        id
+    }
+
+    #[test]
+    fn like_search_matches_a_backslash_literally() {
+        // Two-character queries take the LIKE path. `\n` must find the memory
+        // containing a literal backslash-n, not every memory containing an `n`.
+        let conn = make_memory_db();
+        let literal = insert_memory_with_content(&conn, r"join lines with \n here", 1000);
+        insert_memory_with_content(&conn, "nothing special", 2000);
+        insert_memory_with_content(&conn, r"the tree lives under C:\Users\dev", 3000);
+
+        let rows = get_memories(&conn, None, None, None, None, Some(r"\n"), 100, 0)
+            .expect("get_memories");
+        assert_eq!(rows.iter().map(|m| m.id).collect::<Vec<_>>(), vec![literal]);
+
+        // A Windows path whose FTS tokens match nothing exactly falls back to
+        // LIKE, which must also treat the backslash literally.
+        let rows = get_memories(&conn, None, None, None, None, Some(r"C:\Users\de"), 100, 0)
+            .expect("get_memories");
+        assert_eq!(rows.len(), 1, "windows path search: {rows:?}");
+        assert!(rows[0].content.contains(r"C:\Users\dev"));
+    }
+
+    #[test]
+    fn a_page_past_the_fts_results_does_not_switch_to_like_results() {
+        let conn = make_memory_db();
+        for i in 0..3 {
+            insert_memory_with_content(&conn, &format!("alpha fact {i}"), 1000 + i);
+        }
+        // LIKE '%alpha%' also matches these; FTS's whole-token match does not.
+        for i in 0..3 {
+            insert_memory_with_content(&conn, &format!("alphabet soup {i}"), 2000 + i);
+        }
+
+        let page = |offset| {
+            get_memories(&conn, None, None, None, None, Some("alpha"), 2, offset)
+                .expect("get_memories")
+                .into_iter()
+                .map(|m| m.content)
+                .collect::<Vec<_>>()
+        };
+        let mut seen = page(0);
+        seen.extend(page(2));
+        assert_eq!(seen.len(), 3);
+        assert!(seen.iter().all(|c| c.starts_with("alpha fact")), "{seen:?}");
+        assert_eq!(page(4), Vec::<String>::new());
+
+        // With no FTS match at all, every page comes from LIKE consistently.
+        let like_page = |offset| {
+            get_memories(&conn, None, None, None, None, Some("phabe"), 2, offset)
+                .expect("get_memories")
+                .len()
+        };
+        assert_eq!((like_page(0), like_page(2), like_page(4)), (2, 1, 0));
     }
 
     #[test]

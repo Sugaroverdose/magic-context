@@ -577,7 +577,7 @@ pub fn save_config(source: String, content: String) -> Result<(), String> {
 
 #[tauri::command(async)]
 pub fn get_project_configs(state: State<'_, AppState>) -> Vec<config::ProjectConfigEntry> {
-    let db_path = state.db_path.lock().ok().and_then(|guard| guard.clone());
+    let db_path = state.get_db_path().ok();
     config::discover_project_configs_with_db(
         db_path.as_ref(),
         &db::data_home(),

@@ -17,6 +17,7 @@ import DreamerTasksField from "./DreamerTasksField";
 import HarnessModelFields, { type Harness, modelCatalogForHarness } from "./HarnessModelFields";
 import LiveBadge from "./LiveBadge";
 import PerModelField from "./PerModelField";
+import { structuredConfigSaveContent } from "./structured-save";
 
 // ── JSONC helpers ───────────────────────────────────────────
 
@@ -49,11 +50,6 @@ function parseConfigContent(text: string): ParsedConfigContent {
   } catch (error) {
     return { value: {}, error: jsoncErrorMessage(error) };
   }
-}
-
-/** Pretty-print config as JSONC (plain JSON with 2-space indent). */
-function toJsonc(obj: Record<string, unknown>): string {
-  return JSON.stringify(obj, null, 2);
 }
 
 // ── Config field definitions ────────────────────────────────
@@ -438,34 +434,10 @@ function ConfigForm(props: {
       return;
     }
 
-    // Merge form data with original to preserve unknown keys
-    const original = parsed();
-    const merged = { ...original, ...formData() };
-    // Deep merge for nested objects so we don't blow away sub-keys the form
-    // doesn't currently expose. The shallow `...formData()` above would
-    // otherwise replace the whole sub-tree. A legacy top-level `experimental`
-    // block (if any) is preserved by the shallow spread and relocated by the
-    // plugin's config migration on next load.
-    for (const key of [
-      "embedding",
-      "memory",
-      "sqlite",
-      "system_prompt_injection",
-      "caveman_text_compression",
-      "mural",
-      "prompt_surface",
-      "storage",
-      "compaction",
-      "pi",
-    ]) {
-      if (typeof formData()[key] === "object" && formData()[key] != null) {
-        merged[key] = {
-          ...((original[key] as Record<string, unknown>) ?? {}),
-          ...(formData()[key] as Record<string, unknown>),
-        };
-      }
-    }
-    props.onSave(toJsonc(merged));
+    // Patch the values into the file text rather than re-serializing the
+    // object, so the user's comments survive. The guard above has already
+    // checked that `props.content` parses.
+    props.onSave(structuredConfigSaveContent(props.content, formData()));
   };
 
   const handleRawSave = () => {

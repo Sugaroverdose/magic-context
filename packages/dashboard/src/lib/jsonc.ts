@@ -91,6 +91,49 @@ export function patchDreamerTasksJsonc(
   return stringifyJsonc(root);
 }
 
+// Object.hasOwn needs an ES2022 lib; this project targets ES2021.
+function hasOwn(value: Record<string, unknown>, key: string): boolean {
+  return Object.getOwnPropertyDescriptor(value, key) !== undefined;
+}
+
+function sameJsonValue(a: unknown, b: unknown): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
+}
+
+/**
+ * Make `target` (a comment-json parse result) hold exactly the values in
+ * `next`, mutating it in place so the comments attached to every key and
+ * object that survives stay attached. Keys absent from `next` or set to
+ * `undefined` are removed, matching what `JSON.stringify` would have written.
+ * A value that is unchanged keeps its original node, so comments inside an
+ * unchanged array are kept too.
+ */
+function reconcileInto(target: Record<string, unknown>, next: Record<string, unknown>): void {
+  for (const key of Object.keys(target)) {
+    if (!hasOwn(next, key) || next[key] === undefined) delete target[key];
+  }
+  for (const [key, value] of Object.entries(next)) {
+    if (value === undefined) continue;
+    const current = target[key];
+    if (isRecord(current) && isRecord(value)) {
+      reconcileInto(current, value);
+    } else if (!hasOwn(target, key) || !sameJsonValue(current, value)) {
+      target[key] = value;
+    }
+  }
+}
+
+/**
+ * Rewrite a whole config file so it holds `next`, keeping the file's comments
+ * wherever the commented key still exists. Throws on malformed input so the
+ * caller can refuse the save instead of clobbering the file.
+ */
+export function patchConfigJsonc(text: string, next: Record<string, unknown>): string {
+  const root = parseRoot(text);
+  reconcileInto(root, next);
+  return stringifyJsonc(root);
+}
+
 /** Remove the project-level dreamer override while preserving the rest of the config file. */
 export function removeDreamerBlockJsonc(text: string): string {
   const root = parseRoot(text);
