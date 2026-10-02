@@ -35,6 +35,13 @@ import {
 } from "./workspaces";
 
 const DEFAULT_UNIFIED_SEARCH_LIMIT = 10;
+/**
+ * Upper bound on the results one search returns. The limit comes from the
+ * model, and each tier fetches three times it, so without a bound a call like
+ * `limit: 1e6` could dump the whole archive into one tool result. Matches the
+ * Rust module's ctx_search clamp.
+ */
+export const MAX_UNIFIED_SEARCH_LIMIT = 25;
 const FTS_SEMANTIC_CANDIDATE_LIMIT = 50;
 const SEMANTIC_WEIGHT = 0.7;
 const FTS_WEIGHT = 0.3;
@@ -248,7 +255,7 @@ function normalizeLimit(limit?: number): number {
     if (typeof limit !== "number" || !Number.isFinite(limit)) {
         return DEFAULT_UNIFIED_SEARCH_LIMIT;
     }
-    return Math.max(1, Math.floor(limit));
+    return Math.min(MAX_UNIFIED_SEARCH_LIMIT, Math.max(1, Math.floor(limit)));
 }
 
 interface InclusiveDateRange {
