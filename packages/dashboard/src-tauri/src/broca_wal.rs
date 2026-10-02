@@ -79,6 +79,11 @@ const MAX_ARCHIVED_MEMBER_BYTES: u64 = 64 * 1024 * 1024;
 /// dropped and files are re-read from the start when next asked for.
 const MAX_REMEMBERED_FILES: usize = 512;
 
+/// Decoded archived members kept in memory. Each holds a session's whole run
+/// history, so fewer are kept than live cursors; past this they are dropped
+/// and re-read from their container when next asked for.
+const MAX_REMEMBERED_ARCHIVED: usize = 64;
+
 const ARCHIVE_MEMBER_PREFIX: &[u8; 8] = b"WALM\x01\x00\x00\x00";
 const ARCHIVE_TRAILER_MAGIC: &[u8; 4] = b"WALK";
 const ARCHIVE_MEMBER_HEADER_LEN: u64 = 64;
@@ -669,10 +674,21 @@ fn read_member_header<R: Read + Seek>(
     }
     let address = hex_address(&raw[8..24])?;
     let size = u64::from_le_bytes(raw[24..32].try_into().expect("8 bytes"));
-    if offset + ARCHIVE_MEMBER_HEADER_LEN + size > end {
-        return Err("archive member exceeds container bounds".to_owned());
+    // `size` is file data: checked, so a huge value is refused rather than
+    // overflowing (a panic in debug builds, a wrapped bound check in release).
+    match member_end(offset, size) {
+        Some(member_end) if member_end <= end => {}
+        _ => return Err("archive member exceeds container bounds".to_owned()),
     }
     Ok((address, size, raw[32..64].try_into().expect("32 bytes")))
+}
+
+/// The offset just past a member whose header starts at `offset`, or `None`
+/// when that overflows.
+fn member_end(offset: u64, size: u64) -> Option<u64> {
+    offset
+        .checked_add(ARCHIVE_MEMBER_HEADER_LEN)?
+        .checked_add(size)
 }
 
 /// Parses a container's trailer and index, rebuilding the index from the
@@ -722,7 +738,10 @@ fn read_stored_index<R: Read + Seek>(
         if offset != next_offset || members.contains_key(&address) {
             return Err("invalid archive index coverage".to_owned());
         }
-        next_offset = offset + ARCHIVE_MEMBER_HEADER_LEN + size;
+        next_offset = match member_end(offset, size) {
+            Some(member_end) => member_end,
+            None => return Err("archive index member exceeds bounds".to_owned()),
+        };
         if next_offset > start {
             return Err("archive index member exceeds bounds".to_owned());
         }
@@ -844,6 +863,17 @@ impl WalCache {
         }
     }
 
+    /// Caches a decoded member. Entries for an older length of the same
+    /// container (it was rewritten) can never be hit again and are dropped.
+    fn remember_archived(&mut self, key: (PathBuf, u64, u64), runs: Result<Fold, String>) {
+        self.archived
+            .retain(|(path, _, len), _| *path != key.0 || *len == key.2);
+        if self.archived.len() >= MAX_REMEMBERED_ARCHIVED {
+            self.archived.clear();
+        }
+        self.archived.insert(key, runs);
+    }
+
     /// The session's runs from the newest container holding it. `None` when
     /// no container holds it, or when a container that might hold a newer
     /// copy cannot be read.
@@ -889,11 +919,12 @@ impl WalCache {
                 continue;
             };
             let key = (path, member.offset, len);
-            let runs = self
-                .archived
-                .entry(key)
-                .or_insert_with(|| read_archived_member(&mut file, len, address, member));
-            return runs.clone().ok();
+            if let Some(runs) = self.archived.get(&key) {
+                return runs.clone().ok();
+            }
+            let runs = read_archived_member(&mut file, len, address, member);
+            self.remember_archived(key, runs.clone());
+            return runs.ok();
         }
         None
     }
@@ -1831,6 +1862,51 @@ pub(crate) mod tests {
             run_ids(WalCache::default().session_runs(dir.path(), &identity())),
             Some(vec!["r1".into()])
         );
+    }
+
+    #[test]
+    fn a_member_size_that_overflows_is_refused_without_panicking() {
+        let address = identity().addr();
+        let wal = one_step_wal("r1");
+        let huge = (u64::MAX - 10).to_le_bytes();
+
+        // In a member header, read when the index is missing.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = container(&[(&address, &wal)], false);
+        bytes[24..32].copy_from_slice(&huge);
+        write_container(dir.path(), 100, &bytes);
+        assert!(WalCache::default()
+            .session_runs(dir.path(), &identity())
+            .is_none());
+
+        // In the stored index: entry = address(16) offset(8) size(8), after
+        // the 4-byte entry count that follows the members.
+        let dir = tempfile::tempdir().unwrap();
+        let mut bytes = container(&[(&address, &wal)], true);
+        let size_at = ARCHIVE_MEMBER_HEADER_LEN as usize + wal.len() + 4 + 24;
+        bytes[size_at..size_at + 8].copy_from_slice(&huge);
+        write_container(dir.path(), 100, &bytes);
+        // The index is rejected and the headers are walked instead.
+        assert_eq!(
+            run_ids(WalCache::default().session_runs(dir.path(), &identity())),
+            Some(vec!["r1".into()])
+        );
+    }
+
+    #[test]
+    fn decoded_archived_members_are_bounded() {
+        let mut cache = WalCache::default();
+        for i in 0..(MAX_REMEMBERED_ARCHIVED as u64 + 5) {
+            cache.remember_archived((PathBuf::from(format!("c{i}.ark")), 0, 100), Err("x".into()));
+        }
+        assert!(cache.archived.len() <= MAX_REMEMBERED_ARCHIVED);
+
+        // A rewritten container replaces what was cached for its old length.
+        let mut cache = WalCache::default();
+        let path = PathBuf::from("fold-1.ark");
+        cache.remember_archived((path.clone(), 0, 100), Err("old".into()));
+        cache.remember_archived((path.clone(), 0, 200), Err("new".into()));
+        assert_eq!(cache.archived.keys().collect::<Vec<_>>(), [&(path, 0, 200)]);
     }
 
     #[test]
