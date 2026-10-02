@@ -26,6 +26,14 @@
             "hosts": ["opencode"]
         },
         {
+            "path": "tests/historian-host-timeout.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual regression probe on OpenCode 1.18.30, about 7 minutes: a historian run held by a slow model past Bun's default fetch timer completes under historian_timeout_ms, while a held synchronous prompt on the same plain-fetch client fails at the timer; throwaway root with host PID lsof containment",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/issue-574-unborn-project.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
