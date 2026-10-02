@@ -226,8 +226,11 @@ describe("persistV2UsageReading", () => {
         const sessionID = "ses_f026cf502ffegwOeLMe8Oaw5l3";
         const contextUsageMap: TransformDeps["contextUsageMap"] = new Map();
         const draftModel = { providerID: "google", id: "probe-model" };
+        // Real clock values: recordOverflowDetected stamps last_response_time with Date.now(),
+        // so the accepted reply must complete before it and the next reply after it.
+        const firstReplyCompleted = Date.now() - 60_000;
 
-        // 1. Initial accepted assistant reading (seq 158 with 129,777 input tokens at t=1,000)
+        // 1. Initial accepted assistant reading (seq 158 with 129,777 input tokens)
         persistV2UsageReading({
             db,
             sessionID,
@@ -237,16 +240,17 @@ describe("persistV2UsageReading", () => {
                 limit: 100_000,
                 admissionLimit: 100_000,
                 modelKey: "google/probe-model",
-                completed: 1_000,
+                completed: firstReplyCompleted,
             },
             contextUsageMap,
         });
 
         expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(129_777);
-        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(1_000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(firstReplyCompleted);
         expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(129_777);
 
-        // 2. Provider rejection writes a larger value (123,456 tokens at t=1,050)
+        // 2. Provider rejection writes a larger value (123,456 tokens) and, as in production,
+        //    stamps last_response_time so hosts reload the persisted size.
         recordOverflowDetected(
             db,
             sessionID,
@@ -259,10 +263,13 @@ describe("persistV2UsageReading", () => {
         contextUsageMap.set(sessionID, {
             usage: { inputTokens: 123_456, percentage: (123_456 / 100_000) * 100 },
             hasUsageTokens: true,
-            updatedAt: 1_050,
+            updatedAt: Date.now(),
         });
 
         expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(123_456);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBeGreaterThan(
+            firstReplyCompleted,
+        );
         expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(123_456);
 
         // 3. Next context pass runs before any new reply exists; the newest accepted reply is still seq 158
@@ -275,7 +282,7 @@ describe("persistV2UsageReading", () => {
                 limit: 100_000,
                 admissionLimit: 100_000,
                 modelKey: "google/probe-model",
-                completed: 1_000,
+                completed: firstReplyCompleted,
             },
             contextUsageMap,
         });
@@ -284,7 +291,8 @@ describe("persistV2UsageReading", () => {
         expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(123_456);
         expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(123_456);
 
-        // 4. A genuinely new accepted reply arrives (seq 169 with 10,458 input tokens at t=2,000)
+        // 4. A genuinely new accepted reply arrives (seq 169 with 10,458 input tokens)
+        const newReplyCompleted = Date.now() + 60_000;
         persistV2UsageReading({
             db,
             sessionID,
@@ -294,17 +302,17 @@ describe("persistV2UsageReading", () => {
                 limit: 100_000,
                 admissionLimit: 100_000,
                 modelKey: "google/probe-model",
-                completed: 2_000,
+                completed: newReplyCompleted,
             },
             contextUsageMap,
         });
 
         // The new reply must update the reading
         expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(10_458);
-        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(2_000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(newReplyCompleted);
         expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(10_458);
 
-        // 5. Subsequent accepted reply (10,502 input tokens at t=3,000)
+        // 5. Subsequent accepted reply (10,502 input tokens)
         persistV2UsageReading({
             db,
             sessionID,
@@ -314,13 +322,15 @@ describe("persistV2UsageReading", () => {
                 limit: 100_000,
                 admissionLimit: 100_000,
                 modelKey: "google/probe-model",
-                completed: 3_000,
+                completed: newReplyCompleted + 1_000,
             },
             contextUsageMap,
         });
 
         expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(10_502);
-        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(3_000);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(
+            newReplyCompleted + 1_000,
+        );
         expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(10_502);
     });
 });

@@ -2164,8 +2164,8 @@ export function recordOverflowDetected(
             const percentage =
                 effectiveLimit > 0 ? (reportedInputTokens / effectiveLimit) * 100 : 100;
             db.prepare(
-                "UPDATE session_meta SET last_input_tokens = ?, last_context_percentage = MAX(last_context_percentage, ?) WHERE session_id = ?",
-            ).run(reportedInputTokens, percentage, sessionId);
+                "UPDATE session_meta SET last_input_tokens = ?, last_context_percentage = MAX(last_context_percentage, ?), last_response_time = ? WHERE session_id = ?",
+            ).run(reportedInputTokens, percentage, Date.now(), sessionId);
         }
     }).immediate();
 }
