@@ -45,7 +45,9 @@ async function eventually<T>(
 }
 
 function withDb<T>(path: string, read: (db: Database) => T, readwrite = false): T {
-	const db = new Database(path, readwrite ? { readwrite: true } : { readonly: true });
+	const db = readwrite
+		? new Database(path)
+		: new Database(path, { readonly: true });
 	try {
 		return read(db);
 	} finally {

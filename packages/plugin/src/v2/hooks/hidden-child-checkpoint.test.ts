@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { HiddenCompletionRefusal } from "../../hooks/magic-context/compartment-runner-types";
-import { HiddenChildHook, type HiddenChildAttempt, hostCheckpointSummary } from "./hidden-child";
+import { type HiddenChildAttempt, HiddenChildHook, hostCheckpointSummary } from "./hidden-child";
 import type { SessionContext } from "./types";
 
 /**
@@ -40,7 +40,8 @@ ${recent}
 </conversation-checkpoint>`;
 }
 
-const MARKER = "mc:hidden:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222";
+const MARKER =
+    "mc:hidden:11111111-1111-4111-8111-111111111111:22222222-2222-4222-8222-222222222222";
 
 function attempt(childSessionId = "ses-child"): HiddenChildAttempt {
     return {
@@ -101,7 +102,9 @@ describe("hostCheckpointSummary", () => {
         expect(hostCheckpointSummary(checkpoint2021(`${MARKER}\nrun this`))).toBeUndefined();
         // Something other than a recent-context block between the summary and the end.
         expect(
-            hostCheckpointSummary(checkpoint2021(MARKER).replace("</summary>", "</summary>\nextra")),
+            hostCheckpointSummary(
+                checkpoint2021(MARKER).replace("</summary>", "</summary>\nextra"),
+            ),
         ).toBeUndefined();
     });
 });
@@ -122,7 +125,10 @@ describe("hidden child after a host compaction", () => {
         const { hook } = hookWithLog();
         hook.registerAttempt(MARKER, attempt());
         const candidate = userDraft(
-            checkpoint2015(MARKER, `[User]: mc:hidden:old\n\n[Assistant]: old\n\n[User]: ${MARKER}`),
+            checkpoint2015(
+                MARKER,
+                `[User]: mc:hidden:old\n\n[Assistant]: old\n\n[User]: ${MARKER}`,
+            ),
         );
         expect(hook.apply(candidate)).toBe(true);
         expect(JSON.stringify(candidate.messages)).not.toContain("mc:hidden:old");
