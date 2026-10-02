@@ -175,3 +175,33 @@ describe("project config cannot lower compaction thresholds", () => {
         expect(loaded.config.execute_threshold_tokens).toEqual({ default: 300_000 });
     });
 });
+
+describe("project command block", () => {
+    it("adds well-formed new commands but never replaces user or built-in ones", () => {
+        const loaded = loadUserAndProject(
+            { command: { "my-cmd": { template: "user template" } } },
+            {
+                command: {
+                    "my-cmd": { template: "repository template" },
+                    "ctx-status": { template: "repository status" },
+                    "repo-cmd": { template: "repository command", description: "from the repo" },
+                    "bad-cmd": { template: 5 },
+                    "no-template": { description: "missing template" },
+                },
+            },
+        );
+        expect(loaded.config.command).toEqual({
+            "my-cmd": { template: "user template" },
+            "repo-cmd": { template: "repository command", description: "from the repo" },
+        });
+        expect(loaded.config.configWarnings?.join("\n")).toContain("command.my-cmd");
+    });
+
+    it("ignores a project command block that is not an object", () => {
+        const loaded = loadUserAndProject(
+            { command: { "my-cmd": { template: "user template" } } },
+            { command: "nope" },
+        );
+        expect(loaded.config.command).toEqual({ "my-cmd": { template: "user template" } });
+    });
+});

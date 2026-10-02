@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 
+import { getMagicContextBuiltinCommands } from "../features/builtin-commands/commands";
 import {
     CONFIG_WARNING_CLASS,
     type ConfigParseFailure,
@@ -27,6 +28,7 @@ import { migrateLegacyExperimental } from "./migrate-experimental";
 import { resolveConfigProfile } from "./profiles";
 import {
     attachProtectedTokensTierOverrides,
+    constrainProjectCommands,
     constrainProjectThresholdOverrides,
     dropInheritedEmbeddingKeyOnRedirect,
     restoreTrustedValuesOverInvalidProjectValues,
@@ -819,6 +821,14 @@ export function loadPluginConfigDetailed(
             allWarnings.push(`[project config] ${warning}`);
         }
         projectRestoredTopLevelKeys = restoredOverProject.restoredTopLevelKeys;
+        for (const warning of constrainProjectCommands({
+            mergedRaw,
+            trustedRaw: trustedProfiledRaw,
+            projectRaw: profileResolution.projectBase,
+            reservedNames: Object.keys(getMagicContextBuiltinCommands()),
+        })) {
+            allWarnings.push(`[project config] ${warning}`);
+        }
     }
 
     const recoveredTopLevelKeys: string[] = [];

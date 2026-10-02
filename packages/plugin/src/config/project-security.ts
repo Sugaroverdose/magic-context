@@ -1029,3 +1029,87 @@ export function restoreTrustedValuesOverInvalidProjectValues(args: {
 
     return { warnings, restoredTopLevelKeys: [...restoredTopLevelKeys] };
 }
+
+const PROJECT_COMMAND_STRING_FIELDS = ["description", "agent", "model"] as const;
+
+/** A well-formed command entry with only the fields the command config uses. */
+function wellFormedCommand(value: unknown): Record<string, unknown> | undefined {
+    if (!isPlainObject(value)) return undefined;
+    if (typeof value.template !== "string" || value.template.trim().length === 0) return undefined;
+    const command: Record<string, unknown> = { template: value.template };
+    for (const field of PROJECT_COMMAND_STRING_FIELDS) {
+        if (value[field] === undefined) continue;
+        if (typeof value[field] !== "string") return undefined;
+        command[field] = value[field];
+    }
+    if (value.subtask !== undefined) {
+        if (typeof value.subtask !== "boolean") return undefined;
+        command.subtask = value.subtask;
+    }
+    return command;
+}
+
+/**
+ * Rebuild the merged `command` block so a repository may only ADD commands.
+ *
+ * The command block is not part of the schema; it is copied into the host's
+ * command config after Magic Context's built-in commands. Merged as raw
+ * config, a project could replace a command the user defined, shadow a
+ * built-in /ctx-* command, wipe the user's commands with a non-object value,
+ * or pass malformed entries to the host. Now the user's commands are kept as
+ * they are, and a project entry is used only when it is well formed and its
+ * name is neither a user command nor one of `reservedNames`. `mergedRaw` is
+ * mutated in place.
+ */
+export function constrainProjectCommands(args: {
+    mergedRaw: Record<string, unknown>;
+    trustedRaw: Record<string, unknown>;
+    projectRaw: Record<string, unknown>;
+    reservedNames: readonly string[];
+}): string[] {
+    if (!("command" in args.projectRaw)) return [];
+    const warnings: string[] = [];
+    const trustedCommands = isPlainObject(args.trustedRaw.command)
+        ? args.trustedRaw.command
+        : undefined;
+    const merged: Record<string, unknown> = { ...(trustedCommands ?? {}) };
+    const projectCommands = args.projectRaw.command;
+
+    if (!isPlainObject(projectCommands)) {
+        warnings.push(
+            "Ignoring command from project config (it must be an object of named commands).",
+        );
+    } else {
+        for (const [name, value] of Object.entries(projectCommands)) {
+            if (trustedCommands && Object.hasOwn(trustedCommands, name)) {
+                warnings.push(
+                    `Ignoring command.${name} from project config (security: a repository cannot replace a command defined in user config).`,
+                );
+                continue;
+            }
+            if (args.reservedNames.includes(name)) {
+                warnings.push(
+                    `Ignoring command.${name} from project config (security: a repository cannot replace a built-in Magic Context command).`,
+                );
+                continue;
+            }
+            const command = wellFormedCommand(value);
+            if (!command) {
+                warnings.push(
+                    `Ignoring command.${name} from project config (it needs a non-empty string template; description, agent and model must be strings and subtask a boolean).`,
+                );
+                continue;
+            }
+            Object.defineProperty(merged, name, {
+                value: command,
+                enumerable: true,
+                configurable: true,
+                writable: true,
+            });
+        }
+    }
+
+    if (Object.keys(merged).length === 0) delete args.mergedRaw.command;
+    else args.mergedRaw.command = merged;
+    return warnings;
+}
