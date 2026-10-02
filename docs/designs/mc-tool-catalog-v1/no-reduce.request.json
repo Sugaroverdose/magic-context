@@ -89,13 +89,13 @@
           {
             "name": "browser_use",
             "capabilities": [
-              "browser.use/v1"
+              "prefrontal-core:browser.use/v1"
             ]
           },
           {
             "name": "computer_use",
             "capabilities": [
-              "computer.use/v1"
+              "prefrontal-core:computer.use/v1"
             ]
           }
         ]

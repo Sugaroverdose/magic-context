@@ -8,7 +8,9 @@
     "language": null,
     "prompt_surface": {
       "default": "full",
-      "models": {}
+      "models": {
+        "anthropic/claude-haiku-4-5": "light"
+      }
     },
     "guidance_override_sha256": null,
     "tool_descriptions": {},

@@ -1,10 +1,11 @@
 # Magic Context's `tool.catalog` answer, v1
 
-Status: **plan for review in the extensibility room.** No code is written. The
-example payloads in [`mc-tool-catalog-v1/`](mc-tool-catalog-v1/) are the exact
-bytes this plan proposes Magic Context would serve. They are regenerated, and
-checked against the plugin's shipped strings, by
-`bun docs/designs/mc-tool-catalog-v1/generate.ts --check`.
+Status: **plan, revised with the extensibility room's rulings (r2).** Every
+question the room was asked is decided (§7). No code is written. The example
+payloads in [`mc-tool-catalog-v1/`](mc-tool-catalog-v1/) are the exact bytes
+Magic Context will serve. They are regenerated, and checked against the
+plugin's shipped strings, the Rust module's guidance assets and the commons and
+prefrontal test vectors, by `bun docs/designs/mc-tool-catalog-v1/generate.ts --check`.
 
 ## Summary
 
@@ -13,31 +14,47 @@ checked against the plugin's shipped strings, by
   order), and with its guidance as `system_text` when the plan asks for it. It
   declares no session-level capabilities: every Magic Context call settles inside
   its own reply.
-- **Two presets, two knobs.** Presets are `primary` and `subagent`. Light or full
-  wording comes from the shared `tool_descs` param on the tool item and an MC
-  `surface` param on the text item, or, when neither is given, from the user's
-  existing `prompt_surface` config. Everything else comes from user and project
-  config.
+- **Three presets, chosen by core.** `primary` (heads and masons) and
+  `subagent` (bounded readers and one-shot calls) are sent only when the plan's
+  `compaction_item` names `magic-context`. Otherwise core sends `tools-only`: no
+  `ctx_reduce` and the no-reduce text. Core's plan builder refuses any other
+  pairing. Magic Context never knows the session's role.
+- **Two knobs and a frozen model.** Light or full wording comes from the shared
+  `tool_descs` param on the tool item and an MC `surface` param on the text
+  item. When neither is given, it comes from the user's existing
+  `prompt_surface` config, looked up with an optional `model` param that is
+  frozen with the plan. A model switch applies at the next refresh. Everything
+  else comes from user and project config.
 - **The text reads only Magic Context's own composition entry.** Whether
   `ctx_reduce` is present picks the stamping (tagged) or the no-reduce text;
   whether `ctx_memory` is present picks the pinboard paragraph. Today those come
   from agent permissions, session metadata and the request's serializer profile;
   under this plan they come from the composition the starter computed.
-- **What leaves the system text.** The per-session "Today's date" line the Rust
-  module appends today moves to m0. Session ids, agent names, and live state such
-  as memories, history and project docs never enter a fetched byte. Memories,
-  history and docs already live in m0 and m1.
+- **What leaves the system text.** No runner adds or expects a date in system
+  text. The per-session "Today's date" line the Rust module appends today moves
+  to the head of m0 on runner-driven sessions; OpenCode and Pi keep the host's
+  line. Session ids, agent names, and live state such as memories, history and
+  project docs never enter a fetched byte. Memories, history and docs already
+  live in m0 and m1.
+- **Claude Code maps forward.** The gateway expects exactly
+  `mcp__subc__magic-context_<catalog name>` for each catalog tool and never
+  parses wire names back. `ctx_reduce` counts only if its name and schema both
+  match, so its name and schema are frozen for v1.
 - **Deploys stop costing a rebuild per session.** Today a guidance change busts
   every live session's prefix once on its next turn (OpenCode and Pi) or after
   a Thalamus restart (Claude Code). Under the frozen manifest, a deploy changes
   only new sessions. A head picks the change up at its next dead prefix, under the
   owner's default `on_prefix_rebuild` policy, at no extra cost.
-- **Parity.** The four example texts are byte-identical to the Rust module's
-  shipped guidance assets that Claude Code gets today, minus the date line.
+- **Parity.** The example texts for `primary`, its light surface, the no-reduce
+  variant and both `tools-only` surfaces are byte-identical to the Rust module's
+  four shipped guidance assets that Claude Code gets today, minus the date line.
   Tool descriptions match the plugin's, and one Rust description is missing a
   line. The argument schemas are reconciled: today the plugin and the Rust module
-  advertise different structures, and this plan proposes one.
-- **Fourteen open questions** close the document, each with a recommended answer.
+  advertise different structures, and this plan fixes one.
+- **Fourteen decisions, one item still open.** §7 records each ruling and who
+  made it. The one open item, found while applying the rulings, is that the
+  no-reduce text served under `tools-only` still describes Magic Context's own
+  compaction (§7.2).
 
 ## 1. Sources
 
@@ -45,7 +62,7 @@ checked against the plugin's shipped strings, by
 |---|---|
 | D | `.cortexkit/alfonso/plans/ck-extensibility-design-r7.3.md` (gitignored, present in worktrees) |
 | E | `.cortexkit/alfonso/plans/ck-extensibility-r7.3-errata.md`. Overrides D where they differ. |
-| TP | commons `crates/cortexkit-role-tool-provider/CONTRACT.md` and `src/catalog.rs`, `origin/master` at `5262544e` |
+| TP | commons `crates/cortexkit-role-tool-provider/CONTRACT.md`, `src/catalog.rs` and `src/lib.rs`, `origin/master` at `57305c74` (cortexkit-role-tool-provider 0.4.2, which defines the unprefixed tags and `check_capability_tag`). `catalog.rs` is unchanged since `5262544e`, which r1 cited. |
 | TPV | commons `test-vectors/tool-provider-v1/` at the same commit |
 | FP | prefrontal `test-vectors/fetch-plan-v1/` at `26590b8d4` (README and vectors) |
 
@@ -89,15 +106,37 @@ system_text?, digest_only?}`. Magic Context defines the following.
 **Presets** (the tool item's `preset` and `system_text.preset`; both must name
 the same preset):
 
-| Preset | Meaning | Today's equivalent |
-|---|---|---|
-| `primary` | A long-lived session: a head, a mason, a reader, or a standalone user session. | Every non-subagent session. |
-| `subagent` | A bounded child session that never runs long enough to use the archive. | `isSubagent` session metadata (`packages/plugin/src/hooks/magic-context/system-prompt-hash.ts:334-359`). |
-| absent | `primary`. | |
+| Preset | Sent when | Serves | Today's equivalent |
+|---|---|---|---|
+| `primary` | Magic Context compacts the session, and core runs it as a head or a mason. | All five tools; the stamping text when the composition lists `ctx_reduce`, the no-reduce text otherwise. | Every non-subagent session. |
+| `subagent` | Magic Context compacts the session, and core runs it as a bounded reader or a one-shot call. | All five tools; the short stamping text, or `text: ""` without `ctx_reduce` (§2.3). | `isSubagent` session metadata (`packages/plugin/src/hooks/magic-context/system-prompt-hash.ts:334-359`). |
+| `tools-only` | Another provider compacts the session, or none does, whatever its role. | Every tool except `ctx_reduce`; the no-reduce text, so no stamping and no self-tag guidance. | None: today Magic Context compacts every session it serves. |
+| absent | | As `primary`. | |
+
+- **Who picks.** Core's plan builder, never Magic Context, which doesn't know a
+  head from a worker. The composition doesn't name the compaction provider, so
+  the preset carries that fact. Core sends `primary` or `subagent` only when the
+  plan's `compaction_item` names `magic-context` (FP README line 134), and
+  `tools-only` otherwise. The plan builder refuses any other pairing of preset
+  and compaction provider: `primary` or `subagent` beside another compaction
+  provider or none, and `tools-only` beside Magic Context's compaction
+  (decisions 1 and 2).
+- **`tools-only` never serves `ctx_reduce`.** An `exclude` naming it is
+  accepted and changes nothing. A composition that lists `ctx_reduce` under
+  `magic-context` with `tools-only` doesn't match the fetched tools, and the
+  runner refuses the plan (FP vector
+  `admission/refuse-fetched-tools-differ-from-composition`). The generator
+  refuses such an example the same way.
+- **The text is the no-reduce text, unchanged.** `tools-only` with full
+  wording serves exactly the `no-reduce` example's text; with light wording,
+  the light no-reduce text. Every other input (memory, dreamer, temporal
+  awareness, caveman, language) resolves as for `primary`. §7.2 records what
+  that text still says about Magic Context's own compaction.
 
 Any other preset is refused as `invalid_request {field: "preset"}`
-(`catalog-requests.json` in TPV). FP's vectors use `head` for Magic Context as
-an illustrative name (FP README lines 99–103). See open question 1.
+(`catalog-requests.json` in TPV). FP's vectors use `head` for Magic Context, but
+the vectors' presets are illustrative (FP README lines 99–103); core sends the
+three names above.
 
 **Tool-item params** (`params`):
 
@@ -107,16 +146,22 @@ an illustrative name (FP README lines 99–103). See open question 1.
 | `tool_descs` (shared) | `concise`, `full` | `concise` serves the light descriptions, `full` the full ones. Absent: see "Surface resolution" below. |
 | `exclude` (shared) | tool names | Those tools are absent from the answer. A name Magic Context doesn't serve is refused `invalid_request {field: "params.exclude"}`. |
 | `behavior` (shared) | `autonomous`, `interactive` | Accepted, and changes no byte. |
-| `model` (MC) | a canonical `provider/model` key | Used only to look up `prompt_surface.models` in Magic Context's own config when `tool_descs` (or, on the text item, `surface`) is absent. See open question 4. |
+| `model` (MC) | a canonical `provider/model` key | Optional. Frozen with the plan. Used only to look up `prompt_surface.models` in Magic Context's own config when `tool_descs` (or, on the text item, `surface`) is absent (decision 4). |
 
 **Text-item params** (`system_text.params`): `surface` (`light` or `full`),
 and `model` as above. Any other key or value is refused, never guessed (D §4.1).
 
 **Surface resolution.** An explicit `tool_descs` or `surface` decides. Otherwise
-`prompt_surface.models[model]` is used, then `prompt_surface.default`, through
-the existing lookup order (`packages/plugin/src/shared/prompt-surface.ts:69-153`).
-So Magic Context's own config resolution stays the only one that reads its
-settings, as D §4.2 line 162 requires; the starter never interprets them.
+`prompt_surface.models` is looked up with the `model` param, then
+`prompt_surface.default` applies, through the existing lookup order: exact key,
+bare model id, shorter model ids, then the provider wildcard
+(`packages/plugin/src/shared/prompt-surface.ts:69-153`). So Magic Context's own
+config resolution stays the only one that reads its settings, as D §4.2 line
+162 requires; the starter never interprets them. Because the `model` param is
+frozen with the plan, a model switch changes nothing until the owner's next
+refresh, which carries the new model (§5.2). The `tools-only-light` example
+reaches light wording this way: its `model` is `anthropic/claude-haiku-4-5`,
+which the example config maps to `light`.
 
 ### 2.2 The tools
 
@@ -131,11 +176,27 @@ Order is the plugin's single tool list, `ACTIVE_TOOL_IDS`
 | `ctx_memory` | `magic-context:memory.write/v1` | `prepend`, `append` | 1 | `7a6a1d3f8c5e61d6104805e30e549c9d0e5172d023415a98cb225e0a6af89879` |
 | `ctx_search` | `magic-context:archive.search/v1` | `prepend`, `append` | 1 | `f0d56f456f2ee9569c030072d33a001ae45d8a57d792dbf4d51c59eb12da28e9` |
 
-- **Tags are namespaced.** TP lets only the role document define unprefixed
-  names, and it defines none (TP §3, "capabilities"). So every Magic Context tag
-  carries the `magic-context:` prefix. A peer that relies on stamping matches
-  `magic-context:context.reduce/v1`. See open question 9 for the unprefixed tags
-  AFT ships.
+- **Tags are namespaced.** Tool-provider §3 (cortexkit-role-tool-provider
+  0.4.2) defines eight unprefixed tags: `shell.exec/v1`, `code.read/v1`,
+  `code.edit/v1`, `code.search/v1`, `code.files/v1`, `code.outline/v1`,
+  `code.callgraph/v1` and `code.diagnostics/v1`. Every other tag is
+  `<namespace>:<name>/v<N>`. None of the eight describes a Magic Context tool,
+  so Magic Context ships only `magic-context:*` tags (decision 9). A peer that
+  relies on stamping matches `magic-context:context.reduce/v1`.
+- **Every tag in the payloads passes the role's check.** The generator checks
+  every tag in every example request and answer with a port of
+  `check_capability_tag`, and compares its list of defined tags with the
+  crate's `DEFINED_CAPABILITY_TAGS` at `57305c74`. The crate's own function,
+  compiled from that commit, accepts all twelve distinct tags in the payloads.
+  The examples give Prefrontal's forwarding tools namespaced tags
+  (`prefrontal-core:browser.use/v1`): the unprefixed `browser.use/v1` that FP's
+  vectors use is not one of the eight, so the check refuses it.
+- **`ctx_reduce`'s name and schema are frozen for v1.** The Claude Code gateway
+  grants stamping only to a tool whose wire name and schema both match (§4), so
+  `ctx_reduce` keeps its catalog name and its structural schema
+  (`schema_digest` `69c7dd33…`) for all of v1. Any change to either ships in
+  one release window together with the matching gateway change (decision 11).
+  The generator refuses a `ctx_reduce` schema with any other digest.
 - **No `replace`.** A hook may add text around a Magic Context result but never
   replace it. `ctx_expand` and `ctx_search` return the archived record, and the
   guidance tells the model to trust it as the exact wording. A replaced result
@@ -160,13 +221,14 @@ Order is the plugin's single tool list, `ACTIVE_TOOL_IDS`
   description text, so they share every `schema_digest` (checked by the
   generator: the `primary-light` digests equal `primary-full`'s).
 
-**How the proposed schemas differ from what is advertised today.** The plugin's
+**How the v1 schemas differ from what is advertised today.** The plugin's
 zod shapes and the Rust module's `json!` schemas already disagree, so v1 has to
 choose. Each choice keeps what the handlers already enforce.
 
-| Tool | Proposed v1 | Plugin today | Rust module today |
+| Tool | v1 | Plugin today | Rust module today |
 |---|---|---|---|
-| `ctx_reduce` | `drop` string, required, no extra properties | `drop` optional (`ctx-reduce/tools.ts:53-58`) | same as v1. Thalamus authorizes `ctx_reduce` calls against this exact shape (`prompt_surface.rs:241-257`), so v1 keeps it unchanged. |
+|---|---|---|---|
+| `ctx_reduce` | `drop` string, required, no extra properties | `drop` optional (`ctx-reduce/tools.ts:53-58`) | same as v1. Thalamus authorizes `ctx_reduce` calls against this exact shape (`prompt_surface.rs:241-257`), so v1 keeps it unchanged, and freezes it. |
 | `ctx_expand` | `tag` number or string; `start`, `end` and `message` integers ≥ 0; `verbose` | plain numbers, no bounds | as v1, but `additionalProperties: true` (`crates/mc-module/src/lib.rs:18203-18215`) |
 | `ctx_note` | Rust bounds; no `memory_project` | no bounds on `limit` or `offset` | adds `memory_project`, `additionalProperties: true` (`lib.rs:18217-18232`) |
 | `ctx_memory` | `category` enum of the five categories; `ids` integers ≥ 1, at most 100; bounds on `content` and `reason` | category enum, no bounds (`ctx-memory/tools.ts:394-419`) | free-string category, plus `id`, `target_id`, `source_ids` and `memory_project` (`lib.rs:18120-18172`) |
@@ -174,7 +236,7 @@ choose. Each choice keeps what the handlers already enforce.
 
 Calls carrying a legacy field keep working on today's routes. On a
 `tool-provider/v1` route, an argument outside the served schema is refused after
-coercion, as AFT does. See open questions 6–8.
+coercion, as AFT does (decisions 6–8).
 
 ### 2.3 The system text
 
@@ -184,7 +246,7 @@ mapped as follows:
 
 | Builder input | Taken from |
 |---|---|
-| `ctxReduceCallable` | `ctx_reduce` is listed under `magic-context` in the composition |
+| `ctxReduceCallable` | `ctx_reduce` is listed under `magic-context` in the composition; always false under `tools-only` |
 | `subagentMode` | preset `subagent` |
 | `memoryEnabled` | user or project config `memory.enabled` **and** `ctx_memory` listed in the composition |
 | `dreamerEnabled` | config: the dreamer is configured and not disabled (`packages/plugin/src/config/agent-disable.ts:11-13`) |
@@ -196,13 +258,16 @@ mapped as follows:
 
 - **Subagents.** A subagent whose composition lacks `ctx_reduce` gets
   `text: ""`. OpenCode gives such a subagent no guidance today
-  (`system-prompt-hash.ts:358-359`). See open question 12.
+  (`system-prompt-hash.ts:358-359`). The runner's join skips an empty `text`,
+  so no stray separator appears (decision 12).
 - **Self-tag guidance.** The "Start the text of each reply with exactly §N§"
   paragraph appears only in the variants with `ctx_reduce`, because only those
   sessions have tagged messages (`magic-context-prompt.ts:155-156,181,207,209`).
+  So `tools-only` never carries it.
 - **No date, no ids, no counts.** The text has no date line, session id, agent
   name or count. The Rust module's `guidance.get` appends `Today's date: …` per
-  session (`lib.rs:9422-9451,15377-15379,5555-5566`); that moves out (§3.2).
+  session (`lib.rs:9422-9451,15377-15379,5555-5566`); that moves to the head of
+  m0 (§3.2, decision 5).
 - **Text-only fetches.** If a plan names Magic Context only as a system-prompt
   provider, it is fetched with `params: {}`, as FP's text-only shape requires
   (FP README lines 154–159). Magic Context then serves its tools for the default
@@ -214,7 +279,7 @@ mapped as follows:
 None. `late_results` is not declared, because every Magic Context tool settles
 inside its reply. `host_params` is not declared, because no v1 parameter is
 host-only: the project comes from the route stamp's `project_root`, never from
-an argument (D §9.4 line 989). See open question 7. Magic Context therefore
+an argument (D §9.4 line 989; decision 7). Magic Context therefore
 serves neither `tool.withdraw` nor `late_results` (TP §1).
 
 ### 2.5 Digests
@@ -243,34 +308,46 @@ reading. The module's `serde_json` is built without `preserve_order`
 no whitespace. For these payloads (strings, booleans, safe integers, no floats)
 that equals JCS. The implementation pins it with a byte test against these files.
 
-The generator's JCS and structural-schema code reproduces every non-float case in
-TPV's `composition-digest.json` and `schema-digest.json`, and FP's
-`compositions/broca-head.jcs` and its digest.
+The generator re-checks its JCS and structural-schema code on every run. It
+reproduces every vector without floats in TPV's `composition-digest.json` and
+`schema-digest.json` (commons at `57305c74`), and every FP composition and plan
+whose `.json` canonicalises to its `.jcs` and hashes to its `.sha256`
+(prefrontal at `26590b8d4`). It reads both repositories with `git show` from
+next to this repository's main checkout, and says so when it skips one.
 
 ### 2.7 The examples
 
 All examples resolve against one config (`mc-tool-catalog-v1/config.json`):
 compaction on, memory on, dreamer configured, temporal awareness on, caveman
-off, no language, `prompt_surface.default: full`, no override. With those flags
-the texts equal the Rust module's shipped assets byte for byte
-(`crates/mc-module/assets/guidance_primary.txt`, `guidance_light_primary.txt`
-and `guidance_no_reduce.txt`, compared with `cmp`).
+off, no language, `prompt_surface.default: full`, one model entry
+(`anthropic/claude-haiku-4-5` → `light`), no override. With those flags the
+texts equal the Rust module's shipped assets byte for byte
+(`crates/mc-module/assets/guidance_primary.txt`, `guidance_light_primary.txt`,
+`guidance_no_reduce.txt` and `guidance_light_no_reduce.txt`); the generator
+compares them on every run.
 
-| Example | Request | `catalog_digest` | Text (`item_digest`, bytes) |
+| Example | Request | `catalog_digest` | Text (`item_digest`, UTF-8 bytes) |
 |---|---|---|---|
 | `preflight` | `primary`, no composition, no text | `4dbfd638576261155e2f10b6dddfbd16ba652da5529e8a978b0ca625e2a994f2` | none |
-| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` present, so the tagged text | `3259fa2d459c0805b306582457f00a9a28b2f10e9e052ef7a41eb443f1d2005a` | `ee720eeb…`, 5,974 |
+| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` present, so the tagged text | `08b49224b8acad5de9ba43d70d29aef178f4bc3308264ba7eca63a72c044a719` | `ee720eeb…`, 6,016 |
 | `primary-full.digest-only` | same, `digest_only: true` | same as above | none |
-| `primary-light` | `tool_descs: concise`, `surface: light` | `457783f85d985d2e78d0892edf5573c4de86a9f29c486f0cc8ab166ef7d004a2` | `f03cec64…`, 4,706 |
-| `subagent` | `subagent`, AFT and MC only | `2bb49f640ddb5827289ee9c4224f59f52b82a9ec0d0993859af95ae639e79ba7` | `561c5cb3…`, 2,227 |
-| `no-reduce` | `exclude: ["ctx_reduce"]`; the composition lacks it | `a788b89068fae57e64ffcc80b78b9838279f8edd6fbfe5c535fdae08b3d61e44` | `80e42ffa…`, 4,199 |
+| `primary-light` | `tool_descs: concise`, `surface: light` | `1f5c036cd08b37b7c5d147a06210ea61812ea0e8e15887335978ca1f15793467` | `f03cec64…`, 4,736 |
+| `subagent` | `subagent`, AFT and MC only | `0b43252389ff4c754e2c4601a711d4989e249f59bda59e347223e8a17455881a` | `561c5cb3…`, 2,249 |
+| `no-reduce` | `primary`, `exclude: ["ctx_reduce"]`; the composition lacks it | `8d72f840634e20c238065a08826dc7752ba6178c582502a923c53c31947458ee` | `80e42ffa…`, 4,221 |
+| `tools-only` | `tools-only`, no params; the composition lists Magic Context's four tools without `ctx_reduce` | `195c444bc7c282f1297d3399dd2a5e0043c4cb3adc57c6158c575958cf1b4b2c` | `80e42ffa…`, 4,221 |
+| `tools-only-light` | `tools-only`, `model: anthropic/claude-haiku-4-5` on both items, which the config maps to light | `b62c7fa43af3bd3cb6d2ac054841118fb10fac1131e3ec8ca03dc5d4faea8b2e` | `28470e78…`, 3,333 |
+
+`tools-only` and `no-reduce` serve the same tools and the same text, yet differ
+in `catalog_digest`: `preflight_digest` covers the preset. The full and light
+`tools-only` examples differ in both the text and every tool description.
 
 Each example has `<name>.request.json`, `<name>.answer.json` and
 `<name>.answer.jcs`, plus `text/<name>.txt` holding the exact text with no
 trailing newline. `.gitattributes` keeps both byte-exact files from being
 rewritten on checkout. The compositions follow FP's canonical order (providers,
 tools and tags sorted bytewise; FP README lines 262–271). The AFT entries carry
-the tags from AFT's catalog fixture.
+the tags AFT's catalog declares for those tools (`crates/aft/src/subc/tool_provider.rs`,
+`METADATA`), all of them among the eight defined tags.
 
 ## 3. Variation and purity
 
@@ -278,29 +355,33 @@ the tags from AFT's catalog fixture.
 
 | Varies today by | Today's source | Allowed under the purity rule? | Under this plan |
 |---|---|---|---|
-| Light or full surface | `prompt_surface.default` and `.models[model key]`; per session and model epoch on OpenCode (`system-prompt-hash.ts:360-369`; `prompt-surface-runtime.ts:258-283`), once per process for the OpenCode 1 and Pi tool maps (`tool-registry.ts:196-201`) | The model isn't an input; config and params are. | Params `tool_descs` and `surface`, or the `model` param looked up in MC's own config (open question 4). Frozen with the plan. |
+| Light or full surface | `prompt_surface.default` and `.models[model key]`; per session and model epoch on OpenCode (`system-prompt-hash.ts:360-369`; `prompt-surface-runtime.ts:258-283`), once per process for the OpenCode 1 and Pi tool maps (`tool-registry.ts:196-201`) | The model isn't an input; config and params are. | Params `tool_descs` and `surface`, or the `model` param looked up in MC's own config (decision 4). Frozen with the plan; a model switch applies at the next refresh. |
 | Model family or serializer profile | `guidance.get` picks the tagged variant from `serializer_profile` plus `tool_present` (`lib.rs:9391-9411,1332-1334`) | No. | Removed. The composition says whether `ctx_reduce` is present. |
 | Tags on or off | The same thing as `ctx_reduce` being callable: tags exist only where stamping does (`magic-context-prompt.ts:173-182,200-209`) | Only through the composition. | `ctx_reduce` in MC's composition entry. |
 | `ctx_reduce` denied by agent or session permission | Read from OpenCode's agent and permission config before the verdict freezes (`packages/plugin/src/hooks/magic-context/ctx-reduce-availability.ts:6-44`) | No: agent identity. | The session's starter (Prefrontal, or the gateway when it plans) leaves `ctx_reduce` out, through `exclude` or by not composing it, and the text follows the composition. A user-tier disable by exact name makes it absent from the catalog (D §9.2). |
 | Compaction off | `compaction.enabled: false` drops `ctx_reduce` (`tool-registry.ts:84-85,141-152`) | Yes, config. | Unchanged. `ctx_reduce` is absent from the catalog. |
-| Subagent | `isSubagent` in session metadata (`system-prompt-hash.ts:334-359`) | No: session state. | Preset `subagent`. |
+| Which provider compacts | Nothing today: wherever Magic Context is loaded it compacts, and the guidance assumes so | Yes: the preset, which core's plan builder chooses from the plan's `compaction_item`. | Preset `tools-only` when another provider compacts or none does: no `ctx_reduce`, the no-reduce text (decision 2). |
+| Subagent | `isSubagent` in session metadata (`system-prompt-hash.ts:334-359`) | No: session state. | Preset `subagent`, which core sends for bounded readers and one-shot calls (decision 1). |
 | Memory off | `memory.enabled` drops `ctx_memory` and the pinboard paragraph (`tool-registry.ts:129-178`) | Yes, config. | Unchanged, and the paragraph also requires `ctx_memory` in the composition. |
 | Dreamer, temporal awareness, caveman | Config flags passed to the builder (`system-prompt-hash.ts:376-388`) | Yes, config. | Unchanged. |
-| Language | Config `language`; the name is resolved by `Intl.DisplayNames` in TS (`packages/plugin/src/agents/language-directive.ts:19-39,117-121`) and by a fixed table in Rust (`crates/mc-module/src/content_language.rs:4,181`) | Yes. A project picking a code selects among shipped texts. | Unchanged. One shared name table (open question 13). |
+| Language | Config `language`; the name is resolved by `Intl.DisplayNames` in TS (`packages/plugin/src/agents/language-directive.ts:19-39,117-121`) and by a fixed table in Rust (`crates/mc-module/src/content_language.rs:4,181`) | Yes. A project picking a code selects among shipped texts. | Unchanged. One shared name table (decision 13). |
 | Guidance override, tool-description overrides | User-only config; a project can't set them (`project-security.ts:37,474-486`) | Yes, user config. | Unchanged. The override file's SHA-256 enters `preflight_digest`. |
-| Date line | Rust appends `Today's date: …`, frozen per session in MC's store (`lib.rs:9422-9451,9473-9512`). OpenCode and Pi freeze the host's own date line (`system-prompt-hash.ts:412-465`; `packages/pi-plugin/src/system-prompt.ts:104-119`). | No: time, per session. | Out of the catalog. On runner-driven sessions (Broca, Claude Code) Magic Context puts the sticky date at the head of m0, advanced only when m0 is rebuilt anyway, which is today's sticky-date rule. On OpenCode and Pi the host's line stays the host's (open question 5). |
+| Date line | Rust appends `Today's date: …`, frozen per session in MC's store (`lib.rs:9422-9451,9473-9512`). OpenCode and Pi freeze the host's own date line (`system-prompt-hash.ts:412-465`; `packages/pi-plugin/src/system-prompt.ts:104-119`). | No: time, per session. | Out of the catalog; no runner adds or expects a date in system text. On runner-driven sessions (Broca, Claude Code) Magic Context puts the sticky date at the head of m0, advanced only when m0 is rebuilt anyway, which is today's sticky-date rule. On OpenCode and Pi the host's line stays the host's (decision 5). |
 | Session id and binding | `guidance.get` and `manifest.get` require `session_id` and freeze the selection per session (`lib.rs:9302-9349,9356-9405`) | No. | Removed. The runner freezes what it fetched (D §4.5 line 241). |
 | Memories, history, project docs, profile, key files | Already m0 and m1, never system text (`system-prompt-hash.ts:403-408`; D §4.3 line 186) | Never catalog text. | Unchanged. They stay with compaction. |
 | Steers, nudges, reduction reminders | Channel 1 and 2 reminders and the transform's own text | Not system text. | Unchanged: they stay with the step transform and compaction, as user-role text (D §15 line 1746). |
 
 ### 3.2 What has to move
 
-1. **The date line**, out of the Rust guidance bytes and into m0. That is the
-   only case where today's system text carries time.
+1. **The date line**, out of the Rust guidance bytes and into the head of m0 on
+   runner-driven sessions. That is the only case where today's system text
+   carries time.
 2. **The tagged or no-reduce choice**, from the serializer profile and agent
    permissions to the composition.
 3. **The subagent choice**, from session metadata to the preset.
-4. **The per-session freeze** in `guidance.get` and `manifest.get`, from Magic
+4. **The compaction fact**, from an assumption in the guidance to the preset:
+   `tools-only` when Magic Context doesn't compact.
+5. **The per-session freeze** in `guidance.get` and `manifest.get`, from Magic
    Context to the runner's frozen manifest. Thalamus's in-process freeze
    (`thalamus/crates/thalamus-module/src/guidance_client.rs:1-18`) becomes the
    gateway's frozen plan (D §14.1 lines 1513–1531).
@@ -319,17 +400,19 @@ model only through compaction (m0 and m1) and step transforms, never the catalog
   stamping text. Without it, the no-reduce text, which never mentions tags. With
   `ctx_memory`, the pinboard paragraph; without it, none. Every v1 text names
   `ctx_expand`, `ctx_search` and `ctx_note`. A session without one of them has
-  no shipped text yet (open question 3).
+  no shipped text yet, and the generator refuses such a composition (decision 3).
 - **Across peers, adaptation is by tag and never required.** v1 ships no
   peer-dependent sentence. The mechanism for later is fixed now so peers can
   plan around it:
   - A peer clause is one sentence, appended at a fixed point after the base
     text and before the language directive. It is included only when its tag
     matches.
-  - Matching is unpinned by default (`code.outline/v1` from any provider).
-    It is pinned (`aft:code.outline/v1`, meaning provider `aft` serving
-    `code.outline/v1`) only when the sentence relies on one provider's exact
-    behaviour, such as AFT's line-tag format in `read` (D §4.5 line 215).
+  - Matching is unpinned by default: the tag on a tool from any provider, such
+    as `code.outline/v1`. It is pinned to one provider (the same tag on a tool
+    in the `aft` entry) only when the sentence relies on that provider's exact
+    behaviour, such as AFT's line-tag format in `read` (D §4.5 line 215). A
+    provider's own namespaced tag, such as `aft:code.ast_grep/v1`, needs no
+    pin: only AFT ships it.
   - When the tag is absent, the clause is dropped and the base text stands.
     Magic Context never refuses a composition for a missing peer (D §4.5 line 216).
   - Each clause is a new shipped string, so adding one changes `text_revision`
@@ -338,9 +421,24 @@ model only through compaction (m0 and m1) and step transforms, never the catalog
   `magic-context:context.reduce/v1` or `magic-context:archive.search/v1`.
   Prefrontal's persona and AFT's guidance can then say "stamp outputs you are
   done with" only when the session can.
-- **Claude Code path (b).** The gateway plans from wire tool names with no tags
-  (D §14.1 line 1509). Magic Context needs its own entry under `magic-context`
-  with catalog names. See open question 11.
+- **Claude Code path (b).** The gateway plans from wire tool names, which carry
+  no tags (D §14.1 line 1509), and maps forward, never parsing a wire name back
+  (decision 11):
+  - For each tool in Magic Context's catalog it expects exactly
+    `mcp__subc__magic-context_<catalog name>` among the session's tools. The
+    ones present go under `magic-context` by catalog name, with the catalog's
+    tags.
+  - `ctx_reduce` counts as present only if its wire name and its schema both
+    match, through the same predicate as the gateway's reduce authority gate
+    (today's shape check is `prompt_surface.rs:241-257`). A drifted `ctx_reduce`
+    is left out of the composition and excluded from the fetch, so the session
+    gets the no-reduce text and never a stamping text without working drops.
+    That is why `ctx_reduce`'s name and schema are frozen for v1 (§2.2).
+  - The preset is `subagent` when the request carries
+    `x-claude-code-agent-id`, and `primary` otherwise.
+  - D line 1508 calls the text for a session without the reduce tool "light".
+    In Magic Context's terms that is the no-reduce variant; light is a
+    surface. The design text says "no-reduce".
 
 ## 5. Change policy
 
@@ -360,13 +458,17 @@ model only through compaction (m0 and m1) and step transforms, never the catalog
 
 - A deploy changes what new sessions fetch. Live sessions keep their frozen
   bytes (D §4.5 lines 241–242).
-- At a head's turn boundary, the owner's `digest_only` check (open question 10)
-  sees a new `catalog_digest`, because `text_revision` moved. The owner preflights
-  again and sends `session.refresh` under its policy (D §13.1–13.2). The head
+- At a head's turn boundary, the owner calls `tool.catalog` with
+  `digest_only: true` and the frozen plan's request (decision 10). It sees a new
+  `catalog_digest`, because `text_revision` moved. The owner preflights again
+  and sends `session.refresh` under its policy (D §13.1–13.2). The head
   default, `on_prefix_rebuild`, applies the change at the next dead prefix (TTL
   expiry, model switch or flush), at **zero extra cost** (D §13.2 lines 1377,
   1408). Workers and readers have no turn-boundary check and keep their launch
   bytes (D §13.1 line 1368).
+- A model switch changes no fetched byte on its own: the `model` param is
+  frozen with the plan. The switch applies at the next refresh, whose request
+  carries the new model (decision 4).
 - Magic Context asks owners to use `on_prefix_rebuild` for its wording changes,
   and `on_system_rebuild` only for a correction that can't wait. On Broca an m0
   rewrite, which Magic Context makes at every fold, already invalidates from m0,
@@ -382,6 +484,7 @@ model only through compaction (m0 and m1) and step transforms, never the catalog
 | A description reworded | Fold only. Pins are unaffected: `schema_digest` ignores descriptions (D §9.3 line 974). |
 | An argument added | Fold. Old pins stay servable because argument changes are additive (TP §4). |
 | Behaviour changed with the same schema | Bump `semantics`. A call pinned to the old value is refused `tool_semantics_changed` only if the old behaviour can't be honoured. |
+| `ctx_reduce`'s name or schema | Frozen for v1. A change ships in one release window with the gateway change that recognises it; otherwise Claude Code sessions silently lose stamping (decision 11). |
 | A config edit (memory off, surface, language) | Detected by `preflight_digest` or `catalog_digest`, then applied at a fold. |
 
 Magic Context adds no WAL record kinds. What it serves sits inside the runner's
@@ -397,7 +500,7 @@ same structure and words where the host registers tools itself (OpenCode, Pi).
 | Surface | Today | Under this plan |
 |---|---|---|
 | Broca | No caller of `guidance.get` found in broca or prefrontal, though the module has an `OwnedBroca` branch for one (`lib.rs:9406-9410`). | Fetches `tool.catalog`; the bytes are these files. |
-| Claude Code (Thalamus, ck-mc) | Tools come from the module's manifest (`prompt_surface.rs:206-300`), text from `guidance.get` (`guidance_client.rs:32-46`; no `language` is sent). | The gateway fetches `tool.catalog` for the text, and subc-mcp serves the catalog's tools. The bytes are the same as Broca's. |
+| Claude Code (Thalamus, ck-mc) | Tools come from the module's manifest (`prompt_surface.rs:206-300`), text from `guidance.get` (`guidance_client.rs:32-46`; no `language` is sent). | The gateway fetches `tool.catalog` for the text, and subc-mcp serves the catalog's tools as `mcp__subc__magic-context_<catalog name>`. The bytes are the same as Broca's. |
 | OpenCode | Tools registered natively; the host converts the zod shapes. Guidance is appended to `system[0]` after a blank line (`system-prompt-hash.ts:28,396`). | The same shared definitions. OpenCode serializes them into its own JSON Schema, whose exact bytes Magic Context doesn't control. |
 | Pi | The same builder, `subagentMode` always false (`packages/pi-plugin/src/system-prompt.ts:63-86`). | The same definitions; subagent text when Pi gains subagents. |
 
@@ -418,81 +521,110 @@ descriptions and guidance fragments in one asset set, as the Rust module already
 does for the four guidance assets. A golden test then pins these example files
 in both packages.
 
-## 7. Open questions
+## 7. Decisions
 
-Each question gives the answer this plan recommends. The plan assumes that
-answer until the room decides otherwise.
+The extensibility room reviewed r1's fourteen questions. Each entry gives the
+question, the answer and who ruled. *Adopted* means nobody in the room objected
+to r1's recommendation, so it stands as written.
 
-1. **Preset names.** FP's vectors use `head` for Magic Context. *Recommend:*
-   Magic Context defines `primary` and `subagent`, and Prefrontal maps heads,
-   masons and readers to `primary`. Magic Context doesn't know a head from a
-   worker and shouldn't.
-2. **Is Magic Context the session's compaction provider?** The stamping text and
-   the self-tag paragraph are true only if Magic Context's transform tags the
-   session, and the composition doesn't name the compaction provider (FP README
-   lines 236–251). *Recommend:* `primary` and `subagent` assume Magic Context
-   compacts. A later `tools-only` preset would serve no `ctx_reduce` and the
-   no-reduce text. The alternative is for the composition to carry the
-   compaction provider's id, which is Prefrontal's and Broca's call.
-3. **Sessions without `ctx_expand`, `ctx_search` or `ctx_note`.** The user tier
-   may disable any tool (D §9.2), but every shipped text names these three.
-   *Recommend:* before Magic Context declares `tool-provider/v1`, split the text
-   so each sentence that names one of them is dropped when it is absent, pinned
-   by goldens. Until then the generator refuses such a composition.
+### 7.1 Decided
+
+1. **Preset names.** FP's vectors use `head` for Magic Context. *Ruled by the
+   room:* Magic Context defines `primary` and `subagent`. Core maps heads and
+   masons to `primary`, and bounded readers and one-shot calls to `subagent`.
+   Magic Context never knows the role. FP's `head` is an illustrative name
+   (§2.1).
+2. **Is Magic Context the session's compaction provider?** The stamping text
+   and the self-tag paragraph are true only if Magic Context's transform tags
+   the session. *Ruled by the room:* the composition doesn't name the
+   compaction provider. Core sends `primary` or `subagent` only when the plan's
+   `compaction_item` names `magic-context`. Otherwise it sends a third v1
+   preset, `tools-only`: no `ctx_reduce`, the no-reduce text, and no stamping or
+   self-tag guidance. Core's plan builder refuses any other pairing (§2.1;
+   examples `tools-only` and `tools-only-light`).
+3. **Sessions without `ctx_expand`, `ctx_search` or `ctx_note`.** The user
+   tier may disable any tool (D §9.2), but every shipped text names these three.
+   *Adopted:* before Magic Context declares `tool-provider/v1`, the text is
+   split so each sentence that names one of them is dropped when it is absent,
+   pinned by goldens. Until then the generator refuses such a composition.
 4. **The model as an input.** Today the surface follows the live model per
-   session. The purity rule has no model input. *Recommend:* an optional MC
-   param `model`, used only to look up Magic Context's own `prompt_surface.models`.
-   It is frozen with the plan, and a model switch changes nothing until the
-   owner refreshes. The alternative is for Prefrontal to send
-   `tool_descs`/`surface` explicitly and learn Magic Context's mapping.
-5. **Where the date goes.** *Recommend:* the head of m0 on Broca and Claude
-   Code, with today's sticky rule. OpenCode and Pi keep the host's line.
-   Confirm that no runner expects a date in system text.
-6. **`ctx_search` default limit.** The handler uses 8; the descriptions and the
-   plugin say 10. *Recommend:* 10, and change the handler.
+   session, and the purity rule has no model input. *Ruled by the room:* an
+   optional `model` param, frozen with the plan, used only to look up Magic
+   Context's own `prompt_surface.models`. A model switch applies at the next
+   refresh (§2.1, §5.2; example `tools-only-light`).
+5. **Where the date goes.** *Ruled by BROCA:* no runner adds or expects a date
+   in system text. The sticky date moves to the head of m0 on runner-driven
+   sessions; OpenCode and Pi keep the host's line (§3.1).
+6. **`ctx_search` default limit.** The handler uses 8; the descriptions and
+   the plugin say 10. *Adopted:* 10, and the handler changes.
 7. **`memory_project`.** It is advertised to the model as "supplied by the host
-   transport". *Recommend:* drop it from the v1 schema and take the project from
-   the stamp. If a host still needs it, mark it `"x-ck-audience": "host"` and
-   declare `host_params`.
+   transport". *Adopted:* dropped from the v1 schema; the project comes from
+   the route stamp, so v1 declares no `host_params` (§2.4).
 8. **Legacy argument forms** (`id`, `target_id`, `source_ids`, extra fields).
-   *Recommend:* not advertised. Refused on `tool-provider/v1` routes after
+   *Adopted:* not advertised. Refused on `tool-provider/v1` routes after
    coercion, and still accepted on legacy routes until they retire.
-9. **Unprefixed tags.** TP lets only the role document define unprefixed names
-   and defines none, yet AFT's fixture ships `code.read/v1`, `code.outline/v1`
-   and others. *Recommend:* Magic Context ships only namespaced tags. The room
-   decides whether the tool-provider document defines AFT's names (owner: AFT).
-   Pinned matching works either way.
+9. **Unprefixed tags.** *Ruled by AFT:* the eight unprefixed standard names are
+   defined in tool-provider §3 on commons master (cortexkit-role-tool-provider
+   0.4.2), together with the tag-shape rule `<namespace>:<name>/v<N>` for every
+   other tag. Magic Context ships only `magic-context:*` tags, and every tag in
+   the payloads passes the crate's `check_capability_tag` (§2.2).
 10. **`preflight.digest`.** D §4.2 and §13.1 name `preflight.digest(cwd,
-    params)`, but TP has no such op. *Recommend:* owners use `tool.catalog` with
-    `digest_only: true` and the frozen plan's request. It is contract-native and
-    covers the text through `catalog_digest`; Prefrontal already plans to do
-    this (E line 55). Magic Context serves no separate op.
-11. **Claude Code path (b) composition.** The gateway lists wire tool names
-    with no tags (D §14.1 line 1509). Also, D line 1508 says Magic Context's text
-    is "light when the session's tools lacks the reduce tool". In Magic
-    Context's terms that is the no-reduce variant; light is a separate preset.
-    *Recommend:* the gateway puts Magic Context's tools under `magic-context`
-    with catalog names, using subc-mcp's facade map, and the design text says
-    "no-reduce" rather than "light".
-12. **Empty subagent text.** *Recommend:* Magic Context answers `text: ""`, and
-    the runner's join skips empty texts, so no stray separator appears. This
-    needs BROCA's join rule. The alternative is for the starter to omit Magic
-    Context's text item for such subagents.
-13. **Language names.** *Recommend:* one shipped table for both languages, so
+    params)`, but TP has no such op. *Ruled by the room:* owners use
+    `tool.catalog` with `digest_only: true` and the frozen request. There is no
+    `preflight.digest`, and Magic Context serves no separate op (§5.2).
+11. **Claude Code path (b) composition.** *Ruled by THALAMUS:* the gateway maps
+    forward. It expects exactly `mcp__subc__magic-context_<catalog name>` for
+    each catalog tool and never parses wire names back. `ctx_reduce` counts as
+    present only if its name and its schema both match, through the same
+    predicate as the gateway's reduce authority gate, so a drifted `ctx_reduce`
+    gets the no-reduce text, never stamping without drops. Magic Context takes
+    on one rule in return: `ctx_reduce`'s catalog name and schema are frozen for
+    v1, and any change ships in one release window with a gateway change. The
+    preset is `subagent` when the request carries `x-claude-code-agent-id`, and
+    `primary` otherwise. The design text says "no-reduce", not "light", for the
+    variant without `ctx_reduce` (§2.2, §4, §5.3).
+12. **Empty subagent text.** *Ruled by BROCA:* Magic Context answers
+    `text: ""`, and the runner's join skips an empty `text`, so no stray
+    separator appears. An empty text and an absent text item are recorded
+    differently in `RunStarted` but render the same. The join rule is frozen
+    per session (§2.3).
+13. **Language names.** *Adopted:* one shipped table for both languages, so
     the bytes don't depend on the host's ICU version.
-14. **`result_ops`.** *Recommend:* `prepend` and `append` on all five tools, for
-    the reason in §2.2. Say so now if a planned hook needs `replace` on a Magic
-    Context tool.
+14. **`result_ops`.** *Adopted:* `prepend` and `append` on all five tools, for
+    the reason in §2.2. No planned hook asked for `replace` on a Magic Context
+    tool.
+
+### 7.2 Still open
+
+One item, found while applying decision 2. Owner: Magic Context.
+
+- **The no-reduce text describes Magic Context's own compaction.** It was
+  written for a session Magic Context compacts while the model can't stamp. It
+  says that "Magic Context compacts in the background", that Magic Context files
+  older work as `<session-history>`, and that `ctx_expand(message=N)` brings a
+  cleared item back whole. Under `tools-only` another provider compacts, or
+  none does, so those sentences describe machinery the session doesn't have.
+  v1 serves the no-reduce text under `tools-only`, as ruled. *Proposed:* before
+  Magic Context declares `tool-provider/v1`, build a `tools-only` text from the
+  same fragments without the compaction paragraphs, through the text split
+  decision 3 already requires, and bring it to the extensibility room for a
+  ruling.
 
 ## 8. What implementing this would touch
 
 This section is for scoping only; the room isn't asked to approve it.
 
 - `crates/mc-module`: a `tool.catalog` handler and a `role.describe` answer
-  (TP §2). The answer is built from the shared definition, the date moves to m0,
-  and `guidance.get` and `manifest.get` stay for legacy callers until they retire.
+  (TP §2). The answer is built from the shared definition, the date moves to the
+  head of m0 on runner-driven sessions, the `ctx_search` handler's default limit
+  becomes 10, and `guidance.get` and `manifest.get` stay for legacy callers until
+  they retire.
 - `packages/plugin` and `packages/pi-plugin`: read the same definition, and use
   the reconciled schemas.
 - Conformance: run `cortexkit-role-tool-provider-conformance` against the live
   module. Magic Context declares no held calls, so the withdraw and late-result
   cases are skipped by capability.
+- Outside Magic Context, the decisions above need: core's plan builder choosing
+  the preset from `compaction_item` and refusing other pairings (decisions 1
+  and 2), the gateway's forward name map and `ctx_reduce` predicate (decision
+  11), and Broca's join rule for empty text (decision 12).
