@@ -2355,12 +2355,14 @@ export function retireDeferredClearedCompactionMarkerState(db: Database, session
  */
 export const MAX_STRIPPED_PLACEHOLDER_IDS = 4096;
 
-interface StrippedPlaceholderState {
+export interface StrippedPlaceholderState {
     ids: string[];
     hiddenSeamIds: string[];
 }
 
-function parseStrippedPlaceholderState(raw: string | null | undefined): StrippedPlaceholderState {
+export function parseStrippedPlaceholderState(
+    raw: string | null | undefined,
+): StrippedPlaceholderState {
     if (!raw || raw.length === 0) return { ids: [], hiddenSeamIds: [] };
     try {
         const parsed = JSON.parse(raw) as unknown;
@@ -2401,7 +2403,7 @@ function parseStrippedBlob(raw: string | null | undefined): string[] {
     }
 }
 
-function serializeStrippedPlaceholderState(state: StrippedPlaceholderState): string {
+export function serializeStrippedPlaceholderState(state: StrippedPlaceholderState): string {
     if (state.ids.length === 0) return "";
     if (state.hiddenSeamIds.length === 0) return JSON.stringify(state.ids);
     return JSON.stringify(state);

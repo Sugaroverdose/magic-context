@@ -6,6 +6,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { runMigrations } from "./migrations";
 import { type CloneSessionStateFilter, copySessionStateForClone } from "./storage-clone";
 import { initializeDatabase } from "./storage-db";
+import { applyStrippedPlaceholderDelta, getHiddenSeamPlaceholderIds } from "./storage-meta";
 
 const SOURCE = "ses_source";
 const DESTINATION = "ses_destination";
@@ -81,6 +82,45 @@ describe("copySessionStateForClone", () => {
             .prepare("SELECT tag_id, operation FROM pending_ops WHERE session_id = ?")
             .all(DESTINATION);
         expect(queued).toEqual([{ tag_id: 2, operation: "drop" }]);
+    });
+
+    it("keeps hidden seam placeholder state stored in the object form", () => {
+        const db = createDb();
+        insertTag(db, SOURCE, "msg_a:p0", 1);
+        seedSessionMeta(db, SOURCE);
+        expect(
+            applyStrippedPlaceholderDelta(db, SOURCE, {
+                add: ["msg_a"],
+                hiddenSeamAdd: ["msg_seam"],
+            }),
+        ).toBe(true);
+        const sourceBlob = (
+            db
+                .prepare("SELECT stripped_placeholder_ids FROM session_meta WHERE session_id = ?")
+                .get(SOURCE) as { stripped_placeholder_ids: string }
+        ).stripped_placeholder_ids;
+        expect(JSON.parse(sourceBlob)).toEqual({
+            ids: ["msg_a", "msg_seam"],
+            hiddenSeamIds: ["msg_seam"],
+        });
+
+        copySessionStateForClone(
+            db,
+            SOURCE,
+            DESTINATION,
+            identityFilter({ mapMessageId: (id) => `${id}_clone` }),
+        );
+
+        const cloned = (
+            db
+                .prepare("SELECT stripped_placeholder_ids FROM session_meta WHERE session_id = ?")
+                .get(DESTINATION) as { stripped_placeholder_ids: string }
+        ).stripped_placeholder_ids;
+        expect(JSON.parse(cloned)).toEqual({
+            ids: ["msg_a_clone", "msg_seam_clone"],
+            hiddenSeamIds: ["msg_seam_clone"],
+        });
+        expect([...getHiddenSeamPlaceholderIds(db, DESTINATION)]).toEqual(["msg_seam_clone"]);
     });
 
     it("never binds more SQL variables than node:sqlite allows for a large session", () => {

@@ -3,6 +3,10 @@ import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { decodePiContentDecision, encodePiContentDecision } from "./pi-content-decisions";
+import {
+    parseStrippedPlaceholderState,
+    serializeStrippedPlaceholderState,
+} from "./storage-meta-persisted";
 import { getNativeReplayState } from "./storage-native-replay";
 import {
     type ReplayDocument,
@@ -266,6 +270,27 @@ function filterIdBlob(raw: string | null, filter: CloneSessionStateFilter): stri
     } catch {
         return "";
     }
+}
+
+/**
+ * The stripped-placeholder column has two shapes: a plain id array, and an
+ * `{ ids, hiddenSeamIds }` object once a fold has hidden seam placeholders.
+ * Both are read with the column's own parser so the clone replays exactly the
+ * placeholders the source session strips.
+ */
+function filterStrippedPlaceholderBlob(
+    raw: string | null,
+    filter: CloneSessionStateFilter,
+): string {
+    const state = parseStrippedPlaceholderState(raw);
+    const keep = (ids: readonly string[]): string[] =>
+        ids.filter((id) => filter.includeMessageId(id)).map((id) => mapMessageId(filter, id) ?? id);
+    const ids = keep(state.ids);
+    const copied = new Set(ids);
+    return serializeStrippedPlaceholderState({
+        ids,
+        hiddenSeamIds: keep(state.hiddenSeamIds).filter((id) => copied.has(id)),
+    });
 }
 
 function filterNativeToolInputs(
@@ -636,7 +661,7 @@ export function copySessionStateForClone(
                 Number.isFinite(meta.pi_stable_id_scheme)
                 ? meta.pi_stable_id_scheme
                 : null,
-            filterIdBlob(meta?.stripped_placeholder_ids ?? null, filter),
+            filterStrippedPlaceholderBlob(meta?.stripped_placeholder_ids ?? null, filter),
             filterIdBlob(meta?.stale_reduce_stripped_ids ?? null, filter),
             filterIdBlob(meta?.processed_image_stripped_ids ?? null, filter),
             clonePiContentDecisions(meta?.merged_reasoning_stripped_ids ?? null, filter),
