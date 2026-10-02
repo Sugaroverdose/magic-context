@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { describe, expect, it, mock } from "bun:test";
+import { describe, expect, it, mock, spyOn } from "bun:test";
 import {
     acquireCompartmentLease,
     releaseCompartmentLease,
@@ -333,6 +333,47 @@ describe("runManagedWrapup", () => {
             });
             expect(getWrapupInProgressState(db, sessionId)).toBeNull();
         } finally {
+            closeQuietly(db);
+        }
+    });
+
+    it("clears its wait timer once the active historian run it waited for settles", async () => {
+        const db = createDb();
+        const setTimeoutSpy = spyOn(globalThis, "setTimeout");
+        const clearTimeoutSpy = spyOn(globalThis, "clearTimeout");
+        try {
+            const sessionId = "ses-wrapup-wait-timer";
+            let settleActive!: () => void;
+            registerActiveCompartmentRun(
+                sessionId,
+                new Promise<void>((resolve) => {
+                    settleActive = resolve;
+                }),
+                "other",
+            );
+            const ctx = baseCtx(db);
+            ctx.wrapupLeaseWaitTimeoutMs = 600_000;
+            ctx.runCompartmentAgentForWrapup = mock(async () => {});
+
+            const run = withProvider(sessionId, 8, () =>
+                runManagedWrapup(ctx, sessionId, { messagesToKeep: 2 }),
+            );
+            settleActive();
+            await run;
+
+            // The wait races the active run against a timer as long as the configured
+            // lease wait. Once the run wins, that timer must not stay armed for minutes.
+            const waitTimers = setTimeoutSpy.mock.calls.flatMap((call, index) =>
+                typeof call[1] === "number" && call[1] > 500_000
+                    ? [setTimeoutSpy.mock.results[index]?.value]
+                    : [],
+            );
+            expect(waitTimers.length).toBeGreaterThan(0);
+            const cleared = new Set(clearTimeoutSpy.mock.calls.map((call) => call[0]));
+            for (const timer of waitTimers) expect(cleared.has(timer)).toBe(true);
+        } finally {
+            setTimeoutSpy.mockRestore();
+            clearTimeoutSpy.mockRestore();
             closeQuietly(db);
         }
     });

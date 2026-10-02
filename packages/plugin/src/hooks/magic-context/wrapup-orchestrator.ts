@@ -78,13 +78,23 @@ async function waitForActiveRunWithin(
     timeoutMs: number,
 ): Promise<"settled" | "timeout"> {
     if (timeoutMs <= 0) return "timeout";
-    return Promise.race([
-        promise.then(
-            () => "settled" as const,
-            () => "settled" as const,
-        ),
-        sleep(timeoutMs).then(() => "timeout" as const),
-    ]);
+    // The timer can be armed for the whole lease wait (up to ten minutes). Clear it
+    // as soon as the race is decided so a settled wait leaves nothing behind.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    });
+    try {
+        return await Promise.race([
+            promise.then(
+                () => "settled" as const,
+                () => "settled" as const,
+            ),
+            timedOut,
+        ]);
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 function formatAlreadyRunningMessage(state: ReturnType<typeof getWrapupInProgressState>): string {
