@@ -1058,73 +1058,77 @@ export async function registerContext(context: V2Context) {
             },
         }).m0Text;
     };
-    if (!compactionOff)
-        await context.session.hook("compaction", async (draft) => {
-            const reader = new V2StoreReader(
-                gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+    await context.session.hook("compaction", async (draft) => {
+        // A hidden child is compacted by the host like any session once its own
+        // sizing (its system prompt, instructions and tools, never the calibrated
+        // prompt that replaces them) crosses the model's limit. Its history is not
+        // a user conversation, so it never gets this session's history and memory
+        // fold: it gets the marker of the run in flight, which keeps the
+        // checkpoint recognizable to the hidden-child guard. This holds even with
+        // Magic Context's compaction off, where the host would otherwise summarize
+        // the child with a model call and lose the marker.
+        const hiddenSummary = hiddenChildHook.compactionSummary(draft.sessionID);
+        if (hiddenSummary !== undefined) {
+            draft.result = { summary: hiddenSummary };
+            return;
+        }
+        // Leaving `result` unset hands the request back to the host, exactly as if
+        // no hook were registered.
+        if (compactionOff) return;
+        const reader = new V2StoreReader(
+            gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+        );
+        try {
+            const watermark = reader.latestSequenceForIds(
+                draft.sessionID,
+                draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
             );
-            try {
-                const watermark = reader.latestSequenceForIds(
-                    draft.sessionID,
-                    draft.messages.flatMap((message) => (message.id ? [message.id] : [])),
-                );
-                const running = reader.latestRunningCompaction(draft.sessionID);
-                // In Rust mode the module composes m[0] and the host renders none, so the
-                // checkpoint has to be the module's own baseline. Composing a TypeScript one
-                // here would give the session two different histories: the one the host
-                // stores in its checkpoint and the one the module keeps serving.
-                const moduleBaseline = rustModeModuleClient
-                    ? servedModuleM0Text(draft.sessionID)
-                    : undefined;
-                // This hook ALWAYS answers, and leaving `result` unset is not an option.
-                // On GA 2.0.5 an unanswered request is not a polite decline: the host
-                // summarizes with its own model and, when that answer is not in the
-                // template it requires, records a `compaction.failed` row and ends the
-                // turn with idle outcome=failed. Measured on the real host, a session
-                // whose hook declined produced a failed compaction and no provider
-                // request at all on every turn after the first. When the module has
-                // served nothing yet there is no module baseline to answer with, so the
-                // TypeScript one is supplied instead: still Magic Context's own account
-                // of the session, rather than a host-composed summary of history the
-                // module never served, or a dead turn.
-                const source = !rustModeModuleClient
-                    ? "typescript"
-                    : moduleBaseline === null
-                      ? "typescript_fallback"
-                      : "module";
-                const fold = await folds.supply({
-                    sessionID: draft.sessionID,
-                    watermark,
-                    runningCut: running?.seq,
-                    // Kept lazy for the TypeScript lane: materializing writes cache state and
-                    // must only happen when the fold identity is actually new.
-                    materialize: () => moduleBaseline ?? materialize(draft),
-                });
-                // One line per request with the baseline it was answered from. The
-                // host's rate and ours are separate facts, and only reading both
-                // explains a session's checkpoint cadence.
-                sessionLog(
-                    draft.sessionID,
-                    `v2 compaction hook: fired answered=true source=${source}`,
-                );
-                draft.result = { summary: fold.submitted };
-            } catch (cause) {
-                await refuseBeforeProvider(
-                    context.session,
-                    draft.sessionID,
-                    "compaction-fold",
-                    cause,
-                );
-                throw new V2ContextRefusal(
-                    "Magic Context could not preserve the host checkpoint.",
-                    {
-                        cause,
-                    },
-                );
-            } finally {
-                reader.close();
-            }
-        });
+            const running = reader.latestRunningCompaction(draft.sessionID);
+            // In Rust mode the module composes m[0] and the host renders none, so the
+            // checkpoint has to be the module's own baseline. Composing a TypeScript one
+            // here would give the session two different histories: the one the host
+            // stores in its checkpoint and the one the module keeps serving.
+            const moduleBaseline = rustModeModuleClient
+                ? servedModuleM0Text(draft.sessionID)
+                : undefined;
+            // This hook ALWAYS answers, and leaving `result` unset is not an option.
+            // On GA 2.0.5 an unanswered request is not a polite decline: the host
+            // summarizes with its own model and, when that answer is not in the
+            // template it requires, records a `compaction.failed` row and ends the
+            // turn with idle outcome=failed. Measured on the real host, a session
+            // whose hook declined produced a failed compaction and no provider
+            // request at all on every turn after the first. When the module has
+            // served nothing yet there is no module baseline to answer with, so the
+            // TypeScript one is supplied instead: still Magic Context's own account
+            // of the session, rather than a host-composed summary of history the
+            // module never served, or a dead turn.
+            const source = !rustModeModuleClient
+                ? "typescript"
+                : moduleBaseline === null
+                  ? "typescript_fallback"
+                  : "module";
+            const fold = await folds.supply({
+                sessionID: draft.sessionID,
+                watermark,
+                runningCut: running?.seq,
+                // Kept lazy for the TypeScript lane: materializing writes cache state and
+                // must only happen when the fold identity is actually new.
+                materialize: () => moduleBaseline ?? materialize(draft),
+            });
+            // One line per request with the baseline it was answered from. The
+            // host's rate and ours are separate facts, and only reading both
+            // explains a session's checkpoint cadence.
+            sessionLog(draft.sessionID, `v2 compaction hook: fired answered=true source=${source}`);
+            draft.result = { summary: fold.submitted };
+        } catch (cause) {
+            await refuseBeforeProvider(context.session, draft.sessionID, "compaction-fold", cause);
+            throw new V2ContextRefusal("Magic Context could not preserve the host checkpoint.", {
+                cause,
+            });
+        } finally {
+            reader.close();
+        }
+    });
     const runManagedContext = async (draft: SessionContext): Promise<void> => {
         // Learn the host's message and attachment classes, so attachments on rows restored
         // after a host checkpoint can be rebuilt in the host's own shape.

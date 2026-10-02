@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
     DREAMER_AGENT,
     DREAMER_DOCS_AGENT,
@@ -10,6 +11,7 @@ import {
     type HiddenRunIdentity,
 } from "../../hooks/magic-context/compartment-runner-types";
 import { stripWellFormedLeadingTagPrefix } from "../../hooks/magic-context/tag-content-primitives";
+import { log } from "../../shared/logger";
 import type { PromptArgs } from "../../shared/model-suggestion-retry";
 import type { SessionContext, V2AgentDomain } from "./types";
 
@@ -153,7 +155,10 @@ function authoredOptions(attempt: HiddenChildAttempt): Record<string, number> {
     };
 }
 
-function calibratedParts(attempt: HiddenChildAttempt): Array<{ type: "text"; text: string }> {
+/** The registered prompt as text parts, or undefined when it is not text-only. */
+function calibratedParts(
+    attempt: HiddenChildAttempt,
+): Array<{ type: "text"; text: string }> | undefined {
     const parts = attempt.request.body.parts;
     if (
         !Array.isArray(parts) ||
@@ -166,13 +171,103 @@ function calibratedParts(attempt: HiddenChildAttempt): Array<{ type: "text"; tex
                 typeof (part as { text?: unknown }).text !== "string",
         )
     ) {
-        throw new HiddenCompletionRefusal(
-            "hidden_prompt_unrecognized",
-            "Hidden completion accepts text-only calibrated prompts",
-            true,
-        );
+        return undefined;
     }
     return parts.map((part) => ({ type: "text", text: (part as { text: string }).text }));
+}
+
+/**
+ * Replaces a compacted history in OpenCode 2's context: one user message wrapping
+ * the compaction summary (and, when the host kept any, the newest messages as
+ * serialized text). Source: `toLLMMessage`, case "compaction", in
+ * packages/core/src/session/runner/to-llm-message.ts. Every line is fixed by the
+ * host except the summary, the recent text, and the one explanatory sentence:
+ *
+ *   <conversation-checkpoint>
+ *   The following is a summary and serialized record of earlier conversation. ...
+ *   (empty line)
+ *   <summary>
+ *   {summary}
+ *   </summary>
+ *   (empty line)            \
+ *   <recent-context>         | 2.0.15 always writes this block, even when empty;
+ *   {recent}                 | 2.0.21 writes it only when there is recent text.
+ *   </recent-context>       /
+ *   </conversation-checkpoint>
+ */
+const CHECKPOINT_OPEN = "<conversation-checkpoint>";
+const CHECKPOINT_CLOSE = "</conversation-checkpoint>";
+
+/**
+ * The one-line summary of a host compaction checkpoint, or undefined when
+ * `text` is not a checkpoint in exactly the shape documented above. Only a
+ * single-line summary is returned, because the only summary the hidden-child
+ * bridge accepts is a run marker, which never spans lines.
+ */
+export function hostCheckpointSummary(text: string): string | undefined {
+    const lines = text.split("\n");
+    if (
+        lines.length < 7 ||
+        lines[0] !== CHECKPOINT_OPEN ||
+        lines[1]?.trim() === "" ||
+        lines[2] !== "" ||
+        lines[3] !== "<summary>" ||
+        lines[5] !== "</summary>" ||
+        lines.at(-1) !== CHECKPOINT_CLOSE
+    ) {
+        return undefined;
+    }
+    const rest = lines.slice(6, -1);
+    const recentBlock =
+        rest.length >= 3 &&
+        rest[0] === "" &&
+        rest[1] === "<recent-context>" &&
+        rest.at(-1) === "</recent-context>";
+    if (rest.length !== 0 && !recentBlock) return undefined;
+    return lines[4];
+}
+
+/**
+ * The texts a hidden child's user message may legitimately carry for a run
+ * marker: the marker itself, the marker behind Magic Context's own leading tag
+ * prefix, or a host compaction checkpoint whose summary is the marker. The
+ * last one exists because OpenCode 2 can compact a hidden child before its
+ * first step (the host sizes the child by its own system prompt, instructions
+ * and tools, never by the calibrated prompt that replaces them), and that
+ * compaction folds the marker's message into a checkpoint. Magic Context's
+ * compaction hook answers a hidden child's compaction with exactly the marker
+ * of the run in flight (see `HiddenChildHook.compactionSummary`), so the
+ * checkpoint still names the run it belongs to.
+ */
+function markerCandidates(text: string): string[] {
+    const stripped = stripWellFormedLeadingTagPrefix(text);
+    const summary = hostCheckpointSummary(text);
+    return [text, stripped, ...(summary === undefined ? [] : [summary])];
+}
+
+function textDigest(text: string): { length: number; sha256: string } {
+    return {
+        length: text.length,
+        sha256: createHash("sha256").update(text).digest("hex").slice(0, 16),
+    };
+}
+
+/** Byte offset and up to eight bytes from each side where `a` and `b` first differ. */
+function firstDifference(
+    a: string,
+    b: string,
+): { offset: number; received: string; registered: string } | undefined {
+    const left = Buffer.from(a, "utf8");
+    const right = Buffer.from(b, "utf8");
+    let offset = 0;
+    while (offset < left.length && offset < right.length && left[offset] === right[offset])
+        offset++;
+    if (offset === left.length && offset === right.length) return undefined;
+    return {
+        offset,
+        received: left.subarray(offset, offset + 8).toString("hex"),
+        registered: right.subarray(offset, offset + 8).toString("hex"),
+    };
 }
 
 /**
@@ -185,6 +280,8 @@ export class HiddenChildHook {
     private readonly childIDs = new Set<string>();
     private readonly attempts = new Map<string, HiddenChildAttempt>();
     private readonly active = new Map<string, HiddenChildAttempt>();
+
+    constructor(private readonly note: (message: string) => void = log) {}
 
     registerChild(sessionID: string): void {
         this.childIDs.add(sessionID);
@@ -208,15 +305,97 @@ export class HiddenChildHook {
         return this.childIDs.has(sessionID);
     }
 
+    /**
+     * The summary Magic Context gives the host when it compacts a hidden child:
+     * the marker of the run in flight on that child, or undefined for a session
+     * this bridge does not own. A hidden child's history is never worth
+     * summarizing, since the first step replaces it wholesale and later steps
+     * keep only this run's own messages, but the host cannot be told not to
+     * compact. Answering with the marker keeps the checkpoint recognizable as
+     * this run's start, and keeps the host from summarizing with a model call.
+     * An owned child with no run in flight, or with more than one, is refused
+     * here exactly as the context guard would refuse its prompt.
+     */
+    compactionSummary(sessionID: string): string | undefined {
+        if (!this.owns(sessionID)) return undefined;
+        const active = this.active.get(sessionID);
+        const pending = [...this.attempts.values()].filter(
+            (attempt) => attempt.childSessionId === sessionID && !attempt.shaped,
+        );
+        const inFlight = active ? [active] : pending;
+        const marker = inFlight.length === 1 ? inFlight[0]?.marker : undefined;
+        if (marker === undefined) {
+            this.refuse(
+                "Refusing to compact a Magic Context hidden-run session with no single run in flight",
+                { sessionID, messages: [] },
+                undefined,
+                inFlight.length,
+            );
+        }
+        return marker;
+    }
+
+    /**
+     * Log what the guard saw against what it expected, then throw. Only lengths,
+     * short hashes and the first differing bytes are written, so a mismatch can
+     * be diagnosed from the log without copying either prompt into it.
+     */
+    private refuse(
+        reason: string,
+        draft: Pick<SessionContext, "sessionID" | "messages">,
+        raw: string | undefined,
+        inFlight?: number,
+    ): never {
+        const registered = [...this.attempts.values()]
+            .filter((attempt) => attempt.childSessionId === draft.sessionID && attempt.marker)
+            .map((attempt) => {
+                const marker = attempt.marker as string;
+                return {
+                    ...textDigest(marker),
+                    shaped: attempt.shaped,
+                    ...(raw === undefined
+                        ? {}
+                        : { first_difference: firstDifference(raw, marker) }),
+                };
+            });
+        const newest = draft.messages.at(-1);
+        const summary = raw === undefined ? undefined : hostCheckpointSummary(raw);
+        this.note(
+            `[magic-context] hidden child refused: ${reason} ${JSON.stringify({
+                session: draft.sessionID,
+                messages: draft.messages.length,
+                newest_role: newest?.role ?? null,
+                received: raw === undefined ? null : textDigest(raw),
+                checkpoint_summary: summary === undefined ? null : textDigest(summary),
+                registered,
+                active: this.active.has(draft.sessionID),
+                ...(inFlight === undefined ? {} : { in_flight: inFlight }),
+            })}`,
+        );
+        throw new HiddenCompletionRefusal("hidden_prompt_unrecognized", reason, true);
+    }
+
+    private calibratedParts(
+        attempt: HiddenChildAttempt,
+        draft: SessionContext,
+        raw: string | undefined,
+    ): Array<{ type: "text"; text: string }> {
+        const parts = calibratedParts(attempt);
+        if (!parts)
+            this.refuse("Hidden completion accepts text-only calibrated prompts", draft, raw);
+        return parts;
+    }
+
     /** Returns false only for an ordinary user session that this bridge does not own. */
     apply(draft: SessionContext): boolean {
         if (!this.owns(draft.sessionID)) return false;
 
         const raw = newestUserText(draft);
-        const stripped = raw === undefined ? undefined : stripWellFormedLeadingTagPrefix(raw);
-        const attempt =
-            (raw !== undefined ? this.attempts.get(raw) : undefined) ??
-            (stripped && stripped !== raw ? this.attempts.get(stripped) : undefined);
+        let attempt: HiddenChildAttempt | undefined;
+        for (const candidate of raw === undefined ? [] : markerCandidates(raw)) {
+            attempt = this.attempts.get(candidate);
+            if (attempt) break;
+        }
         const current = this.active.get(draft.sessionID);
         const selected = attempt ?? current;
         if (
@@ -224,10 +403,10 @@ export class HiddenChildHook {
             selected.childSessionId !== draft.sessionID ||
             (attempt && current && current !== attempt)
         ) {
-            throw new HiddenCompletionRefusal(
-                "hidden_prompt_unrecognized",
+            this.refuse(
                 "Refusing an unregistered prompt on a Magic Context hidden-run session",
-                true,
+                draft,
+                raw,
             );
         }
         if (selected.request.signal?.aborted) {
@@ -236,11 +415,7 @@ export class HiddenChildHook {
 
         if (!selected.shaped) {
             if (!attempt)
-                throw new HiddenCompletionRefusal(
-                    "hidden_prompt_unrecognized",
-                    "Hidden child first step requires a registered marker",
-                    true,
-                );
+                this.refuse("Hidden child first step requires a registered marker", draft, raw);
             this.active.set(draft.sessionID, selected);
         }
         const steps = (selected.steps ?? 0) + 1;
@@ -256,31 +431,39 @@ export class HiddenChildHook {
                 : selected.identity.system;
         draft.system = [{ type: "text", text: system }];
         if (!selected.shaped) {
-            draft.messages = [{ role: "user", content: calibratedParts(selected) }];
+            draft.messages = [
+                { role: "user", content: this.calibratedParts(selected, draft, raw) },
+            ];
         } else {
             // A reused historian child still holds the rows of its earlier runs, so on a
             // later step of this run (for example the host retrying a provider error)
             // this run's marker is not the first message. This run starts at its own
-            // marker: everything before it belongs to earlier runs and is dropped.
+            // marker, or at the host checkpoint that replaced the marker's message when
+            // the host compacted mid-run: everything before it belongs to earlier runs
+            // and is dropped.
             let start = -1;
             draft.messages.forEach((message, index) => {
                 const text = newestUserText({ ...draft, messages: [message] });
-                if (text !== undefined && stripWellFormedLeadingTagPrefix(text) === selected.marker)
+                if (
+                    text !== undefined &&
+                    selected.marker !== undefined &&
+                    markerCandidates(text).includes(selected.marker)
+                )
                     start = index;
             });
             const first = draft.messages[start];
             if (!first) {
-                throw new HiddenCompletionRefusal(
-                    "hidden_prompt_unrecognized",
+                this.refuse(
                     "Hidden child history does not contain this run's registered marker",
-                    true,
+                    draft,
+                    raw,
                 );
             }
             // The host saves the placeholder user prompt rather than the calibrated
             // text sent on step one. Replace only that placeholder, preserving all
             // assistant tool calls and tool results after it.
             draft.messages = [
-                { ...first, content: calibratedParts(selected) },
+                { ...first, content: this.calibratedParts(selected, draft, raw) },
                 ...draft.messages.slice(start + 1),
             ];
         }
