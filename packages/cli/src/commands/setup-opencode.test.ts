@@ -533,3 +533,24 @@ describe("setup-opencode DCP detection across plugin keys", () => {
         expect(findDcpPluginEntries({ plugins: ["other"] })).toEqual([]);
     });
 });
+
+describe("setup-opencode inserts follow the file's layout", () => {
+    it("writes new keys on their own indented lines with the file's CRLF endings", () => {
+        const path = join(tempDir(), "opencode.jsonc");
+        writeFileSync(path, '{\r\n    "model": "a/b"\r\n}\r\n');
+
+        addPluginToOpenCodeConfig(path, "jsonc", false, true, "v1");
+
+        const text = readFileSync(path, "utf-8");
+        // Every line break stays CRLF and nothing is crammed onto the model line.
+        expect(text.replace(/\r\n/g, "")).not.toContain("\n");
+        expect(text.split("\r\n")[1]).toBe('    "model": "a/b",');
+        expect(text).toContain('\r\n    "plugin": [');
+        expect(text).toContain('\r\n    "compaction": {');
+        expect(parseJsonc(text)).toEqual({
+            model: "a/b",
+            plugin: ["@cortexkit/opencode-magic-context@latest"],
+            compaction: { auto: false, prune: false },
+        });
+    });
+});
