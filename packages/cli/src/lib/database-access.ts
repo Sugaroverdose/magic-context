@@ -1,4 +1,4 @@
-import { existsSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import {
     ensureContextStoreUuid,
@@ -146,8 +146,26 @@ export function openExistingContextDatabaseForMutation(path: string): DatabaseTy
     });
 }
 
-/** Create a consistent SQLite snapshot, including committed WAL contents. */
-export async function backupDatabaseSnapshot(db: DatabaseType, destination: string): Promise<void> {
+/**
+ * Create a consistent SQLite snapshot of `sourcePath`, including committed WAL
+ * contents, at `destination` (which must not exist yet).
+ *
+ * Callers may hold a write transaction on `db` so no other writer can change
+ * the file between the snapshot and their own writes. Bun copies the open
+ * connection's view with serialize(). node:sqlite has no serialize(), and its
+ * backup API fails ("not an error") when the source connection is inside a
+ * transaction, so the Node path reads through a second, read-only connection:
+ * the caller's lock still keeps other writers out, and the reader sees the
+ * same committed state.
+ *
+ * A failed snapshot removes the destination it created, so a half-written or
+ * empty backup is never left behind looking like a real one.
+ */
+export async function backupDatabaseSnapshot(
+    db: DatabaseType,
+    sourcePath: string,
+    destination: string,
+): Promise<void> {
     const serializable = db as DatabaseType & { serialize?: () => Uint8Array };
     if (typeof serializable.serialize === "function") {
         writeFileSync(destination, serializable.serialize(), { flag: "wx" });
@@ -161,5 +179,16 @@ export async function backupDatabaseSnapshot(db: DatabaseType, destination: stri
     if (typeof sqlite.backup !== "function") {
         throw new Error("The active SQLite runtime does not provide a snapshot backup API");
     }
-    await sqlite.backup(db, destination);
+    if (existsSync(destination)) {
+        throw new Error(`Refusing to overwrite existing backup ${destination}`);
+    }
+    const reader = new Database(sourcePath, { readonly: true });
+    try {
+        await sqlite.backup(reader, destination);
+    } catch (error) {
+        rmSync(destination, { force: true });
+        throw error;
+    } finally {
+        reader.close();
+    }
 }

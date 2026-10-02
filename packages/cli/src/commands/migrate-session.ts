@@ -716,8 +716,8 @@ export async function runMigrateSessionCli(args: string[]): Promise<number> {
         try {
             contextDb.exec("BEGIN IMMEDIATE");
             contextLocked = true;
-            await backupDatabaseSnapshot(opencodeDb as DatabaseType, ocBackup);
-            await backupDatabaseSnapshot(contextDb as DatabaseType, ctxBackup);
+            await backupDatabaseSnapshot(opencodeDb as DatabaseType, opencodeDbPath, ocBackup);
+            await backupDatabaseSnapshot(contextDb as DatabaseType, contextDbPath, ctxBackup);
         } finally {
             if (contextLocked) contextDb.exec("ROLLBACK");
             opencodeDb.exec("ROLLBACK");
