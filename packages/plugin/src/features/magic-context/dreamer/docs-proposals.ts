@@ -61,6 +61,31 @@ function git(projectDir: string, args: string[]): string {
     }).trim();
 }
 
+/**
+ * Like git(), but returns the output read so far when it outgrows the buffer.
+ * Callers keep only a bounded prefix of these outputs, so a truncated read is
+ * enough; throwing instead would make maintain-docs fail on the same diff every
+ * run while its anchor stays put and the diff keeps growing.
+ */
+function gitOutputPrefix(projectDir: string, args: string[]): string {
+    try {
+        return git(projectDir, args);
+    } catch (error) {
+        const { code, stdout } = error as { code?: unknown; stdout?: unknown };
+        if (code !== "ENOBUFS") throw error;
+        if (typeof stdout === "string") return stdout.trim();
+        if (Buffer.isBuffer(stdout)) return stdout.toString("utf8").trim();
+        throw error;
+    }
+}
+
+/**
+ * Pathspec bytes allowed on one git command line. macOS caps arguments plus
+ * environment at 1 MiB and Linux usually at 2 MiB; beyond this the changed-file
+ * list is summarised instead of passed to git, which would fail with E2BIG.
+ */
+const MAX_PATHSPEC_BYTES = 256_000;
+
 export function docsChangeSet(
     projectDir: string,
     storedAnchor?: string,
@@ -119,6 +144,16 @@ export function docsChangeSet(
                 return docs.includes(file) || (directory.length > 2 && docs.includes(directory));
             });
             if (!relevant) return { head, text: "", unchanged: false, relevant: false };
+            const budget = 32000;
+            const pathspecBytes = files.reduce((sum, file) => sum + Buffer.byteLength(file) + 1, 0);
+            if (pathspecBytes > MAX_PATHSPEC_BYTES) {
+                return {
+                    head,
+                    unchanged: false,
+                    relevant: true,
+                    text: `Changed files (too many to include a diff):\n${files.join("\n").slice(0, budget)}`,
+                };
+            }
             const stat = git(projectDir, [
                 "diff",
                 "-M",
@@ -127,7 +162,7 @@ export function docsChangeSet(
                 "--",
                 ...files,
             ]);
-            const patch = git(projectDir, [
+            const patch = gitOutputPrefix(projectDir, [
                 "diff",
                 "-M",
                 "--unified=3",
@@ -135,7 +170,6 @@ export function docsChangeSet(
                 "--",
                 ...files,
             ]);
-            const budget = 32000;
             const text = `Changed files:\n${files.join("\n")}\n\nStat:\n${stat}\n\nHunks:\n${patch}`;
             if (text.length <= budget) return { head, text, unchanged: false, relevant: true };
             const ranges = [...patch.matchAll(/^\+\+\+ b\/(.+)$|^@@ .* \+(\d+)(?:,(\d+))? @@/gm)];
@@ -162,7 +196,7 @@ export function docsChangeSet(
             "dist",
             "*generated*",
         ];
-        const raw = git(projectDir, [
+        const raw = gitOutputPrefix(projectDir, [
             "log",
             "--format=commit %h %s",
             "--stat",
