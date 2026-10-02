@@ -661,6 +661,72 @@ describe("dreamer tick stage containment", () => {
             fixture.dispose();
         }
     });
+
+    // The per-project startup run is scheduled on its own timer, detached from
+    // the tick that scheduled it. A throw in it (ensureRegistered can hit
+    // SQLITE_BUSY) must not escape as an unhandled rejection, which can end the
+    // host process.
+    test("contains a failure in a project's startup maintenance run", async () => {
+        const timeoutCallbacks: Array<() => void> = [];
+        const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+            callback: () => void,
+        ) => {
+            timeoutCallbacks.push(callback);
+            return { unref: () => {} };
+        }) as unknown as typeof setTimeout);
+        const clearTimeoutSpy = spyOn(globalThis, "clearTimeout").mockImplementation(
+            (() => undefined) as typeof clearTimeout,
+        );
+        const setIntervalSpy = spyOn(globalThis, "setInterval").mockImplementation((() => ({
+            unref: () => {},
+        })) as unknown as typeof setInterval);
+        const clearIntervalSpy = spyOn(globalThis, "clearInterval").mockImplementation(
+            (() => undefined) as typeof clearInterval,
+        );
+        const restoreStages = _setDreamTimerStagesForTests({
+            runMessageHistoryMaintenance: async () => undefined,
+        });
+        const unhandled: unknown[] = [];
+        const onUnhandled = (reason: unknown) => {
+            unhandled.push(reason);
+        };
+        process.on("unhandledRejection", onUnhandled);
+        const directory = createTestTempDirFromPath(join(tmpdir(), "mc-dream-startup-"));
+        let cleanup: (() => void) | undefined;
+        try {
+            cleanup = await startDreamScheduleTimer({
+                directory,
+                projectIdentity: "git:startup-throws",
+                harness: "pi",
+                client: {} as never,
+                dreamerConfig: { disable: false } as never,
+                ensureRegistered: async () => {
+                    throw new Error("SQLITE_BUSY: database is locked");
+                },
+            });
+            // Fire the startup tick, then the per-project startup run it schedules.
+            for (let fired = 0; fired < 10 && timeoutCallbacks.length > 0; fired += 1) {
+                const callback = timeoutCallbacks.shift();
+                callback?.();
+                for (let attempt = 0; attempt < 50; attempt += 1) await Bun.sleep(0);
+            }
+            for (let attempt = 0; attempt < 20; attempt += 1) await Bun.sleep(1);
+
+            expect(unhandled).toEqual([]);
+            const failure = getDreamerTickFailure(timerDb());
+            expect(failure?.stage).toBe("project git:startup-throws");
+            expect(failure?.message).toContain("SQLITE_BUSY");
+        } finally {
+            process.off("unhandledRejection", onUnhandled);
+            cleanup?.();
+            restoreStages();
+            setTimeoutSpy.mockRestore();
+            clearTimeoutSpy.mockRestore();
+            setIntervalSpy.mockRestore();
+            clearIntervalSpy.mockRestore();
+            rmSync(directory, { recursive: true, force: true });
+        }
+    });
 });
 
 /** The status fields the warning selector reads, at their empty-but-healthy values. */

@@ -480,7 +480,18 @@ function scheduleInitialProjectRun(reg: ProjectRegistration, db: Database): void
     const timer = scheduleAfterBootQuiet(() => {
         startupTimers.delete(reg.directory);
         if (registeredProjects.get(reg.directory) !== reg) return;
-        void runProjectMaintenance(reg, "startup", db);
+        // This run is detached from the tick that scheduled it, so nothing
+        // upstream catches its failure. An uncaught rejection here (for example
+        // SQLITE_BUSY in ensureRegistered) would be an unhandled rejection that
+        // can end the host process; record it like an interval tick failure.
+        tickStages.runProjectMaintenance(reg, "startup", db).catch((error: unknown) => {
+            log(`[magic-context] startup maintenance failed for ${reg.projectIdentity}:`, error);
+            persistTickOutcome(db, {
+                at: Date.now(),
+                stage: `project ${reg.projectIdentity}`,
+                message: getErrorMessage(error),
+            });
+        });
     }, startupJitterMs(reg.directory));
     startupTimers.set(reg.directory, timer);
 }
