@@ -1,6 +1,7 @@
 import { resolveToolTier } from "../../hooks/magic-context/emergency-drop";
 import { getHarness } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { contentTagOwnerMessageId, TEXT_TAG_IDENTITY_MARKER } from "../../shared/tag-owner-id";
 import { newestCtxReduceTagNumbers } from "./reclaim-protection";
 import type { TagEntry } from "./types";
 
@@ -130,7 +131,6 @@ export interface MessageTokenTotal {
     hasNull: boolean;
 }
 
-const CONTENT_ID_SUFFIX = /:(?:p|file)\d+$/;
 const RECENT_OWNER_SCAN_PAGE_SIZE = 128;
 const recentTagOwnerStatements = new WeakMap<Database, PreparedStatement>();
 
@@ -142,7 +142,7 @@ function ownerMessageIdForTagRow(row: {
     if (row.type === "tool") {
         return row.tool_owner_message_id ?? row.message_id;
     }
-    return row.message_id.replace(CONTENT_ID_SUFFIX, "");
+    return contentTagOwnerMessageId(row.message_id);
 }
 
 function getRecentTagOwnerStatement(db: Database): PreparedStatement {
@@ -189,7 +189,7 @@ export function getRecentTagOwnerMessageIds(
                     ? typeof row.tool_owner_message_id === "string"
                         ? row.tool_owner_message_id
                         : null
-                    : row.message_id.replace(CONTENT_ID_SUFFIX, "");
+                    : contentTagOwnerMessageId(row.message_id);
             // Reclaim selectors withhold legacy tool rows whose owner is unknown.
             // Skip them here too so they do not consume a known-owner slot.
             if (!ownerId || recent.has(ownerId)) continue;
@@ -724,7 +724,7 @@ function getTagNumbersByMessageIdStatement(db: Database): PreparedStatement {
     let stmt = getTagNumbersByMessageIdStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "SELECT tag_number FROM tags WHERE session_id = ? AND (message_id = ? OR message_id LIKE ? ESCAPE '\\' OR message_id LIKE ? ESCAPE '\\') ORDER BY tag_number ASC",
+            "SELECT tag_number FROM tags WHERE session_id = ? AND (message_id = ? OR message_id LIKE ? ESCAPE '\\' OR message_id LIKE ? ESCAPE '\\' OR message_id LIKE ? ESCAPE '\\') ORDER BY tag_number ASC",
         );
         getTagNumbersByMessageIdStatements.set(db, stmt);
     }
@@ -735,7 +735,7 @@ function getDeleteTagsByMessageIdStatement(db: Database): PreparedStatement {
     let stmt = deleteTagsByMessageIdStatements.get(db);
     if (!stmt) {
         stmt = db.prepare(
-            "DELETE FROM tags WHERE session_id = ? AND (message_id = ? OR message_id LIKE ? ESCAPE '\\' OR message_id LIKE ? ESCAPE '\\')",
+            "DELETE FROM tags WHERE session_id = ? AND (message_id = ? OR message_id LIKE ? ESCAPE '\\' OR message_id LIKE ? ESCAPE '\\' OR message_id LIKE ? ESCAPE '\\')",
         );
         deleteTagsByMessageIdStatements.set(db, stmt);
     }
@@ -1812,6 +1812,7 @@ export function markTagsCompactedByMessageIds(
  *   - Message tags: `messageId == <removed-msg-id>` (text parts).
  *   - File tags: `messageId LIKE <removed-msg-id>:p%` /
  *     `<removed-msg-id>:file%`.
+ *   - Content-derived text tags (Pi): `<removed-msg-id>:mc-text-v1:%`.
  *   - Tool tags owned by the removed message:
  *     `tool_owner_message_id == <removed-msg-id>` (v3.3.1 Layer C).
  *
@@ -1833,8 +1834,9 @@ export function deleteTagsByMessageId(
         const escapedMessageId = escapeLikePattern(messageId);
         const textPartPattern = `${escapedMessageId}:p%`;
         const filePartPattern = `${escapedMessageId}:file%`;
+        const contentDerivedTextPattern = `${escapedMessageId}${escapeLikePattern(TEXT_TAG_IDENTITY_MARKER)}%`;
         const messageScopedTags = getTagNumbersByMessageIdStatement(db)
-            .all(sessionId, messageId, textPartPattern, filePartPattern)
+            .all(sessionId, messageId, textPartPattern, filePartPattern, contentDerivedTextPattern)
             .filter(isTagNumberRow)
             .map((row) => row.tag_number);
 
@@ -1854,6 +1856,7 @@ export function deleteTagsByMessageId(
                 messageId,
                 textPartPattern,
                 filePartPattern,
+                contentDerivedTextPattern,
             );
         }
         if (ownerScopedTagNumbers.length > 0) {

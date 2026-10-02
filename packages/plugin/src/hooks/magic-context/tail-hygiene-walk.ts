@@ -2,6 +2,7 @@ import { newestCtxReduceTagNumbers } from "../../features/magic-context/reclaim-
 import type { TagEntry } from "../../features/magic-context/types";
 import { isRecord } from "../../shared/record-type-guard";
 import { stableStringify } from "../../shared/stable-json";
+import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
 import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
@@ -361,7 +362,7 @@ function toolInputText(part: Record<string, unknown>): string | null {
 
 function messageIdForTag(tag: TagEntry): string | null {
     if (tag.type === "tool") return tag.toolOwnerMessageId;
-    return tag.messageId.replace(/:(?:p|file)\d+$/, "");
+    return contentTagOwnerMessageId(tag.messageId);
 }
 
 /**
