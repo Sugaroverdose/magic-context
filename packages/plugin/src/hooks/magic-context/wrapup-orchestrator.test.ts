@@ -310,6 +310,33 @@ describe("runManagedWrapup", () => {
         }
     });
 
+    it("marks progress failed and releases the marker when a wrapup iteration throws", async () => {
+        const db = createDb();
+        try {
+            const sessionId = "ses-wrapup-throw";
+            const state = liveState();
+            const ctx = baseCtx(db, state);
+            ctx.runCompartmentAgentForWrapup = mock(async () => {
+                throw new Error("database is locked");
+            });
+
+            await expect(
+                withProvider(sessionId, 10, () =>
+                    runManagedWrapup(ctx, sessionId, { messagesToKeep: 2 }),
+                ),
+            ).rejects.toThrow("database is locked");
+
+            expect(state.recompProgressBySession.get(sessionId)).toMatchObject({
+                kind: "wrapup",
+                phase: "failed",
+                message: "Wrapup stopped: database is locked. Run /ctx-wrapup again to continue.",
+            });
+            expect(getWrapupInProgressState(db, sessionId)).toBeNull();
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     it("reports a mid-loop historian failure while preserving published chunks", async () => {
         const db = createDb();
         try {
