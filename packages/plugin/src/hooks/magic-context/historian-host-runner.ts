@@ -426,6 +426,14 @@ export class HistorianHostRunner {
             // A refusal means somebody else won or the run moved on. Both are answered
             // the same way: take the next run, never re-present this attempt.
             if (!claim) continue;
+            // stop() may have run while the claim was on the wire. It only aborts runs
+            // already started, so starting this one now would pay for a completion
+            // after shutdown. Leave it unreported, as stop() leaves every claim it
+            // abandons: the lease lapses and hands the run to the next claimant.
+            if (this.stopped) {
+                this.log(`run ${claim.runId} left for the lease: this host is stopping`);
+                return;
+            }
             // Started, not awaited. This is the head-of-line rule: a fold for one
             // session runs for minutes and must not delay claiming another's.
             this.start(claim);
