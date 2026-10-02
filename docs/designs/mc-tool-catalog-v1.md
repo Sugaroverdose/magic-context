@@ -320,7 +320,7 @@ The generator re-checks its JCS and structural-schema code on every run. It
 reproduces every vector without floats in TPV's `composition-digest.json` and
 `schema-digest.json` (commons at `42949fc3`), and every FP composition and plan
 whose `.json` canonicalises to its `.jcs` and hashes to its `.sha256`
-(prefrontal at `1ea2a6225843d3f3ef0b2244976d1d9e6aa42c86`). It reads both repositories with `git show` from
+(prefrontal at `35c8e5f7cec5b5fc3564f51f9888b2e290c0c023`). It reads both repositories with `git show` from
 next to this repository's main checkout, and says so when it skips one.
 The prefrontal vectors include `plans/broca-head-no-compaction`, whose
 Magic Context `tools-only` entry contains only `ctx_memory`, `ctx_note` and
