@@ -293,11 +293,13 @@ test("OpenCode 2 tool-loop families execute scoped tools across steps and remove
 			id: "mock-model",
 		});
 		expect(storedUser.tokens).toMatchObject({ input: 0, output: 0 });
-		expect(
-			host.mock
-				.requests()
-				.filter((r) => r.headers["x-opencode-session"] === user.id),
-		).toHaveLength(0);
+        // Parented child requests carry their root's session header. Classify the actual
+        // hidden-run system prompts instead, including the production mapper's prompt.
+        expect(host.mock.requests().filter((request) => {
+            const instructions = String(request.body.instructions);
+            return !instructions.startsWith("DREAM_LOOP_") &&
+                !instructions.includes("memory mapper for the magic-context system");
+        })).toHaveLength(0);
     } catch (error) {
         console.error(host.stderr());
         throw error;

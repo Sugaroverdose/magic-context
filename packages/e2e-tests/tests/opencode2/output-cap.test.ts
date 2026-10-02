@@ -25,11 +25,11 @@ test("OpenCode 2 ordinary and hidden historian omit caps; a provider default exh
     const bundle = mkdtempSync(join(root, "probe-"));
     let host: Awaited<ReturnType<typeof spawnOpencode2>> | undefined;
     try {
-        const build = await Bun.build({ entrypoints: [join(import.meta.dir, "hidden-child-ga-probe.ts")], outdir: bundle, naming: "index.js", target: "node", format: "esm", define: { "process.env.NODE_ENV": '"production"' }, external: ["bun:sqlite", "node:sqlite"] });
+        const build = await Bun.build({ entrypoints: [join(import.meta.dir, "output-cap-probe.ts")], outdir: bundle, naming: "index.js", target: "node", format: "esm", define: { "process.env.NODE_ENV": '"production"' }, external: ["bun:sqlite", "node:sqlite"] });
         if (!build.success) throw new Error(build.logs.join("\n"));
-        host = await spawnOpencode2({ probePlugin: bundle, includeMagicContext: false, serviceMode: true, defaultModelID: "mock-model-user", additionalModelIDs: ["mock-model-cheap"], modelContextLimit: 200000, modelOutputLimit: 4096 });
+        host = await spawnOpencode2({ probePlugin: bundle, includeMagicContext: false, defaultModelID: "mock-model-user", additionalModelIDs: ["mock-model-cheap"], modelContextLimit: 200000, modelOutputLimit: 4096 });
         const client = OpenCode.make({ baseUrl: host.url, headers: { authorization: `Basic ${btoa(`opencode:${host.password}`)}` } });
-        await waitForPluginActive(client, host.cwd, "mc-hidden-child-ga-proof");
+        await waitForPluginActive(client, host.cwd, "mc-hidden-output-cap-proof");
         await waitFile(join(host.cwd, "hidden-child-ready"));
         const open = execFileSync("lsof", ["-p", String(host.pid), "-Fn"], { encoding: "utf8" });
         const dbPaths = open.split("\n").filter((line) => /^n.*\.db(?:-(?:wal|shm))?$/.test(line)).map((line) => line.slice(1));
@@ -59,6 +59,7 @@ test("OpenCode 2 ordinary and hidden historian omit caps; a provider default exh
         await waitFile(join(host.cwd, "hidden-child-result-1.json"));
         const hidden = host.mock.requests().find((request) => JSON.stringify(request.body).includes("EXACT_HISTORIAN_CHUNK_1"));
         expect(hidden).toBeDefined();
+        expect(hidden!.body.model).toBe("mock-model-cheap");
         console.log("STEP1 OpenCode2 hidden", caps(hidden!.body));
         expect(caps(hidden!.body)).toEqual(caps(ordinary!.body));
         const first = JSON.parse(readFileSync(join(host.cwd, "hidden-child-result-1.json"), "utf8"));
@@ -74,6 +75,7 @@ test("OpenCode 2 ordinary and hidden historian omit caps; a provider default exh
         expect(second.completion).toMatchObject({ text: "successful historian", lengthCapped: false });
         const configured = host.mock.requests().find((request) => JSON.stringify(request.body).includes("EXACT_HISTORIAN_CHUNK_2"));
         expect(configured?.body.max_output_tokens).toBe(4096);
+        expect((await client.session.get({ sessionID: user.id })).model?.id).toBe("mock-model-user");
     } catch (error) {
         if (host) console.error(host.stderr(), host.stdout());
         throw error;

@@ -25,6 +25,7 @@ import {
     checkUserMemoriesDreamerCompatibility,
     collectNpmReleaseAgeWarnings,
     describeAutoUpdateStall,
+    describeOpenCode2SessionAPIRequirement,
     describeOpenCodeDatabaseDoctorCheck,
     findUndeclaredConfiguredVariants,
     formatSharedDbRowCounts,
@@ -978,4 +979,10 @@ describe("doctor v22 backfill commands", () => {
         expect(memory.project_path).not.toBe(oldIdentity);
         expect(messages.join("\n")).toContain("Re-keyed 1 row(s)");
     });
+});
+
+it("names the installed OpenCode host and minimum native session API version", () => {
+    expect(describeOpenCode2SessionAPIRequirement("2.0.21")).toBe(
+        "OpenCode host 2.0.21; Magic Context requires OpenCode 2.0.22 or newer with session.remove and session.compact.",
+    );
 });

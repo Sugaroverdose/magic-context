@@ -39,7 +39,12 @@ const request = () => ({
 });
 
 async function setup(
-    options: { keepsParent?: boolean; removeError?: unknown; keepSubagents?: boolean } = {},
+    options: {
+        keepsParent?: boolean;
+        removeError?: unknown;
+        keepSubagents?: boolean;
+        stuck?: boolean;
+    } = {},
 ) {
     const db = new Database(":memory:");
     db.exec("CREATE TABLE schema_migrations_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
@@ -110,12 +115,9 @@ async function setup(
         },
         async update() {},
         async removeSession(input) {
+            if (options.stuck) await new Promise(() => {});
             if (options.removeError !== undefined) throw options.removeError;
             removed.push(input.sessionID);
-        },
-        // The owner-bound HTTP route older hosts need; this lifecycle must never use it.
-        async remove(input) {
-            legacyRemovals.push(input.sessionID);
         },
     };
     const executor = await createV2HiddenCompletionExecutor(host, {
@@ -129,7 +131,7 @@ async function setup(
             latestIdle: () => undefined,
         }),
         generation: "native-generation",
-        removalSpacingMs: 0,
+        removalTimeoutMs: 20,
         ...(options.keepSubagents ? { keepSubagents: true } : {}),
         log: (message) => logs.push(message),
     });
@@ -189,6 +191,7 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
                 "child-2",
                 "child-3",
             ]);
+            expect(state.creates.every((input) => !("location" in input))).toBe(true);
             expect(state.creates.map((input) => [input.parentID, input.metadata.role])).toEqual([
                 ["user-session", "historian"],
                 ["user-session", "historian"],
@@ -271,6 +274,23 @@ describe("OpenCode 2 hidden children on a host with session.remove", () => {
             expect(state.logs).toEqual([
                 "[magic-context] hidden child child-1 could not be removed; it goes when its parent session is deleted: host is shutting down",
             ]);
+        } finally {
+            state.db.close();
+        }
+    });
+
+    test("a stuck removal times out without hanging close", async () => {
+        const state = await setup({ stuck: true });
+        try {
+            const run = await Promise.race([
+                state.runOnce(historian),
+                Bun.sleep(100).then(() => {
+                    throw new Error("close did not honor its removal timeout");
+                }),
+            ]);
+            expect(run.settled).toBe(true);
+            expect(state.logs).toHaveLength(1);
+            expect(state.logs[0]).toContain("session.remove timed out");
         } finally {
             state.db.close();
         }

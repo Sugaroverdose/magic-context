@@ -63,6 +63,8 @@ test("a hidden child compacted by OpenCode 2 before its first step runs its regi
 		// The child's own sizing crosses this window's compaction threshold.
 		modelContextLimit: 1300,
 		magicContextConfig: {
+			// Keep the settled child so the host's compaction rows remain inspectable.
+			keep_subagents: true,
 			dreamer: { tasks: { "map-memories": { schedule: "0 3 * * *" } } },
 		},
 	});
@@ -141,6 +143,7 @@ test("a hidden child compacted by OpenCode 2 before its first step runs its regi
 			).map((row) => JSON.parse(row.data) as { summary?: string; status?: string }),
 		);
 		expect(compactions.length).toBeGreaterThan(0);
+        expect(withDb(openCodeDb, (db) => db.prepare("SELECT title FROM session_v2 WHERE json_extract(metadata, '$.magic_context') = 'hidden-run'").all())).toEqual([{ title: "Magic Context dreamer" }]);
 		// Answered with the run's marker, never with a user-session history fold.
 		for (const compaction of compactions) {
 			expect(compaction.summary ?? "").toMatch(/^mc:hidden:[0-9a-f-]+:[0-9a-f-]+$/);

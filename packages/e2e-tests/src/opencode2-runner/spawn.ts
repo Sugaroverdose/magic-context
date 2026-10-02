@@ -256,6 +256,10 @@ export async function waitForPluginActive(
 
 
 export interface OpenCode2SpawnOptions {
+    /** Explicit host binary for a same-store upgrade scenario. */
+    cli?: string;
+    /** Built plugin snapshot used before a same-store upgrade. */
+    magicContextPlugin?: string;
 	probePlugin?: string;
 	providerID?: string;
 	probeStandalone?: boolean;
@@ -333,7 +337,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 			JSON.stringify({
 				...options.extraConfig,
 				plugins: [
-					...(options.includeMagicContext === false ? [] : [PLUGIN]),
+					...(options.includeMagicContext === false ? [] : [options.magicContextPlugin ?? PLUGIN]),
 					...(options.probePlugin ? [options.probePlugin] : []),
 					SCHEMA_GUARD,
 				],
@@ -393,7 +397,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		}
 		// serve owns its server directly; --standalone is a TUI/run flag, not a serve option.
 		const child = spawn(
-			CLI,
+			options.cli ?? CLI,
 			[
 				"serve",
 				"--hostname",

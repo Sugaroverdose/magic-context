@@ -3,13 +3,8 @@ import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../hooks/magic-context/compartment-runner-types";
-import { __resetHostLimitations, activeHostLimitations } from "../shared/host-limitations";
 import { Database } from "../shared/sqlite";
-import {
-    createV2HiddenCompletionExecutor,
-    type HiddenChildHost,
-    hiddenChildrenMetaKey,
-} from "./hidden-completion";
+import { createV2HiddenCompletionExecutor, type HiddenChildHost } from "./hidden-completion";
 import {
     HIDDEN_CURATE_AGENT,
     HIDDEN_DREAMER_AGENT,
@@ -18,7 +13,6 @@ import {
     registerHiddenChildAgents,
 } from "./hooks/hidden-child";
 import type { SessionContext } from "./hooks/types";
-import { type HostServiceOwner, HostServiceUnavailable } from "./host-service";
 import type { StoreRow } from "./store-reader";
 
 const run: HiddenRunIdentity = {
@@ -160,32 +154,6 @@ async function eventually(check: () => boolean, timeoutMs = 2000): Promise<void>
     }
 }
 
-/**
- * Gives any removal the executor might have queued time to reach the host, so a test can assert
- * that nothing was deleted. Removals are spaced 0 ms apart in these tests.
- */
-async function settleRemovals(): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, 50));
-}
-
-function retiredChild(
-    id: string,
-    retiredAt: number,
-    role: "historian" | "dreamer" | "dreamer-curate" = "historian",
-) {
-    return {
-        id,
-        role,
-        generation: "host-generation-1",
-        title: "Magic Context historian",
-        model: { providerID: "mock", modelID: "cheap" },
-        created_at: retiredAt - 1,
-        title_reasserted: true,
-        retired_at: retiredAt,
-        reason: "seeded",
-    };
-}
-
 async function setup(
     generation = "host-generation-1",
     capabilities: {
@@ -196,7 +164,7 @@ async function setup(
          * Which registration, if any, the fake host would report as its own. Undefined stands for
          * a host that registered no service at all (`--standalone`, or a plain `serve`).
          */
-        owner?: HostServiceOwner;
+        owner?: unknown;
         keepSubagents?: boolean;
     } = {},
 ) {
@@ -214,7 +182,7 @@ async function setup(
     const interrupts: string[] = [];
     const requests: SessionContext[] = [];
     const removed: string[] = [];
-    const removals: Array<{ sessionID: string; owner?: HostServiceOwner; directory?: string }> = [];
+    const removals: Array<{ sessionID: string; owner?: unknown; directory?: string }> = [];
     let nextID = 0;
     let failPrompt = false;
     let promptError: Error | undefined;
@@ -315,21 +283,10 @@ async function setup(
         async update(input) {
             updates.push(structuredClone(input));
         },
-        // The session interface an OpenCode 2 host injects has no remove, so the default fake has
-        // none either; the tests that cover cleanup opt the capability in.
-        ...(capabilities.remove
-            ? {
-                  async remove(input: {
-                      sessionID: string;
-                      owner?: HostServiceOwner;
-                      directory?: string;
-                  }) {
-                      removals.push(structuredClone(input));
-                      if (removeError) throw removeError;
-                      removed.push(input.sessionID);
-                  },
-              }
-            : {}),
+        async removeSession(input) {
+            if (removeError) throw removeError;
+            removed.push(input.sessionID);
+        },
     };
     const create = (hostGeneration = generation) =>
         createV2HiddenCompletionExecutor(host, {
@@ -339,8 +296,6 @@ async function setup(
             hook,
             openReader: () => rows,
             generation: hostGeneration,
-            removalSpacingMs: 0,
-            resolveOwner: () => capabilities.owner,
             ...(capabilities.keepSubagents ? { keepSubagents: true } : {}),
             log: (message) => capabilities.logs?.push(message),
             ...(capabilities.modelCatalog ? { modelCatalog: capabilities.modelCatalog } : {}),
@@ -360,46 +315,6 @@ async function setup(
         requests,
         removed,
         removals,
-        meta: () =>
-            JSON.parse(
-                (
-                    db
-                        .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
-                        .get(hiddenChildrenMetaKey("/project", "/project")) as { value: string }
-                ).value,
-            ) as {
-                retired_children: Array<{
-                    id: string;
-                    reason: string;
-                    ever_settled?: boolean;
-                    cleanup_attempts?: number;
-                }>;
-            },
-        seedRetired(children: Array<ReturnType<typeof retiredChild> & { ever_settled?: boolean }>) {
-            db.prepare(
-                `INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-            ).run(
-                hiddenChildrenMetaKey("/project", "/project"),
-                JSON.stringify({ version: 1, active: {}, retired_children: children }),
-            );
-        },
-        seedActive(child: ReturnType<typeof retiredChild> & { ever_settled?: boolean }) {
-            const active = structuredClone(child) as Record<string, unknown>;
-            delete active.retired_at;
-            delete active.reason;
-            db.prepare(
-                `INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
-                 ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
-            ).run(
-                hiddenChildrenMetaKey("/project", "/project"),
-                JSON.stringify({
-                    version: 1,
-                    active: { [child.role]: active },
-                    retired_children: [],
-                }),
-            );
-        },
         setFailPrompt(value: boolean) {
             failPrompt = value;
         },
@@ -498,7 +413,7 @@ describe("OpenCode 2 hidden child completion", () => {
                     title: "Magic Context historian",
                     agent: "historian",
                     model: { providerID: "mock", id: "cheap" },
-                    location: { directory: "/project" },
+                    parentID: "user-session",
                     metadata: { magic_context: "hidden-run", role: "historian" },
                 },
             ]);
@@ -527,9 +442,7 @@ describe("OpenCode 2 hidden child completion", () => {
                 providerId: "mock",
                 modelId: "cheap",
             });
-            expect(state.updates).toEqual([
-                { sessionID: "child-1", title: "Magic Context historian" },
-            ]);
+            expect(state.updates).toEqual([]);
             await close(state.executor, handle, true);
         } finally {
             state.db.close();
@@ -556,7 +469,7 @@ describe("OpenCode 2 hidden child completion", () => {
         }
     });
 
-    test("reuses one successful child for a second run and reasserts its title once", async () => {
+    test("creates a fresh successful child for each run without rewriting its title", async () => {
         const state = await setup();
         try {
             for (const text of ["first", "second"]) {
@@ -566,46 +479,9 @@ describe("OpenCode 2 hidden child completion", () => {
                 expect((await state.executor.collect(handle, 50)).text).toBe(text);
                 await close(state.executor, handle, true);
             }
-            expect(state.creates).toHaveLength(1);
-            expect(state.requests).toHaveLength(2);
-            expect(state.updates).toHaveLength(1);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("retires an overall failed run and creates a fresh child next time", async () => {
-        const state = await setup();
-        try {
-            const first = await state.executor.open(run);
-            await state.executor.attempt(first, request());
-            await close(state.executor, first, true);
-
-            state.setFailPrompt(true);
-            const second = await state.executor.open(run);
-            await expect(state.executor.attempt(second, request())).rejects.toThrow(
-                "provider unavailable",
-            );
-            await close(state.executor, second, false);
-
-            state.setFailPrompt(false);
-            const third = await state.executor.open(run);
-            expect(third.id).toBe("child-2");
-            await state.executor.attempt(third, request());
-            await close(state.executor, third, true);
             expect(state.creates).toHaveLength(2);
-            const meta = JSON.parse(
-                (
-                    state.db
-                        .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
-                        .get(hiddenChildrenMetaKey("/project", "/project")) as { value: string }
-                ).value,
-            );
-            expect(meta.retired_children).toHaveLength(1);
-            expect(meta.retired_children[0]).toMatchObject({
-                id: "child-1",
-                reason: "hidden-run-failed",
-            });
+            expect(state.requests).toHaveLength(2);
+            expect(state.updates).toHaveLength(0);
         } finally {
             state.db.close();
         }
@@ -629,7 +505,7 @@ describe("OpenCode 2 hidden child completion", () => {
             await state.executor.attempt(recovered, request());
             await close(state.executor, recovered, true);
             expect(state.creates).toHaveLength(6);
-            expect(state.meta().retired_children).toHaveLength(5);
+            expect(state.removed).toHaveLength(6);
         } finally {
             state.db.close();
         }
@@ -648,9 +524,7 @@ describe("OpenCode 2 hidden child completion", () => {
             // After a provider failure the child is stopped and retired, so a pending host step
             // (such as a scheduled retry) cannot run on it after the run's marker is released.
             expect(state.interrupts).toEqual(["child-1"]);
-            expect(state.meta().retired_children).toMatchObject([
-                { id: "child-1", reason: "hidden-run-provider-error" },
-            ]);
+            expect(state.removed).toEqual(["child-1"]);
 
             state.setProviderError(undefined);
             const recovered = await state.executor.open(run);
@@ -687,8 +561,7 @@ describe("OpenCode 2 hidden child completion", () => {
             const events: string[] = [];
             const release = state.hook.releaseAttempt.bind(state.hook);
             state.hook.releaseAttempt = (marker: string) => {
-                const retired = state.meta().retired_children.map((child) => child.id);
-                events.push(`release retired=${retired.join(",")}`);
+                events.push("release");
                 release(marker);
             };
             const interrupt = state.host.interrupt.bind(state.host);
@@ -703,7 +576,7 @@ describe("OpenCode 2 hidden child completion", () => {
             );
             // Until the marker is released the hook still recognises this run's prompt, so
             // stopping the child first leaves no window in which a host step on it is refused.
-            expect(events).toEqual(["interrupt child-1", "release retired=child-1"]);
+            expect(events).toEqual(["interrupt child-1", "release"]);
             await close(state.executor, handle, false);
         } finally {
             state.db.close();
@@ -777,30 +650,6 @@ describe("OpenCode 2 hidden child completion", () => {
         }
     });
 
-    test("a restarted executor retires a persisted provider-error child from an older version", async () => {
-        const state = await setup();
-        try {
-            const legacy = retiredChild("legacy-child", 1);
-            state.seedActive(legacy);
-            state.rows.append("legacy-child", "", {
-                error: { message: "The usage limit has been reached" },
-                usage: false,
-                finish: "error",
-            });
-            const restarted = await state.create();
-            const next = await restarted.open(run);
-            expect(next.id).toBe("child-1");
-            await restarted.attempt(next, request());
-            await close(restarted, next, true);
-            expect(state.creates).toHaveLength(1);
-            expect(state.meta().retired_children).toMatchObject([
-                { id: "legacy-child", reason: "newest-assistant-not-reusable" },
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
     test("retires a child whose newest assistant error row never settled", async () => {
         const state = await setup();
         try {
@@ -819,9 +668,7 @@ describe("OpenCode 2 hidden child completion", () => {
             expect(next.id).toBe("child-2");
             await state.executor.attempt(next, request());
             await close(state.executor, next, true);
-            expect(state.meta().retired_children).toMatchObject([
-                { id: "child-1", reason: "newest-assistant-not-reusable" },
-            ]);
+            expect(state.removed).toEqual(["child-1", "child-2"]);
         } finally {
             state.db.close();
         }
@@ -843,243 +690,7 @@ describe("OpenCode 2 hidden child completion", () => {
             expect(next.id).toBe("child-2");
             await state.executor.attempt(next, request());
             await close(state.executor, next, true);
-            expect(state.meta().retired_children).toMatchObject([
-                { id: "child-1", reason: "hidden-run-failed" },
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("deletes a retired child's session and forgets the entry", async () => {
-        const state = await setup("host-generation-1", { remove: true });
-        try {
-            const first = await state.executor.open(run);
-            await state.executor.attempt(first, request());
-            await close(state.executor, first, true);
-
-            state.setFailPrompt(true);
-            const second = await state.executor.open(run);
-            await expect(state.executor.attempt(second, request())).rejects.toThrow(
-                "provider unavailable",
-            );
-            await close(state.executor, second, false);
-
-            await eventually(() => state.removed.includes("child-1"));
-            await eventually(() => state.meta().retired_children.length === 0);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("deletes only through the registration that created the child", async () => {
-        const owner: HostServiceOwner = {
-            registration: "/state/opencode/service-local.json",
-            serviceID: "owning-service",
-            pid: 4242,
-        };
-        const state = await setup("host-generation-1", { remove: true, owner });
-        try {
-            const first = await state.executor.open(run);
-            await state.executor.attempt(first, request());
-            await close(state.executor, first, true);
-
-            state.setFailPrompt(true);
-            const second = await state.executor.open(run);
-            await expect(state.executor.attempt(second, request())).rejects.toThrow(
-                "provider unavailable",
-            );
-            await close(state.executor, second, false);
-
-            await eventually(() => state.removed.includes("child-1"));
-            expect(state.removals).toEqual([
-                { sessionID: "child-1", owner, directory: "/project" },
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("carries the creating host's binding across a restart of the executor", async () => {
-        const owner: HostServiceOwner = {
-            registration: "/state/opencode/service-local.json",
-            serviceID: "owning-service",
-            pid: 4242,
-        };
-        const state = await setup("host-generation-1", { remove: true, owner });
-        try {
-            const handle = await state.executor.open(run);
-            await state.executor.attempt(handle, request());
-            await close(state.executor, handle, true);
-
-            // A newer host build retires the previous generation's child. The binding it deletes
-            // through has to be the one the CREATING process recorded, which this restarted
-            // executor only knows from the persisted row.
-            const restarted = await state.create("host-generation-2");
-            const next = await restarted.open(run);
-            await restarted.attempt(next, request());
-            await close(restarted, next, true);
-
-            await eventually(() => state.removed.includes("child-1"));
-            expect(state.removals[0]).toEqual({
-                sessionID: "child-1",
-                owner,
-                directory: "/project",
-            });
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("keeps an unbound child recorded and names the limitation instead of guessing a host", async () => {
-        __resetHostLimitations();
-        // A host that registered no service: nothing this process can reach owns the child.
-        const state = await setup("host-generation-1", { remove: true, owner: undefined });
-        try {
-            state.setRemoveError(
-                new HostServiceUnavailable(
-                    "This session was created by an OpenCode host that registered no service",
-                ),
-            );
-            state.setFailPrompt(true);
-            const handle = await state.executor.open(run);
-            await expect(state.executor.attempt(handle, request())).rejects.toThrow(
-                "provider unavailable",
-            );
-            await close(state.executor, handle, false);
-
-            await eventually(() => state.removals.length === 1);
-            expect(state.removals).toEqual([{ sessionID: "child-1", directory: "/project" }]);
-            expect(state.removed).toEqual([]);
-            // Still recorded, so a later process inside a registered service retries it.
-            expect(state.meta().retired_children.map((child) => child.id)).toEqual(["child-1"]);
-            expect(activeHostLimitations()).toContain("hidden_cleanup_unbound");
-        } finally {
-            __resetHostLimitations();
-            state.db.close();
-        }
-    });
-
-    test("logs a missing removal route once with backlog count and offline remedy", async () => {
-        __resetHostLimitations();
-        const logs: string[] = [];
-        const state = await setup("host-generation-1", { logs });
-        try {
-            state.setFailPrompt(true);
-            const handle = await state.executor.open(run);
-            await expect(state.executor.attempt(handle, request())).rejects.toThrow(
-                "provider unavailable",
-            );
-            await close(state.executor, handle, false);
-            await eventually(() => logs.some((line) => line.includes("doctor --fix")));
-            state.seedRetired([retiredChild("old-1", 1), retiredChild("old-2", 2)]);
-            await state.create();
-            await settleRemovals();
-            expect(logs).toEqual([expect.stringContaining("1 retired hidden children")]);
-            expect(logs[0]).toContain("with OpenCode closed");
-            expect(state.meta().retired_children.map((child) => child.id)).toEqual([
-                "old-1",
-                "old-2",
-            ]);
-        } finally {
-            __resetHostLimitations();
-            state.db.close();
-        }
-    });
-
-    test("keeps a retired entry when deletion cannot reach the host", async () => {
-        const logs: string[] = [];
-        const state = await setup("host-generation-1", { remove: true, logs });
-        try {
-            state.setRemoveError(new Error("Session not found (wrong directory)"));
-            state.setFailPrompt(true);
-            const handle = await state.executor.open(run);
-            await expect(state.executor.attempt(handle, request())).rejects.toThrow(
-                "provider unavailable",
-            );
-            await close(state.executor, handle, false);
-            await eventually(() =>
-                logs.some((line) => line.includes("Session not found (wrong directory)")),
-            );
-            expect(logs).toContainEqual(expect.stringContaining("hidden child child-1"));
-            expect(state.meta().retired_children).toMatchObject([{ id: "child-1" }]);
-
-            // A failed cleanup must not stop the next run from working.
-            state.setFailPrompt(false);
-            const next = await state.executor.open(run);
-            expect(next.id).toBe("child-2");
-            await state.executor.attempt(next, request());
-            await close(state.executor, next, true);
-            expect(state.removed).toEqual([]);
-            expect(state.meta().retired_children).toMatchObject([{ id: "child-1" }]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("bounds unresolved legacy children to five failed boot attempts", async () => {
-        const logs: string[] = [];
-        const state = await setup("host-generation-1", { remove: true, logs });
-        try {
-            state.seedRetired([retiredChild("legacy", 1)]);
-            state.setRemoveError(new Error("host lookup failed"));
-            for (let boot = 1; boot <= 5; boot++) {
-                const before = state.removals.length;
-                await state.create();
-                await eventually(() => state.removals.length > before);
-                await settleRemovals();
-                expect(state.meta().retired_children[0]?.cleanup_attempts).toBe(
-                    boot === 5 ? undefined : boot,
-                );
-            }
-            expect(state.meta().retired_children).toEqual([]);
-            expect(logs.filter((line) => line.includes("dropped after"))).toEqual([
-                expect.stringContaining("legacy hidden child legacy dropped after 5"),
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("sweeps a retired backlog left behind by an earlier process", async () => {
-        const state = await setup("host-generation-1", { remove: true });
-        try {
-            state.seedRetired([
-                retiredChild("stale-1", 1),
-                retiredChild("stale-2", 2),
-                retiredChild("stale-3", 3),
-            ]);
-            const swept = await state.create();
-            await eventually(() => state.meta().retired_children.length === 0);
-            expect(state.removed).toEqual(["stale-1", "stale-2", "stale-3"]);
-            // The sweep leaves the executor usable; it never blocks boot on cleanup.
-            const handle = await swept.open(run);
-            await swept.attempt(handle, request());
-            await close(swept, handle, true);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("bounds the retired list when deletion is unavailable", async () => {
-        const state = await setup();
-        try {
-            state.seedRetired(
-                Array.from({ length: 200 }, (_value, index) =>
-                    retiredChild(`stale-${index}`, index + 1),
-                ),
-            );
-            const bounded = await state.create();
-            state.setFailPrompt(true);
-            const handle = await bounded.open(run);
-            await expect(bounded.attempt(handle, request())).rejects.toThrow(
-                "provider unavailable",
-            );
-            await close(bounded, handle, false);
-            const retained = state.meta().retired_children;
-            expect(retained).toHaveLength(200);
-            expect(retained.at(0)?.id).toBe("stale-1");
-            expect(retained.at(-1)?.id).toBe("child-1");
+            expect(state.removed).toEqual(["child-1", "child-2"]);
         } finally {
             state.db.close();
         }
@@ -1197,317 +808,6 @@ describe("OpenCode 2 hidden child completion", () => {
             const fresh = await state.executor.open(run);
             expect(fresh.id).toBe("child-2");
             await close(state.executor, fresh, false);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("legacy children migrate only after inactivity, then cleanup is idempotent", async () => {
-        const state = await setup("host-generation-1", { remove: true });
-        try {
-            const oldKey = hiddenChildrenMetaKey("/project");
-            expect(hiddenChildrenMetaKey("/project", "/project")).not.toBe(
-                hiddenChildrenMetaKey("/project", "/other"),
-            );
-            const stale = {
-                ...retiredChild("legacy-stale", Date.now() - 24 * 60 * 60_000),
-                directory: "/other",
-            };
-            const fresh = { ...retiredChild("legacy-fresh", Date.now()), directory: "/project" };
-            const active = (child: typeof stale) => {
-                const result = { ...child } as Record<string, unknown>;
-                delete result.retired_at;
-                delete result.reason;
-                return result;
-            };
-            state.db.prepare("INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)").run(
-                oldKey,
-                JSON.stringify({
-                    version: 1,
-                    active: { historian: active(fresh) },
-                    retired_children: [stale],
-                }),
-            );
-            await state.create();
-            await eventually(() => state.removed.includes("legacy-stale"));
-            expect(
-                state.removals.find((item) => item.sessionID === "legacy-stale")?.directory,
-            ).toBe("/other");
-            expect(state.removed).not.toContain("legacy-fresh");
-            expect(
-                state.db
-                    .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
-                    .get(oldKey),
-            ).toBeTruthy();
-            await state.create();
-            expect(state.removals.filter((item) => item.sessionID === "legacy-stale")).toHaveLength(
-                1,
-            );
-            state.db.prepare("UPDATE schema_migrations_meta SET value = ? WHERE key = ?").run(
-                JSON.stringify({
-                    version: 1,
-                    active: {
-                        historian: active({
-                            ...fresh,
-                            created_at: Date.now() - 24 * 60 * 60_000,
-                        }),
-                    },
-                    retired_children: [],
-                }),
-                oldKey,
-            );
-            await state.create();
-            await eventually(() => state.removed.includes("legacy-fresh"));
-            expect(
-                state.db
-                    .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
-                    .get(oldKey),
-            ).toBeNull();
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("an affirmatively busy legacy child is not deleted even when old", async () => {
-        const state = await setup("host-generation-1", { remove: true });
-        try {
-            const child = retiredChild("busy-legacy", Date.now() - 24 * 60 * 60_000);
-            const oldKey = hiddenChildrenMetaKey("/project");
-            state.db
-                .prepare("INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)")
-                .run(oldKey, JSON.stringify({ version: 1, active: {}, retired_children: [child] }));
-            state.host.status = async () => ({ "busy-legacy": { type: "busy" } });
-            await state.create();
-            await settleRemovals();
-            expect(state.removed).toEqual([]);
-            expect(
-                state.db
-                    .prepare("SELECT value FROM schema_migrations_meta WHERE key = ?")
-                    .get(oldKey),
-            ).toBeTruthy();
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("a restarted executor reuses the successful v2 child from persisted project meta", async () => {
-        const state = await setup();
-        try {
-            const first = await state.executor.open(run);
-            await state.executor.attempt(first, request());
-            await close(state.executor, first);
-
-            const restarted = await createV2HiddenCompletionExecutor(state.host, {
-                db: state.db,
-                projectIdentity: "/project",
-                directory: "/project",
-                hook: state.hook,
-                openReader: () => state.rows,
-                generation: "host-generation-1",
-            });
-            const reused = await restarted.open(run);
-            expect(reused.id).toBe("child-1");
-            await restarted.attempt(reused, request("after restart"));
-            await close(restarted, reused);
-            expect(state.creates).toHaveLength(1);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("keep_subagents keeps a settled child a new host generation retires, across later boots", async () => {
-        const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
-        try {
-            const first = await state.executor.open(run);
-            await state.executor.attempt(first, request());
-            await close(state.executor, first, true);
-
-            const restarted = await state.create("host-generation-2");
-            const second = await restarted.open(run);
-            expect(second.id).toBe("child-2");
-            await restarted.attempt(second, request());
-            await close(restarted, second, true);
-
-            // A later boot sweeps the retired list; the kept child must survive that too.
-            await state.create("host-generation-2");
-            await settleRemovals();
-            expect(state.removals).toEqual([]);
-            expect(state.meta().retired_children).toMatchObject([
-                { id: "child-1", reason: "host-generation-changed", ever_settled: true },
-            ]);
-            expect(state.hook.owns("child-1")).toBe(true);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("without keep_subagents a settled child a new host generation retires is deleted", async () => {
-        const state = await setup("host-generation-1", { remove: true });
-        try {
-            const first = await state.executor.open(run);
-            await state.executor.attempt(first, request());
-            await close(state.executor, first, true);
-
-            const restarted = await state.create("host-generation-2");
-            const second = await restarted.open(run);
-            await close(restarted, second, true);
-
-            await eventually(() => state.removed.includes("child-1"));
-            await eventually(() => state.meta().retired_children.length === 0);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("keep_subagents keeps an unsettled historian child, as the OpenCode 1 sweep does", async () => {
-        const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
-        try {
-            state.setFailPrompt(true);
-            const handle = await state.executor.open(run);
-            await expect(state.executor.attempt(handle, request())).rejects.toThrow(
-                "provider unavailable",
-            );
-            await close(state.executor, handle, false);
-            await settleRemovals();
-            expect(state.removals).toEqual([]);
-            expect(state.meta().retired_children).toMatchObject([
-                { id: "child-1", reason: "hidden-run-failed" },
-            ]);
-            expect(state.meta().retired_children[0]?.ever_settled).toBeUndefined();
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("keep_subagents keeps a child retired for a provider error once it holds a settled run", async () => {
-        const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
-        try {
-            // A dreamer child is kept only for a settled run, so this isolates that rule from
-            // the historian role, which the setting keeps regardless.
-            const settled = await state.executor.open(dreamerRun);
-            await state.executor.attempt(settled, request());
-            await close(state.executor, settled, true);
-            state.setProviderError({ message: "Go usage limit exceeded" });
-            const reused = await state.executor.open(dreamerRun);
-            expect(reused.id).toBe("child-1");
-            await expect(state.executor.attempt(reused, request())).rejects.toThrow(
-                "Hidden completion provider error: ",
-            );
-            await close(state.executor, reused, false);
-
-            const fresh = await state.executor.open(dreamerRun);
-            expect(fresh.id).toBe("child-2");
-            await expect(state.executor.attempt(fresh, request())).rejects.toThrow(
-                "Hidden completion provider error: ",
-            );
-            await close(state.executor, fresh, false);
-
-            await eventually(() => state.removed.includes("child-2"));
-            await settleRemovals();
-            expect(state.removed).toEqual(["child-2"]);
-            expect(state.meta().retired_children).toMatchObject([
-                { id: "child-1", reason: "hidden-run-provider-error", ever_settled: true },
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("keep_subagents keeps a reused dreamer child with an earlier settled run, not one that never settled", async () => {
-        const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
-        const interrupt = async (
-            executor: typeof state.executor,
-            handle: Awaited<ReturnType<typeof state.executor.open>>,
-        ) => {
-            state.setDelayRow(1000);
-            const controller = new AbortController();
-            setTimeout(() => controller.abort(), 20);
-            await expect(
-                executor.attempt(handle, { ...request(), signal: controller.signal }),
-            ).rejects.toThrow("aborted");
-            await close(executor, handle, false);
-            state.setDelayRow(0);
-        };
-        try {
-            // One settled run, then an interrupted run in the same reused child.
-            const settled = await state.executor.open(dreamerRun);
-            await state.executor.attempt(settled, request());
-            await close(state.executor, settled, true);
-            const reused = await state.executor.open(dreamerRun);
-            expect(reused.id).toBe("child-1");
-            await interrupt(state.executor, reused);
-
-            // A fresh child whose only run is interrupted.
-            const fresh = await state.executor.open(dreamerRun);
-            expect(fresh.id).toBe("child-2");
-            await interrupt(state.executor, fresh);
-
-            await eventually(() => state.removed.includes("child-2"));
-            // A later boot sweeps the retired list; the child with a settled run survives it.
-            await state.create();
-            await settleRemovals();
-            expect(state.removed).toEqual(["child-2"]);
-            expect(state.meta().retired_children).toMatchObject([
-                { id: "child-1", ever_settled: true },
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("keep_subagents boot sweep deletes only unsettled dreamer children", async () => {
-        const state = await setup("host-generation-1", { remove: true, keepSubagents: true });
-        try {
-            state.seedRetired([
-                { ...retiredChild("historian-settled", 1), ever_settled: true },
-                { ...retiredChild("historian-unsettled", 2), ever_settled: false },
-                { ...retiredChild("dreamer-settled", 3, "dreamer"), ever_settled: true },
-                { ...retiredChild("dreamer-unsettled", 4, "dreamer"), ever_settled: false },
-                // Rows written before settlement was recorded count as unsettled.
-                retiredChild("dreamer-legacy", 5, "dreamer"),
-            ]);
-            await state.create();
-            await eventually(() => state.removed.length === 2);
-            await settleRemovals();
-            expect(state.removed).toEqual(["dreamer-unsettled", "dreamer-legacy"]);
-            expect(state.meta().retired_children.map((child) => child.id)).toEqual([
-                "historian-settled",
-                "historian-unsettled",
-                "dreamer-settled",
-            ]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("without keep_subagents the boot sweep deletes settled children too", async () => {
-        const state = await setup("host-generation-1", { remove: true });
-        try {
-            state.seedRetired([
-                { ...retiredChild("historian-settled", 1), ever_settled: true },
-                { ...retiredChild("dreamer-settled", 2, "dreamer"), ever_settled: true },
-            ]);
-            await state.create();
-            await eventually(() => state.meta().retired_children.length === 0);
-            expect(state.removed).toEqual(["historian-settled", "dreamer-settled"]);
-        } finally {
-            state.db.close();
-        }
-    });
-
-    test("a new host generation retires the previous generation's child", async () => {
-        const state = await setup();
-        try {
-            const first = await state.executor.open(run);
-            await state.executor.attempt(first, request());
-            await close(state.executor, first, true);
-
-            const restarted = await state.create("host-generation-2");
-            const second = await restarted.open(run);
-            expect(second.id).toBe("child-2");
-            await restarted.attempt(second, request());
-            await close(restarted, second, true);
-            expect(state.creates).toHaveLength(2);
         } finally {
             state.db.close();
         }
