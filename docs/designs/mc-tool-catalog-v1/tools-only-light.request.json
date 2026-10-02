@@ -56,12 +56,6 @@
         "provider": "magic-context",
         "tools": [
           {
-            "name": "ctx_expand",
-            "capabilities": [
-              "magic-context:history.expand/v1"
-            ]
-          },
-          {
             "name": "ctx_memory",
             "capabilities": [
               "magic-context:memory.write/v1"

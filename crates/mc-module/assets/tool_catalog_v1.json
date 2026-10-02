@@ -1,5 +1,10 @@
 {
   "format": "magic-context/tool-catalog-definition/1",
+  "preset_tools": {
+    "primary": ["ctx_reduce", "ctx_expand", "ctx_note", "ctx_memory", "ctx_search"],
+    "subagent": ["ctx_reduce", "ctx_expand", "ctx_note", "ctx_memory", "ctx_search"],
+    "tools-only": ["ctx_search", "ctx_memory", "ctx_note"]
+  },
   "tools": [
     {
       "name": "ctx_reduce",

@@ -120,6 +120,51 @@ fn every_example_request_gets_exactly_the_pinned_answer_bytes() {
 }
 
 #[test]
+fn system_text_tool_names_match_served_tools_for_every_example_and_preset() {
+    let config = example_catalog_config();
+    let check = |name: &str, request: &Value| {
+        let answer = tool_catalog::catalog_answer(request, &config).unwrap();
+        if let Some(text) = answer.get("system_text") {
+            let names: std::collections::BTreeSet<&str> = answer["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|tool| tool["name"].as_str().unwrap())
+                .collect();
+            assert_eq!(text["tool_names"], json!(names), "{name}");
+        }
+    };
+    for (name, request, _) in examples() {
+        check(&name, &request);
+    }
+    for preset in ["primary", "subagent", "tools-only"] {
+        for surface in ["full", "light"] {
+            check(
+                &format!("{preset}/{surface}"),
+                &json!({"preset": preset, "params": {"tool_descs": if surface == "light" { "concise" } else { "full" }},
+                    "system_text": {"preset": preset, "params": {"surface": surface}}}),
+            );
+        }
+    }
+}
+
+#[test]
+fn tools_only_serves_exactly_the_three_guidance_tools_on_both_surfaces() {
+    for surface in ["full", "light"] {
+        let answer = tool_catalog::catalog_answer(
+            &json!({"preset": "tools-only", "params": {"tool_descs": if surface == "light" { "concise" } else { "full" }},
+                "system_text": {"preset": "tools-only", "params": {"surface": surface}}}),
+            &example_catalog_config(),
+        ).unwrap();
+        assert_eq!(
+            answer["system_text"]["tool_names"],
+            json!(["ctx_memory", "ctx_note", "ctx_search"])
+        );
+        assert_eq!(answer["tools"].as_array().unwrap().len(), 3);
+    }
+}
+
+#[test]
 fn the_example_settings_resolve_to_the_example_config_member_for_member() {
     assert_eq!(
         CatalogConfig::from_module_config(&example_module_config()),

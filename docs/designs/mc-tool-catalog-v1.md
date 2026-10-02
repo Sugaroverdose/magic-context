@@ -113,7 +113,7 @@ the same preset):
 |---|---|---|---|
 | `primary` | Magic Context compacts the session, and core runs it as a head or a mason. | All five tools; the stamping text when the composition lists `ctx_reduce`, the no-reduce text otherwise. | Every non-subagent session. |
 | `subagent` | Magic Context compacts the session, and core runs it as a bounded reader or a one-shot call. | All five tools; the short stamping text, or `text: ""` without `ctx_reduce` (§2.3). | `isSubagent` session metadata (`packages/plugin/src/hooks/magic-context/system-prompt-hash.ts:334-359`). |
-| `tools-only` | Another provider compacts the session, or none does, whatever its role. | Every tool except `ctx_reduce`; the tools-only text, which describes only the tools (§7.2). | None: today Magic Context compacts every session it serves. |
+| `tools-only` | Another provider compacts the session, or none does, whatever its role. | Only `ctx_search`, `ctx_memory` and `ctx_note`; the tools-only text, which describes only the tools (§7.2). | None: today Magic Context compacts every session it serves. |
 | absent | | As `primary`. | |
 
 - **Who picks.** Core's plan builder, never Magic Context, which doesn't know a
@@ -124,8 +124,8 @@ the same preset):
   and compaction provider: `primary` or `subagent` beside another compaction
   provider or none, and `tools-only` beside Magic Context's compaction
   (decisions 1 and 2).
-- **`tools-only` never serves `ctx_reduce`.** An `exclude` naming it is
-  accepted and changes nothing. A composition that lists `ctx_reduce` under
+- **`tools-only` never serves `ctx_reduce` or `ctx_expand`.** An `exclude`
+  naming either is accepted and changes nothing. A composition that lists either under
   `magic-context` with `tools-only` doesn't match the fetched tools, and the
   runner refuses the plan (FP vector
   `admission/refuse-fetched-tools-differ-from-composition`). The generator
@@ -298,7 +298,7 @@ All digests are SHA-256 written as 64 lowercase hex characters.
 | `schema_digest` | JCS of the structural schema: `description` removed from every schema object (TP §3; `catalog.rs:340-366,375-431`). |
 | `composition_digest` (top level and in `system_text`) | JCS of the request's `composition`, exactly as sent (TP §3; E line 151). Absent on a preflight call, which carries no composition. |
 | `system_text.item_digest` | The UTF-8 bytes of `text`. |
-| `system_text.tool_names` | The sorted, deduplicated names of Magic Context tools whose guidance the text describes, taken from the composition's Magic Context entry (or served tools when there is no composition). Present whenever `text` is present; absent when there is no text. |
+| `system_text.tool_names` | The sorted, deduplicated names of tools in the same answer. The composition's Magic Context entry must match these names when supplied. Present whenever `system_text` is present, including empty text. Tool-provider 0.4.5 runners refuse a mismatch as `plan_stale` (`text_tool_names`); Rust tests and the generator check this invariant. |
 | `system_text.preflight_digest` | JCS of `{format: "magic-context/preflight/1", preset, params, config, text_revision}`, where `preset` and `params` are the text item's, `config` is the resolved inputs listed in `mc-tool-catalog-v1/config.json`, and `text_revision` hashes every model-facing string the build ships: JCS of `{texts, descriptions, parameters}` from the shared definition, where `texts` is every guidance template and fragment, the two tools-only texts included. The generator fails when a guidance asset in `crates/mc-module/assets/` is not covered. It doesn't depend on the composition. |
 | `catalog_digest` | JCS of the answer without `generation` and `catalog_digest`: `composition_digest`, `tools` and `system_text` when present. A `digest_only` request with the same inputs gets the same value (TP §3). |
 | `generation` | Equal to `catalog_digest`, as AFT does. Opaque to consumers. |
@@ -320,8 +320,11 @@ The generator re-checks its JCS and structural-schema code on every run. It
 reproduces every vector without floats in TPV's `composition-digest.json` and
 `schema-digest.json` (commons at `42949fc3`), and every FP composition and plan
 whose `.json` canonicalises to its `.jcs` and hashes to its `.sha256`
-(prefrontal at `7079a4025`). It reads both repositories with `git show` from
+(prefrontal at `1ea2a6225843d3f3ef0b2244976d1d9e6aa42c86`). It reads both repositories with `git show` from
 next to this repository's main checkout, and says so when it skips one.
+The prefrontal vectors include `plans/broca-head-no-compaction`, whose
+Magic Context `tools-only` entry contains only `ctx_memory`, `ctx_note` and
+`ctx_search`, with no step-transform items.
 
 ### 2.7 The examples
 
@@ -338,16 +341,16 @@ which no example uses, is the definition's light no-reduce text.
 | Example | Request | Old `catalog_digest` → new `catalog_digest` | Text (`item_digest`, UTF-8 bytes) |
 |---|---|---|---|
 | `preflight` | `primary`, no composition, no text | `4dbfd638576261155e2f10b6dddfbd16ba652da5529e8a978b0ca625e2a994f2` → `4dbfd638576261155e2f10b6dddfbd16ba652da5529e8a978b0ca625e2a994f2` | none |
-| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` is present, so the guidance text is included | `629f6a1724f7ded5e64537552511133d2ae77e2943ba2c45ac8d85fd7a73a276` → `363be1ae56892bef2904595cf6644ddfbe4144d080d073776069a1f881ab5e4f` | `ee720eeb…`, 6,016 |
-| `primary-full.digest-only` | same, `digest_only: true` | `629f6a1724f7ded5e64537552511133d2ae77e2943ba2c45ac8d85fd7a73a276` → `363be1ae56892bef2904595cf6644ddfbe4144d080d073776069a1f881ab5e4f` | none |
-| `primary-light` | `tool_descs: concise`, `surface: light` | `706719affdc2edd24757098e6b12b99dfbe84bc6639842de46be0b5cc1773fd9` → `bf46a16344d6869af44648fb17a990aef33746ed46687bdeaa39914b73677a39` | `f03cec64…`, 4,736 |
-| `subagent` | `subagent`, AFT and MC only | `b0e33d2d121a0f987e4958692cc61882ace971413fc5267209aa69d8fd30f180` → `a297c427e1f4e821bb134081d8965f34a30c5abe0a98f2f00196b941de316f55` | `561c5cb3…`, 2,249 |
-| `no-reduce` | `primary`, `exclude: ["ctx_reduce"]`; the composition lacks it | `8baff6228ce394fe303ddb734cd7a11d9ab4a1ff3c04424c5cfe65679792c89d` → `f3fb053c5bbc680734978aee427804ec443a0114eea9a5f417f8e438a6346c62` | `80e42ffa…`, 4,221 |
-| `tools-only` | `tools-only`, no params; the composition lists Magic Context's four tools without `ctx_reduce` | `319c2b82687b9c6e6201d1c90441b96b8cba55fb7326c339f49fdd01fe407e23` → `9b776859dbfece430c08a798e4dd3dff0be9802d7fd2b88282e3adbedc7bd098` | `73c67970…`, 802 |
-| `tools-only-light` | `tools-only`, `model: anthropic/claude-haiku-4-5` on both items, which the config maps to light | `80a9675ae14f3514c3f86dbe9b12e1bf76b5331645b0875e7c2f6df90148e62a` → `e5ad1e0995f6985cfcca1e8dd15f125f9ae78f7c7b370f4d6a2c6c5a3db2554d` | `7ab35687…`, 675 |
+| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` is present, so the guidance text is included | `363be1ae56892bef2904595cf6644ddfbe4144d080d073776069a1f881ab5e4f` → `363be1ae56892bef2904595cf6644ddfbe4144d080d073776069a1f881ab5e4f` | `ee720eeb…`, 6,016 |
+| `primary-full.digest-only` | same, `digest_only: true` | `363be1ae56892bef2904595cf6644ddfbe4144d080d073776069a1f881ab5e4f` → `363be1ae56892bef2904595cf6644ddfbe4144d080d073776069a1f881ab5e4f` | none |
+| `primary-light` | `tool_descs: concise`, `surface: light` | `bf46a16344d6869af44648fb17a990aef33746ed46687bdeaa39914b73677a39` → `bf46a16344d6869af44648fb17a990aef33746ed46687bdeaa39914b73677a39` | `f03cec64…`, 4,736 |
+| `subagent` | `subagent`, AFT and MC only | `a297c427e1f4e821bb134081d8965f34a30c5abe0a98f2f00196b941de316f55` → `a297c427e1f4e821bb134081d8965f34a30c5abe0a98f2f00196b941de316f55` | `561c5cb3…`, 2,249 |
+| `no-reduce` | `primary`, `exclude: ["ctx_reduce"]`; the composition lacks it | `f3fb053c5bbc680734978aee427804ec443a0114eea9a5f417f8e438a6346c62` → `f3fb053c5bbc680734978aee427804ec443a0114eea9a5f417f8e438a6346c62` | `80e42ffa…`, 4,221 |
+| `tools-only` | `tools-only`, no params; the composition lists only `ctx_search`, `ctx_memory` and `ctx_note` | `9b776859dbfece430c08a798e4dd3dff0be9802d7fd2b88282e3adbedc7bd098` → `460bf7b2b492835d15e29855833f2134a079dac5ab190a48f6f9d6d1c0f0a91b` | `73c67970…`, 802 |
+| `tools-only-light` | `tools-only`, `model: anthropic/claude-haiku-4-5` on both items, which the config maps to light | `e5ad1e0995f6985cfcca1e8dd15f125f9ae78f7c7b370f4d6a2c6c5a3db2554d` → `1f0295dcc087dac9f7cbd21557d53a35fed395e8560481fdfcccc15bccd7158c` | `7ab35687…`, 675 |
 
-`tools-only` and `no-reduce` serve the same tools but different texts
-(§7.2). The full and light `tools-only` examples differ in both the text and
+`tools-only` serves three tools; `no-reduce` also serves `ctx_expand` and
+uses different text (§7.2). The full and light `tools-only` examples differ in both the text and
 every tool description.
 
 Each example has `<name>.request.json`, `<name>.answer.json` and
@@ -369,7 +372,7 @@ the tags AFT's catalog declares for those tools (`crates/aft/src/subc/tool_provi
 | Tags on or off | The same thing as `ctx_reduce` being callable: tags exist only where stamping does (`magic-context-prompt.ts:173-182,200-209`) | Only through the composition. | `ctx_reduce` in MC's composition entry. |
 | `ctx_reduce` denied by agent or session permission | Read from OpenCode's agent and permission config before the verdict freezes (`packages/plugin/src/hooks/magic-context/ctx-reduce-availability.ts:6-44`) | No: agent identity. | The session's starter (Prefrontal, or the gateway when it plans) leaves `ctx_reduce` out, through `exclude` or by not composing it, and the text follows the composition. A user-tier disable by exact name makes it absent from the catalog (D §9.2). |
 | Compaction off | `compaction.enabled: false` drops `ctx_reduce` (`tool-registry.ts:84-85,141-152`) | Yes, config. | Unchanged. `ctx_reduce` is absent from the catalog. |
-| Which provider compacts | Nothing today: wherever Magic Context is loaded it compacts, and the guidance assumes so | Yes: the preset, which core's plan builder chooses from the plan's `compaction_item`. | Preset `tools-only` when another provider compacts or none does: no `ctx_reduce`, the no-reduce text (decision 2). |
+| Which provider compacts | Nothing today: wherever Magic Context is loaded it compacts, and the guidance assumes so | Yes: the preset, which core's plan builder chooses from the plan's `compaction_item`. | Preset `tools-only` when another provider compacts or none does: no `ctx_reduce` or `ctx_expand`, the tools-only text (§7.2). |
 | Subagent | `isSubagent` in session metadata (`system-prompt-hash.ts:334-359`) | No: session state. | Preset `subagent`, which core sends for bounded readers and one-shot calls (decision 1). |
 | Memory off | `memory.enabled` drops `ctx_memory` and the pinboard paragraph (`tool-registry.ts:129-178`) | Yes, config. | Unchanged, and the paragraph also requires `ctx_memory` in the composition. |
 | Dreamer, temporal awareness, caveman | Config flags passed to the builder (`system-prompt-hash.ts:376-388`) | Yes, config. | Unchanged. |
@@ -407,9 +410,10 @@ model only through compaction (m0 and m1) and step transforms, never the catalog
   a tool name (D §4.5 line 213).
 - **Richest satisfied variant, within Magic Context.** With `ctx_reduce`, the
   stamping text. Without it, the no-reduce text, which never mentions tags. With
-  `ctx_memory`, the pinboard paragraph; without it, none. Every v1 text names
-  `ctx_expand`, `ctx_search` and `ctx_note`. A session without one of them has
-  no shipped text yet, and the generator refuses such a composition (decision 3).
+  `ctx_memory`, the pinboard paragraph; without it, none. The `primary` and `subagent` texts require
+  `ctx_expand`, `ctx_search` and `ctx_note`. The `tools-only` texts require only
+  `ctx_search`, `ctx_memory` and `ctx_note`. A session missing a required tool
+  has no shipped text, and both Rust and the generator refuse that request.
 - **Across peers, adaptation is by tag and never required.** v1 ships no
   peer-dependent sentence. The mechanism for later is fixed now so peers can
   plan around it:
@@ -619,7 +623,11 @@ One item, found while applying decision 2. Owner and ruler: Magic Context.
   older work as `<session-history>`, and that `ctx_expand(message=N)` brings a
   cleared item back whole. Under `tools-only` another provider compacts, or
   none does, so those sentences describe machinery the session doesn't have.
-  *Decided:* `tools-only` gets its own text. Magic Context renders nothing into
+  *Decided:* `tools-only` serves exactly `ctx_search`, `ctx_memory` and
+  `ctx_note` on both surfaces, and gets its own text. It serves neither
+  `ctx_reduce` nor `ctx_expand`: there are no Magic Context tags or
+  `<session-history>` headings to expand, and a runner such as Broca does not
+  expose the session's raw history to Magic Context. Magic Context renders nothing into
   a `tools-only` session (no m0 or m1, no `<project-memory>`, no tags, markings
   or clearing), so the text drops every sentence about those: the desk and its
   tags, the long-term-partner frame, the history filing, the markings, the

@@ -43,7 +43,7 @@ const PREFLIGHT_FORMAT: &str = "magic-context/preflight/1";
 /// The `provider` value that marks Magic Context's own entry in a composition.
 const MODULE_ID: &str = crate::DEFAULT_MODULE_ID;
 
-/// The tools every shipped guidance text names. A session without one of them
+/// The tools the compaction guidance texts name. A session without one of them
 /// has no accurate text yet, so a text request for it is refused rather than
 /// served a text that names a missing tool.
 const TEXT_REQUIRED_TOOLS: [&str; 3] = ["ctx_expand", "ctx_search", "ctx_note"];
@@ -78,6 +78,8 @@ pub(crate) struct Definition {
     format: String,
     /// In catalog order.
     pub tools: Vec<ToolDefinition>,
+    /// Allowed tools by preset, before config and request filtering.
+    preset_tools: BTreeMap<String, Vec<String>>,
     /// `{full: {tool: text}, light: {tool: text}}`.
     descriptions: Value,
     /// `{full: {tool: {param: text}}, light: ...}`.
@@ -169,6 +171,14 @@ enum Preset {
 }
 
 impl Preset {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Subagent => "subagent",
+            Self::ToolsOnly => "tools-only",
+        }
+    }
+
     fn parse(value: &str) -> Option<Self> {
         match value {
             "primary" => Some(Self::Primary),
@@ -497,11 +507,14 @@ fn served_tools(
         .filter(|tool| {
             let name = tool.name.as_str();
             !(name == "ctx_reduce" && !config.compaction_enabled)
-                // Under tools-only another provider compacts, so nothing in the
-                // session carries Magic Context's tags for ctx_reduce to drop.
-                && !(name == "ctx_reduce" && preset == Preset::ToolsOnly)
+                && definition().preset_tools[preset.as_str()]
+                    .iter()
+                    .any(|allowed| allowed == name)
                 && !(name == "ctx_memory" && !config.memory_enabled)
-                && !config.disabled_tools.iter().any(|disabled| disabled == name)
+                && !config
+                    .disabled_tools
+                    .iter()
+                    .any(|disabled| disabled == name)
                 && !excluded.contains(name)
                 && !(read_only && !tool.read_scope)
         })
@@ -624,10 +637,12 @@ fn guidance_text(
     own: &BTreeSet<String>,
     config: &CatalogConfig,
 ) -> Result<String, CatalogError> {
-    if let Some(missing) = TEXT_REQUIRED_TOOLS
-        .iter()
-        .find(|tool| !own.contains(**tool))
-    {
+    let required = if preset == Preset::ToolsOnly {
+        &["ctx_search", "ctx_memory", "ctx_note"]
+    } else {
+        &TEXT_REQUIRED_TOOLS
+    };
+    if let Some(missing) = required.iter().find(|tool| !own.contains(**tool)) {
         return Err(CatalogError::invalid(
             "system_text",
             format!("no shipped text describes a session without {missing}"),

@@ -27,7 +27,7 @@
  *   same variant (`crates/mc-module/assets/`);
  * - every capability tag passes the tool-provider role's tag check, and
  *   `system_text.tool_names` matches the sorted, deduplicated Magic Context
- *   composition entry whenever guidance text is present;
+ *   served tool names whenever system_text is present;
  * - `ctx_reduce` keeps its frozen name and structural schema;
  * - this file's JCS and schema-digest code reproduces the canonical JSON and
  *   schema hashes published in the commons role-contract and prefrontal fetch-plan
@@ -173,6 +173,7 @@ interface Definition {
     format: string;
     /** Catalog order: the plugin's single list of ctx_* tools (ACTIVE_TOOL_IDS). */
     tools: ToolDefinition[];
+    preset_tools: Record<Preset, ToolId[]>;
     descriptions: Record<Surface, Record<ToolId, string>>;
     parameter_descriptions: Record<Surface, Record<ToolId, Record<string, string>>>;
     /** Guidance templates and the fragments they include, by name (see `renderText`). */
@@ -605,7 +606,7 @@ function servedToolIds(request: CatalogRequest, config: ResolvedConfig): ToolId[
     const preset = requestPreset(request);
     return TOOL_ORDER.filter((tool) => {
         if (tool === "ctx_reduce" && !config.compaction_enabled) return false;
-        if (tool === "ctx_reduce" && preset === "tools-only") return false;
+        if (!DEFINITION.preset_tools[preset].includes(tool)) return false;
         if (tool === "ctx_memory" && !config.memory_enabled) return false;
         if (config.disabled_tools.includes(tool)) return false;
         if (exclude.has(tool)) return false;
@@ -658,12 +659,15 @@ function guidanceText(request: CatalogRequest, config: ResolvedConfig): string {
     const item = request.system_text;
     if (!item) throw new Error("guidanceText needs a system_text item");
     const own = ownToolNames(request, servedToolIds(request, config));
-    for (const required of ["ctx_expand", "ctx_search", "ctx_note"]) {
+    const preset = requestPreset(request);
+    const requiredTools = preset === "tools-only"
+        ? ["ctx_search", "ctx_memory", "ctx_note"]
+        : ["ctx_expand", "ctx_search", "ctx_note"];
+    for (const required of requiredTools) {
         if (!own.has(required)) {
             throw new Error(`no shipped text names the session without ${required} (open question 3)`);
         }
     }
-    const preset = requestPreset(request);
     const reduce = own.has("ctx_reduce");
     const inputs: TextInputs = {
         memory: config.memory_enabled && own.has("ctx_memory"),
@@ -677,8 +681,9 @@ function guidanceText(request: CatalogRequest, config: ResolvedConfig): string {
         // Another provider compacts the session, or none does, so Magic Context
         // puts nothing into the conversation: no tags, no history, no project
         // memory block, no markings. The tools-only text describes only the
-        // tools. servedToolIds never serves ctx_reduce here, and answer()
-        // refuses a composition that lists it.
+        // tools. Without tags or archived session history, ctx_reduce and
+        // ctx_expand have nothing to act on. The catalog builder rejects
+        // compositions listing either because they differ from the served tools.
         return renderVariant("tools_only", inputs);
     }
     if (preset === "subagent") {
@@ -807,8 +812,9 @@ function answer(request: CatalogRequest, config: ResolvedConfig): JsonObject {
     if (request.system_text) {
         const text = guidanceText(request, config);
         const toolNames = [...ownToolNames(request, servedToolIds(request, config))].sort();
-        if (jcs(toolNames) !== jcs([...new Set(toolNames)].sort())) {
-            throw new Error("system_text.tool_names must be sorted and deduplicated");
+        const servedNames = [...new Set((content.tools as JsonObject[]).map((tool) => tool.name as string))].sort();
+        if (jcs(toolNames) !== jcs(servedNames)) {
+            throw new Error("system_text.tool_names must equal the sorted, deduplicated served tool names");
         }
         const systemText: JsonObject = {
             text,
@@ -867,6 +873,7 @@ const PREFRONTAL_HEAD: JsonObject = {
 
 const ALL_TOOLS: ToolId[] = [...TOOL_ORDER];
 const WITHOUT_REDUCE: ToolId[] = TOOL_ORDER.filter((tool) => tool !== "ctx_reduce");
+const TOOLS_ONLY = DEFINITION.preset_tools["tools-only"];
 
 interface Example {
     name: string;
@@ -934,7 +941,7 @@ const EXAMPLES: Example[] = [
         request: {
             preset: "tools-only",
             params: {},
-            composition: { providers: [AFT_HEAD, mcEntry(WITHOUT_REDUCE), PREFRONTAL_HEAD] },
+            composition: { providers: [AFT_HEAD, mcEntry(TOOLS_ONLY), PREFRONTAL_HEAD] },
             system_text: { preset: "tools-only", params: {} },
         },
     },
@@ -945,7 +952,7 @@ const EXAMPLES: Example[] = [
         request: {
             preset: "tools-only",
             params: { model: "anthropic/claude-haiku-4-5" },
-            composition: { providers: [AFT_HEAD, mcEntry(WITHOUT_REDUCE), PREFRONTAL_HEAD] },
+            composition: { providers: [AFT_HEAD, mcEntry(TOOLS_ONLY), PREFRONTAL_HEAD] },
             system_text: { preset: "tools-only", params: { model: "anthropic/claude-haiku-4-5" } },
         },
     },
@@ -993,7 +1000,7 @@ const COMMONS_REF = "42949fc331d8c318225d8ffa0faa024584237c57";
  * prefrontal at a commit whose fetch-plan vectors (compositions and plans, each
  * as pretty JSON, JCS bytes and SHA-256) the design document cites.
  */
-const PREFRONTAL_REF = "7079a4025b28f66e76f30bb19cc77caa0d9a1335";
+const PREFRONTAL_REF = "1ea2a6225843d3f3ef0b2244976d1d9e6aa42c86";
 
 function git(repo: string, args: string[]): string | undefined {
     const run = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8", maxBuffer: 64 << 20 });
@@ -1108,6 +1115,14 @@ function crossCheckPrefrontal(repo: string, out: CrossCheck): void {
         checked++;
         if (jcs(value) !== bytes || sha256Hex(bytes) !== digest.trim()) {
             out.failures.push(`prefrontal ${stem.slice(dir.length + 1)}`);
+        }
+        if (stem === `${dir}/plans/broca-head-no-compaction`) {
+            const plan = value as JsonObject;
+            const computed = sha256Hex(jcs(plan.composition));
+            if (computed !== plan.composition_digest) {
+                out.failures.push(`prefrontal plans/broca-head-no-compaction composition_digest: computed ${computed}, declared ${plan.composition_digest}`);
+            }
+            out.report.push(`prefrontal plans/broca-head-no-compaction composition_digest: ${computed}`);
         }
     }
     if (checked === 0) out.failures.push("prefrontal: no fetch-plan vectors found");
