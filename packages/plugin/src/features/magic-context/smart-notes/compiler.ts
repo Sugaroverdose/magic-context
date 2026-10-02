@@ -182,6 +182,9 @@ Remember: output only the JSON object described by the system prompt.`;
                     },
                 },
                 {
+                    // Send without holding a request open for the whole run, so the
+                    // deadline below is the only timer (see prompt-async-transport.ts).
+                    transport: shared.createPromptAsyncTransport(client, childSessionId),
                     timeoutMs: remainingMs,
                     signal: args.signal,
                     fallbackModels: args.fallbackModels,
