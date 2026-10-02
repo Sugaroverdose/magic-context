@@ -7,15 +7,22 @@
  *   bun docs/designs/mc-tool-catalog-v1/generate.ts          # write the files
  *   bun docs/designs/mc-tool-catalog-v1/generate.ts --check  # fail if any file differs
  *
- * Every model-facing string (tool descriptions, parameter descriptions and the
- * guidance text) is imported from the plugin's shipped sources, so a later
- * wording change shows up as a `--check` failure instead of drifting silently.
- * The argument-schema structures are written out here because they are what
- * this design decides; the design document explains how each one differs from
- * what the plugin and the Rust module advertise today.
+ * The payloads are built from the one definition the Rust module also serves
+ * from: `crates/mc-module/assets/tool_catalog_v1.json` (tools, argument-schema
+ * structures, descriptions, parameter descriptions and the guidance texts) and
+ * the two `tools-only` texts beside it (`catalog_tools_only.txt`,
+ * `catalog_tools_only_light.txt`). The texts are templates; `renderText` below
+ * is the reference renderer, and the module's `tool_catalog.rs` renders them
+ * the same way. The design document explains how each schema differs from what
+ * the plugin and the Rust module advertise today.
  *
  * Both modes also check what the payloads promise:
  *
+ * - the definition's descriptions and parameter descriptions equal the
+ *   plugin's shipped strings, and its guidance texts render to exactly what the
+ *   plugin's `buildMagicContextSection` builds, for every combination of its
+ *   inputs, so a wording change on either side is a `--check` failure instead
+ *   of silent drift;
  * - each example text equals the Rust module's shipped guidance asset for the
  *   same variant (`crates/mc-module/assets/`);
  * - every capability tag passes the tool-provider role's tag check;
@@ -26,14 +33,20 @@
  *   this one, or at `MC_CATALOG_COMMONS_REPO` and `MC_CATALOG_PREFRONTAL_REPO`.
  *   When one is missing the run says so and skips that cross-check.
  *
+ * Besides the example payloads it writes
+ * `crates/mc-module/testdata/tool-catalog-guidance-matrix.json`: the digest of
+ * every guidance text for every combination of config inputs, which the Rust
+ * module's tests render and compare, so both renderers stay byte-identical.
+ *
  * This is a documentation helper. Nothing in the plugin or the module imports it.
  */
 
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
+import { buildPrimaryLanguageDirective } from "../../../packages/plugin/src/agents/language-directive";
 import { buildMagicContextSection } from "../../../packages/plugin/src/agents/magic-context-prompt";
 import { CTX_EXPAND_DESCRIPTION } from "../../../packages/plugin/src/tools/ctx-expand/constants";
 import { CTX_MEMORY_DESCRIPTION } from "../../../packages/plugin/src/tools/ctx-memory/constants";
@@ -126,126 +139,283 @@ export function capabilityTagProblem(tag: string): string | null {
     return null;
 }
 
-/** Catalog order: the plugin's single list of ctx_* tools (ACTIVE_TOOL_IDS). */
-const TOOL_ORDER: readonly ToolId[] = [
-    "ctx_reduce",
-    "ctx_expand",
-    "ctx_note",
-    "ctx_memory",
-    "ctx_search",
-];
+const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), "..", "..", "..");
+const ASSETS = join(REPO_ROOT, "crates/mc-module/assets");
+
+/** One tool as the shared definition declares it. */
+interface ToolDefinition {
+    name: ToolId;
+    /** Capability tags, all `magic-context:*` (see the design document, §2.2). */
+    capabilities: string[];
+    /**
+     * Hooks may add text before or after a Magic Context result but never
+     * replace it: ctx_expand and ctx_search return archived conversation and
+     * memories, and the guidance tells the model to trust that content as the
+     * exact record.
+     */
+    result_ops: string[];
+    semantics: number;
+    /**
+     * Served under `scope: read`: the tool writes no project data (memories,
+     * notes). Stamping with ctx_reduce only changes what this session's model sees.
+     */
+    read_scope: boolean;
+    /** The argument schema without descriptions; property order never affects a digest. */
+    structure: JsonObject;
+}
+
+interface Definition {
+    format: string;
+    /** Catalog order: the plugin's single list of ctx_* tools (ACTIVE_TOOL_IDS). */
+    tools: ToolDefinition[];
+    descriptions: Record<Surface, Record<ToolId, string>>;
+    parameter_descriptions: Record<Surface, Record<ToolId, Record<string, string>>>;
+    /** Guidance templates and the fragments they include, by name (see `renderText`). */
+    texts: Record<string, string>;
+}
+
+const DEFINITION_FORMAT = "magic-context/tool-catalog-definition/1";
+
+function loadDefinition(): Definition {
+    const definition = JSON.parse(
+        readFileSync(join(ASSETS, "tool_catalog_v1.json"), "utf8"),
+    ) as Definition;
+    if (definition.format !== DEFINITION_FORMAT) {
+        throw new Error(`tool_catalog_v1.json has format ${definition.format}`);
+    }
+    // The tools-only texts are their own assets so they read as plain text.
+    definition.texts["tools_only/full"] = readFileSync(join(ASSETS, "catalog_tools_only.txt"), "utf8");
+    definition.texts["tools_only/light"] = readFileSync(
+        join(ASSETS, "catalog_tools_only_light.txt"),
+        "utf8",
+    );
+    return definition;
+}
+
+const DEFINITION = loadDefinition();
+const TOOL_ORDER: readonly ToolId[] = DEFINITION.tools.map((tool) => tool.name);
+const TOOL_DEFINITIONS = new Map(DEFINITION.tools.map((tool) => [tool.name, tool]));
+const FULL_DESCRIPTIONS = DEFINITION.descriptions.full;
+const LIGHT_DESCRIPTIONS = DEFINITION.descriptions.light;
+
+function toolDefinition(tool: ToolId): ToolDefinition {
+    const definition = TOOL_DEFINITIONS.get(tool);
+    if (!definition) throw new Error(`the definition has no tool ${tool}`);
+    return definition;
+}
+
+// ── Guidance templates ───────────────────────────────────────────────────
+
+/** The config switches a guidance template may test. */
+interface TextFlags {
+    memory: boolean;
+    dreamer: boolean;
+    temporal: boolean;
+    caveman: boolean;
+    language: boolean;
+}
 
 /**
- * Tools served under `scope: read`: they write no project data (memories, notes).
- * Stamping with ctx_reduce only changes what this session's model sees.
+ * Render the definition's text `name`. A template is literal text with four
+ * kinds of tag:
+ *
+ * - `{{name}}` includes the definition's text `name`, rendered the same way;
+ * - `{{$name}}` inserts the runtime value `name` verbatim (never rendered);
+ * - `{{#flag}}…{{/flag}}` keeps its body only when `flag` is on, and
+ *   `{{^flag}}…{{/flag}}` only when it is off. Sections nest, and a closing tag
+ *   names the section it closes.
+ *
+ * Anything else between `{{` and `}}`, an unknown name or flag, or an unclosed
+ * section is an error. The Rust module's renderer follows the same rules.
  */
-const READ_SCOPE_TOOLS: ReadonlySet<ToolId> = new Set(["ctx_reduce", "ctx_expand", "ctx_search"]);
+export function renderText(
+    name: string,
+    flags: TextFlags,
+    values: Record<string, string>,
+    texts: Record<string, string> = DEFINITION.texts,
+): string {
+    const template = texts[name];
+    if (template === undefined) throw new Error(`no text named ${name}`);
+    let out = "";
+    // Each open section: its flag, and whether its body is kept.
+    const open: { flag: string; keep: boolean }[] = [];
+    const keeping = () => open.every((section) => section.keep);
+    let at = 0;
+    while (at < template.length) {
+        const start = template.indexOf("{{", at);
+        if (start < 0) {
+            if (keeping()) out += template.slice(at);
+            break;
+        }
+        if (keeping()) out += template.slice(at, start);
+        const end = template.indexOf("}}", start + 2);
+        if (end < 0) throw new Error(`${name}: unterminated tag`);
+        const tag = template.slice(start + 2, end);
+        at = end + 2;
+        const sigil = tag[0];
+        const body = tag.slice(1);
+        if (sigil === "#" || sigil === "^") {
+            if (!(body in flags)) throw new Error(`${name}: unknown flag ${body}`);
+            const on = flags[body as keyof TextFlags];
+            open.push({ flag: body, keep: sigil === "#" ? on : !on });
+        } else if (sigil === "/") {
+            const section = open.pop();
+            if (section?.flag !== body) throw new Error(`${name}: {{/${body}}} closes nothing open`);
+        } else if (sigil === "$") {
+            const value = values[body];
+            if (value === undefined) throw new Error(`${name}: no value ${body}`);
+            if (keeping()) out += value;
+        } else if (/^[a-z_/]+$/.test(tag)) {
+            if (keeping()) out += renderText(tag, flags, values, texts);
+        } else {
+            throw new Error(`${name}: malformed tag {{${tag}}}`);
+        }
+    }
+    if (open.length > 0) throw new Error(`${name}: section ${open[0]?.flag} is never closed`);
+    return out;
+}
 
-const CAPABILITIES: Record<ToolId, string[]> = {
-    ctx_reduce: ["magic-context:context.reduce/v1"],
-    ctx_expand: ["magic-context:history.expand/v1"],
-    ctx_note: ["magic-context:notes/v1"],
-    ctx_memory: ["magic-context:memory.write/v1"],
-    ctx_search: ["magic-context:archive.search/v1"],
-};
+/** The guidance inputs a text varies by, as the catalog resolves them. */
+interface TextInputs {
+    memory: boolean;
+    dreamer: boolean;
+    temporal: boolean;
+    caveman: boolean;
+    language: string | null;
+    surface: Surface;
+}
+
+function renderVariant(
+    variant: "primary/reduce" | "primary/no_reduce" | "subagent" | "tools_only",
+    inputs: TextInputs,
+    override?: string,
+): string {
+    const directive = buildPrimaryLanguageDirective(inputs.language ?? undefined);
+    const flags: TextFlags = {
+        memory: inputs.memory,
+        dreamer: inputs.dreamer,
+        temporal: inputs.temporal,
+        caveman: inputs.caveman,
+        language: directive !== "",
+    };
+    const values: Record<string, string> = { language_directive: directive };
+    if (override !== undefined && variant.startsWith("primary/")) {
+        return renderText("override", flags, { ...values, override });
+    }
+    return renderText(`${variant}/${inputs.surface}`, flags, values);
+}
 
 /**
- * Hooks may add text before or after a Magic Context result but never replace
- * it: ctx_expand and ctx_search return archived conversation and memories, and
- * the guidance tells the model to trust that content as the exact record.
+ * Check the definition against the plugin's shipped strings: descriptions and
+ * parameter descriptions are equal, and every text the plugin's builder makes
+ * is what the definition renders for the same inputs. The tools-only texts
+ * have no plugin counterpart.
  */
-const RESULT_OPS: string[] = ["prepend", "append"];
-
-const SEMANTICS = 1;
-
-const FULL_DESCRIPTIONS: Record<ToolId, string> = {
-    ctx_reduce: CTX_REDUCE_DESCRIPTION,
-    ctx_expand: CTX_EXPAND_DESCRIPTION,
-    ctx_note: CTX_NOTE_DESCRIPTION,
-    ctx_memory: CTX_MEMORY_DESCRIPTION,
-    ctx_search: CTX_SEARCH_DESCRIPTION,
-};
-
-const LIGHT_DESCRIPTIONS: Record<ToolId, string> = {
-    ctx_reduce: CTX_REDUCE_LIGHT_DESCRIPTION,
-    ctx_expand: CTX_EXPAND_LIGHT_DESCRIPTION,
-    ctx_note: CTX_NOTE_LIGHT_DESCRIPTION,
-    ctx_memory: CTX_MEMORY_LIGHT_DESCRIPTION,
-    ctx_search: CTX_SEARCH_LIGHT_DESCRIPTION,
-};
-
-const MEMORY_CATEGORIES = ["PROJECT_RULES", "ARCHITECTURE", "CONSTRAINTS", "CONFIG_VALUES", "NAMING"];
-
-/**
- * The proposed argument structures, without descriptions. Property order is
- * the order the plugin declares them in; it never affects a digest.
- */
-const STRUCTURES: Record<ToolId, JsonObject> = {
-    ctx_reduce: {
-        type: "object",
-        properties: { drop: { type: "string" } },
-        required: ["drop"],
-        additionalProperties: false,
-    },
-    ctx_expand: {
-        type: "object",
-        properties: {
-            tag: { anyOf: [{ type: "number" }, { type: "string" }] },
-            start: { type: "integer", minimum: 0 },
-            end: { type: "integer", minimum: 0 },
-            verbose: { type: "boolean" },
-            message: { type: "integer", minimum: 0 },
-        },
-        additionalProperties: false,
-    },
-    ctx_note: {
-        type: "object",
-        properties: {
-            action: { type: "string", enum: ["write", "read", "update", "dismiss"] },
-            content: { type: "string", maxLength: 65536 },
-            surface_condition: { type: "string", maxLength: 4096 },
-            filter: { type: "string", enum: ["all", "active", "pending", "ready", "dismissed"] },
-            limit: { type: "integer", minimum: 1, maximum: 100, default: 25 },
-            offset: { type: "integer", minimum: 0, default: 0 },
-            note_ids: {
-                type: "array",
-                minItems: 1,
-                maxItems: 50,
-                items: { type: "integer", minimum: 1, maximum: 9007199254740991 },
+function checkDefinitionMatchesPlugin(): void {
+    const plugin = {
+        descriptions: {
+            full: {
+                ctx_reduce: CTX_REDUCE_DESCRIPTION,
+                ctx_expand: CTX_EXPAND_DESCRIPTION,
+                ctx_note: CTX_NOTE_DESCRIPTION,
+                ctx_memory: CTX_MEMORY_DESCRIPTION,
+                ctx_search: CTX_SEARCH_DESCRIPTION,
+            },
+            light: {
+                ctx_reduce: CTX_REDUCE_LIGHT_DESCRIPTION,
+                ctx_expand: CTX_EXPAND_LIGHT_DESCRIPTION,
+                ctx_note: CTX_NOTE_LIGHT_DESCRIPTION,
+                ctx_memory: CTX_MEMORY_LIGHT_DESCRIPTION,
+                ctx_search: CTX_SEARCH_LIGHT_DESCRIPTION,
             },
         },
-        additionalProperties: false,
-    },
-    ctx_memory: {
-        type: "object",
-        properties: {
-            action: { type: "string", enum: ["write", "update", "archive", "merge", "get"] },
-            content: { type: "string", maxLength: 65536 },
-            category: { type: "string", enum: MEMORY_CATEGORIES },
-            ids: { type: "array", maxItems: 100, items: { type: "integer", minimum: 1 } },
-            reason: { type: "string", maxLength: 4096 },
+        parameter_descriptions: {
+            full: FULL_PARAMETER_DESCRIPTIONS,
+            light: LIGHT_PARAMETER_DESCRIPTIONS,
         },
-        additionalProperties: false,
-    },
-    ctx_search: {
-        type: "object",
-        properties: {
-            query: { type: "string", maxLength: 1024 },
-            limit: { type: "integer", minimum: 1, maximum: 25, default: 10 },
-            from: { type: "string" },
-            to: { type: "string" },
-            sources: {
-                type: "array",
-                items: {
-                    type: "string",
-                    enum: ["memory", "message", "git_commit", "primer", "note"],
-                },
-            },
-        },
-        required: ["query"],
-        additionalProperties: false,
-    },
-};
+    };
+    for (const key of ["descriptions", "parameter_descriptions"] as const) {
+        if (jcs(DEFINITION[key] as unknown as Json) !== jcs(plugin[key] as unknown as Json)) {
+            throw new Error(`tool_catalog_v1.json ${key} differ from the plugin's`);
+        }
+    }
+    for (const inputs of everyTextInput()) {
+        const { memory, dreamer, temporal, caveman, language, surface } = inputs;
+        const lang = language ?? undefined;
+        for (const reduce of [true, false]) {
+            const variant = reduce ? "primary/reduce" : "primary/no_reduce";
+            const expected = buildMagicContextSection(
+                null, 0, reduce, dreamer, temporal, caveman, false, lang, memory, surface,
+            );
+            if (renderVariant(variant, inputs) !== expected) {
+                throw new Error(`${variant} differs from the plugin for ${JSON.stringify(inputs)}`);
+            }
+            const overridden = buildMagicContextSection(
+                null, 0, reduce, dreamer, temporal, caveman, false, lang, memory, surface, OVERRIDE_SAMPLE,
+            );
+            if (renderVariant(variant, inputs, OVERRIDE_SAMPLE) !== overridden) {
+                throw new Error(`the override text differs from the plugin for ${JSON.stringify(inputs)}`);
+            }
+        }
+        const subagent = buildMagicContextSection(
+            null, 0, true, dreamer, temporal, caveman, true, lang, memory, surface,
+        );
+        if (renderVariant("subagent", inputs) !== subagent) {
+            throw new Error(`subagent differs from the plugin for ${JSON.stringify(inputs)}`);
+        }
+    }
+}
+
+/** A stand-in for a user's guidance override, for the parity check and the matrix. */
+const OVERRIDE_SAMPLE = "## My guidance\n\nA user's own section, with {{braces}} kept as typed.";
+
+/** Languages the parity check and the matrix cover: none, and one with a directive. */
+const SAMPLE_LANGUAGES: (string | null)[] = [null, "fr"];
+
+function* everyTextInput(): Generator<TextInputs> {
+    for (const surface of ["full", "light"] as Surface[]) {
+        for (const language of SAMPLE_LANGUAGES) {
+            for (let bits = 0; bits < 16; bits++) {
+                yield {
+                    memory: (bits & 1) !== 0,
+                    dreamer: (bits & 2) !== 0,
+                    temporal: (bits & 4) !== 0,
+                    caveman: (bits & 8) !== 0,
+                    language,
+                    surface,
+                };
+            }
+        }
+    }
+}
+
+/**
+ * The digest of every guidance text for every input combination, for the Rust
+ * module's renderer to reproduce. Written to the module's testdata.
+ */
+function guidanceMatrix(): JsonObject {
+    const cases: JsonObject[] = [];
+    for (const inputs of everyTextInput()) {
+        const entries: [string, string | undefined][] = [
+            ["primary/reduce", undefined],
+            ["primary/no_reduce", undefined],
+            ["subagent", undefined],
+            ["tools_only", undefined],
+            ["primary/reduce", OVERRIDE_SAMPLE],
+        ];
+        for (const [variant, override] of entries) {
+            const text = renderVariant(variant as "primary/reduce", inputs, override);
+            cases.push({
+                variant,
+                override: override !== undefined,
+                ...inputs,
+                bytes: Buffer.byteLength(text, "utf8"),
+                sha256: sha256Hex(text),
+            } as unknown as JsonObject);
+        }
+    }
+    return { override_sample: OVERRIDE_SAMPLE, cases } as JsonObject;
+}
 
 /** The user and project configuration every example resolves against. */
 interface ResolvedConfig {
@@ -407,9 +577,8 @@ function textSurface(params: JsonObject, config: ResolvedConfig): Surface {
 }
 
 function inputSchema(tool: ToolId, surface: Surface): JsonObject {
-    const table = surface === "light" ? LIGHT_PARAMETER_DESCRIPTIONS : FULL_PARAMETER_DESCRIPTIONS;
-    const descriptions = table[tool] as Record<string, string>;
-    const structure = STRUCTURES[tool];
+    const descriptions = DEFINITION.parameter_descriptions[surface][tool];
+    const structure = toolDefinition(tool).structure;
     const properties = structure.properties as JsonObject;
     const described: JsonObject = {};
     for (const [name, sub] of Object.entries(properties)) {
@@ -435,7 +604,7 @@ function servedToolIds(request: CatalogRequest, config: ResolvedConfig): ToolId[
         if (tool === "ctx_memory" && !config.memory_enabled) return false;
         if (config.disabled_tools.includes(tool)) return false;
         if (exclude.has(tool)) return false;
-        if (scope === "read" && !READ_SCOPE_TOOLS.has(tool)) return false;
+        if (scope === "read" && !toolDefinition(tool).read_scope) return false;
         return true;
     });
 }
@@ -447,15 +616,16 @@ function catalogTools(request: CatalogRequest, config: ResolvedConfig): JsonObje
         if (tool === "ctx_reduce" && schemaDigest(schema) !== FROZEN_CTX_REDUCE_SCHEMA_DIGEST) {
             throw new Error("ctx_reduce's schema is frozen for v1; change it only with the gateway");
         }
+        const definition = toolDefinition(tool);
         const description =
             config.tool_descriptions[tool] ??
             (surface === "light" ? LIGHT_DESCRIPTIONS[tool] : FULL_DESCRIPTIONS[tool]);
         return {
             name: tool,
             schema_digest: schemaDigest(schema),
-            semantics: SEMANTICS,
-            result_ops: RESULT_OPS,
-            capabilities: CAPABILITIES[tool],
+            semantics: definition.semantics,
+            result_ops: definition.result_ops,
+            capabilities: definition.capabilities,
             description,
             input_schema: schema,
         };
@@ -474,6 +644,11 @@ function ownToolNames(request: CatalogRequest, served: ToolId[]): Set<string> {
     return new Set(tools.map((tool) => tool.name as string));
 }
 
+/**
+ * The text for the request's system_text item. The examples' config has no
+ * guidance override; the module renders a user's override through the
+ * definition's `override` text, which the parity check and the matrix cover.
+ */
 function guidanceText(request: CatalogRequest, config: ResolvedConfig): string {
     const item = request.system_text;
     if (!item) throw new Error("guidanceText needs a system_text item");
@@ -485,82 +660,90 @@ function guidanceText(request: CatalogRequest, config: ResolvedConfig): string {
     }
     const preset = requestPreset(request);
     const reduce = own.has("ctx_reduce");
-    const memory = config.memory_enabled && own.has("ctx_memory");
-    const surface = textSurface(item.params, config);
+    const inputs: TextInputs = {
+        memory: config.memory_enabled && own.has("ctx_memory"),
+        dreamer: config.dreamer_runnable,
+        temporal: config.temporal_awareness,
+        caveman: config.caveman_text_compression,
+        language: config.language,
+        surface: textSurface(item.params, config),
+    };
     if (preset === "tools-only") {
-        // Another provider compacts the session, so Magic Context adds no §N§
-        // tags to its messages and ctx_reduce would have nothing to drop. The
-        // text is the one built for a session without ctx_reduce: it neither
-        // explains dropping items by tag nor asks the model to start replies
-        // with a tag, whatever the session's role. servedToolIds never serves
-        // ctx_reduce here, and answer() refuses a composition that lists it.
-        return buildMagicContextSection(
-            null,
-            0,
-            false,
-            config.dreamer_runnable,
-            config.temporal_awareness,
-            config.caveman_text_compression,
-            false,
-            config.language ?? undefined,
-            memory,
-            surface,
-        );
+        // Another provider compacts the session, or none does, so Magic Context
+        // puts nothing into the conversation: no tags, no history, no project
+        // memory block, no markings. The tools-only text describes only the
+        // tools. servedToolIds never serves ctx_reduce here, and answer()
+        // refuses a composition that lists it.
+        return renderVariant("tools_only", inputs);
     }
     if (preset === "subagent") {
         // A subagent without ctx_reduce has no tagged messages and no archive use,
         // so it gets no guidance (the OpenCode plugin behaves the same way).
         if (!reduce) return "";
-        return buildMagicContextSection(
-            null,
-            0,
-            true,
-            false,
-            false,
-            false,
-            true,
-            undefined,
-            false,
-            surface,
-        );
+        return renderVariant("subagent", inputs);
     }
-    return buildMagicContextSection(
-        null,
-        0,
-        reduce,
-        config.dreamer_runnable,
-        config.temporal_awareness,
-        config.caveman_text_compression,
-        false,
-        config.language ?? undefined,
-        memory,
-        surface,
+    return renderVariant(reduce ? "primary/reduce" : "primary/no_reduce", inputs);
+}
+
+/**
+ * A hash over every model-facing string this build ships, so a wording change
+ * moves the digest: every guidance template and fragment in the definition
+ * (the tools-only texts included), every tool description and every parameter
+ * description. `checkTextRevisionCoversAssets` fails the run when a shipped
+ * guidance asset is not covered by it.
+ */
+function textRevision(): string {
+    return sha256Hex(
+        jcs({
+            texts: DEFINITION.texts,
+            descriptions: DEFINITION.descriptions,
+            parameters: DEFINITION.parameter_descriptions,
+        } as unknown as JsonObject),
     );
 }
 
-/** A hash over every model-facing string this build ships, so a wording change moves the digest. */
-function textRevision(): string {
-    const guidance: string[] = [];
-    for (const surface of ["full", "light"] as Surface[]) {
-        for (const reduce of [true, false]) {
-            guidance.push(
-                buildMagicContextSection(null, 0, reduce, true, true, false, false, undefined, true, surface),
-            );
+/**
+ * The Rust module's guidance.get assets, and the definition text each is
+ * rendered from at the example config. They are still served by guidance.get,
+ * so they must stay renderings of texts `text_revision` covers.
+ */
+const LEGACY_GUIDANCE_ASSETS: Record<string, string> = {
+    "guidance_primary.txt": "primary/reduce/full",
+    "guidance_light_primary.txt": "primary/reduce/light",
+    "guidance_no_reduce.txt": "primary/no_reduce/full",
+    "guidance_light_no_reduce.txt": "primary/no_reduce/light",
+};
+
+/** The definition's own files, every byte of which `text_revision` covers. */
+const DEFINITION_ASSETS = ["tool_catalog_v1.json", "catalog_tools_only.txt", "catalog_tools_only_light.txt"];
+
+/**
+ * Fail when the module ships a guidance asset `text_revision` does not cover:
+ * every file in the assets directory is part of the definition, or a
+ * guidance.get asset equal to a definition text rendered at the example config.
+ */
+function checkTextRevisionCoversAssets(): void {
+    for (const file of readdirSync(ASSETS)) {
+        if (DEFINITION_ASSETS.includes(file)) continue;
+        const text = LEGACY_GUIDANCE_ASSETS[file];
+        if (text === undefined) {
+            throw new Error(`assets/${file} is not covered by text_revision; add it to the definition`);
         }
-        guidance.push(
-            buildMagicContextSection(null, 0, true, false, false, false, true, undefined, false, surface),
-        );
+        const flags: TextFlags = {
+            memory: EXAMPLE_CONFIG.memory_enabled,
+            dreamer: EXAMPLE_CONFIG.dreamer_runnable,
+            temporal: EXAMPLE_CONFIG.temporal_awareness,
+            caveman: EXAMPLE_CONFIG.caveman_text_compression,
+            language: false,
+        };
+        const rendered = renderText(text, flags, { language_directive: "" });
+        if (readFileSync(join(ASSETS, file), "utf8") !== rendered) {
+            throw new Error(`assets/${file} is not the rendering of the definition's ${text}`);
+        }
     }
-    return sha256Hex(
-        jcs({
-            guidance,
-            descriptions: { full: FULL_DESCRIPTIONS, light: LIGHT_DESCRIPTIONS },
-            parameters: {
-                full: FULL_PARAMETER_DESCRIPTIONS as unknown as JsonObject,
-                light: LIGHT_PARAMETER_DESCRIPTIONS as unknown as JsonObject,
-            },
-        } as JsonObject),
-    );
+    for (const file of DEFINITION_ASSETS) {
+        if (!existsSync(join(ASSETS, file))) throw new Error(`assets/${file} is missing`);
+    }
 }
 
 function preflightDigest(
@@ -636,7 +819,7 @@ function answer(request: CatalogRequest, config: ResolvedConfig): JsonObject {
 function mcEntry(tools: ToolId[]): JsonObject {
     return {
         provider: MODULE_ID,
-        tools: [...tools].sort().map((name) => ({ name, capabilities: CAPABILITIES[name] })),
+        tools: [...tools].sort().map((name) => ({ name, capabilities: toolDefinition(name).capabilities })),
     };
 }
 
@@ -742,7 +925,6 @@ const EXAMPLES: Example[] = [
             composition: { providers: [AFT_HEAD, mcEntry(WITHOUT_REDUCE), PREFRONTAL_HEAD] },
             system_text: { preset: "tools-only", params: {} },
         },
-        rustAsset: "guidance_no_reduce.txt",
     },
     {
         // The surface comes from the frozen `model` param, looked up in the
@@ -754,15 +936,17 @@ const EXAMPLES: Example[] = [
             composition: { providers: [AFT_HEAD, mcEntry(WITHOUT_REDUCE), PREFRONTAL_HEAD] },
             system_text: { preset: "tools-only", params: { model: "anthropic/claude-haiku-4-5" } },
         },
-        rustAsset: "guidance_light_no_reduce.txt",
     },
 ];
 
-// ── Output ───────────────────────────────────────────────────────────────
+// ── Output ───────────────────────────────────────────────────────────────────────
 
-const REPO_ROOT = join(dirname(new URL(import.meta.url).pathname), "..", "..", "..");
+/** The guidance matrix's path, relative to this directory. */
+const MATRIX_PATH = "../../../crates/mc-module/testdata/tool-catalog-guidance-matrix.json";
 
 function outputs(): Map<string, string> {
+    checkDefinitionMatchesPlugin();
+    checkTextRevisionCoversAssets();
     const files = new Map<string, string>();
     for (const { name, request, rustAsset } of EXAMPLES) {
         const reply = answer(request, EXAMPLE_CONFIG);
@@ -771,7 +955,7 @@ function outputs(): Map<string, string> {
             if (problem) throw new Error(`${name}: capability tag ${tag}: ${problem}`);
         }
         if (rustAsset) {
-            const asset = readFileSync(join(REPO_ROOT, "crates/mc-module/assets", rustAsset), "utf8");
+            const asset = readFileSync(join(ASSETS, rustAsset), "utf8");
             const text = (reply.system_text as JsonObject | undefined)?.text;
             if (text !== asset) throw new Error(`${name}: text differs from ${rustAsset}`);
         }
@@ -785,6 +969,7 @@ function outputs(): Map<string, string> {
         "config.json",
         `${JSON.stringify({ config: EXAMPLE_CONFIG, text_revision: textRevision() }, null, 2)}\n`,
     );
+    files.set(MATRIX_PATH, `${JSON.stringify(guidanceMatrix(), null, 2)}\n`);
     return files;
 }
 

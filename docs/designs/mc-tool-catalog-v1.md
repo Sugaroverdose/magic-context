@@ -1,11 +1,14 @@
 # Magic Context's `tool.catalog` answer, v1
 
 Status: **plan, revised with the extensibility room's rulings (r2).** Every
-question the room was asked is decided (§7). No code is written. The example
-payloads in [`mc-tool-catalog-v1/`](mc-tool-catalog-v1/) are the exact bytes
-Magic Context will serve. They are regenerated, and checked against the
-plugin's shipped strings, the Rust module's guidance assets and the commons and
-prefrontal test vectors, by `bun docs/designs/mc-tool-catalog-v1/generate.ts --check`.
+question the room was asked is decided (§7). The Rust module serves
+`tool.catalog` and `role.describe` from the shared definition (§6), and does not
+yet declare `tool-provider/v1` (§8). The example payloads in
+[`mc-tool-catalog-v1/`](mc-tool-catalog-v1/) are the exact bytes Magic Context
+serves; the module's tests compare its answers with them byte for byte. They
+are regenerated, and checked against the plugin's shipped strings, the Rust
+module's guidance assets and the commons and prefrontal test vectors, by
+`bun docs/designs/mc-tool-catalog-v1/generate.ts --check`.
 
 ## Summary
 
@@ -45,16 +48,16 @@ prefrontal test vectors, by `bun docs/designs/mc-tool-catalog-v1/generate.ts --c
   a Thalamus restart (Claude Code). Under the frozen manifest, a deploy changes
   only new sessions. A head picks the change up at its next dead prefix, under the
   owner's default `on_prefix_rebuild` policy, at no extra cost.
-- **Parity.** The example texts for `primary`, its light surface, the no-reduce
-  variant and both `tools-only` surfaces are byte-identical to the Rust module's
-  four shipped guidance assets that Claude Code gets today, minus the date line.
+- **Parity.** The example texts for `primary`, its light surface and the
+  no-reduce variant are byte-identical to the Rust module's four shipped
+  guidance assets that Claude Code gets today, minus the date line. The
+  `tools-only` texts are new (§7.2).
   Tool descriptions match the plugin's, and one Rust description is missing a
   line. The argument schemas are reconciled: today the plugin and the Rust module
   advertise different structures, and this plan fixes one.
-- **Fourteen decisions, one item still open.** §7 records each ruling and who
-  made it. The one open item, found while applying the rulings, is that the
-  no-reduce text served under `tools-only` still describes Magic Context's own
-  compaction (§7.2).
+- **Fifteen decisions.** §7 records each ruling and who made it. The last,
+  found while applying the rulings, gives `tools-only` its own text, because
+  the no-reduce text describes Magic Context's own compaction (§7.2).
 
 ## 1. Sources
 
@@ -110,7 +113,7 @@ the same preset):
 |---|---|---|---|
 | `primary` | Magic Context compacts the session, and core runs it as a head or a mason. | All five tools; the stamping text when the composition lists `ctx_reduce`, the no-reduce text otherwise. | Every non-subagent session. |
 | `subagent` | Magic Context compacts the session, and core runs it as a bounded reader or a one-shot call. | All five tools; the short stamping text, or `text: ""` without `ctx_reduce` (§2.3). | `isSubagent` session metadata (`packages/plugin/src/hooks/magic-context/system-prompt-hash.ts:334-359`). |
-| `tools-only` | Another provider compacts the session, or none does, whatever its role. | Every tool except `ctx_reduce`; the no-reduce text, so no stamping and no self-tag guidance. | None: today Magic Context compacts every session it serves. |
+| `tools-only` | Another provider compacts the session, or none does, whatever its role. | Every tool except `ctx_reduce`; the tools-only text, which describes only the tools (§7.2). | None: today Magic Context compacts every session it serves. |
 | absent | | As `primary`. | |
 
 - **Who picks.** Core's plan builder, never Magic Context, which doesn't know a
@@ -127,11 +130,13 @@ the same preset):
   runner refuses the plan (FP vector
   `admission/refuse-fetched-tools-differ-from-composition`). The generator
   refuses such an example the same way.
-- **The text is the no-reduce text, unchanged.** `tools-only` with full
-  wording serves exactly the `no-reduce` example's text; with light wording,
-  the light no-reduce text. Every other input (memory, dreamer, temporal
-  awareness, caveman, language) resolves as for `primary`. §7.2 records what
-  that text still says about Magic Context's own compaction.
+- **The text is its own.** Under `tools-only` Magic Context puts nothing
+  into the conversation, so its text (`crates/mc-module/assets/catalog_tools_only.txt`
+  and its light twin) describes only `ctx_search`, `ctx_memory` and
+  `ctx_note`: no desk, tags, history, `<project-memory>` block or markings.
+  Memory (the `ctx_memory` paragraph) and language resolve as for `primary`;
+  dreamer, temporal awareness and caveman change nothing, because the
+  sentences they switch describe what Magic Context renders (§7.2).
 
 Any other preset is refused as `invalid_request {field: "preset"}`
 (`catalog-requests.json` in TPV). FP's vectors use `head` for Magic Context, but
@@ -291,7 +296,7 @@ All digests are SHA-256 written as 64 lowercase hex characters.
 | `schema_digest` | JCS of the structural schema: `description` removed from every schema object (TP §3; `catalog.rs:340-366,375-431`). |
 | `composition_digest` (top level and in `system_text`) | JCS of the request's `composition`, exactly as sent (TP §3; E line 151). Absent on a preflight call, which carries no composition. |
 | `system_text.item_digest` | The UTF-8 bytes of `text`. |
-| `system_text.preflight_digest` | JCS of `{format: "magic-context/preflight/1", preset, params, config, text_revision}`, where `preset` and `params` are the text item's, `config` is the resolved inputs listed in `mc-tool-catalog-v1/config.json`, and `text_revision` hashes every model-facing string the build ships. It doesn't depend on the composition. |
+| `system_text.preflight_digest` | JCS of `{format: "magic-context/preflight/1", preset, params, config, text_revision}`, where `preset` and `params` are the text item's, `config` is the resolved inputs listed in `mc-tool-catalog-v1/config.json`, and `text_revision` hashes every model-facing string the build ships: JCS of `{texts, descriptions, parameters}` from the shared definition, where `texts` is every guidance template and fragment, the two tools-only texts included. The generator fails when a guidance asset in `crates/mc-module/assets/` is not covered. It doesn't depend on the composition. |
 | `catalog_digest` | JCS of the answer without `generation` and `catalog_digest`: `composition_digest`, `tools` and `system_text` when present. A `digest_only` request with the same inputs gets the same value (TP §3). |
 | `generation` | Equal to `catalog_digest`, as AFT does. Opaque to consumers. |
 
@@ -303,10 +308,10 @@ still see it (§4).
 
 Magic Context serves the answer as its JCS bytes. The `.answer.jcs` files are
 those bytes; the `.answer.json` files are the same values pretty-printed for
-reading. The module's `serde_json` is built without `preserve_order`
-(`Cargo.toml:35`), so `serde_json::to_vec` of a `Value` writes sorted keys with
-no whitespace. For these payloads (strings, booleans, safe integers, no floats)
-that equals JCS. The implementation pins it with a byte test against these files.
+reading. The module writes them with `serde_jcs`, the RFC 8785 canonicaliser the
+tool-provider crate computes its digests with, so a composition holding floats
+or non-ASCII keys still hashes as JCS. Its tests compare each answer with these
+files byte for byte.
 
 The generator re-checks its JCS and structural-schema code on every run. It
 reproduces every vector without floats in TPV's `composition-digest.json` and
@@ -321,25 +326,26 @@ All examples resolve against one config (`mc-tool-catalog-v1/config.json`):
 compaction on, memory on, dreamer configured, temporal awareness on, caveman
 off, no language, `prompt_surface.default: full`, one model entry
 (`anthropic/claude-haiku-4-5` → `light`), no override. With those flags the
-texts equal the Rust module's shipped assets byte for byte
-(`crates/mc-module/assets/guidance_primary.txt`, `guidance_light_primary.txt`,
-`guidance_no_reduce.txt` and `guidance_light_no_reduce.txt`); the generator
-compares them on every run.
+`primary`, `primary-light` and `no-reduce` texts equal the Rust module's shipped
+assets byte for byte (`crates/mc-module/assets/guidance_primary.txt`,
+`guidance_light_primary.txt` and `guidance_no_reduce.txt`); the generator
+compares them on every run, and checks that `guidance_light_no_reduce.txt`,
+which no example uses, is the definition's light no-reduce text.
 
 | Example | Request | `catalog_digest` | Text (`item_digest`, UTF-8 bytes) |
 |---|---|---|---|
 | `preflight` | `primary`, no composition, no text | `4dbfd638576261155e2f10b6dddfbd16ba652da5529e8a978b0ca625e2a994f2` | none |
-| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` present, so the tagged text | `08b49224b8acad5de9ba43d70d29aef178f4bc3308264ba7eca63a72c044a719` | `ee720eeb…`, 6,016 |
+| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` present, so the tagged text | `428739ab99cf73e506c3b7813ac32481cec97b6d31565cfc55a3432b07baeeed` | `ee720eeb…`, 6,016 |
 | `primary-full.digest-only` | same, `digest_only: true` | same as above | none |
-| `primary-light` | `tool_descs: concise`, `surface: light` | `1f5c036cd08b37b7c5d147a06210ea61812ea0e8e15887335978ca1f15793467` | `f03cec64…`, 4,736 |
-| `subagent` | `subagent`, AFT and MC only | `0b43252389ff4c754e2c4601a711d4989e249f59bda59e347223e8a17455881a` | `561c5cb3…`, 2,249 |
-| `no-reduce` | `primary`, `exclude: ["ctx_reduce"]`; the composition lacks it | `8d72f840634e20c238065a08826dc7752ba6178c582502a923c53c31947458ee` | `80e42ffa…`, 4,221 |
-| `tools-only` | `tools-only`, no params; the composition lists Magic Context's four tools without `ctx_reduce` | `195c444bc7c282f1297d3399dd2a5e0043c4cb3adc57c6158c575958cf1b4b2c` | `80e42ffa…`, 4,221 |
-| `tools-only-light` | `tools-only`, `model: anthropic/claude-haiku-4-5` on both items, which the config maps to light | `b62c7fa43af3bd3cb6d2ac054841118fb10fac1131e3ec8ca03dc5d4faea8b2e` | `28470e78…`, 3,333 |
+| `primary-light` | `tool_descs: concise`, `surface: light` | `c1254019d4519db58510e863684e1a2ef040f953ae7e61ded5403a1fe4f33b9c` | `f03cec64…`, 4,736 |
+| `subagent` | `subagent`, AFT and MC only | `b0e33d2d121a0f987e4958692cc61882ace971413fc5267209aa69d8fd30f180` | `561c5cb3…`, 2,249 |
+| `no-reduce` | `primary`, `exclude: ["ctx_reduce"]`; the composition lacks it | `6024ae5637324c07d8966d301ce9ef32b9667d76fa96a089a995ec99f691bbae` | `80e42ffa…`, 4,221 |
+| `tools-only` | `tools-only`, no params; the composition lists Magic Context's four tools without `ctx_reduce` | `a0702af864d7696bd790f9f927820152cbbfc51e42f0e4682ddfdc9a37fd6265` | `73c67970…`, 802 |
+| `tools-only-light` | `tools-only`, `model: anthropic/claude-haiku-4-5` on both items, which the config maps to light | `d9e17c66d159a715d02cd3c318f748dffd4e40376f684ab4d9fa21c6da4d78c4` | `7ab35687…`, 675 |
 
-`tools-only` and `no-reduce` serve the same tools and the same text, yet differ
-in `catalog_digest`: `preflight_digest` covers the preset. The full and light
-`tools-only` examples differ in both the text and every tool description.
+`tools-only` and `no-reduce` serve the same tools but different texts
+(§7.2). The full and light `tools-only` examples differ in both the text and
+every tool description.
 
 Each example has `<name>.request.json`, `<name>.answer.json` and
 `<name>.answer.jcs`, plus `text/<name>.txt` holding the exact text with no
@@ -518,8 +524,11 @@ Gaps found while preparing this plan:
 
 The fix is one shipped definition read by both languages: tool structures,
 descriptions and guidance fragments in one asset set, as the Rust module already
-does for the four guidance assets. A golden test then pins these example files
-in both packages.
+does for the four guidance assets. That definition is
+`crates/mc-module/assets/tool_catalog_v1.json` with the two tools-only texts
+beside it. The module's `tool.catalog` serves from it, the generator builds
+these examples from it and checks it against the plugin's strings, and a golden
+test in the module pins these example files. The plugins do not read it yet.
 
 ## 7. Decisions
 
@@ -539,7 +548,7 @@ to r1's recommendation, so it stands as written.
    the session. *Ruled by the room:* the composition doesn't name the
    compaction provider. Core sends `primary` or `subagent` only when the plan's
    `compaction_item` names `magic-context`. Otherwise it sends a third v1
-   preset, `tools-only`: no `ctx_reduce`, the no-reduce text, and no stamping or
+   preset, `tools-only`: no `ctx_reduce`, its own text (§7.2), and no stamping or
    self-tag guidance. Core's plan builder refuses any other pairing (§2.1;
    examples `tools-only` and `tools-only-light`).
 3. **Sessions without `ctx_expand`, `ctx_search` or `ctx_note`.** The user
@@ -604,12 +613,21 @@ One item, found while applying decision 2. Owner and ruler: Magic Context.
   older work as `<session-history>`, and that `ctx_expand(message=N)` brings a
   cleared item back whole. Under `tools-only` another provider compacts, or
   none does, so those sentences describe machinery the session doesn't have.
-  *Decided:* `tools-only` gets its own text, built from the same fragments
-  without the compaction paragraphs, through the text split decision 3 already
-  requires. It is in place before Magic Context declares `tool-provider/v1`;
-  until then no session is served `tools-only`. The text is Magic Context's to
-  choose, since it reads only Magic Context's own entry, so the room needs no
-  ruling; it sees the bytes when the payloads are regenerated.
+  *Decided:* `tools-only` gets its own text. Magic Context renders nothing into
+  a `tools-only` session (no m0 or m1, no `<project-memory>`, no tags, markings
+  or clearing), so the text drops every sentence about those: the desk and its
+  tags, the long-term-partner frame, the history filing, the markings, the
+  caveman warning and the temporal markers. It keeps the `ctx_search` paragraph
+  without its pointer to filed history, the `ctx_note` tray, and a rewritten
+  `ctx_memory` paragraph that says pinned facts are recalled with `ctx_search`
+  rather than shown. It reuses the existing sentences where they are still
+  true and adds plain new ones where none is. The text is its own asset
+  (`crates/mc-module/assets/catalog_tools_only.txt` and
+  `catalog_tools_only_light.txt`); the examples `tools-only` and
+  `tools-only-light` show its bytes. It is in place before Magic Context
+  declares `tool-provider/v1`; until then no session is served `tools-only`.
+  The text is Magic Context's to choose, since it reads only Magic Context's
+  own entry, so the room needs no ruling.
 
 ## 8. What implementing this would touch
 
@@ -619,7 +637,10 @@ This section is for scoping only; the room isn't asked to approve it.
   (TP §2). The answer is built from the shared definition, the date moves to the
   head of m0 on runner-driven sessions, the `ctx_search` handler's default limit
   becomes 10, and `guidance.get` and `manifest.get` stay for legacy callers until
-  they retire.
+  they retire. Magic Context lists `tool-provider/v1` in its manifest's
+  `capabilities.provides` only in the slice that completes decision 3's text
+  split; until then callers reach `tool.catalog` and `role.describe` by name on
+  its tool route.
 - `packages/plugin` and `packages/pi-plugin`: read the same definition, and use
   the reconciled schemas.
 - Conformance: run `cortexkit-role-tool-provider-conformance` against the live
