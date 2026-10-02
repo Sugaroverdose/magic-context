@@ -1607,18 +1607,65 @@ pub struct TableCount {
 
 // ── Helpers ───────────────────────────────────────────────────
 
-/// Compute a normalized hash matching the plugin's dedup logic:
-/// lowercase → trim whitespace → hash as hex string.
-/// Uses std::hash for portability (no SHA crate in deps); the exact
-/// hash algorithm doesn't matter as long as it's consistent within
-/// the dashboard. The plugin uses its own Bun-based hash path.
-/// Match the plugin's `computeNormalizedHash`: lowercase → collapse whitespace → trim → MD5 hex.
+/// Match the plugin's `computeNormalizedHash` (`normalize-hash.ts`): lowercase,
+/// replace every JS `\s+` run with one space, trim, then MD5 hex. The whitespace
+/// set must be JavaScript's, not Rust's `char::is_whitespace`: the two disagree on
+/// U+0085 (Rust only) and U+FEFF (JS only), and any disagreement gives the same
+/// memory two hashes, which defeats the `UNIQUE(project_path, category,
+/// normalized_hash)` dedup the plugin relies on.
 fn normalize_hash(content: &str) -> String {
-    let normalized = content.to_lowercase();
-    // Collapse all whitespace runs into a single space (mirrors JS /\s+/g → " ")
-    let normalized: String = normalized.split_whitespace().collect::<Vec<_>>().join(" ");
+    let lowered = content.to_lowercase();
+    let normalized = lowered
+        .split(is_js_whitespace)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
     let digest = md5::compute(normalized.as_bytes());
     format!("{:032x}", digest)
+}
+
+/// The characters matched by a JavaScript regex `\s`: ECMAScript WhiteSpace
+/// (including U+FEFF and the Unicode `Zs` spaces) plus LineTerminator.
+fn is_js_whitespace(c: char) -> bool {
+    matches!(
+        c,
+        '\u{0009}'..='\u{000D}'
+            | '\u{0020}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
+    )
+}
+
+#[cfg(test)]
+mod normalize_hash_tests {
+    use super::normalize_hash;
+
+    #[test]
+    fn memory_hash_uses_the_plugin_whitespace_set() {
+        // Expected digests come from the plugin's own code path:
+        // createHash("md5").update(s.toLowerCase().replace(/\s+/g, " ").trim()).
+        // U+0085 is not JS whitespace, so it stays inside the word.
+        assert_eq!(
+            normalize_hash("a\u{0085}b"),
+            "7337d246dc3bfd7109e19d37193e7f19"
+        );
+        // U+FEFF is JS whitespace: it collapses and trims away.
+        assert_eq!(
+            normalize_hash("\u{FEFF}User  Prefers\u{00A0}Bun\u{FEFF}"),
+            "c35b4c1bcc1a2fabeb3e9efa7bac6597"
+        );
+        assert_eq!(
+            normalize_hash("x\u{2028}y\u{3000}z\t"),
+            "a0971f3c1fc2d4c967b3cd362cc29f48"
+        );
+    }
 }
 
 fn format_timestamp_iso(timestamp: i64) -> String {
