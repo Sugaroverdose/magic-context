@@ -183,6 +183,7 @@ export function getStaleCompiledSmartNotes(
             (note) =>
                 note.checkStatus === "compiled" &&
                 note.compiledCheck !== null &&
+                (note.checkQuarantinedUntil === null || note.checkQuarantinedUntil <= now) &&
                 note.policyVersion === SMART_NOTE_CHECK_POLICY_VERSION &&
                 note.checkFalseSinceAt !== null &&
                 note.checkFalseSinceAt <= staleBefore &&
@@ -278,10 +279,12 @@ export function markCompiledCheckNetworkFailure(
     noteId: number,
     now: number,
     maxFailures: number,
+    retryAt?: number,
 ): void {
     const failureCount = readFailureCount(db, noteId, "check_network_failure_count") + 1;
-    const quarantinedUntil = now + backoffMs(failureCount);
-    const status: NoteCheckStatus = failureCount >= maxFailures ? "failing" : "compiled";
+    const quarantinedUntil = Math.max(now + backoffMs(failureCount), retryAt ?? 0);
+    const status: NoteCheckStatus =
+        retryAt === undefined && failureCount >= maxFailures ? "failing" : "compiled";
     db.prepare(
         `UPDATE notes
          SET check_network_failure_count = ?,
@@ -320,15 +323,19 @@ export function markSmartNoteCompilationFailure(
     error: string,
     persistent: boolean,
     fallbackSessionId?: string,
+    retryAt?: number,
 ): void {
     db.transaction(() => {
         const failureCount = readFailureCount(db, noteId, "check_failure_count") + 1;
         const status: NoteCheckStatus = persistent
             ? "uncompiled"
-            : failureCount >= maxFailures
+            : retryAt === undefined && failureCount >= maxFailures
               ? "fallback"
               : "uncompiled";
-        const nextDueAt = now + (persistent ? 7 * 24 * 60 * 60 * 1_000 : backoffMs(failureCount));
+        const nextDueAt = Math.max(
+            now + (persistent ? 7 * 24 * 60 * 60 * 1_000 : backoffMs(failureCount)),
+            retryAt ?? 0,
+        );
         db.prepare(
             `UPDATE notes
          SET check_failure_count = ?,
@@ -347,7 +354,7 @@ export function markSmartNoteCompilationFailure(
             now,
             noteId,
         );
-        if (persistent || failureCount >= maxFailures) {
+        if (persistent || (retryAt === undefined && failureCount >= maxFailures)) {
             const source = db
                 .prepare(
                     "SELECT session_id, surface_condition FROM notes WHERE id = ? AND type = 'smart'",

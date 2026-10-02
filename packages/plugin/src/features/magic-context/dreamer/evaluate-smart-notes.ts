@@ -20,6 +20,7 @@ import {
     getSmartNotesNeedingCompilation,
     getStaleCompiledSmartNotes,
     markCompiledCheckFalse,
+    markCompiledCheckNetworkFailure,
     markSmartNoteCheckStatus,
     markSmartNoteCompilationFailure,
     markSmartNoteLivenessChecked,
@@ -298,6 +299,7 @@ async function compileNote(
                         result.error,
                         result.persistent,
                         args.parentSessionId,
+                        result.retryAt,
                     );
                 },
             });
@@ -381,6 +383,24 @@ async function runLivenessCheck(
                 );
             } else if (result.ok && nextDueAt !== null) {
                 markCompiledCheckFalse(args.db, note.id, nextDueAt, now);
+            } else if (!result.ok && result.persistent) {
+                markSmartNoteCompilationFailure(
+                    args.db,
+                    note.id,
+                    now,
+                    MAX_COMPILATION_FAILURES,
+                    result.error,
+                    true,
+                    args.parentSessionId,
+                );
+            } else if (!result.ok && result.retryAt !== undefined) {
+                markCompiledCheckNetworkFailure(
+                    args.db,
+                    note.id,
+                    now,
+                    MAX_COMPILATION_FAILURES,
+                    result.retryAt,
+                );
             } else if (!result.ok && !result.network) {
                 markSmartNoteCheckStatus(args.db, note.id, "failing", now);
             }
