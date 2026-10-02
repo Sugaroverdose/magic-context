@@ -1955,7 +1955,7 @@ export async function unifiedSearch(
 ): Promise<UnifiedSearchResult[]> {
     const trimmedQuery = query.trim();
     const measurementStartedAt = Date.now();
-    if (trimmedQuery.length === 0) {
+    if (trimmedQuery.length === 0 || options.signal?.aborted) {
         return [];
     }
 
@@ -2029,6 +2029,7 @@ export async function unifiedSearch(
     // before the embed fetch is processed, and the embedding HTTP request
     // doesn't actually leave the process until we await later.
     await Promise.resolve();
+    if (options.signal?.aborted) return [];
 
     // Run the synchronous message-FTS SELECT now that the embed fetch is
     // in flight. Message indexing is event-driven and never runs here;
@@ -2054,6 +2055,9 @@ export async function unifiedSearch(
     // Wait for the single embed call (if any) and then run the two
     // embedding-dependent searches in parallel using the same vector.
     const capturedQuery = await queryEmbeddingPromise;
+    // A provider may ignore cancellation and resolve after the hint deadline.
+    // Do not turn that late vector into another synchronous database scan.
+    if (options.signal?.aborted) return [];
     const embeddingSnapshot = getProjectEmbeddingSnapshot(projectPath);
     const queryContract =
         capturedQuery instanceof Float32Array || capturedQuery === null ? null : capturedQuery;

@@ -56,6 +56,7 @@ export interface PerfPassReport {
 	serializationMs: number;
 	deferredDrainMs: number;
 	deferredDb: DatabaseTiming;
+	dbQueries: ReturnType<ReturnType<typeof createDatabaseTimer>["queries"]>;
 }
 
 export interface PerfRunReport {
@@ -173,7 +174,11 @@ async function main(): Promise<void> {
 			: undefined,
 		autoSearch:
 			options.lane === "auto-search-sticky"
-				? { enabled: true, minPromptChars: Number.MAX_SAFE_INTEGER }
+				? {
+						enabled: true,
+						minPromptChars: Number.MAX_SAFE_INTEGER,
+						scoreThreshold: 0.55,
+					}
 				: undefined,
 	});
 	const handler = handlers.get("context");
@@ -220,7 +225,10 @@ async function main(): Promise<void> {
 				| undefined;
 			const output = result?.messages ?? event.messages;
 			if (options.wireOutput)
-				writeFileSync(`${resolve(options.wireOutput)}-${index + 1}.json`, JSON.stringify(output));
+				writeFileSync(
+					`${resolve(options.wireOutput)}-${index + 1}.json`,
+					JSON.stringify(output),
+				);
 			const transformError = rawDb
 				.prepare(
 					"SELECT last_transform_error AS error FROM session_meta WHERE session_id = ?",
@@ -257,12 +265,13 @@ async function main(): Promise<void> {
 				serializationMs,
 				deferredDrainMs,
 				deferredDb,
+				dbQueries: dbTimer.queries(),
 			});
 		}
 	} finally {
 		restoreObserver();
 		clearContextHandlerSession(fixture.sessionId);
-		rawDb.close(false);
+		rawDb.close();
 		rmSync(dataDir, { recursive: true, force: true });
 	}
 
