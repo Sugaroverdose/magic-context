@@ -93,6 +93,10 @@ const fencedSources: Array<{ path: string; sites: string[]; reporterCalls?: stri
 
 const nonBeginCoveredSites: Array<{ path: string; site: string }> = [
     {
+        path: "packages/plugin/src/hooks/magic-context/lkg-persist.ts",
+        site: "lkg_stale_gc",
+    },
+    {
         path: "packages/plugin/src/hooks/magic-context/compartment-runner-incremental.ts",
         site: "historian-publish",
     },

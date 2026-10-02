@@ -56,6 +56,25 @@ describe("LKG durable write discipline", () => {
         }
     });
 
+    it("bounds LKG pruning to 25 slices and resumes orphan cleanup without a replayable partial prefix", () => {
+        const { db, raw } = fixture();
+        try {
+            saveLkgSlotToDb(db, "large-old", { ...slot, jsonPrefix: "x".repeat(60 * 65536) });
+            const count = () =>
+                (raw.query("SELECT COUNT(*) AS n FROM lkg_slot_chunks").get() as { n: number }).n;
+            expect(count()).toBe(60);
+            expect(pruneStaleLkgSlots(db, 20 * 86400000)).toBe(1);
+            expect(count()).toBe(35);
+            expect(loadPersistedLkgSlot(db, "large-old")).toBeUndefined();
+            expect(pruneStaleLkgSlots(db, 20 * 86400000)).toBe(0);
+            expect(count()).toBe(10);
+            expect(pruneStaleLkgSlots(db, 20 * 86400000)).toBe(0);
+            expect(count()).toBe(0);
+        } finally {
+            raw.close();
+        }
+    });
+
     it("prunes old slots but keeps recent captures and recent session bindings", () => {
         const { db, raw } = fixture();
         try {

@@ -81,8 +81,9 @@ function ensureBackfillStateTable(db: Database): void {
 }
 
 function withImmediateTransaction<T>(db: Database, fn: () => T): T {
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    // BEGIN has acquired the write lock; exclude time waiting for other writers.
+    const transactionStartedAt = performance.now();
     try {
         const result = fn();
         db.exec("COMMIT");

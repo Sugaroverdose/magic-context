@@ -50,6 +50,26 @@ afterEach(() => {
 });
 
 describe("message FTS rowid map", () => {
+    test("caps a maintenance transaction at 100 FTS rows even for oversized requests", () => {
+        const db = createDb();
+        try {
+            insertLegacyFtsRows(db, 250);
+            expect(backfillMessageFtsRowidMapBatch(db, 100000)).toMatchObject({
+                processed: 100,
+                completed: false,
+            });
+            expect(backfillMessageFtsRowidMapBatch(db)).toMatchObject({
+                processed: 100,
+                completed: false,
+            });
+            expect(backfillMessageFtsRowidMapBatch(db)).toMatchObject({
+                processed: 50,
+                completed: true,
+            });
+        } finally {
+            closeQuietly(db);
+        }
+    });
     test("backfills bounded windows and resumes from the persisted watermark after restart", () => {
         const directory = createTestTempDirFromPath(join(tmpdir(), "message-fts-rowid-map-"));
         tempDirectories.push(directory);

@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { spawn } from "node:child_process";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -86,6 +87,58 @@ describe("Pi context handler LKG replay", () => {
 		resetEmergencyRecoveryRegistryForTest();
 		for (const dir of tempDirs) rmSync(dir, { recursive: true, force: true });
 		tempDirs.length = 0;
+	});
+
+	it("admits first Pi turns during bounded background holds without a saved request", async () => {
+		const dir = createTestTempDirFromPath(join(tmpdir(), "pi-bounded-writer-"));
+		tempDirs.push(dir);
+		const path = join(dir, "context.db");
+		const db = createTestDb(path);
+		let refused = 0;
+		try {
+			for (let trial = 0; trial < 3; trial++) {
+				const sessionId = `pi-bounded-${trial}`;
+				sessions.add(sessionId);
+				updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
+				db.exec("PRAGMA busy_timeout=0");
+				const host = contextHost();
+				const handler = handlerFor(db, host);
+				// A separate process can release the lock while the main thread waits
+				// synchronously in SQLite. A timer on this thread could not do that.
+				const writer = spawn(
+					process.execPath,
+					[
+						"-e",
+						`import { Database } from 'bun:sqlite';
+					const db = new Database(${JSON.stringify(path)});
+					db.exec('BEGIN IMMEDIATE'); console.log('locked');
+					setTimeout(() => { db.exec('COMMIT'); db.close(); }, 80);`,
+					],
+					{ stdio: ["ignore", "pipe", "pipe"], windowsHide: true },
+				);
+				const exited = new Promise<void>((resolve, reject) => {
+					writer.once("error", reject);
+					writer.once("exit", (code) =>
+						code === 0 ? resolve() : reject(new Error(`writer exit ${code}`)),
+					);
+				});
+				try {
+					await new Promise<void>((resolve, reject) => {
+						writer.stdout.once("data", () => resolve());
+						writer.once("error", reject);
+					});
+					const raw = [userMessage(`first turn ${trial}`, 1)];
+					const ctx = fakeContext(sessionId, dir, ["entry-1"], raw);
+					await host.emit(handler as never, raw, ctx);
+					if (host.controller.signal.aborted) refused++;
+				} finally {
+					await exited;
+				}
+			}
+			expect(refused).toBe(0);
+		} finally {
+			closeQuietly(db);
+		}
 	});
 
 	for (const emergency of [true, false]) {
@@ -404,9 +457,9 @@ describe("Pi context handler LKG replay", () => {
 				await expect(
 					runPass(handler, sessionId, editedRaw, ["entry-u1-edited"]),
 				).rejects.toMatchObject({ code: "PI_STORAGE_BUSY" });
-				expect(logLines).toContain("raw_fallback_refused completeness=partial");
+
 				expect(logLines).toContain(
-					"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_invalidated_reshape); checking raw 1-message input",
+					"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_invalidated_reshape); refusing unreduced 1-message input",
 				);
 			} finally {
 				locker.exec("ROLLBACK");
@@ -447,9 +500,9 @@ describe("Pi context handler LKG replay", () => {
 				["entry-u1", "entry-a1"],
 			);
 			await expect(replay).rejects.toMatchObject({ code: "PI_STORAGE_BUSY" });
-			expect(logLines).toContain("raw_fallback_refused completeness=partial");
+
 			expect(logLines).toContain(
-				"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_miss); checking raw 2-message input",
+				"TRANSIENT STORAGE FAILURE SQLITE_BUSY: LKG unavailable (lkg_miss); refusing unreduced 2-message input",
 			);
 		} finally {
 			if (locker.inTransaction) locker.exec("ROLLBACK");
