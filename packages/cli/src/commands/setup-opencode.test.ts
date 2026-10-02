@@ -8,6 +8,7 @@ import {
     addPluginToOpenCodeConfig,
     addPluginToTuiConfig,
     applyOpenCodeSetupConfigs,
+    findDcpPluginEntries,
     findDcpPluginIndexes,
     writeMagicContextConfig,
 } from "./setup-opencode";
@@ -515,5 +516,20 @@ describe("setup-opencode relative development checkout", () => {
             process.chdir(originalCwd);
         }
         expect(readFileSync(path, "utf-8")).toBe(original);
+    });
+});
+
+describe("setup-opencode DCP detection across plugin keys", () => {
+    it("finds opencode-dcp registered under the OpenCode 2 `plugins` key", () => {
+        expect(
+            findDcpPluginEntries({
+                plugin: ["@cortexkit/opencode-magic-context@latest"],
+                plugins: [{ package: "@tarquinen/opencode-dcp@latest" }],
+            }),
+        ).toEqual([{ package: "@tarquinen/opencode-dcp@latest" }]);
+        expect(findDcpPluginEntries({ plugin: ["@tarquinen/opencode-dcp"] })).toEqual([
+            "@tarquinen/opencode-dcp",
+        ]);
+        expect(findDcpPluginEntries({ plugins: ["other"] })).toEqual([]);
     });
 });

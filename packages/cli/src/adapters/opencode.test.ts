@@ -97,6 +97,31 @@ describe("OpenCodeAdapter registration keys across host generations", () => {
         expect(read()).toEqual({ plugin: ["@cortexkit/opencode-magic-context@latest"] });
     });
 
+    test("removal keeps comments inside and around the plugin array", async () => {
+        mkdirSync(join(root, "opencode"), { recursive: true });
+        writeFileSync(
+            configPath,
+            `{
+  // plugins I use
+  "plugin": [
+    // theme first
+    "other",
+    "@cortexkit/opencode-magic-context@latest",
+    "third" // keep me
+  ]
+}
+`,
+        );
+        const adapter = new OpenCodeAdapter({ hostGeneration: "v1" });
+        const result = await adapter.removePluginEntry();
+        expect(result.action).toBe("updated");
+        const text = readFileSync(configPath, "utf-8");
+        for (const comment of ["// plugins I use", "// theme first", "// keep me"]) {
+            expect(text).toContain(comment);
+        }
+        expect(text).not.toContain("opencode-magic-context");
+    });
+
     test("removal drops the entry from whichever key holds it", async () => {
         write({ plugins: ["other", "@cortexkit/opencode-magic-context@latest"] });
         const adapter = new OpenCodeAdapter({ hostGeneration: "v2" });

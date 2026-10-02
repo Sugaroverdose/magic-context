@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, parse as parsePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { removeJsoncArrayEntries } from "@magic-context/core/shared/jsonc-edit";
 import {
     type OpenCodeHostGeneration,
     openCodeHostGenerationFromVersion,
@@ -14,6 +15,7 @@ import {
     removeOpenCodeV2PluginCacheSlot,
 } from "../commands/doctor-opencode2-cache";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { readJsoncTextForEdit } from "../lib/jsonc-config";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { getOpenCodeVersion } from "../lib/opencode-helpers";
 import {
@@ -243,13 +245,18 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     configPath: target,
                 };
             }
+            // Edit the text rather than re-serializing the parsed config, so
+            // comments inside the plugin arrays survive the removal.
+            const document = readJsoncTextForEdit(target);
+            let text = document.text;
             let removed = false;
             for (const key of ["plugin", "plugins"] as const) {
-                const list = cfg[key];
-                if (!Array.isArray(list)) continue;
-                const kept = list.filter((e) => !matchesPluginEntry(e, PLUGIN_NAME));
-                if (kept.length !== list.length) {
-                    cfg[key] = kept;
+                if (!Array.isArray(cfg[key])) continue;
+                const result = removeJsoncArrayEntries(text, [key], (entry) =>
+                    matchesPluginEntry(entry, PLUGIN_NAME),
+                );
+                if (result.removed) {
+                    text = result.text;
                     removed = true;
                 }
             }
@@ -261,7 +268,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     configPath: target,
                 };
             }
-            writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
+            writeFileAtomic(target, document.bom + text);
             return {
                 ok: true,
                 action: "updated",

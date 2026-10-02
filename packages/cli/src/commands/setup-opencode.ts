@@ -1,4 +1,4 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename, dirname } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { isCompactionEnabled } from "@magic-context/core/config/agent-disable";
@@ -30,6 +30,7 @@ import {
     assertJsoncConfigsParseable,
     editableChild,
     readJsoncConfigForUpdate,
+    readJsoncTextForEdit,
     readMagicContextConfigForSetup,
 } from "../lib/jsonc-config";
 import { pickModel } from "../lib/model-picker";
@@ -72,20 +73,6 @@ function resolveCompactionEnabledForWriter(): boolean {
 }
 
 // ─── Helpers ──────────────────────────────────────────────
-
-const BYTE_ORDER_MARK = "\uFEFF";
-
-/**
- * Read a JSONC file for byte-preserving edits. comment-json accepts a leading
- * UTF-8 byte-order mark but the text editor's parser rejects it, so the mark
- * is split off for the edit and put back on write.
- */
-function readJsoncTextForEdit(configPath: string): { bom: string; text: string } {
-    const raw = readFileSync(configPath, "utf-8");
-    return raw.startsWith(BYTE_ORDER_MARK)
-        ? { bom: BYTE_ORDER_MARK, text: raw.slice(BYTE_ORDER_MARK.length) }
-        : { bom: "", text: raw };
-}
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -257,6 +244,13 @@ export function addPluginToTuiConfig(configPath: string, _format: "json" | "json
     if (text !== null) writeFileAtomic(configPath, text);
 }
 
+/** opencode-dcp registrations under either plugin key (OpenCode 2 loads both). */
+export function findDcpPluginEntries(config: Record<string, unknown>): unknown[] {
+    return readPluginEntries(config)
+        .map(({ entry }) => entry)
+        .filter((entry) => matchesPluginEntry(entry, DCP_PLUGIN_NAME));
+}
+
 export function findDcpPluginIndexes(plugins: unknown[]): number[] {
     return plugins
         .map((plugin, index) => (matchesPluginEntry(plugin, DCP_PLUGIN_NAME) ? index : -1))
@@ -272,12 +266,10 @@ async function resolveDcpConflictBeforeSetup(
     format: "json" | "jsonc" | "none",
 ): Promise<boolean> {
     if (format === "none") return false;
-    const ocConfig = readJsoncConfigForUpdate(configPath);
-    const plugins = Array.isArray(ocConfig.plugin) ? ocConfig.plugin : [];
-    const dcpIndexes = findDcpPluginIndexes(plugins);
-    if (dcpIndexes.length === 0) return false;
+    const dcpEntries = findDcpPluginEntries(readJsoncConfigForUpdate(configPath));
+    if (dcpEntries.length === 0) return false;
 
-    log.warn(`Found conflicting plugin: ${pluginEntryName(plugins[dcpIndexes[0]])}`);
+    log.warn(`Found conflicting plugin: ${pluginEntryName(dcpEntries[0])}`);
     log.message(
         "opencode-dcp (Dynamic Context Pruning) and Magic Context both manage context.\n" +
             "Running both simultaneously will cause unpredictable behavior.",

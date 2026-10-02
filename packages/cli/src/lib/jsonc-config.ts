@@ -78,6 +78,20 @@ export function readJsoncConfigForUpdate(path: string): Record<string, unknown> 
     return result.value;
 }
 
+const BYTE_ORDER_MARK = "\uFEFF";
+
+/**
+ * Read a JSONC file for byte-preserving edits. comment-json accepts a leading
+ * UTF-8 byte-order mark but the text editor's parser rejects it, so the mark
+ * is split off for the edit; callers write `bom + text` back.
+ */
+export function readJsoncTextForEdit(configPath: string): { bom: string; text: string } {
+    const raw = readFileSync(configPath, "utf-8");
+    return raw.startsWith(BYTE_ORDER_MARK)
+        ? { bom: BYTE_ORDER_MARK, text: raw.slice(BYTE_ORDER_MARK.length) }
+        : { bom: "", text: raw };
+}
+
 export function assertJsoncConfigsParseable(paths: readonly string[]): void {
     for (const path of paths) {
         const result = readJsoncConfig(path);
