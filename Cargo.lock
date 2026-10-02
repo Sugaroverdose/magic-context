@@ -221,9 +221,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-tool-provider"
-version = "0.4.3"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4208474cb997f706715bf0aca22c8357dbc31d59b647be8208de374871a29540"
+checksum = "068c305434e881773a662aab07193edae5a961b82bbf409712a01aa093af2a23"
 dependencies = [
  "serde",
  "serde_jcs",
@@ -234,9 +234,9 @@ dependencies = [
 
 [[package]]
 name = "cortexkit-role-tool-provider-conformance"
-version = "0.4.3"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "828df20333562ffeffba4d55be58af6c63045eacfb13b10faac380aaa109973c"
+checksum = "1bfed5e7ef0f6ed1db0f5a349eab687fb76502f2901e0888f6f122113cc91d04"
 dependencies = [
  "async-trait",
  "cortexkit-role-harness",
@@ -1084,7 +1084,7 @@ dependencies = [
 
 [[package]]
 name = "subc-client-rs"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -1100,7 +1100,7 @@ dependencies = [
 
 [[package]]
 name = "subc-control"
-version = "0.26.0"
+version = "0.27.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -1109,7 +1109,7 @@ dependencies = [
 
 [[package]]
 name = "subc-core"
-version = "0.20.49"
+version = "0.20.50"
 dependencies = [
  "base64",
  "cortexkit-log 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
@@ -1135,7 +1135,7 @@ dependencies = [
 
 [[package]]
 name = "subc-daemon"
-version = "0.28.1"
+version = "0.29.0"
 dependencies = [
  "cortexkit-log 0.3.4 (registry+https://github.com/rust-lang/crates.io-index)",
  "cortexkit-paths",
