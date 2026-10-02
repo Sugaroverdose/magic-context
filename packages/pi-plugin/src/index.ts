@@ -54,7 +54,6 @@ import {
 	resolveProjectIdentityForSession,
 	setHomeProjectPermission,
 } from "@magic-context/core/features/magic-context/memory/project-identity";
-import { scheduleIncrementalIndex } from "@magic-context/core/features/magic-context/message-index-async";
 import { detectOverflow } from "@magic-context/core/features/magic-context/overflow-detection";
 import { resolveSessionCacheTtl } from "@magic-context/core/features/magic-context/session-cache-ttl";
 import { runSessionProjectBackfill } from "@magic-context/core/features/magic-context/session-project-backfill";
@@ -182,6 +181,7 @@ import {
 	unregisterPiProjectEmbeddings,
 } from "./embedding-bootstrap";
 import { registerPiFailClosedSurface } from "./fail-closed-pi";
+import { schedulePiAssistantIndexOnMessageEnd } from "./message-end-index-pi";
 import {
 	describeInertEmergencyDrainLatch,
 	emptyPiModelChainsKey,
@@ -2731,24 +2731,18 @@ async function startPiMagicContextRuntime(
 			const sessionId = sm?.getSessionId?.();
 			if (typeof sessionId !== "string" || sessionId.length === 0) return;
 			const endedMsg = event.message as unknown as {
-				id?: string;
-				role?: string;
 				timestamp?: number;
 			};
 			observePiMessageActivity(db, sessionId, endedMsg?.timestamp);
-			if (
-				endedMsg?.role === "assistant" &&
-				typeof endedMsg.id === "string" &&
-				endedMsg.id.length > 0
-			) {
-				const messageId = endedMsg.id;
-				scheduleIncrementalIndex(db, sessionId, messageId, () => {
-					const rawMessages = readPiSessionMessages(ctx);
-					return (
-						rawMessages.find((message) => message.id === messageId) ?? null
-					);
-				});
-			}
+			schedulePiAssistantIndexOnMessageEnd(db, sessionId, event.message, {
+				readBranch: () => {
+					const branch = (
+						ctx.sessionManager as { getBranch?: () => unknown[] } | undefined
+					)?.getBranch?.();
+					return Array.isArray(branch) ? branch : undefined;
+				},
+				readMessages: () => readPiSessionMessages(ctx),
+			});
 			persistPiMessageEndModelMeta({
 				db,
 				sessionId,
