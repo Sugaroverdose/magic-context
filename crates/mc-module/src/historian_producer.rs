@@ -1021,6 +1021,8 @@ impl HistorianProducer {
             admission_facts: None,
             // Historian routes carry no session scope; they run under the module's own identity.
             scope: None,
+            // The historian runner is not a versioned role route.
+            role_versions: None,
         };
         let corr = self.next_corr();
         let body = serde_json::to_vec(&request)?;
