@@ -1,5 +1,6 @@
 import type { Database } from "../../shared/sqlite";
 import { deleteChunkEmbedBackoffForSession } from "./compartment-chunk-embedding";
+import { deleteUnmappedMessageFtsRows } from "./message-fts-rowid-map";
 import { deleteSessionActivity } from "./session-activity";
 
 export interface SessionScopedTableDefinition {
@@ -112,6 +113,7 @@ export function deleteSessionScopedRows(
                      WHERE session_id IN (${placeholders})
                  )`,
             ).run(...deletableSessionIds);
+            deleteUnmappedMessageFtsRows(db, deletableSessionIds);
             continue;
         }
 

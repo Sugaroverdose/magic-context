@@ -265,3 +265,26 @@ export function getMessageFtsRowidMapBackfillProgress(
 ): MessageFtsRowidMapBackfillProgress {
     return getBackfillState(db);
 }
+
+/**
+ * Delete the FTS rows of whole sessions that the rowid map cannot reach yet.
+ *
+ * Whole-session clears delete FTS rows through `message_fts_rowid_map`. Rows
+ * written before the map existed get their map entry only when the bounded
+ * backfill reaches them, and the backfill walks rowids in ascending order, so
+ * every such unmapped row sits above its watermark. Until the backfill
+ * completes, a clear also sweeps that rowid range for the sessions; otherwise
+ * the rows outlive the clear, get mapped later, and surface in search as stale
+ * duplicates forever, even after the session is deleted. The rowid bound keeps
+ * the sweep to the part of the table the backfill has not reached.
+ */
+export function deleteUnmappedMessageFtsRows(db: Database, sessionIds: readonly string[]): void {
+    if (sessionIds.length === 0) return;
+    const state = getBackfillState(db);
+    if (state.completed) return;
+    const placeholders = sessionIds.map(() => "?").join(", ");
+    db.prepare(
+        `DELETE FROM message_history_fts
+         WHERE rowid > ? AND session_id IN (${placeholders})`,
+    ).run(state.watermarkRowid, ...sessionIds);
+}
