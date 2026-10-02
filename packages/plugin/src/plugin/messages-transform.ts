@@ -20,6 +20,7 @@ import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallbac
 import {
     noteExternalLkgReplay,
     resolveRustLkgReplayParticipant,
+    rustAdapterHasRunSession,
 } from "../hooks/magic-context/rust-lkg-freeze-registry";
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
 import type { MessageLike } from "../hooks/magic-context/transform-operations";
@@ -504,6 +505,21 @@ export function createMessagesTransformHandler(args: {
             const message = error instanceof Error ? error.message : String(error);
             const isTransient =
                 isTransientSqliteError(error) || error instanceof StorageBusyRefusalError;
+            if (
+                !args.compactionOff &&
+                !isTransient &&
+                sessionId &&
+                rustAdapterHasRunSession(sessionId)
+            ) {
+                // A Rust-mode session whose pass failed and whose last-known-good replay
+                // could not serve. Passing the input through unchanged would send the
+                // raw history, which can be far larger than the window and, while the
+                // adapter is frozen, rewrites bytes the provider holds. Refuse instead.
+                // TypeScript-mode sessions keep their fail-open handling below.
+                throw new DegradedPassRefusalError("rust-mode-transform-failed", {
+                    cause: error,
+                });
+            }
 
             if (isTransient) {
                 if (!args.compactionOff) {

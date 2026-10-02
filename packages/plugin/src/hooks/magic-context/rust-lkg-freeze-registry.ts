@@ -87,6 +87,14 @@ export function resolveRustLkgReplayParticipant(
     return alive.length === 1 ? alive[0] : undefined;
 }
 
+/** True when a live Rust adapter has run a pass for this session in this process. */
+export function rustAdapterHasRunSession(sessionId: string): boolean {
+    for (const ref of participants) {
+        if (ref.deref()?.lastPassStamp(sessionId) !== undefined) return true;
+    }
+    return false;
+}
+
 /** How many adapters are registered and still alive (for tests). */
 export function liveRustLkgReplayParticipantCountForTest(): number {
     let count = 0;

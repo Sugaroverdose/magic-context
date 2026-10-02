@@ -34,6 +34,7 @@ import { createMessagesTransformHandler } from "../../plugin/messages-transform"
 import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { DegradedPassRefusalError } from "./degraded-pass-refusal";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import { resolveTrustedContextLimit } from "./event-resolvers";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
@@ -235,22 +236,27 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         await transform.run(sessionId, input, output, meta());
         return structuredClone(output.messages);
     };
-    let hookBusy = false;
+    let hookFailure: (() => Error) | null = null;
     const handler = createMessagesTransformHandler({
         magicContext: {
             "experimental.chat.messages.transform": async (_input, output) => {
-                if (hookBusy) {
-                    hookBusy = false;
-                    throw sqliteBusy();
+                if (hookFailure) {
+                    const failure = hookFailure;
+                    hookFailure = null;
+                    throw failure();
                 }
                 const messages = output.messages as unknown as MessageLike[];
                 await transform.run(sessionId, messages, output, meta());
             },
         },
     });
-    /** One pass through the wrapper. `"hook-busy"` fails the hook before the adapter runs. */
-    const runWrapped = async (input: MessageLike[], step?: Step | "hook-busy") => {
-        if (step === "hook-busy") hookBusy = true;
+    /**
+     * One pass through the wrapper. `"hook-busy"` fails the hook with a SQLite busy
+     * error before the adapter runs; `"hook-error"` with an ordinary error.
+     */
+    const runWrapped = async (input: MessageLike[], step?: Step | "hook-busy" | "hook-error") => {
+        if (step === "hook-busy") hookFailure = sqliteBusy;
+        else if (step === "hook-error") hookFailure = () => new Error("transform bug");
         else if (step !== undefined) script.push(step);
         lastInput = input;
         const output = { messages: [...input] };
@@ -844,6 +850,34 @@ describe("the frozen path validates the array it serves", () => {
         } finally {
             logSpy.mockRestore();
         }
+    });
+});
+
+describe("the wrapper never sends a Rust session's raw input with compaction on", () => {
+    it("an ordinary failure whose replay cannot serve refuses instead of passing the input through", async () => {
+        const s = frozenSession("wrapper-no-raw");
+        const sid = s.sessionId;
+        const { conversation } = await freezeWithTwoDefers(s);
+        const before = s.frozenFields();
+        // Emergency recovery blocks the wrapper's replay, and the wrapper must not
+        // hand the raw input back instead while the adapter stays frozen.
+        s.armEmergency();
+        conversation.push(assistant(sid, "a4"), user(sid, "m5", "turn 5"));
+        await expect(s.runWrapped([...conversation], "hook-error")).rejects.toBeInstanceOf(
+            DegradedPassRefusalError,
+        );
+        expect(s.frozenFields()).toEqual(before);
+    });
+
+    it("an ordinary failure with a replay that serves still replays", async () => {
+        const s = frozenSession("wrapper-replays-on-error");
+        const sid = s.sessionId;
+        const conversation: MessageLike[] = [user(sid, "m1", "question")];
+        await s.runWrapped([...conversation], "HARD");
+        conversation.push(assistant(sid, "a1"), user(sid, "m2", "turn 2"));
+        const replayed = await s.runWrapped([...conversation], "hook-error");
+        expect(sha(replayed)).toBe(sha(conversation));
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
     });
 });
 
