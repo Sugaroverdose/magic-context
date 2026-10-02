@@ -13,7 +13,6 @@ import {
     getProjectEmbeddings,
     type Memory,
     ModuleMemoryAuthorityError,
-    peekProjectEmbeddings,
     searchMemoriesFTS,
     searchMemoriesFTSUnion,
     updateMemoryRetrievalCount,
@@ -761,6 +760,7 @@ function getFtsScores(matches: Memory[]): Map<number, number> {
 }
 
 function selectSemanticCandidates(args: {
+    db: Database;
     memories: Memory[];
     projectPath: string;
     ftsMatches: Memory[];
@@ -777,9 +777,11 @@ function selectSemanticCandidates(args: {
             ? args.workspace.identities
             : [args.projectPath];
         for (const projectPath of embeddingProjects) {
-            const cachedEmbeddings = peekProjectEmbeddings(projectPath, args.queryModelId);
-            if (!cachedEmbeddings) continue;
-            for (const memoryId of cachedEmbeddings.keys()) {
+            // Load (not peek) the stored vectors: a cold or expired cache would
+            // otherwise shrink the candidate set to the FTS hits alone and drop
+            // every memory that only matches by meaning.
+            const storedEmbeddings = getProjectEmbeddings(args.db, projectPath, args.queryModelId);
+            for (const memoryId of storedEmbeddings.keys()) {
                 candidateIds.add(memoryId);
             }
         }
@@ -904,6 +906,7 @@ async function searchMemories(args: {
     });
     const ftsScores = getFtsScores(ftsMatches);
     const semanticCandidates = selectSemanticCandidates({
+        db: args.db,
         memories,
         projectPath: args.projectPath,
         ftsMatches,

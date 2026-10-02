@@ -1515,6 +1515,41 @@ describe("unifiedSearch", () => {
         expect(memoryResults[0]?.matchType).toBe("semantic");
     });
 
+    it("keeps semantic-only memories alongside FTS hits when the embedding cache is cold", async () => {
+        const snapshot = registerEmbeddingProject(db, "/repo/project");
+        const ftsHit = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE_DECISIONS",
+            content: "coldneedle lexical match",
+        });
+        const semanticTarget = insertMemory(db, {
+            projectPath: "/repo/project",
+            category: "ARCHITECTURE_DECISIONS",
+            content: "durable vector neighbour",
+        });
+        saveEmbedding(db, ftsHit.id, new Float32Array([0, 1]), snapshot.modelId);
+        saveEmbedding(db, semanticTarget.id, new Float32Array([1, 0]), snapshot.modelId);
+        queryEmbedding = new Float32Array([1, 0]);
+        // Nothing has loaded the project's vectors yet, as after the cache TTL.
+        resetEmbeddingCacheForTests();
+
+        const results = await unifiedSearch(db, "ses-cold", "/repo/project", "coldneedle", {
+            limit: 5,
+            memoryEnabled: true,
+            embeddingEnabled: true,
+            readMessages,
+            embedQuery,
+            isEmbeddingRuntimeEnabled,
+            sources: ["memory"],
+        });
+
+        const memoryHits = results.flatMap((result) =>
+            result.source === "memory" ? [[result.memoryId, result.matchType]] : [],
+        );
+        expect(memoryHits).toContainEqual([semanticTarget.id, "semantic"]);
+        expect(memoryHits).toContainEqual([ftsHit.id, "hybrid"]);
+    });
+
     /**
      * Regression for the duplicate-embed bug observed in production LMStudio
      * logs: when both memory and git-commit search ran in parallel, EACH
