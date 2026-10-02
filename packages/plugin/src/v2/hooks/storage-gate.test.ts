@@ -17,6 +17,10 @@ import {
     LATEST_SUPPORTED_VERSION,
     openDatabase,
 } from "../../features/magic-context/storage-db";
+import {
+    __resetOffThreadMigrationClockForTests,
+    beginOffThreadMigration,
+} from "../../shared/off-thread-migration-clock";
 import { __resetRpcIdentityTestHooks, __setRpcIdentityTestHooks } from "../../shared/rpc-utils";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -275,6 +279,24 @@ test("boot wait retains a healthy database that opens after two seconds", async 
     });
     expect(await probeV2StorageAtBoot(gate)).toBe(database);
     expect(gate.require()).toBe(database);
+});
+
+test("boot wait does not count time an off-thread schema migration spends", async () => {
+    const database = openDatabase();
+    const endMigration = beginOffThreadMigration();
+    const gate = createV2StorageGate({
+        open: async () => {
+            await Bun.sleep(150);
+            endMigration();
+            return database;
+        },
+    });
+    try {
+        expect(await probeV2StorageAtBoot(gate, 30)).toBe(database);
+    } finally {
+        endMigration();
+        __resetOffThreadMigrationClockForTests();
+    }
 });
 
 test("boot wait gives up on an unresolved open after fifteen seconds", async () => {

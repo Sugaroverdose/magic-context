@@ -189,6 +189,32 @@ function scheduleFlush(): void {
     }, FLUSH_INTERVAL_MS);
 }
 
+// Set inside a worker thread so its lines reach the main thread's log file:
+// the main thread knows the harness-specific log path and owns the flush timer.
+let lineForwarder: ((line: string) => void) | null = null;
+
+/**
+ * Hand every formatted log line to `forward` instead of this thread's buffer.
+ * Pass null to log locally again.
+ */
+export function setLogLineForwarder(forward: ((line: string) => void) | null): void {
+    lineForwarder = forward;
+}
+
+/** Append a line formatted by `log` on another thread, keeping its timestamp. */
+export function writeForwardedLogLine(line: string): void {
+    if (isTestEnv) return;
+    try {
+        buffer.push(line);
+        bufferedBytes += Buffer.byteLength(line);
+        boundBuffer();
+        if (buffer.length >= BUFFER_SIZE_LIMIT) flush();
+        else scheduleFlush();
+    } catch {
+        // Intentional: logging must never throw
+    }
+}
+
 export function log(message: string, data?: unknown): void {
     if (isTestEnv) return;
     try {
@@ -202,6 +228,10 @@ export function log(message: string, data?: unknown): void {
                     )}`
                   : ` ${JSON.stringify(sanitizeConfigValue(data))}`;
         const line = `[${timestamp}] ${sanitizeDiagnosticText(message)}${serialized}\n`;
+        if (lineForwarder) {
+            lineForwarder(line);
+            return;
+        }
         buffer.push(line);
         bufferedBytes += Buffer.byteLength(line);
         boundBuffer();
