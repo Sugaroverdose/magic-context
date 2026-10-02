@@ -69,6 +69,14 @@ esac
             "lsof": '''#!/bin/sh
 python3 -c 'import os; p=os.environ["FAKE_DEPLOYED"]; print("i" + str(os.stat(p).st_ino) + "\\nn" + p)'
 ''',
+            # A stripped release lists no debug-map (STABS) entries; FAKE_UNSTRIPPED
+            # lists two, the shape a failed rust-objcopy strip leaves behind.
+            "nm": '''#!/bin/sh
+if [ "${FAKE_UNSTRIPPED:-}" = 1 ]; then
+  printf '0000000000000000 - 00 0000   SO /build/src/\\n0000000000000000 - 00 0000  OSO /build/target/x.o\\n'
+fi
+printf '0000000100000000 T _main\\n'
+''',
         }.items():
             # Stable content-addressed shim, with a command-name link for PATH lookup.
             (self.shims / name).symlink_to(once(root, body))
@@ -96,6 +104,12 @@ python3 -c 'import os; p=os.environ["FAKE_DEPLOYED"]; print("i" + str(os.stat(p)
     def run_script(self, *args):
         return subprocess.run(["bash", str(SCRIPT), "--dry-run", *args, str(self.staged)],
                               env=self.env, cwd=ROOT, capture_output=True, text=True)
+
+    def test_unstripped_binary_refuses(self):
+        self.env["FAKE_UNSTRIPPED"] = "1"
+        run = self.run_script()
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("carries 2 debug-map entries", run.stderr)
 
     def test_context_fence_refuses(self):
         self.versions(92, 49)

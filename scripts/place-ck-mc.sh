@@ -51,6 +51,19 @@ require_hardened() {
         die "$1 carries the get-task-allow entitlement"
 }
 require_hardened "$staged"
+# A release build strips its debug info with rust-objcopy. When that step fails,
+# cargo only prints a warning and the build still succeeds, so a binary still
+# carrying debug-map (STABS) entries means the strip silently failed: the binary
+# works, but it's larger and carries this machine's build paths. Count before
+# matching, so an nm failure can't read as zero.
+require_stripped() {
+    local symbols debug_entries
+    symbols=$(nm -a "$1" 2>/dev/null) || die "cannot list symbols of $1"
+    debug_entries=$(awk '$2 == "-"' <<<"$symbols" | wc -l | tr -d ' ')
+    ((debug_entries == 0)) ||
+        die "$1 carries $debug_entries debug-map entries: its debug-info strip failed (rebuild without the failing rustc wrapper)"
+}
+require_stripped "$staged"
 sha_from() {
     local line sha
     line=$("$1" --version) || die "cannot read $1 --version"
