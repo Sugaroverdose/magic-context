@@ -2019,24 +2019,24 @@ export function createRustModeTransform(
         hostModelFallback(sessionId);
 
     /**
-     * On this process's first applied pass for a session, resume a freeze that a
-     * previous process left behind. A frozen healthy pass captures the raw bytes it
-     * served, so a durable slot holding a message exactly as the host sent it, which
-     * the module now renders differently, proves the provider last saw the frozen
-     * representation. Uses the module output from before postprocess, which has
-     * side effects a pass that ends in a frozen serve must not run.
+     * On this process's first applied pass for a session, find whether a previous
+     * process left a freeze behind. A frozen healthy pass captures the raw bytes it
+     * served, so a durable slot ending in messages exactly as the host sent them,
+     * one of which the module now renders differently, shows the provider last saw
+     * the frozen representation (see `coldStartRawServedIndex`). Returns the slot's
+     * messages and the first raw-served index, or null. Uses the module output from
+     * before postprocess, which has side effects a pass that ends in a frozen serve
+     * must not run.
      */
-    const resumeFreezeFromColdStartSlot = (
-        state: RustSessionState,
+    const detectColdStartFrozenSlot = (
         sessionId: string,
         rawInput: MessageLike[],
         moduleOutput: readonly unknown[],
         providerID: string | undefined,
-    ): void => {
+    ): { slotMessages: unknown[]; index: number } | null => {
         try {
-            const slot = getSlot(sessionId);
-            const slotMessages = parseLastServedSnapshot(slot?.jsonPrefix);
-            if (!slotMessages) return;
+            const slotMessages = parseLastServedSnapshot(getSlot(sessionId)?.jsonPrefix);
+            if (!slotMessages) return null;
             const index = coldStartRawServedIndex({
                 slotMessages,
                 rawInput,
@@ -2047,13 +2047,10 @@ export function createRustModeTransform(
                     resolvedProviderID: providerID,
                 }),
             });
-            if (index === null) return;
-            state.lkgRepresentationFrozen = true;
-            state.forceFullWire = true;
-            state.lkgFrozenAtInputCount = rawInput.length;
-            sessionLog(sessionId, `lkg_cold_start_frozen_slot_resumed raw_served_index=${index}`);
+            return index === null ? null : { slotMessages, index };
         } catch (error) {
             sessionLog(sessionId, "lkg cold-start freeze check failed (ignored):", error);
+            return null;
         }
     };
 
@@ -3722,19 +3719,38 @@ export function createRustModeTransform(
                 );
                 let appliedMessages = moduleMessages;
                 let replayedFrozenRepresentation = false;
+                // The slot a previous process captured from a frozen serve, when this is
+                // this process's first applied pass and that pass is a module bust: the
+                // bust replaces messages the provider last saw raw, so the thinking strip
+                // needs that array exactly as a bust of a freeze in this process would.
+                let coldStartLastServed: FrozenReleaseLastServed | null = null;
                 if (state.lkgColdStartCheckPending) {
                     state.lkgColdStartCheckPending = false;
-                    if (
-                        !cacheBustingPass &&
-                        !state.lkgRepresentationFrozen &&
-                        state.lkgAcceptedCapture === undefined
-                    ) {
-                        resumeFreezeFromColdStartSlot(
-                            state,
+                    const coldStart =
+                        !state.lkgRepresentationFrozen && state.lkgAcceptedCapture === undefined
+                            ? detectColdStartFrozenSlot(
+                                  sessionId,
+                                  messages,
+                                  moduleMessages,
+                                  model?.providerID,
+                              )
+                            : null;
+                    if (coldStart && !cacheBustingPass) {
+                        state.lkgRepresentationFrozen = true;
+                        state.forceFullWire = true;
+                        state.lkgFrozenAtInputCount = inputCount;
+                        sessionLog(
                             sessionId,
-                            messages,
-                            moduleMessages,
-                            model?.providerID,
+                            `lkg_cold_start_frozen_slot_resumed raw_served_index=${coldStart.index}`,
+                        );
+                    } else if (coldStart) {
+                        // Nothing in this process proves the slot is the very last array
+                        // served (an uncaptured replay may have followed), so it is
+                        // unproven: the strip covers the first change or the slot's end.
+                        coldStartLastServed = { messages: coldStart.slotMessages, proven: false };
+                        sessionLog(
+                            sessionId,
+                            `lkg_cold_start_frozen_slot_busted raw_served_index=${coldStart.index}`,
                         );
                     }
                 }
@@ -3755,6 +3771,8 @@ export function createRustModeTransform(
                 });
                 if (passStartedFrozen && cacheBustingPass) {
                     frozenReleaseLastServed = lastServedSnapshot();
+                } else if (coldStartLastServed) {
+                    frozenReleaseLastServed = coldStartLastServed;
                 }
                 if (state.lkgRepresentationFrozen && !cacheBustingPass) {
                     if (state.lkgFrozenAtInputCount === null) {
@@ -3851,7 +3869,7 @@ export function createRustModeTransform(
                         // signed thinking block is valid only while every byte before it is
                         // unchanged, so thinking after the first changed message must be
                         // stripped.
-                        ...(passStartedFrozen || frozenReleaseReason
+                        ...(passStartedFrozen || frozenReleaseReason || coldStartLastServed
                             ? { frozenReleaseLastServed }
                             : {}),
                         trailingBlankSourceDecisions,
