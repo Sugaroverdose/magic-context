@@ -2956,40 +2956,63 @@ async function startPiMagicContextRuntime(
 		if (activePiRuntimes.size === 0) unregisterPiProjectEmbeddings(db);
 	});
 
-	// Pi has no `session_deleted` event, but `session_before_switch`
-	// fires when the user switches to a different session within the
-	// same Pi process. That's the right moment to drain caches keyed
-	// by the OUTGOING session id — without this, every session swap
-	// in a long-running Pi process leaks one entry per cache, and
-	// after dozens of swaps the maps balloon. Cleanup here mirrors
-	// OpenCode's `session.deleted` handler in `event-handler.ts`.
+	// Pi has no `session_deleted` event; a switch to another session within
+	// the same process is the moment to drain caches keyed by the OUTGOING
+	// session id, or every swap in a long-running process leaks one entry per
+	// cache. Cleanup mirrors OpenCode's `session.deleted` handler in
+	// `event-handler.ts`, minus the durable state (see below).
+	//
+	// `session_before_switch` only announces a switch: another extension can
+	// cancel it and opening the target can still fail, leaving the user in the
+	// current session. Clearing there would drop that session's pending refresh
+	// signals and warm caches. So it only records the outgoing id, and the
+	// drain runs once the switch has happened:
+	//   - stock Pi tears the outgoing runtime down with `session_shutdown`
+	//     (handled above);
+	//   - OMP keeps the runtime and emits `session_switch` instead.
+	//
+	// Only the in-memory per-session maps are cleared. The durable DB m[0]
+	// cache stays: a switch is reversible (the user can switch back), unlike
+	// OpenCode's session.deleted. It is bounded (one session_meta row per
+	// session) and self-invalidates via epoch/version/docs-hash checks in
+	// mustMaterializePi, so keeping it lets a switch-back reuse the cached
+	// prefix instead of forcing a full m[0] re-materialization (an avoidable
+	// prompt-cache bust).
+	let switchOutgoingSessionId: string | undefined;
+	const readSessionId = (ctx: unknown): string | undefined => {
+		const sm = (
+			ctx as {
+				sessionManager?: { getSessionId?: () => string | undefined };
+			}
+		).sessionManager;
+		const id =
+			typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
+		return typeof id === "string" && id.length > 0 ? id : undefined;
+	};
 	pi.on("session_before_switch", (_event, ctx) => {
 		try {
-			const sm = (
-				ctx as unknown as {
-					sessionManager?: { getSessionId?: () => string | undefined };
-				}
-			).sessionManager;
-			const outgoingSessionId =
-				typeof sm?.getSessionId === "function" ? sm.getSessionId() : undefined;
-			if (
-				typeof outgoingSessionId === "string" &&
-				outgoingSessionId.length > 0
-			) {
-				// Clear ONLY the in-memory per-session maps (the actual leak that
-				// grows one entry per swap). Do NOT clear the durable DB m[0] cache
-				// here: session_before_switch is REVERSIBLE (the user can switch
-				// back), unlike OpenCode's session.deleted. The DB cache is bounded
-				// (one session_meta row per session) and self-invalidates via
-				// epoch/version/docs-hash checks in mustMaterializePi, so preserving
-				// it lets a switch-back reuse the cached prefix instead of forcing a
-				// full m[0] re-materialization (an avoidable prompt-cache bust).
-				clearPiSystemPromptSession(outgoingSessionId);
-				promptSurfaceGuidanceEpochs.clear(outgoingSessionId);
-				clearContextHandlerSession(outgoingSessionId);
-			}
+			switchOutgoingSessionId = readSessionId(ctx);
 		} catch {
 			// best-effort — Pi proceeds with the switch regardless
+		}
+	});
+	// `session_switch` is OMP-only and absent from stock Pi's typed event map.
+	(
+		pi.on as (
+			event: string,
+			handler: (event: unknown, ctx: unknown) => void,
+		) => void
+	)("session_switch", (_event, ctx) => {
+		const outgoingSessionId = switchOutgoingSessionId;
+		switchOutgoingSessionId = undefined;
+		try {
+			if (!outgoingSessionId || outgoingSessionId === readSessionId(ctx))
+				return;
+			clearPiSystemPromptSession(outgoingSessionId);
+			promptSurfaceGuidanceEpochs.clear(outgoingSessionId);
+			clearContextHandlerSession(outgoingSessionId);
+		} catch {
+			// best-effort cleanup
 		}
 	});
 }

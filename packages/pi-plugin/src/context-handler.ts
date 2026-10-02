@@ -7753,12 +7753,12 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
 }
 
 /**
- * Per-session cleanup. Pi has no `session_deleted` event, but it does
- * fire `session_before_switch` when the user switches to a different
- * session within the same Pi process, and `session_shutdown` when the
- * process exits. Both are valid moments to drain caches keyed by the
- * outgoing session id so we don't leak unbounded memory across many
- * session switches in a long-lived Pi process.
+ * Per-session cleanup. Pi has no `session_deleted` event, but a completed
+ * switch to a different session within the same process tears the outgoing
+ * session down (`session_shutdown` on stock Pi, `session_switch` on OMP), and
+ * `session_shutdown` also fires when the process exits. Those are the moments
+ * to drain caches keyed by the outgoing session id so we don't leak unbounded
+ * memory across many session switches in a long-lived Pi process.
  *
  * Counterpart to OpenCode `session.deleted` cleanup in
  * `event-handler.ts:262-276`. We clean every per-session map this
@@ -7780,7 +7780,7 @@ function clearPiCompactionOffInMemoryState(sessionId: string): void {
  */
 // IMPORTANT: this clears only IN-MEMORY, process-local maps — it must NOT call
 // the durable DB `clearSession(db, sessionId)`. The two callers are
-// `session_shutdown` and `session_before_switch`, NEITHER of which means the
+// `session_shutdown` and OMP's `session_switch`, NEITHER of which means the
 // session was deleted — the session still exists on disk and may be resumed.
 // Pi has no `session_deleted` event (OpenCode's event-handler is the only place
 // the durable DB clearSession fires). Calling DB clearSession here would DESTROY
