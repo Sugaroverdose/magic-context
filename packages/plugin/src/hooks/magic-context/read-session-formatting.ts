@@ -356,6 +356,11 @@ function estimateTokensHeuristically(text: string): number {
     return Math.ceil(text.length / 3.5);
 }
 
+/** Admission must refuse rather than treating a heuristic fallback as an exact count. */
+export function hasTokenizerForFit(): boolean {
+    return getTokenizer() !== undefined;
+}
+
 export function estimateTokens(text: string): number {
     if (!text) return 0;
     const activeTokenizer = getTokenizer();

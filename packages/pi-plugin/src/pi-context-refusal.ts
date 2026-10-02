@@ -31,7 +31,8 @@ export function registerPiGuardedContext(
 	);
 	pi.on("context", async (event, ctx) => {
 		try {
-			// Let SQLite wait up to 250 ms for each write lock, as in OpenCode.
+			// Share at most 250 ms of synchronous writer waiting across the turn,
+			// including autocommit statements, as in OpenCode.
 			// Do not rerun the handler: it may already have committed earlier writes.
 			return await withSqliteTransformPass(() => handler(event, ctx));
 		} catch (error) {

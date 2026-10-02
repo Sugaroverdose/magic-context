@@ -38,6 +38,8 @@ import {
     _setShadowBackfillNowForTests,
     _setTestProviderFactoryForProject,
     drainCommitBacklogForProject,
+    drainProjectEmbeddingIdentityMaintenance,
+    drainStaleEmbeddingIdentitiesForProject,
     embedSessionCompartmentChunks,
     embedTextForProject,
     embedUnembeddedCompartmentChunksForProject,
@@ -1401,6 +1403,26 @@ describe("project embedding registry", () => {
         expect(finalSweep.trackingRowsDeleted).toBe(1);
     });
 
+    it("drains many stale GC batches within one maintenance tick", async () => {
+        const db = useTempDb();
+        const project = "git:gc-tick-drain";
+        registerProjectEmbedding(
+            db,
+            project,
+            localConfig("current"),
+            { memoryEnabled: true, gitCommitEnabled: false },
+            "/tmp/gc-tick",
+        );
+        for (let i = 0; i < 100; i++)
+            db.prepare("INSERT INTO embedding_identity_active VALUES (?, 'memory', ?, 0)").run(
+                project,
+                `expired-${i}`,
+            );
+        expect(
+            (await drainStaleEmbeddingIdentitiesForProject(db, project)).trackingRowsDeleted,
+        ).toBe(100);
+    });
+
     it("bounds stale GC even when expired identities have no vectors", () => {
         const db = useTempDb();
         const project = "git:empty-gc-bounded";
@@ -1755,7 +1777,7 @@ describe("project embedding registry", () => {
     });
 
     for (const mode of ["session", "registration"])
-        it(`caps ${mode}-scoped chunk repair work per observation`, () => {
+        it(`caps ${mode}-scoped chunk repair work per observation`, async () => {
             const db = useTempDb();
             const compartmentId = seedCompartmentWithFts(db, "ses-repair-batched");
             const windows = chunkCanonicalText("[1] U: hello", 1, 1, 10_000);
@@ -1833,6 +1855,16 @@ describe("project embedding registry", () => {
                     )
                     .get("ses-repair-batched", "git:right"),
             ).toEqual({ count: mode === "session" ? 150 : 50 });
+            if (mode === "registration") {
+                expect(await drainProjectEmbeddingIdentityMaintenance(db, "git:right")).toBe(4);
+                expect(
+                    db
+                        .prepare(
+                            "SELECT COUNT(*) AS count FROM compartment_chunk_embeddings WHERE session_id = ? AND project_path = ?",
+                        )
+                        .get("ses-repair-batched", "git:right"),
+                ).toEqual({ count: 150 });
+            }
         });
 
     // Issue 543: history embedding is not a memory feature. With memory off and

@@ -3,6 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { EmbeddingConfig } from "../../config/schema/magic-context";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../config/schema/magic-context";
 import { setBootQuietPeriodForTests } from "../../plugin/boot-quiet";
+import { drainBackgroundBatches } from "../../shared/background-batch-drain";
 import { isEmbeddingHostBusy } from "../../shared/embedding-activity";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
@@ -920,15 +921,17 @@ function recordScopeActiveIdentity(
     getUpsertActiveIdentityStatement(db).run(projectIdentity, scope, modelId, now);
 }
 
+const legacyDiscoveryComplete = new WeakMap<Database, Set<string>>();
+
 function recordActiveEmbeddingIdentity(
     db: Database,
     projectIdentity: string,
     currentProviderIdentity: string,
     currentChunkIdentity: string,
     features: EmbeddingFeatures,
-): void {
+): boolean {
     if (currentProviderIdentity === OFF_PROVIDER_IDENTITY) {
-        return;
+        return false;
     }
 
     const scopes: Array<[EmbeddingIdentityScope, string]> = [["chunk", currentChunkIdentity]];
@@ -937,23 +940,40 @@ function recordActiveEmbeddingIdentity(
     const active = db.prepare(
         "SELECT 1 FROM embedding_identity_active WHERE project_path = ? AND scope = ? AND model_id = ?",
     );
-    // Discover legacy models without owning the writer. Even an empty DISTINCT
-    // scan can read a large vector table; only the small marker upserts need a lock.
-    const legacy = scopes.map(([scope]) => ({
-        scope,
-        rows: getBackfillActiveIdentityStatement(db, scope).all(
-            projectIdentity,
-            projectIdentity,
+    let discovered = legacyDiscoveryComplete.get(db);
+    if (!discovered) {
+        discovered = new Set();
+        legacyDiscoveryComplete.set(db, discovered);
+    }
+    const discoveryKey = (scope: EmbeddingIdentityScope, model: string) =>
+        JSON.stringify([projectIdentity, scope, model]);
+    // Once discovery is exhausted, ordinary re-registration only checks keyed
+    // markers and project-indexed repairs. A full slice stays pending so later
+    // observations (including after restart) resume legacy marker discovery.
+    const legacy = scopes
+        .filter(
+            ([scope, model]) =>
+                !discovered.has(discoveryKey(scope, model)) ||
+                !active.get(projectIdentity, scope, model),
+        )
+        .map(([scope, model]) => ({
             scope,
-        ) as Array<{ model_id: string }>,
-    }));
+            model,
+            rows: getBackfillActiveIdentityStatement(db, scope).all(
+                projectIdentity,
+                projectIdentity,
+                scope,
+            ) as Array<{ model_id: string }>,
+        }));
     const repairIds = findMisScopedCompartmentChunkEmbeddingIdsForProject(db, projectIdentity);
     if (
         legacy.every(({ rows }) => rows.length === 0) &&
         scopes.every(([scope, model]) => active.get(projectIdentity, scope, model)) &&
         repairIds.length === 0
-    )
-        return;
+    ) {
+        for (const { scope, model } of legacy) discovered.add(discoveryKey(scope, model));
+        return false;
+    }
 
     const now = Date.now();
     db.exec("BEGIN IMMEDIATE");
@@ -987,6 +1007,10 @@ function recordActiveEmbeddingIdentity(
         recordScopeActiveIdentity(db, projectIdentity, "chunk", currentChunkIdentity, now);
         db.exec("COMMIT");
         logSlowWriteTransaction("embedding_identity_record", transactionStartedAt);
+        for (const { scope, model, rows } of legacy) {
+            if (rows.length < 25) discovered.add(discoveryKey(scope, model));
+        }
+        return true;
     } catch (error) {
         try {
             db.exec("ROLLBACK");
@@ -1265,6 +1289,57 @@ export function sweepStaleEmbeddingIdentitiesForProject(
 
     if (result.memoryRowsDeleted > 0) invalidateProject(projectIdentity);
     return result;
+}
+
+export async function drainProjectEmbeddingIdentityMaintenance(
+    db: Database,
+    projectIdentity: string,
+    budgetMs = 2000,
+): Promise<number> {
+    const snapshot = getProjectEmbeddingSnapshot(projectIdentity);
+    if (!snapshot || untrustedLoadProjects.has(projectIdentity)) return 0;
+    return drainBackgroundBatches(
+        () =>
+            recordActiveEmbeddingIdentity(
+                db,
+                projectIdentity,
+                snapshot.modelId,
+                snapshot.chunkModelId,
+                { memoryEnabled: snapshot.enabled, gitCommitEnabled: snapshot.gitCommitEnabled },
+            ),
+        { budgetMs },
+    );
+}
+
+export async function drainStaleEmbeddingIdentitiesForProject(
+    db: Database,
+    projectIdentity: string,
+    budgetMs = 2000,
+): Promise<StaleEmbeddingSweepResult> {
+    const total: StaleEmbeddingSweepResult = {
+        memoryRowsDeleted: 0,
+        commitRowsDeleted: 0,
+        chunkRowsDeleted: 0,
+        trackingRowsDeleted: 0,
+    };
+    await drainBackgroundBatches(
+        () => {
+            const result = sweepStaleEmbeddingIdentitiesForProject(db, projectIdentity);
+            total.memoryRowsDeleted += result.memoryRowsDeleted;
+            total.commitRowsDeleted += result.commitRowsDeleted;
+            total.chunkRowsDeleted += result.chunkRowsDeleted;
+            total.trackingRowsDeleted += result.trackingRowsDeleted;
+            return (
+                result.memoryRowsDeleted +
+                    result.commitRowsDeleted +
+                    result.chunkRowsDeleted +
+                    result.trackingRowsDeleted >
+                0
+            );
+        },
+        { budgetMs },
+    );
+    return total;
 }
 
 export function registerProjectEmbedding(

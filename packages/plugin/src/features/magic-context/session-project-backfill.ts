@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { getHarness } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { withoutSqliteTransformPass, withSqliteBackgroundWriter } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { isUserHomeDirectory, resolveProjectIdentityForSession } from "./memory/project-identity";
 import { recordSessionProjectIdentity } from "./session-project-storage";
@@ -81,7 +82,7 @@ function ensureBackfillStateTable(db: Database): void {
 }
 
 function withImmediateTransaction<T>(db: Database, fn: () => T): T {
-    db.exec("BEGIN IMMEDIATE");
+    withoutSqliteTransformPass(() => withSqliteBackgroundWriter(() => db.exec("BEGIN IMMEDIATE")));
     // BEGIN has acquired the write lock; exclude time waiting for other writers.
     const transactionStartedAt = performance.now();
     try {
@@ -261,6 +262,18 @@ function createPageReader(
 }
 
 export async function runSessionProjectBackfill(
+    db: Database,
+    source: SessionProjectBackfillSource,
+    options: RunSessionProjectBackfillOptions = {},
+): Promise<BackfillResult> {
+    // Every write in discovery, including implicit upserts, is background work.
+    // A busy acquisition leaves the lease/state available for the next pass.
+    return withoutSqliteTransformPass(() =>
+        withSqliteBackgroundWriter(() => runSessionProjectBackfillPass(db, source, options)),
+    );
+}
+
+async function runSessionProjectBackfillPass(
     db: Database,
     source: SessionProjectBackfillSource,
     options: RunSessionProjectBackfillOptions = {},

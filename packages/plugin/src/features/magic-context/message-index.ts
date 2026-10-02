@@ -5,6 +5,7 @@ import {
     hasMeaningfulUserText,
 } from "../../hooks/magic-context/read-session-chunk";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
+import { drainBackgroundBatches } from "../../shared/background-batch-drain";
 import { getHarness, type HarnessId } from "../../shared/harness";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -16,7 +17,9 @@ import {
     recordIndexedMessageTime,
     recordMessageFtsRowid,
 } from "./message-fts-rowid-map";
-import { deleteSessionScopedRows, SESSION_SCOPED_TABLES } from "./storage-session-tables";
+import { prepareSessionCleanupBatch } from "./session-cleanup-batch";
+import { retryPendingSessionCleanups } from "./storage-meta-session";
+import { SESSION_SCOPED_TABLES } from "./storage-session-tables";
 
 interface MessageHistoryIndexRow {
     last_indexed_ordinal?: number;
@@ -50,7 +53,7 @@ export interface MessageHistoryOrphanSweepOptions {
     unavailableReprobeMs?: number;
 }
 
-export const MESSAGE_HISTORY_ORPHAN_SWEEP_BATCH_SIZE = 200;
+export const MESSAGE_HISTORY_ORPHAN_SWEEP_BATCH_SIZE = 1;
 export const MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS = 24 * 60 * 60 * 1000;
 export const MESSAGE_HISTORY_ORPHAN_SWEEP_COOLDOWN_MS = 10 * 60 * 1000;
 export const MESSAGE_HISTORY_ORPHAN_UNAVAILABLE_REPROBE_MS = 24 * 60 * 60 * 1000;
@@ -512,8 +515,9 @@ export function clearIndexedMessagesInTransaction(db: Database, sessionId: strin
 }
 
 export function clearIndexedMessages(db: Database, sessionId: string): void {
-    const transactionStartedAt = performance.now();
+    let transactionStartedAt = 0;
     db.transaction(() => {
+        transactionStartedAt = performance.now();
         clearIndexedMessagesInTransaction(db, sessionId);
     }).immediate();
     logSlowWriteTransaction("message_index_clear", transactionStartedAt);
@@ -650,8 +654,8 @@ export function indexSingleMessage(db: Database, sessionId: string, message: Raw
     // plain FTS5 table with NO UNIQUE constraint, and the dedup is checked inside
     // the body. Taking the writer lock up front serializes concurrent terminal
     // updates so the second transaction sees the first transaction's source state.
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let committed = false;
     try {
         const result = indexSingleMessageInTransaction(
@@ -715,8 +719,8 @@ function indexItemsAfterOrdinal<T extends { ordinal: number }>(
     // The writer lock protects both duplicate checks and the progress row. Each
     // caller supplies only one bounded source page, so lock hold time is bounded
     // by that page rather than the full session history.
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let committed = false;
     try {
         const currentWatermark = getLastIndexedOrdinal(db, sessionId);
@@ -897,8 +901,9 @@ function getOpenCodeSessionScopedCandidateSourceSql(harness: "opencode" | "openc
 }
 
 /**
- * Delete old OpenCode session state that no longer exists in OpenCode's
- * authoritative session table. One bounded keyset page is processed per call;
+ * Discover and queue old OpenCode session state absent from OpenCode's
+ * authoritative session table. Cleanup drains separate committed row slices.
+ * One bounded keyset page is processed per call;
  * the cursor survives restarts and only resets after a complete pass. Pi rows
  * need a separate sweep against Pi's session files and are excluded here.
  */
@@ -908,9 +913,9 @@ export function sweepOrphanedOpenCodeMessageIndexes(
     options: MessageHistoryOrphanSweepOptions = {},
 ): MessageHistoryOrphanSweepResult {
     const now = options.now ?? Date.now();
-    const batchSize = Math.max(
+    const batchSize = Math.min(
         1,
-        Math.floor(options.batchSize ?? MESSAGE_HISTORY_ORPHAN_SWEEP_BATCH_SIZE),
+        Math.max(1, Math.floor(options.batchSize ?? MESSAGE_HISTORY_ORPHAN_SWEEP_BATCH_SIZE)),
     );
     const safetyAgeMs = Math.max(0, options.safetyAgeMs ?? MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS);
     const cooldownMs = Math.max(0, options.cooldownMs ?? MESSAGE_HISTORY_ORPHAN_SWEEP_COOLDOWN_MS);
@@ -988,28 +993,43 @@ export function sweepOrphanedOpenCodeMessageIndexes(
                 : (candidates[candidates.length - 1]?.session_id ?? cursor);
         const completedAt = candidates.length < batchSize ? now : null;
 
-        const transactionStartedAt = performance.now();
+        const cleanupPlans = new Map(
+            missingSessionIds.map((sessionId) => [
+                sessionId,
+                prepareSessionCleanupBatch(db, sessionId, harness),
+            ]),
+        );
         db.exec("BEGIN IMMEDIATE");
+        const transactionStartedAt = performance.now();
         let committed = false;
         let deleted = 0;
         try {
-            const stillEligible = db.prepare(
-                `SELECT 1
-                 FROM (${candidateSourceSql}) AS session_candidates
-                 WHERE session_id = ?
-                   AND NOT EXISTS (
-                       SELECT 1
-                       FROM message_history_index
-                       WHERE message_history_index.session_id = session_candidates.session_id
-                          AND message_history_index.harness = '${harness}'
-                         AND message_history_index.updated_at > ?
-                   )
-                 LIMIT 1`,
-            );
+            const sources = SESSION_SCOPED_TABLES.filter((definition) => definition.harnessScoped);
+            // Point existence probes avoid materializing a UNION of every row of
+            // a large session while the writer is held.
+            const stillEligible = db.prepare(`SELECT 1 WHERE NOT EXISTS (
+                SELECT 1 FROM message_history_index WHERE session_id=? AND harness=? AND updated_at>?
+            ) AND (${sources
+                .map(
+                    (definition) => `EXISTS (SELECT 1 FROM ${definition.table}
+                WHERE session_id=? AND harness='${harness}' ${definition.extraPredicate ? `AND ${definition.extraPredicate}` : ""} LIMIT 1)`,
+                )
+                .join(" OR ")})`);
             const eligibleSessionIds = missingSessionIds.filter((sessionId) =>
-                stillEligible.get(sessionId, cutoff),
+                stillEligible.get(sessionId, harness, cutoff, ...sources.map(() => sessionId)),
             );
-            deleted = deleteSessionScopedRows(db, eligibleSessionIds, harness);
+            for (const sessionId of eligibleSessionIds) {
+                // Hand off unfinished rows to the durable cleanup queue before the
+                // scan cursor advances. Rust-required markers remain protected.
+                db.prepare(`INSERT OR IGNORE INTO pending_session_cleanup
+                    (session_id, harness, requested_at, last_attempt_at) VALUES (?, ?, ?, NULL)`).run(
+                    sessionId,
+                    `${harness}:orphan`,
+                    now,
+                );
+                const result = cleanupPlans.get(sessionId)?.();
+                if (result?.completed) deleted++;
+            }
             persistMessageHistoryOrphanSweepState(db, nextCursor, completedAt, harness);
             db.exec("COMMIT");
             committed = true;
@@ -1033,4 +1053,66 @@ export function sweepOrphanedOpenCodeMessageIndexes(
     } finally {
         closeQuietly(openCodeDb);
     }
+}
+
+/** Spend one timer budget on discovery and queued row slices. A large session
+ * remains in the cleanup queue across ticks and process restarts. */
+export async function drainOrphanedOpenCodeMessageIndexes(
+    db: Database,
+    openReadableOpenCodeDb: () => Database | null,
+    options: MessageHistoryOrphanSweepOptions = {},
+    budgetMs = 2000,
+): Promise<MessageHistoryOrphanSweepResult> {
+    const total: MessageHistoryOrphanSweepResult = {
+        status: "swept",
+        scanned: 0,
+        deleted: 0,
+        cursor: "",
+    };
+    await drainBackgroundBatches(
+        () => {
+            let sourceUnavailable = false;
+            const cleanup = retryPendingSessionCleanups(
+                db,
+                1,
+                harnessSupportsOpenCodeOrphanSweep(getHarness())
+                    ? {
+                          harness: getHarness(),
+                          isAbsent: (sessionId) => {
+                              let source: Database | null = null;
+                              try {
+                                  source = openReadableOpenCodeDb();
+                                  if (!source) {
+                                      sourceUnavailable = true;
+                                      return null;
+                                  }
+                                  return !source
+                                      .prepare("SELECT id FROM session WHERE id=?")
+                                      .get(sessionId);
+                              } catch {
+                                  sourceUnavailable = true;
+                                  return null;
+                              } finally {
+                                  source?.close();
+                              }
+                          },
+                      }
+                    : undefined,
+            );
+            total.deleted += cleanup.cleared;
+            if (cleanup.failedSessionIds.length) {
+                if (sourceUnavailable) total.status = "source_unavailable";
+                return false;
+            }
+            if (cleanup.attempted) return true;
+            const sweep = sweepOrphanedOpenCodeMessageIndexes(db, openReadableOpenCodeDb, options);
+            total.status = sweep.status;
+            total.scanned += sweep.scanned;
+            total.deleted += sweep.deleted;
+            total.cursor = sweep.cursor;
+            return sweep.status === "swept" && sweep.cursor !== "";
+        },
+        { budgetMs },
+    );
+    return total;
 }

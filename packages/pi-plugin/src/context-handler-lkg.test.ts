@@ -100,7 +100,7 @@ describe("Pi context handler LKG replay", () => {
 				const sessionId = `pi-bounded-${trial}`;
 				sessions.add(sessionId);
 				updateSessionMeta(db, sessionId, { piStableIdScheme: 1 });
-				db.exec("PRAGMA busy_timeout=0");
+				db.exec("PRAGMA busy_timeout=5000");
 				const host = contextHost();
 				const handler = handlerFor(db, host);
 				// A separate process can release the lock while the main thread waits
@@ -129,7 +129,19 @@ describe("Pi context handler LKG replay", () => {
 					});
 					const raw = [userMessage(`first turn ${trial}`, 1)];
 					const ctx = fakeContext(sessionId, dir, ["entry-1"], raw);
+					const startedAt = performance.now();
 					await host.emit(handler as never, raw, ctx);
+					const elapsedMs = performance.now() - startedAt;
+					if (process.env.MC_BACKGROUND_BENCHMARK === "1")
+						console.info(
+							JSON.stringify({
+								scenario: "first-turn-80ms-holder",
+								trial,
+								turnMs: elapsedMs,
+								refused: host.controller.signal.aborted,
+							}),
+						);
+					expect(elapsedMs).toBeLessThan(1500);
 					if (host.controller.signal.aborted) refused++;
 				} finally {
 					await exited;

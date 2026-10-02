@@ -256,7 +256,31 @@ function installTransactionRouting(db: BetterSqlite3.Database, readonly: boolean
             }
             if (WRITER_TRANSACTION_END.test(sql) && openWriterTransactions.has(db))
                 return endWriterTransaction(db, () => nativeExec(sql), sql);
+            if (!/^\s*(?:SELECT|EXPLAIN|PRAGMA|COMMIT|END|ROLLBACK|SAVEPOINT|RELEASE)\b/i.test(sql))
+                return withAutocommitTimeout(db, () => nativeExec(sql));
             return nativeExec(sql);
+        },
+    });
+    const nativePrepare = db.prepare.bind(db);
+    Object.defineProperty(db, "prepare", {
+        configurable: true,
+        writable: true,
+        value: (sql: string) => {
+            const statement = nativePrepare(sql);
+            // SELECT/EXPLAIN cannot acquire a writer. Treat CTEs conservatively:
+            // WITH can introduce INSERT/UPDATE/DELETE as well as a read query.
+            if (!readonly && !/^\s*(?:SELECT|EXPLAIN|PRAGMA)\b/i.test(sql)) {
+                for (const method of ["run", "get", "all"] as const) {
+                    const execute = statement[method].bind(statement);
+                    Object.defineProperty(statement, method, {
+                        configurable: true,
+                        // biome-ignore lint/suspicious/noExplicitAny: retain SQLite's native binding overloads.
+                        value: (...args: any[]) =>
+                            withAutocommitTimeout(db, () => execute(...args)),
+                    });
+                }
+            }
+            return statement;
         },
     });
     Object.defineProperty(db, "transaction", {
@@ -517,7 +541,9 @@ export type Database = BetterSqlite3.Database;
 export type Statement = BetterSqlite3.Statement<unknown[], unknown>;
 
 const privilegeDepth = new WeakMap<Database, number>();
-const transformPassScope = new AsyncLocalStorage<{ active: boolean } | undefined>();
+const transformPassScope = new AsyncLocalStorage<
+    { active: boolean; remainingWaitMs: number } | undefined
+>();
 const admissionScope = new AsyncLocalStorage<boolean>();
 const backgroundWriterScope = new AsyncLocalStorage<boolean>();
 
@@ -529,7 +555,9 @@ export function withSqliteBackgroundWriter<T>(operation: () => T): T {
 /** Only an awaited foreground transform may spend the extra acquisition budget.
  * The mutable lease also expires for detached descendants when that pass ends. */
 export function withSqliteTransformPass<T>(operation: () => T): T {
-    const lease = { active: true };
+    const existing = transformPassScope.getStore();
+    if (existing?.active) return operation();
+    const lease = { active: true, remainingWaitMs: FOREGROUND_IN_PASS_BUSY_TIMEOUT_MS };
     return transformPassScope.run(lease, () => {
         try {
             const result = operation();
@@ -609,6 +637,41 @@ interface OpenWriterTransaction {
 const writerAcquisitionScope = new AsyncLocalStorage<WriterAcquisition | undefined>();
 const openWriterTransactions = new WeakMap<Database, OpenWriterTransaction>();
 
+function foregroundWaitLease() {
+    const lease = transformPassScope.getStore();
+    return lease?.active && !admissionScope.getStore() && !backgroundWriterScope.getStore()
+        ? lease
+        : undefined;
+}
+
+/** Bound implicit writer admission too, including prepared INSERT OR IGNORE and
+ * writes with RETURNING. Charge successful execution time conservatively: the
+ * native API cannot separate lock waiting from statement execution. Exhaustion
+ * switches to zero-wait acquisition, not a refusal when the writer is free. */
+function withAutocommitTimeout<T>(db: Database, operation: () => T): T {
+    const lease = foregroundWaitLease();
+    if (isInTransaction(db) || (!lease && !backgroundWriterScope.getStore())) return operation();
+    const previous = pragmaNumber(db, "busy_timeout");
+    db.exec(
+        `PRAGMA busy_timeout=${lease ? Math.floor(lease.remainingWaitMs) : SHORT_BUSY_TIMEOUT_MS}`,
+    );
+    const started = performance.now();
+    try {
+        return operation();
+    } catch (error) {
+        if (lease && isTransientSqliteError(error))
+            throw new SqliteAcquisitionBusyError(error, "autocommit");
+        throw error;
+    } finally {
+        if (lease)
+            lease.remainingWaitMs = Math.max(
+                0,
+                lease.remainingWaitMs - (performance.now() - started),
+            );
+        if (previous !== null) db.exec(`PRAGMA busy_timeout=${previous}`);
+    }
+}
+
 /** The connection is never handed back to another caller with a shortened timeout. */
 function acquireShort(db: Database, acquire: () => unknown, site: string): void {
     const started = performance.now();
@@ -624,12 +687,8 @@ function acquireShort(db: Database, acquire: () => unknown, site: string): void 
         // Async admission retries after yielding, so each of its BEGIN attempts
         // stays short. An ordinary BEGIN inside a transform pass cannot yield;
         // give that single attempt enough time for a brief writer to finish.
-        const timeout =
-            transformPassScope.getStore()?.active &&
-            !admissionScope.getStore() &&
-            !backgroundWriterScope.getStore()
-                ? FOREGROUND_IN_PASS_BUSY_TIMEOUT_MS
-                : SHORT_BUSY_TIMEOUT_MS;
+        const lease = foregroundWaitLease();
+        const timeout = lease ? Math.floor(lease.remainingWaitMs) : SHORT_BUSY_TIMEOUT_MS;
         db.exec(`PRAGMA busy_timeout=${timeout}`);
         acquire();
         acquiredAt = performance.now();
@@ -639,6 +698,8 @@ function acquireShort(db: Database, acquire: () => unknown, site: string): void 
         throw error;
     } finally {
         const attemptMs = (acquiredAt ?? performance.now()) - started;
+        const lease = foregroundWaitLease();
+        if (lease) lease.remainingWaitMs = Math.max(0, lease.remainingWaitMs - attemptMs);
         if (previous !== null) db.exec(`PRAGMA busy_timeout=${previous}`);
         if (acquiredAt !== undefined) {
             // Reported when the transaction ends, together with how long it held

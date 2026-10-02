@@ -199,6 +199,7 @@ import {
 	type PiHarnessKind,
 	resolvePiHarnessDetection,
 } from "./pi-harness-kind";
+import { notePiLkgProviderUsage } from "./pi-lkg";
 import {
 	computePiPressure,
 	extractAssistantUsage,
@@ -2690,6 +2691,23 @@ async function startPiMagicContextRuntime(
 	// stored text is what Pi's UI renders — without this scrub, users
 	// see internal tag IDs at the start of every assistant turn.
 	pi.on("message_end", async (event, ctx) => {
+		try {
+			const leafId = ctx.sessionManager.getLeafId();
+			const leaf = leafId ? ctx.sessionManager.getEntry(leafId) : undefined;
+			// Pi normally appends after this event. Also accept runtimes that have
+			// already appended this exact reply and expose its explicit parent.
+			const parentId =
+				leaf?.type === "message" && leaf.message === event.message
+					? leaf.parentId
+					: leafId;
+			notePiLkgProviderUsage(
+				ctx.sessionManager.getSessionId(),
+				parentId,
+				event.message,
+			);
+		} catch {
+			/* Usage without a verifiable request boundary is not a replay basis. */
+		}
 		try {
 			const msg = event.message as unknown;
 			if (!compactionOff && msg !== null && typeof msg === "object") {

@@ -56,6 +56,10 @@ try {
             const snapshot = registerProjectEmbedding(db, project, { provider: "local", model: "offline-maintenance-probe", local_runtime: "auto" }, { memoryEnabled: true, gitCommitEnabled: true }, root);
             return snapshot.modelId;
         });
+        await probe(`embedding_identity_record_steady:${project}`, () => {
+            const snapshot = registerProjectEmbedding(db, project, { provider: "local", model: "offline-maintenance-probe", local_runtime: "auto" }, { memoryEnabled: true, gitCommitEnabled: true }, root);
+            return snapshot.modelId;
+        });
         db.prepare("UPDATE embedding_identity_active SET last_active_at=0 WHERE project_path=? AND model_id NOT LIKE '%offline-maintenance-probe%'").run(project);
         await probe(`embedding_stale_gc:${project}`, () => sweepStaleEmbeddingIdentitiesForProject(db, project, Date.now() + 30 * 86400000));
     }

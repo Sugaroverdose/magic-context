@@ -63,8 +63,9 @@ function persistMarkerStateAndDropReplacedTag(
     state: PersistedCompactionMarkerState | null,
     replacedSummaryMessageId: string | null,
 ): void {
-    const transactionStartedAt = performance.now();
+    let transactionStartedAt = 0;
     db.transaction(() => {
+        transactionStartedAt = performance.now();
         setPersistedCompactionMarkerState(db, sessionId, state);
         if (replacedSummaryMessageId !== null) {
             dropMarkerSummaryTag(db, sessionId, replacedSummaryMessageId);

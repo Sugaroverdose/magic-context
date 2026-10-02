@@ -7,6 +7,7 @@ import {
 import type { Database } from "../../shared/sqlite";
 import {
     clearPersistedLkgSlot,
+    drainStaleLkgSlots,
     loadPersistedLkgSlot,
     pruneStaleLkgSlots,
     saveLkgSlotToDb,
@@ -70,6 +71,21 @@ describe("LKG durable write discipline", () => {
             expect(count()).toBe(10);
             expect(pruneStaleLkgSlots(db, 20 * 86400000)).toBe(0);
             expect(count()).toBe(0);
+        } finally {
+            raw.close();
+        }
+    });
+
+    it("drains orphan-only batches and multiple old slots within one tick", async () => {
+        const { db, raw } = fixture();
+        try {
+            for (let i = 0; i < 3; i++)
+                saveLkgSlotToDb(db, `large-old-${i}`, {
+                    ...slot,
+                    jsonPrefix: "x".repeat(60 * 65536),
+                });
+            expect(await drainStaleLkgSlots(db, 20 * 86400000)).toBe(3);
+            expect(raw.query("SELECT COUNT(*) AS n FROM lkg_slot_chunks").get()).toEqual({ n: 0 });
         } finally {
             raw.close();
         }

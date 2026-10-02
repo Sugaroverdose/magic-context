@@ -1130,6 +1130,13 @@ function backoffKey(compartmentId: number): string {
     return `${BACKOFF_PREFIX}${compartmentId}`;
 }
 
+export function deleteChunkEmbedBackoffForCompartments(db: Database, ids: readonly number[]): void {
+    if (ids.length === 0) return;
+    db.prepare(
+        `DELETE FROM schema_migrations_meta WHERE key IN (${ids.map(() => "?").join(",")})`,
+    ).run(...ids.map((id) => `${BACKOFF_PREFIX}${id}`));
+}
+
 export function deleteChunkEmbedBackoffForSession(db: Database, sessionId: string): void {
     db.prepare(`DELETE FROM schema_migrations_meta WHERE key IN (
         SELECT ? || id FROM compartments WHERE session_id = ?

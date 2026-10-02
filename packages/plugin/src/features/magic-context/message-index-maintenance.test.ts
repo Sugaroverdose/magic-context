@@ -10,6 +10,7 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { recordMessageFtsRowid } from "./message-fts-rowid-map";
 import {
+    drainOrphanedOpenCodeMessageIndexes,
     MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS,
     MESSAGE_HISTORY_ORPHAN_UNAVAILABLE_REPROBE_MS,
     sweepOrphanedOpenCodeMessageIndexes,
@@ -83,6 +84,7 @@ function countRows(db: Database, table: string, sessionId: string): number {
 }
 
 afterEach(() => {
+    _resetHarnessForTesting();
     for (const directory of tempDirectories) {
         rmSync(directory, { recursive: true, force: true });
     }
@@ -90,7 +92,7 @@ afterEach(() => {
 });
 
 describe("message history orphan maintenance", () => {
-    test("removes activity for a missing host session but retains the live session and backfill marker", () => {
+    test("removes activity for a missing host session but retains the live session and backfill marker", async () => {
         const db = createStoreDb();
         const now = 2_000_000_000_000;
         const old = now - MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS - 1;
@@ -104,7 +106,7 @@ describe("message history orphan maintenance", () => {
         const hostPath = createOpenCodeDb(["live"]);
         try {
             expect(
-                sweepOrphanedOpenCodeMessageIndexes(
+                await drainOrphanedOpenCodeMessageIndexes(
                     db,
                     () => new Database(hostPath, { readonly: true }),
                     { now },
@@ -123,7 +125,7 @@ describe("message history orphan maintenance", () => {
             closeQuietly(db);
         }
     });
-    test("sweeps every old orphan row while retaining live, young, and Pi rows", () => {
+    test("sweeps every old orphan row while retaining live, young, and Pi rows", async () => {
         const db = createStoreDb();
         const now = 2_000_000_000_000;
         const old = now - MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS - 1;
@@ -136,7 +138,7 @@ describe("message history orphan maintenance", () => {
         const openCodePath = createOpenCodeDb(["ses-live"]);
 
         try {
-            const result = sweepOrphanedOpenCodeMessageIndexes(
+            const result = await drainOrphanedOpenCodeMessageIndexes(
                 db,
                 () => new Database(openCodePath, { readonly: true }),
                 { now },
@@ -209,7 +211,7 @@ describe("message history orphan maintenance", () => {
         }
     });
 
-    test("discovers an orphan whose index rows were already purged", () => {
+    test("discovers an orphan whose index rows were already purged", async () => {
         const db = createStoreDb();
         const now = 2_000_000_000_000;
         const orphanSessionId = "ses-indexless-orphan";
@@ -225,7 +227,7 @@ describe("message history orphan maintenance", () => {
         try {
             expect(countRows(db, "message_history_index", orphanSessionId)).toBe(0);
 
-            const result = sweepOrphanedOpenCodeMessageIndexes(
+            const result = await drainOrphanedOpenCodeMessageIndexes(
                 db,
                 () => new Database(openCodePath, { readonly: true }),
                 { now },
@@ -239,7 +241,7 @@ describe("message history orphan maintenance", () => {
         }
     });
 
-    test("persists a keyset cursor and resumes within the configured batch bound", () => {
+    test("clamps an oversized orphan page to one session and resumes its durable cleanup queue", async () => {
         const db = createStoreDb();
         const now = 2_000_000_000_000;
         const old = now - MESSAGE_HISTORY_ORPHAN_SAFETY_AGE_MS - 1;
@@ -254,20 +256,27 @@ describe("message history orphan maintenance", () => {
                 now,
                 batchSize: 2,
             });
-            expect(first).toEqual({ status: "swept", scanned: 2, deleted: 2, cursor: "ses-b" });
+            expect(first).toEqual({ status: "swept", scanned: 1, deleted: 0, cursor: "ses-a" });
+            expect(
+                db
+                    .prepare("SELECT harness FROM pending_session_cleanup WHERE session_id='ses-a'")
+                    .get(),
+            ).toEqual({ harness: "opencode:orphan" });
 
             const persisted = db
                 .prepare(
                     "SELECT cursor_session_id FROM message_history_orphan_sweep WHERE harness = 'opencode'",
                 )
                 .get() as { cursor_session_id: string };
-            expect(persisted.cursor_session_id).toBe("ses-b");
+            expect(persisted.cursor_session_id).toBe("ses-a");
 
             const second = sweepOrphanedOpenCodeMessageIndexes(db, openSource, {
                 now,
                 batchSize: 2,
             });
-            expect(second).toEqual({ status: "swept", scanned: 1, deleted: 1, cursor: "" });
+            expect(second).toEqual({ status: "swept", scanned: 1, deleted: 0, cursor: "ses-b" });
+            const resumed = await drainOrphanedOpenCodeMessageIndexes(db, openSource, { now });
+            expect(resumed).toMatchObject({ deleted: 3, cursor: "" });
             expect(
                 (
                     db.prepare("SELECT COUNT(*) AS count FROM message_history_index").get() as {
@@ -361,13 +370,13 @@ describe("message history orphan sweep on a host without an OpenCode store", () 
     }
 });
 
-test("a harness-scoped orphan sweep retains counters until the last harness's compartments are gone", () => {
+test("a harness-scoped orphan sweep retains counters until the last harness's compartments are gone", async () => {
     const db = createStoreDb();
     try {
         setHarness("opencode");
         const source = createOpenCodeDb([]);
         const sweep = () =>
-            sweepOrphanedOpenCodeMessageIndexes(db, () => new Database(source), {
+            drainOrphanedOpenCodeMessageIndexes(db, () => new Database(source), {
                 now: 10_000,
                 safetyAgeMs: 0,
                 cooldownMs: 0,
@@ -381,7 +390,7 @@ test("a harness-scoped orphan sweep retains counters until the last harness's co
                 "SELECT generation,version FROM compartment_history_versions WHERE session_id=?",
             )
             .get("shared-session") as { generation: string; version: number };
-        expect(sweep().deleted).toBe(1);
+        expect((await sweep()).deleted).toBe(1);
         expect(
             db
                 .prepare("SELECT harness,content FROM compartments WHERE session_id=?")
@@ -396,7 +405,7 @@ test("a harness-scoped orphan sweep retains counters until the last harness's co
         ).toEqual({ ...before, version: before.version + 1 });
         _resetHarnessForTesting();
         setHarness("opencode2");
-        expect(sweep().deleted).toBe(1);
+        expect((await sweep()).deleted).toBe(1);
         expect(
             db
                 .prepare("SELECT generation FROM compartment_history_versions WHERE session_id=?")

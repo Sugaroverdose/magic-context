@@ -6,7 +6,7 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { _resetHarnessForTesting } from "../../shared/harness";
-import { Database } from "../../shared/sqlite";
+import { Database, withSqliteTransformPass } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
@@ -75,6 +75,35 @@ function returningRootCommit(rootCommit: string): typeof execFileSync {
 }
 
 describe("runSessionProjectBackfill", () => {
+    it("defers a busy background lease without spending the production 5 s timeout", async () => {
+        const db = createDb();
+        await runSessionProjectBackfill(db, [], { leaseKey: "prime" });
+        db.exec("PRAGMA busy_timeout=5000");
+        const blocker = new Database(db.filename);
+        try {
+            blocker.exec("BEGIN IMMEDIATE");
+            const started = performance.now();
+            await expect(
+                runSessionProjectBackfill(db, [], { leaseKey: "blocked" }),
+            ).rejects.toThrow();
+            expect(performance.now() - started).toBeLessThan(750);
+            const nestedStarted = performance.now();
+            await expect(
+                withSqliteTransformPass(() =>
+                    runSessionProjectBackfill(db, [], { leaseKey: "foreground-parent" }),
+                ),
+            ).rejects.toThrow();
+            expect(performance.now() - nestedStarted).toBeLessThan(200);
+            expect(db.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
+            blocker.exec("ROLLBACK");
+            expect((await runSessionProjectBackfill(db, [], { leaseKey: "blocked" })).status).toBe(
+                "completed",
+            );
+        } finally {
+            if (blocker.inTransaction) blocker.exec("ROLLBACK");
+            blocker.close();
+        }
+    });
     it("backfills unmapped sessions and leaves mapped ones untouched", async () => {
         const db = createDb();
         const directory = makeTempDir("session-project-backfill-live-");

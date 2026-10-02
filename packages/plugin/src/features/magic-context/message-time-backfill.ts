@@ -130,8 +130,9 @@ export function backfillMessageTimesBatch(
     const cursorSessionId = last?.sessionId ?? state.cursorSessionId;
     const cursorOrdinal = last ? Number(last.messageOrdinal) : state.cursorOrdinal;
 
-    const transactionStartedAt = performance.now();
+    let transactionStartedAt = 0;
     db.transaction(() => {
+        transactionStartedAt = performance.now();
         const update = db.prepare(
             `UPDATE message_fts_rowid_map
                 SET message_time_ms = ?

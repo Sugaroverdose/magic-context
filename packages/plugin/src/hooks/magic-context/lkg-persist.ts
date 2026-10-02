@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { assembleLkgPrefix, layoutLkgPrefix } from "../../features/magic-context/lkg-prefix-chunks";
+import { drainBackgroundBatches } from "../../shared/background-batch-drain";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
@@ -349,7 +350,7 @@ export function loadPersistedLkgSlot(db: Database, sessionId: string): LkgSlot |
     return slot;
 }
 
-export function pruneStaleLkgSlots(db: Database, now = Date.now()): number {
+function pruneStaleLkgSlotsBatch(db: Database, now: number): { slots: number; chunks: number } {
     const previousTimeout = db.prepare("PRAGMA busy_timeout").get() as { timeout: number };
     const cutoff = now - 7 * 24 * 60 * 60 * 1000;
     const stale = `captured_at < ? AND NOT EXISTS (
@@ -366,7 +367,7 @@ export function pruneStaleLkgSlots(db: Database, now = Date.now()): number {
         session_id = ? OR NOT EXISTS (SELECT 1 FROM lkg_slots s WHERE s.session_id = c.session_id)
         LIMIT 25`)
         .all(slot?.session_id ?? "") as Array<{ rowid: number }>;
-    if (!slot && chunks.length === 0) return 0;
+    if (!slot && chunks.length === 0) return { slots: 0, chunks: 0 };
     try {
         db.exec("PRAGMA busy_timeout = 0");
         let transactionStartedAt = 0;
@@ -382,16 +383,38 @@ export function pruneStaleLkgSlots(db: Database, now = Date.now()): number {
                     db.prepare(`DELETE FROM lkg_slot_chunks WHERE rowid = ? AND NOT EXISTS (
                 SELECT 1 FROM lkg_slots s WHERE s.session_id = lkg_slot_chunks.session_id
             )`);
-                for (const { rowid } of chunks) removeChunk.run(rowid);
-                return removed;
+                let removedChunks = 0;
+                for (const { rowid } of chunks) removedChunks += removeChunk.run(rowid).changes;
+                return { slots: removed, chunks: removedChunks };
             })
             .immediate();
         logSlowWriteTransaction("lkg_stale_gc", transactionStartedAt);
-        if (changes) persistedFingerprints.delete(db);
+        if (changes.slots && slot) persistedFingerprints.get(db)?.delete(slot.session_id);
         return changes;
     } finally {
         db.exec(`PRAGMA busy_timeout = ${Number(previousTimeout.timeout) || 0}`);
     }
+}
+
+export function pruneStaleLkgSlots(db: Database, now = Date.now()): number {
+    return pruneStaleLkgSlotsBatch(db, now).slots;
+}
+
+export async function drainStaleLkgSlots(
+    db: Database,
+    now = Date.now(),
+    budgetMs = 2000,
+): Promise<number> {
+    let removed = 0;
+    await drainBackgroundBatches(
+        () => {
+            const batch = pruneStaleLkgSlotsBatch(db, now);
+            removed += batch.slots;
+            return batch.slots + batch.chunks > 0;
+        },
+        { budgetMs },
+    );
+    return removed;
 }
 
 /** Backend bound to one database handle, for registration with the slot store. */

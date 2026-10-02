@@ -48,19 +48,20 @@ import {
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
 import { isUsableProjectIdentity } from "../features/magic-context/memory/project-identity";
-import { sweepOrphanedOpenCodeMessageIndexes } from "../features/magic-context/message-index";
+import { drainOrphanedOpenCodeMessageIndexes } from "../features/magic-context/message-index";
 import {
     drainCommitBacklogForProject,
-    sweepStaleEmbeddingIdentitiesForProject,
+    drainProjectEmbeddingIdentityMaintenance,
+    drainStaleEmbeddingIdentitiesForProject,
 } from "../features/magic-context/project-embedding-registry";
 import { runDueCompiledSmartNoteChecks } from "../features/magic-context/smart-notes/runner";
 import {
     openDatabase,
     retryPendingRustSessionCleanupsForProject,
-    retryPendingSessionCleanups,
     runSqliteOptimize,
 } from "../features/magic-context/storage";
-import { pruneStaleLkgSlots } from "../hooks/magic-context/lkg-persist";
+import { drainPendingSessionCleanups } from "../features/magic-context/storage-meta-session";
+import { drainStaleLkgSlots } from "../hooks/magic-context/lkg-persist";
 import type { RawMessageProvider } from "../hooks/magic-context/read-session-chunk";
 import { projectNeedsSingleStoreMigration } from "../hooks/magic-context/single-store-refusal";
 import { getErrorMessage } from "../shared/error-message";
@@ -419,12 +420,12 @@ function persistTickOutcome(db: Database, failure: DreamerTickFailure | null): v
 
 async function runMessageHistoryMaintenance(db: Database): Promise<void> {
     try {
-        pruneStaleLkgSlots(db);
+        await drainStaleLkgSlots(db);
     } catch (error) {
         // A busy writer should not prevent unrelated maintenance from running.
         log("[magic-context] LKG pruning deferred:", error);
     }
-    const cleanup = retryPendingSessionCleanups(db);
+    const cleanup = await drainPendingSessionCleanups(db);
     if (cleanup.cleared > 0 || cleanup.failedSessionIds.length > 0) {
         log(
             `[message-index] pending session cleanup: cleared=${cleanup.cleared} failed=${cleanup.failedSessionIds.length}`,
@@ -452,7 +453,7 @@ async function runMessageHistoryMaintenance(db: Database): Promise<void> {
         }
     }
 
-    const sweep = sweepOrphanedOpenCodeMessageIndexes(db, openOpenCodeDb);
+    const sweep = await drainOrphanedOpenCodeMessageIndexes(db, openOpenCodeDb);
     if (sweep.deleted > 0) {
         log(
             `[message-index] orphan sweep: scanned=${sweep.scanned} deleted=${sweep.deleted} cursor=${sweep.cursor || "<complete>"}`,
@@ -564,7 +565,8 @@ async function sweepProject(
     await reg.ensureRegistered(reg.directory, db);
     const embeddingSnapshot = getProjectEmbeddingSnapshot(reg.projectIdentity);
     const commitIndexingEnabled = gitCommitEnabled ?? embeddingSnapshot?.gitCommitEnabled === true;
-    const gc = sweepStaleEmbeddingIdentitiesForProject(db, reg.projectIdentity);
+    await drainProjectEmbeddingIdentityMaintenance(db, reg.projectIdentity);
+    const gc = await drainStaleEmbeddingIdentitiesForProject(db, reg.projectIdentity);
     const gcDeleted = gc.memoryRowsDeleted + gc.commitRowsDeleted + gc.chunkRowsDeleted;
     if (gcDeleted > 0) {
         log(

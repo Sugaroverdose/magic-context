@@ -142,9 +142,13 @@ describe("dream-timer registration cleanup", () => {
             unref: mock(() => {}),
         } as unknown as ReturnType<typeof setTimeout>;
         let startupCallback: (() => void) | undefined;
+        const nativeTimeout = globalThis.setTimeout;
         const setTimeoutSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
             callback: () => void,
+            delay?: number,
         ) => {
+            // Maintenance yields are real timer turns, not startup schedules.
+            if (delay === 0) return nativeTimeout(callback, 0);
             startupCallback ??= callback;
             return timeoutHandle;
         }) as typeof setTimeout);
@@ -179,7 +183,7 @@ describe("dream-timer registration cleanup", () => {
                     .get(sessionId) as { count: number };
             for (let attempt = 0; attempt < 100; attempt += 1) {
                 if (pendingCount().count === 0) break;
-                await Promise.resolve();
+                await new Promise<void>((resolve) => nativeTimeout(resolve, 0));
             }
 
             expect(deleteSession).toHaveBeenCalledWith(sessionId, directory);
@@ -325,8 +329,8 @@ describe("dream-timer message-history maintenance (static)", () => {
             source.indexOf("function startupJitterMs("),
         );
         expect(tick).toContain("runMessageHistoryMaintenance(db)");
-        expect(tick).toContain("retryPendingSessionCleanups(db)");
-        expect(tick).toContain("sweepOrphanedOpenCodeMessageIndexes(db, openOpenCodeDb)");
+        expect(tick).toContain("await drainPendingSessionCleanups(db)");
+        expect(tick).toContain("await drainOrphanedOpenCodeMessageIndexes(db, openOpenCodeDb)");
     });
 });
 
