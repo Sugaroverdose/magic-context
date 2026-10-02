@@ -18358,6 +18358,7 @@ mod tests {
     mod gate_a1_b0;
     mod gate_a1_b0_baseline_probe;
     mod gate_a2;
+    mod guidance_get_golden;
     mod single_store_drill;
     // The per-harness default runner, driven through real passes.
     mod default_runner;
