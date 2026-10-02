@@ -1,0 +1,18 @@
+{
+  "config": {
+    "compaction_enabled": true,
+    "memory_enabled": true,
+    "dreamer_runnable": true,
+    "temporal_awareness": true,
+    "caveman_text_compression": false,
+    "language": null,
+    "prompt_surface": {
+      "default": "full",
+      "models": {}
+    },
+    "guidance_override_sha256": null,
+    "tool_descriptions": {},
+    "disabled_tools": []
+  },
+  "text_revision": "3faac726f7109b8dd3acde7a119b1e9ae5361b592a70bf943c1083d5553365a7"
+}
