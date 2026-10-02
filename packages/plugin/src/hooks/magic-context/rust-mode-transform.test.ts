@@ -4513,6 +4513,47 @@ describe("Rust mode authority adapter", () => {
         expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
     });
 
+    it("refuses instead of rebuilding forever when every state sync loses the module connection", async () => {
+        const sessionId = `rust-state-sync-reconnect-loop-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let stateSyncs = 0;
+        let transforms = 0;
+        const moduleClient: RustModeModuleClient = {
+            stateSyncCapabilities: async () => ({ state_sync_deltas: true }),
+            call: async ({ method }) => {
+                if (method === "state_sync") {
+                    stateSyncs += 1;
+                    // Bounded so a client that never gives up still finishes and the
+                    // assertions below report the retry count instead of hanging.
+                    if (stateSyncs <= 50) {
+                        return {
+                            transport_status: "connection_generation_changed",
+                            previous_generation: stateSyncs,
+                            current_generation: stateSyncs + 1,
+                        };
+                    }
+                    return { ok: true };
+                }
+                if (method === "transform") {
+                    transforms += 1;
+                    return { decision: "PASSTHROUGH", native_messages: makeMessages(sessionId) };
+                }
+                return { ok: true };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const output = { messages: [] as unknown[] };
+        await expect(
+            transform.run(sessionId, makeMessages(sessionId), output, makeMeta(db, sessionId)),
+        ).rejects.toThrow("Magic Context's engine is reconnecting");
+        expect(output.messages).toEqual([]);
+        expect(stateSyncs).toBe(3);
+        expect(transforms).toBe(0);
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
+    });
+
     it("refuses transform_transport_interrupted with compaction disabled instead of serving unmanaged history", async () => {
         const sessionId = `rust-interrupted-compaction-off-${Date.now()}`;
         sessions.push(sessionId);

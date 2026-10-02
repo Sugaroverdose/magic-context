@@ -1249,6 +1249,9 @@ function readAuthoritySeqMismatch(error: unknown): number | null {
     return null;
 }
 
+/** Reconnects one state-sync pass tolerates before it fails instead of rebuilding again. */
+const MAX_STATE_SYNC_GENERATION_CHANGES = 2;
+
 /**
  * Mode-neutral state synchronization: the same watermark-triggered assembly is
  * used by the mirror sender and the Rust authority path. Callers own retries and
@@ -1323,12 +1326,31 @@ export async function syncModuleState(args: {
             return capability === true;
         };
         let stateSyncDeltas = await resolveStateSyncDeltas();
+        // Each connection-generation change rebuilds the whole payload and re-probes the
+        // module. A module that drops the connection on every attempt (a crash-and-restart
+        // loop, or a payload it cannot survive) would otherwise keep this pass rebuilding
+        // forever. Two reconnects cover an ordinary module restart; a third fails the
+        // pass, and the caller's failure ladder (last-known-good replay, then refusal)
+        // decides what is served.
+        let generationChanges = 0;
+        const afterGenerationChange = async (): Promise<void> => {
+            generationChanges += 1;
+            if (generationChanges > MAX_STATE_SYNC_GENERATION_CHANGES) {
+                throw Object.assign(
+                    new Error(
+                        `module state sync abandoned: the module connection changed ${generationChanges} times during one pass`,
+                    ),
+                    { code: "state_sync_connection_unstable" },
+                );
+            }
+            stateSyncDeltas = await resolveStateSyncDeltas(true);
+        };
         syncLoop: for (;;) {
             if (force) args.options = { ...args.options, seedInventory: undefined };
             if (force && resumable) {
                 const rawInventory = await probe({ state_sync_inventory: true });
                 if (isModuleTransportGenerationChangedResult(rawInventory)) {
-                    stateSyncDeltas = await resolveStateSyncDeltas(true);
+                    await afterGenerationChange();
                     continue;
                 }
                 const inventoryEnvelope =
@@ -1423,7 +1445,7 @@ export async function syncModuleState(args: {
                     for (const batch of batches) batch.params.seed_id = seedId;
                     const raw = await probe({ state_sync_seed_id: seedId });
                     if (isModuleTransportGenerationChangedResult(raw)) {
-                        stateSyncDeltas = await resolveStateSyncDeltas(true);
+                        await afterGenerationChange();
                         continue;
                     }
                     const envelope = isRecord(raw) && isRecord(raw.result) ? raw.result : raw;
@@ -1500,7 +1522,7 @@ export async function syncModuleState(args: {
                     if (isModuleTransportGenerationChangedResult(response)) {
                         // The payload used the previous connection's capabilities. Re-probe the new
                         // connection and rebuild before retrying because it may not support deltas.
-                        stateSyncDeltas = await resolveStateSyncDeltas(true);
+                        await afterGenerationChange();
                         continue syncLoop;
                     }
                 }
