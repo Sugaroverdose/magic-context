@@ -119,19 +119,15 @@ On OpenCode 2 each [historian](/concepts/historian/) run is one request with no 
 
 The [dreamer](/concepts/dreamer/) also runs tool-loop tasks on OpenCode 2: `map-memories`, `verify`, `verify-broad`, `curate`, `retrospective`, `maintain-docs`, and `refresh-primers`. Each uses a task-scoped hidden agent with only its permitted tools. Single-shot and host-only tasks continue to run as before.
 
-### Hidden sessions appear as top-level sessions
+### Hidden runs use native child sessions
 
-OpenCode 2 gives plugins no way to attach a session to a parent. Magic Context keeps reusable hidden sessions for single-shot tasks. A tool-loop task gets a fresh hidden session for each run, so its tool history cannot leak into the next run. They are titled `Magic Context historian` and `Magic Context dreamer`.
+Magic Context requires OpenCode 2.0.22 or newer. Startup checks the session API's capabilities, not the host's version string. Older hosts show one upgrade notice and refuse turns before a provider is called.
 
-A session is retired when a run in it fails or is interrupted, or when a new OpenCode version replaces it.
+Every hidden run gets a fresh session, titled `Magic Context historian` or `Magic Context dreamer`. When started from a user session it is parented to that session and inherits its location. The native session API removes it when the run ends, without requiring `serve --service`.
 
-With [`keep_subagents: true`](/reference/configuration/), retired sessions are kept by the same rule as OpenCode 1. A session that ever completed a run is kept for either role, whatever its latest run did, because it holds those earlier runs. A historian session is always kept. Only a dreamer session none of whose runs ever completed is deleted. Kept sessions stay marked as hidden, and turning the option off lets the next start delete them.
+With [`keep_subagents: true`](/reference/configuration/), settled children and historian children are kept for inspection. Unsettled dreamer children are removed. Kept sessions accumulate until manually cleared.
 
-Otherwise Magic Context deletes a retired session through OpenCode's own session API. That works only when the host registered itself as a service, as `opencode serve --service` does. A plain `opencode serve` or a `--standalone` host registers no service. There, retired sessions are kept and retried by a later process, and Magic Context reports the limitation `MC-H02`. To list them:
-
-```bash
-npx @cortexkit/magic-context@latest doctor list-hidden-sessions
-```
+On upgrade, Magic Context removes children recorded by older hosts through the native API. Cleanup is bounded per boot and resumes on later boots until complete. It never rewrites the OpenCode store directly.
 
 ### Other differences
 

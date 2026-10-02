@@ -41,6 +41,16 @@ export class AssistantTerminalRetryError extends Error {
     }
 }
 
+export class IncompleteUserMessageError extends Error {
+    readonly code = "INCOMPLETE_USER_MESSAGE";
+    readonly recoverable = true;
+
+    constructor() {
+        super("Your message hadn't finished arriving. Send it again.");
+        this.name = "IncompleteUserMessageError";
+    }
+}
+
 type MessageWithParts = {
     info: import("@opencode-ai/sdk").Message;
     parts: import("@opencode-ai/sdk").Part[];
@@ -540,6 +550,18 @@ export function createMessagesTransformHandler(args: {
 
     return (input, output): Promise<MessageWithParts[]> =>
         withSqliteTransformPass(async () => {
+            const tail = output.messages.at(-1);
+            // OpenCode persists the user row before its parts. Refuse before any
+            // transform or replay can turn that incomplete row into the old request.
+            // ID-less injected heads and host summary rows are not arriving prompts.
+            if (
+                tail?.info.role === "user" &&
+                tail.info.id &&
+                !(tail.info as { summary?: boolean }).summary &&
+                tail.parts.length === 0
+            ) {
+                throw new IncompleteUserMessageError();
+            }
             const inputMessages = [...output.messages];
             // Read before the transform runs: it mutates the shared message objects.
             const inputTailRole = wireTailRole(output.messages);

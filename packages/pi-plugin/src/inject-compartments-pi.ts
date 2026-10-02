@@ -1738,7 +1738,6 @@ export function materializeM0Pi(
 	// changed since Phase 1, the rendered bytes are stale — roll back and let the
 	// caller retry. m[1] is rendered and persisted INSIDE the same transaction as
 	// m[0] so cached_m0_bytes/cached_m1_bytes/markers/memory_block_ids stay paired.
-	const transactionStartedAt = performance.now();
 	try {
 		db.exec("BEGIN IMMEDIATE");
 	} catch (error) {
@@ -1747,6 +1746,7 @@ export function materializeM0Pi(
 		}
 		throw error;
 	}
+	const transactionStartedAt = performance.now();
 	try {
 		// The lock-time marker check must describe the bytes rendered above. Reusing
 		// that HARD-fold document snapshot avoids a second stat/read pair and prevents
@@ -2427,8 +2427,8 @@ function softRefreshCachedM1Pi(args: {
 	memoryUpdateCount: number;
 	recomputed: boolean;
 } {
-	const transactionStartedAt = performance.now();
 	args.db.exec("BEGIN IMMEDIATE");
+	const transactionStartedAt = performance.now();
 	try {
 		const row = readCachedPiM0M1Row(args.db, args.state.sessionId);
 		if (

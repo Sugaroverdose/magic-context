@@ -14,6 +14,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { OpenCode } from "@opencode/client";
+import { classifyContentionTurn } from "../src/contention-turn-outcome";
 import { isolation, spawnOpencode2 } from "../src/opencode2-runner/spawn";
 
 const count = Number(process.env.MC_554_HOSTS ?? 11);
@@ -48,24 +49,38 @@ import { appendFileSync } from "node:fs";
 import { Database } from "bun:sqlite";
 const sample = new Database(":memory:");
 const statementPrototype = Object.getPrototypeOf(sample.prepare("SELECT 1"));
-const originalRun = statementPrototype.run;
-statementPrototype.run = function (...args) {
-  const start = Date.now();
-  const stack = new Error().stack;
-  try { return originalRun.apply(this, args); }
-  finally {
-    const ms = Date.now() - start;
-    if (ms > 150) appendFileSync(${JSON.stringify(join(root, "sqlite-waits.log"))}, JSON.stringify({ pid: process.pid, ms, method: "run", sql: String(this).slice(0, 180), stack }) + '\\n');
+for (const method of ["run", "get", "all"]) {
+  const original = statementPrototype[method];
+  statementPrototype[method] = function (...args) {
+    const start = Date.now();
+    try { return original.apply(this, args); }
+    finally { const ms = Date.now()-start;
+      if (ms > 20) appendFileSync(${JSON.stringify(join(root, "sqlite-waits.log"))}, JSON.stringify({ pid:process.pid, at:Date.now(), ms, method, sql:String(this).slice(0,180), stack:new Error().stack })+'\\n');
+    }
+  };
+}
+const originalTransaction = Database.prototype.transaction;
+Database.prototype.transaction = function (callback) {
+  const transaction = originalTransaction.call(this, callback);
+  for (const method of ["immediate", "exclusive", "deferred"]) {
+    const original = transaction[method];
+    transaction[method] = function (...args) {
+      const start = Date.now();
+      try { return original.apply(this, args); }
+      finally { const ms = Date.now()-start;
+        if (ms > 20) appendFileSync(${JSON.stringify(join(root, "sqlite-waits.log"))}, JSON.stringify({ pid:process.pid, at:Date.now(), ms, method:"transaction:"+method, stack:new Error().stack })+'\\n');
+      }
+    };
   }
+  return transaction;
 };
 const originalExec = Database.prototype.exec;
 Database.prototype.exec = function (...args) {
   const start = Date.now();
-  const stack = new Error().stack;
   try { return originalExec.apply(this, args); }
   finally {
     const ms = Date.now() - start;
-    if (ms > 150) appendFileSync(${JSON.stringify(join(root, "sqlite-waits.log"))}, JSON.stringify({ pid: process.pid, ms, method: "exec", sql: args[0], stack }) + '\\n');
+    if (ms > 20) appendFileSync(${JSON.stringify(join(root, "sqlite-waits.log"))}, JSON.stringify({ pid: process.pid, at:Date.now(), ms, method: "exec", sql: args[0], stack: new Error().stack }) + '\\n');
   }
 };
 sample.close();
@@ -88,6 +103,7 @@ const built = await Bun.build({
 	outdir: plugin,
 	naming: "server.js",
 	target: "bun",
+	sourcemap: "external",
 	tsconfig: resolve(import.meta.dir, "../../plugin/tsconfig.json"),
 	define: { "process.env.NODE_ENV": JSON.stringify("production") },
 	external: [
@@ -106,13 +122,23 @@ const samples: {
 	status: number | string;
 	at: number;
 }[] = [];
-const turns: { index: number; phase: string; ms: number; result: string }[] =
-	[];
+const turns: {
+	index: number;
+	phase: string;
+	ms: number;
+	result: string;
+	providerRequests?: number;
+	refused?: boolean;
+	replay?: boolean;
+}[] = [];
 const dbPath = join(storage, "context.db");
 // A fresh store has every migration pending; host startup creates it without prewarming.
 const toolCalls: { index: number; issued: boolean; outcome: string }[] = [];
 let lock: Database | undefined;
 let paused = false;
+let stoppedAt = 0;
+let resumedAt = 0;
+const warmProof: { index: number; saved: boolean }[] = [];
 const version = execFileSync(process.env.MC_E2E_OPENCODE2_CLI!, ["--version"], {
 	encoding: "utf8",
 }).trim();
@@ -191,22 +217,62 @@ try {
 			clients.map(async (client, i) => {
 				if (i >= 7) return;
 				const start = performance.now();
+				const beforeRequests = hosts[i].mock.requests().length;
+				const beforeLog = hosts[i].pluginLog().length;
+				const text =
+					phase === "locked"
+						? `write a note for issue 554 locked ${Date.now()}`
+						: `issue 554 ${phase} ${Date.now()}`;
+				const previousIdleIds = new Set<string>();
 				try {
+					const previous = await client.message.list({
+						sessionID: sessions[i],
+					});
+					for (const row of (
+						previous as unknown as { data: Array<{ id: string; type: string }> }
+					).data)
+						if (row.type === "idle") previousIdleIds.add(row.id);
 					await client.session.prompt({
 						sessionID: sessions[i],
-						text:
-							phase === "locked"
-								? `write a note for issue 554 locked ${Date.now()}`
-								: `issue 554 ${phase} ${Date.now()}`,
+						text,
 					});
+					await client.session.wait(
+						{ sessionID: sessions[i] },
+						{ signal: AbortSignal.timeout(30000) },
+					);
+					const listed = await client.message.list({ sessionID: sessions[i] });
+					const idle = (
+						listed as unknown as {
+							data: Array<{ id: string; type: string; outcome?: string }>;
+						}
+					).data.find(
+						(row) => row.type === "idle" && !previousIdleIds.has(row.id),
+					);
+					const requests = hosts[i].mock
+						.requests()
+						.slice(beforeRequests)
+						.filter((request) => JSON.stringify(request.body).includes(text));
+					const log = hosts[i].pluginLog().slice(beforeLog);
 					turns.push({
+						providerRequests: requests.length,
+						...classifyContentionTurn(log, requests.length, idle?.outcome),
 						index: i,
 						phase,
 						ms: performance.now() - start,
-						result: "ok",
 					});
 				} catch (error) {
+					const log = hosts[i].pluginLog().slice(beforeLog);
 					turns.push({
+						providerRequests: hosts[i].mock
+							.requests()
+							.slice(beforeRequests)
+							.filter((request) => JSON.stringify(request.body).includes(text))
+							.length,
+						refused:
+							/refusing this turn before the model call|v2 refusal: interrupting the turn before the provider request|storage-busy refusal/.test(
+								log,
+							),
+						replay: log.includes("lkg_replay_served"),
 						index: i,
 						phase,
 						ms: performance.now() - start,
@@ -252,18 +318,37 @@ try {
 	const steadyTurn = drive("steady");
 	await poll("steady", 10);
 	await steadyTurn;
-	hosts.forEach((host) => { process.kill(host.pid!, "SIGSTOP"); });
+	stoppedAt = Date.now();
+	hosts.forEach((host) => {
+		process.kill(host.pid!, "SIGSTOP");
+	});
 	paused = true;
 	await poll("stopped", 30);
-	hosts.forEach((host) => { process.kill(host.pid!, "SIGCONT"); });
+	hosts.forEach((host) => {
+		process.kill(host.pid!, "SIGCONT");
+	});
 	paused = false;
+	resumedAt = Date.now();
 	const wakeTurn = drive("wake");
 	await poll("wake", 10);
 	await wakeTurn;
+	if (process.env.MC_554_WARM_LKG === "1") {
+		await drive("warm");
+		await Bun.sleep(100);
+		const reader = new Database(dbPath, { readonly: true });
+		for (let i = 0; i < 7; i++)
+			warmProof.push({
+				index: i,
+				saved: !!reader
+					.prepare("SELECT 1 FROM lkg_slots WHERE session_id=?")
+					.get(sessions[i]),
+			});
+		reader.close();
+	}
 	lock = new Database(dbPath);
 	lock.exec("BEGIN IMMEDIATE");
 	const lockTurn = drive("locked");
-	await poll("locked", 10);
+	await poll("locked", Number(process.env.MC_554_LOCK_SECONDS ?? 10));
 	lock.exec("ROLLBACK");
 	lock.close();
 	lock = undefined;
@@ -343,19 +428,20 @@ try {
 		}
 	}
 	migrationReader.close();
-	const lockedTurnOutcomes = hosts.map((_, index) => ({
-		index,
-		// Both markers are Magic Context log lines, never host stderr.
-		outcome: hostLogs[index].pluginLog.includes("lkg_replay_served")
-			? "LKG"
-			: hostLogs[index].pluginLog.includes("refusing this turn before the model call")
-				? "refused"
-				: "normal",
-	}));
+	const lockedTurnOutcomes = turns
+		.filter((turn) => turn.phase === "locked")
+		.map((turn) => ({
+			index: turn.index,
+			outcome: turn.replay ? "LKG" : turn.refused ? "refused" : turn.result,
+			providerRequests: turn.providerRequests ?? 0,
+		}));
 	const evidence = {
 		root,
 		version,
 		source,
+		stoppedAt,
+		resumedAt,
+		warmProof,
 		sqliteWaits,
 		hostPids: hosts.map((host) => host.pid),
 		phases,

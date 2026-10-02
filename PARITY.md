@@ -80,8 +80,8 @@ sequence or inventing an endpoint would violate the host contract.
 **OpenCode 1:** historian and Dreamer work can use child sessions with an
 explicit model and a host tool loop.
 
-**OpenCode 2:** text-only historian/classifier/compress-cues work uses one
-reusable unparented child session per project and role. The child is created on
+**OpenCode 2 (2.0.22 or newer):** historian/classifier/compress-cues work uses a
+fresh child per run, parented to the user's session when one exists. The child is created on
 the resolved historian or Dreamer chain head, so the configured cheaper model is
 independent of the user's session model. A narrowly discriminated `context` hook
 replaces the marker with the exact calibrated `[system, user]` pair, generation
@@ -89,23 +89,16 @@ options, and an empty tool surface. Completion text and provider usage come from
 the child's persisted assistant row; the local meter is only a missing-usage
 fallback. Retryable fallback switches the child's model before re-prompting.
 
-**Constraint:** the GA plugin Pick cannot remove or archive a session. Each active
-historian child is therefore a visible root titled `Magic Context historian`, and
-Dreamer uses a second root titled `Magic Context dreamer`. Failed or incompatible-host-generation
-children are retired and deleted through the host's own session-delete route,
-bound to the `serve --service` registration that created them; a child whose
-host registered no service stays recorded for a later process and is reported as
-`MC-H02`. `doctor list-hidden-sessions` lists these roots read-only. The marker
-hook refuses any unregistered prompt on a Magic Context child.
+**Lifecycle:** the plugin requires `session.remove` and `session.compact` capabilities.
+A child inherits its parent's location and carries its hidden-run metadata on create.
+Completion removes it through the native API, with idempotent missing-session handling
+and a timeout so shutdown cannot hang. No service registration or offline doctor deletion
+is needed. Legacy bookkeeping is drained through the host once, in resumable boot batches.
+The marker hook still refuses any unregistered prompt on a Magic Context child.
 
-**Retention:** `keep_subagents: true` follows the OpenCode 1 rule, adapted to a
-child that holds many runs. OpenCode 1 keeps every settled child and hands an
-unsettled one to its age-gated sweep, which under the setting still retains
-historian children and deletes the privacy-sensitive Dreamer ones. On OpenCode 2
-one child carries every run for its role, so a retired child that ever completed
-a settled run is kept whatever its latest run did: deleting it would discard
-those settled runs, which OpenCode 1 never does. A historian child is always
-kept; only a Dreamer child none of whose runs ever settled is still deleted.
+**Retention:** `keep_subagents: true` keeps settled children and historian children.
+Unsettled Dreamer children are removed. Each retained child holds only its own run;
+retained sessions accumulate until manually cleared.
 Kept children stay in the retired list, so every boot still registers them as
 hidden, and the boot sweep skips them until the setting is turned off.
 

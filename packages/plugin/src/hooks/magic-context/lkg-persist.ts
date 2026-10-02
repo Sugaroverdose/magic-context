@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 
 import { assembleLkgPrefix, layoutLkgPrefix } from "../../features/magic-context/lkg-prefix-chunks";
+import { drainBackgroundBatches } from "../../shared/background-batch-drain";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { LkgPersistenceBackend, LkgSlot } from "./lkg-slot";
 
 /**
@@ -348,33 +350,71 @@ export function loadPersistedLkgSlot(db: Database, sessionId: string): LkgSlot |
     return slot;
 }
 
-export function pruneStaleLkgSlots(db: Database, now = Date.now()): number {
-    // A zero-wait write transaction lets this maintenance pass yield to active
-    // writers. Sessions used within the last week retain their replay snapshots.
+function pruneStaleLkgSlotsBatch(db: Database, now: number): { slots: number; chunks: number } {
     const previousTimeout = db.prepare("PRAGMA busy_timeout").get() as { timeout: number };
     const cutoff = now - 7 * 24 * 60 * 60 * 1000;
     const stale = `captured_at < ? AND NOT EXISTS (
-                SELECT 1 FROM session_projects sp
-                WHERE sp.session_id = lkg_slots.session_id AND sp.updated_at >= ?
-            )`;
+        SELECT 1 FROM session_projects sp
+        WHERE sp.session_id = lkg_slots.session_id AND sp.updated_at >= ?
+    )`;
+    // Discovery is read-only. Removing the slot first makes its prefix unavailable
+    // for replay; remaining orphan slices are reclaimed on later maintenance ticks.
+    const slot = db
+        .prepare(`SELECT session_id FROM lkg_slots WHERE ${stale} LIMIT 1`)
+        .get(cutoff, cutoff) as { session_id: string } | undefined;
+    const chunks = db
+        .prepare(`SELECT rowid FROM lkg_slot_chunks c WHERE
+        session_id = ? OR NOT EXISTS (SELECT 1 FROM lkg_slots s WHERE s.session_id = c.session_id)
+        LIMIT 25`)
+        .all(slot?.session_id ?? "") as Array<{ rowid: number }>;
+    if (!slot && chunks.length === 0) return { slots: 0, chunks: 0 };
     try {
         db.exec("PRAGMA busy_timeout = 0");
+        let transactionStartedAt = 0;
         const changes = db
             .transaction(() => {
-                db.prepare(
-                    `DELETE FROM lkg_slot_chunks WHERE session_id IN (
-                    SELECT session_id FROM lkg_slots WHERE ${stale}
-                )`,
-                ).run(cutoff, cutoff);
-                return db.prepare(`DELETE FROM lkg_slots WHERE ${stale}`).run(cutoff, cutoff)
-                    .changes;
+                transactionStartedAt = performance.now();
+                const removed = slot
+                    ? db
+                          .prepare(`DELETE FROM lkg_slots WHERE session_id = ? AND ${stale}`)
+                          .run(slot.session_id, cutoff, cutoff).changes
+                    : 0;
+                const removeChunk =
+                    db.prepare(`DELETE FROM lkg_slot_chunks WHERE rowid = ? AND NOT EXISTS (
+                SELECT 1 FROM lkg_slots s WHERE s.session_id = lkg_slot_chunks.session_id
+            )`);
+                let removedChunks = 0;
+                for (const { rowid } of chunks) removedChunks += removeChunk.run(rowid).changes;
+                return { slots: removed, chunks: removedChunks };
             })
             .immediate();
-        if (changes) persistedFingerprints.delete(db);
+        logSlowWriteTransaction("lkg_stale_gc", transactionStartedAt);
+        if (changes.slots && slot) persistedFingerprints.get(db)?.delete(slot.session_id);
         return changes;
     } finally {
         db.exec(`PRAGMA busy_timeout = ${Number(previousTimeout.timeout) || 0}`);
     }
+}
+
+export function pruneStaleLkgSlots(db: Database, now = Date.now()): number {
+    return pruneStaleLkgSlotsBatch(db, now).slots;
+}
+
+export async function drainStaleLkgSlots(
+    db: Database,
+    now = Date.now(),
+    budgetMs = 2000,
+): Promise<number> {
+    let removed = 0;
+    await drainBackgroundBatches(
+        () => {
+            const batch = pruneStaleLkgSlotsBatch(db, now);
+            removed += batch.slots;
+            return batch.slots + batch.chunks > 0;
+        },
+        { budgetMs },
+    );
+    return removed;
 }
 
 /** Backend bound to one database handle, for registration with the slot store. */

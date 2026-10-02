@@ -149,6 +149,7 @@ import {
     findMergedReasoningStripDecisions,
     findReasoningBearingAssistantIds,
     findTrailingBlankDecisionCandidates,
+    replayStrippedInlineThinking,
     snapshotTrailingBlankSourceDecisions,
     stripClearedReasoning,
     stripDroppedPlaceholderMessages,
@@ -2379,6 +2380,21 @@ export async function runPostTransformPhase(
                           args.clearReasoningAge,
                       )
                     : 0;
+            // Fresh caveman compression above rebuilds text from its original source,
+            // which brings back inline thinking that the replay at the start of this
+            // pass removed. The fresh strip only reaches this pass's age cutoff (and
+            // is off on prefix-bound models), while every later pass replays up to
+            // the persisted watermark. Strip up to that watermark again so this pass
+            // serves the bytes the next deferred pass will replay. Not counted as a
+            // new edit: it only restores what replay already removed.
+            const persistedInlineWatermark = args.sessionMeta?.clearedReasoningThroughTag ?? 0;
+            if (routineCleanupApplied && persistedInlineWatermark > 0 && !compactionOff) {
+                replayStrippedInlineThinking(
+                    args.messages,
+                    args.messageTagNumbers,
+                    persistedInlineWatermark,
+                );
+            }
             // Every other provider removes whole reasoning parts instead. New ids
             // are chosen only here, on the same rebuilding pass as the lane above,
             // and persisted before final representation applies them; a failed

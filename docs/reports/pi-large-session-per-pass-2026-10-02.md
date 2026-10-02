@@ -417,3 +417,54 @@ runs executed only the named regression, with no other failures.
 | Abort fence before vector SQL | `does not scan vector lanes when a late embedding ignores cancellation` |
 
 No mutation is present in the delivered tree.
+
+## Measured resend compatibility after merging master
+
+Master `e661094edb755239ce9ac1a99542262954a0ac49` added provider-measured fit to
+Pi's storage-busy resend. Its captured request must match the replay slot's
+`captureSequence` and `capturedAt`, as well as its bytes, model and provider.
+A textual merge would publish a new request while unchanged-write skipping kept
+an older slot identity, silently discarding the measured fit.
+
+The merged coordinator retains both incremental capture state and measured
+request state. Once an unchanged pass is proven by exact inputs, output ownership,
+bytes, model and provider, it refreshes the slot's sequence and timestamp through
+`captureSlot`, which installs only an in-memory copy. It does this synchronously
+before returning from the context hook, not in the deferred commit: provider
+usage can be noted before that callback runs. `getSlot` returns a copy, so merely
+mutating the returned object would not update the replay slot. The deferred
+unchanged commit still returns without `saveLkgSlotToDb`.
+
+Every new captured request starts without usage. Older usage therefore remains
+superseded even when request bytes happen to match; new usage correlates with the
+fresh request identity. Durable identity may lag while bytes are unchanged, but
+provider measurements are process-local and cannot be borrowed after restart.
+Existing parent, envelope, model/provider, accepted-reply and timestamp fences
+remain intact. Failure to install the in-memory slot forces synchronous capture
+rather than pretending the identities agree.
+
+New tests cover both flushed and still-pending deferred capture callbacks. They
+note fresh provider usage, replay an image-containing prefix using the measured
+fit, and assert SQLite `total_changes()` is unchanged. A separate real-hook test
+runs an unchanged steady-state pass, notes 300000 provider input tokens, then
+holds a writer lock in another process. Its storage-busy resend must refuse via
+`lkg_fit_basis=provider_input`, despite the small local text estimate; the naive
+merge instead admitted the request through the estimate. These tests were red
+on the naive merge. Neutralizing the synchronous identity refresh again failed
+only `a production-timeout busy turn refuses steady-state measured usage`; the
+staged live state had an empty diff before the mutation, a 2-insertion/1-deletion
+diff during it, and an empty diff after index restore and touch.
+
+A fresh ten-pass comparison against archived current-master source, using the
+same cloned session/database seed and identical replay harness, retained **10/10
+byte-identical served arrays and behavioral tag hashes**. Artifacts are private
+under `master-merged-replay/`. Master's new temporary-directory policy also exposed
+an older allocation in the tag-cache regression; it now uses the registered
+fixture helper without changing the cache test's assertions.
+
+After integration, the full Pi suite passed 1449 tests (3 existing skips), and the
+full plugin suite passed 6391 tests (4 existing skips). Both package typechecks and
+lints passed. The initial plugin run found only the temporary-directory policy
+violation described above; after switching the fixture helper, the full suite was
+rerun successfully. Frozen-lockfile installation installed 29 packages from the
+merged dependency state without editing its manifests or lockfile.

@@ -1,7 +1,9 @@
 import {
 	calibrationForModelKey,
+	type DecisionCalibration,
 	providerMass,
 } from "@magic-context/core/hooks/magic-context/decision-calibration";
+import { hasTokenizerForFit } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 
 import { tokenizePiMessages } from "./tokenize-pi-messages";
 
@@ -63,17 +65,33 @@ export function piRawMessagesExceedLimit(
 	}
 }
 
-/** A byte-based approximation may reject early; admission needs measured system/tools and countable messages. */
+export interface PiFitEnvelope {
+	modelKey: string;
+	systemTokens: number;
+	toolDefinitionTokens: number;
+	/** Serialized complete envelope with an empty messages array. */
+	envelopeBytes?: number;
+	/** Fingerprint of the complete host system/tools snapshot. */
+	envelopeSignature?: string;
+	/** The session's frozen policy; an absent freeze uses the unknown-model fit rule. */
+	calibration?: DecisionCalibration;
+}
+
+export interface PiMeasuredPrefixFit {
+	modelKey: string;
+	envelopeSignature: string;
+	inputTokens: number;
+	appendedMessages: readonly unknown[];
+}
+
+/** Prefer correlated provider input plus the new tail; otherwise price the full envelope. */
 export function assertPiRawFallbackFits(
 	messages: readonly unknown[],
 	contextLimit: number | undefined,
 	log: (message: string) => void,
 	cause: unknown,
-	observed?: {
-		modelKey: string;
-		systemTokens: number;
-		toolDefinitionTokens: number;
-	},
+	observed?: PiFitEnvelope,
+	measuredPrefix?: PiMeasuredPrefixFit,
 ): void {
 	if (
 		!contextLimit ||
@@ -82,34 +100,56 @@ export function assertPiRawFallbackFits(
 		!Number.isFinite(observed.systemTokens) ||
 		observed.systemTokens <= 0 ||
 		!Number.isFinite(observed.toolDefinitionTokens) ||
-		observed.toolDefinitionTokens < 0
+		observed.toolDefinitionTokens < 0 ||
+		(observed.envelopeBytes !== undefined &&
+			(!Number.isFinite(observed.envelopeBytes) || observed.envelopeBytes < 0))
 	) {
 		log("raw_fallback_refused completeness=partial");
 		throw new PiStorageBusyError({ cause });
 	}
-	let bytes = 1;
+	const measured =
+		measuredPrefix &&
+		measuredPrefix.modelKey === observed.modelKey &&
+		observed.envelopeSignature &&
+		measuredPrefix.envelopeSignature === observed.envelopeSignature &&
+		Number.isSafeInteger(measuredPrefix.inputTokens) &&
+		measuredPrefix.inputTokens > 0
+			? measuredPrefix
+			: undefined;
+	const baseInputTokens = measured?.inputTokens ?? 0;
+	const pricedMessages = measured?.appendedMessages ?? messages;
+	log(
+		`lkg_fit_basis=${measured ? "provider_input" : "host_metadata"} measured_input=${baseInputTokens}`,
+	);
+	// Explicit count-only callers use a conservative proxy for their measured
+	// envelope. The installed handler supplies the actual serialized host metadata.
+	let bytes = measured
+		? 1
+		: 1 +
+			(observed.envelopeBytes ??
+				20 + 4 * (observed.systemTokens + observed.toolDefinitionTokens));
 	let serializationFailed = false;
 	try {
-		for (const message of messages) {
+		for (const message of pricedMessages) {
 			const serialized = JSON.stringify(message);
 			if (typeof serialized !== "string") {
 				serializationFailed = true;
 				break;
 			}
 			bytes += Buffer.byteLength(serialized) + 1;
-			if (bytes > contextLimit * 4) break;
+			if (baseInputTokens + Math.ceil(bytes / 4) > contextLimit) break;
 		}
 	} catch {
 		serializationFailed = true;
 	}
-	const proxyTokens = Math.ceil(bytes / 4);
+	const proxyTokens = baseInputTokens + Math.ceil(bytes / 4);
 	if (serializationFailed || proxyTokens > contextLimit) {
 		log(
 			`raw_fallback_over_context_limit proxy_bytes=${bytes} proxy_tokens=${proxyTokens} limit=${contextLimit} early_abort=true serialization_failed=${serializationFailed}`,
 		);
 		throw new PiStorageBusyError({ cause });
 	}
-	const complete = messages.every((message) => {
+	const complete = pricedMessages.every((message) => {
 		if (!message || typeof message !== "object") return false;
 		const m = message as { role?: string; content?: unknown };
 		return (
@@ -126,16 +166,22 @@ export function assertPiRawFallbackFits(
 					)))
 		);
 	});
-	const raw = tokenizePiMessages([...messages]);
-	const tokens = providerMass(
-		{
-			system: observed.systemTokens,
-			tools: observed.toolDefinitionTokens + raw.toolCall,
-			prose: raw.conversation,
-		},
-		calibrationForModelKey(observed.modelKey),
-		true,
-	);
+	const raw = tokenizePiMessages([...pricedMessages]);
+	if (!hasTokenizerForFit()) {
+		log("raw_fallback_refused completeness=partial tokenizer=unavailable");
+		throw new PiStorageBusyError({ cause });
+	}
+	const tokens =
+		baseInputTokens +
+		providerMass(
+			{
+				system: measured ? 0 : observed.systemTokens,
+				tools: (measured ? 0 : observed.toolDefinitionTokens) + raw.toolCall,
+				prose: raw.conversation,
+			},
+			observed.calibration ?? calibrationForModelKey(observed.modelKey),
+			true,
+		);
 	if (
 		!complete ||
 		!Number.isFinite(tokens) ||

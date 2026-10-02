@@ -24,7 +24,7 @@ import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-ref
 import { finalizeMessageRepresentation } from "../hooks/magic-context/transform-postprocess-phase";
 import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolved-history-boundary";
 import { Database } from "../shared/sqlite";
-import { createMessagesTransformHandler } from "./messages-transform";
+import { createMessagesTransformHandler, IncompleteUserMessageError } from "./messages-transform";
 
 afterEach(() => {
     resetEmergencyRecoveryRegistryForTest();
@@ -634,4 +634,85 @@ describe("createMessagesTransformHandler — user-tail removal defense", () => {
         ]);
         expect(output.messages.at(-1)?.info.id).toBe("m1");
     });
+});
+
+describe("incomplete arriving user message", () => {
+    for (const compactionOff of [false, true]) {
+        it(`refuses user:none before transform or fallback (compactionOff=${compactionOff})`, async () => {
+            let calls = 0;
+            const handler = createMessagesTransformHandler({
+                compactionOff,
+                magicContext: {
+                    "experimental.chat.messages.transform": async () => {
+                        calls++;
+                    },
+                },
+            });
+            const output = makeOutput();
+            output.messages[0].parts = [];
+            const before = JSON.stringify(output);
+            await expect(handler({}, output)).rejects.toBeInstanceOf(IncompleteUserMessageError);
+            expect(calls).toBe(0);
+            expect(JSON.stringify(output)).toBe(before);
+        });
+    }
+    for (const [name, mutate] of [
+        ["text", () => {}],
+        [
+            "file only",
+            (m: any) => {
+                m.parts = [{ type: "file", mime: "image/png", url: "data:image/png;base64,AA==" }];
+            },
+        ],
+        [
+            "tool result only",
+            (m: any) => {
+                m.parts = [{ type: "tool", state: { status: "completed", output: "result" } }];
+            },
+        ],
+        [
+            "synthetic m[0]/m[1]",
+            (m: any) => {
+                delete m.info.id;
+                m.parts = [];
+            },
+        ],
+        [
+            "summary",
+            (m: any) => {
+                m.info.summary = true;
+                m.parts = [];
+            },
+        ],
+        [
+            "compaction",
+            (m: any) => {
+                m.parts = [{ type: "compaction", auto: true }];
+            },
+        ],
+        [
+            "assistant tool continuation",
+            (m: any) => {
+                m.info.role = "assistant";
+                m.parts = [{ type: "tool", state: { status: "completed", output: "result" } }];
+            },
+        ],
+    ] as const) {
+        it(`passes ${name} unchanged`, async () => {
+            let calls = 0;
+            const handler = createMessagesTransformHandler({
+                magicContext: {
+                    "experimental.chat.messages.transform": async () => {
+                        calls++;
+                    },
+                },
+            });
+            const output = makeOutput();
+            mutate(output.messages[0]);
+            const before = JSON.stringify(output);
+            await handler({}, output);
+            expect(calls).toBe(1);
+            expect(JSON.stringify(output)).toBe(before);
+        });
+    }
 });

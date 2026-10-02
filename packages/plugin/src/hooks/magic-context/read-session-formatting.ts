@@ -356,6 +356,44 @@ function estimateTokensHeuristically(text: string): number {
     return Math.ceil(text.length / 3.5);
 }
 
+// Mixed prose, code, numbers, non-ASCII text and a special-token literal, so a
+// tokenizer whose vocabulary counts differently is likely to give another count.
+const TOKEN_ESTIMATOR_SAMPLE =
+    'Coverage check: const windows = chunk(text, 0x1f, 512); // ok? "naïve" café 日本語 <EOT> 3.14159 ->  done.';
+let estimatorFingerprintTokenizer: TokenizerLike | undefined;
+let estimatorFingerprint = "";
+
+/**
+ * Short identity of the estimator `estimateTokens` currently uses. Results that
+ * depend on token counts and outlive the process (such as where embedding
+ * windows were split) record it, so a process running a different estimator
+ * (the character heuristic after a failed tokenizer load, or a tokenizer that
+ * counts differently) recomputes them instead of trusting them. Reads the
+ * tokenizer directly so callers counting `estimateTokens` calls are unaffected.
+ */
+export function getTokenEstimatorFingerprint(): string {
+    const activeTokenizer = getTokenizer();
+    if (!activeTokenizer) {
+        return `heuristic:${estimateTokensHeuristically(TOKEN_ESTIMATOR_SAMPLE)}`;
+    }
+    if (estimatorFingerprintTokenizer === activeTokenizer) return estimatorFingerprint;
+    let fingerprint: string;
+    try {
+        fingerprint = `tokenizer:${activeTokenizer.encode(TOKEN_ESTIMATOR_SAMPLE, "all").length}`;
+    } catch {
+        // Still an exact identity: the same tokenizer fails on the sample the same way.
+        fingerprint = "tokenizer:sample-unencodable";
+    }
+    estimatorFingerprintTokenizer = activeTokenizer;
+    estimatorFingerprint = fingerprint;
+    return fingerprint;
+}
+
+/** Admission must refuse rather than treating a heuristic fallback as an exact count. */
+export function hasTokenizerForFit(): boolean {
+    return getTokenizer() !== undefined;
+}
+
 export function estimateTokens(text: string): number {
     if (!text) return 0;
     const activeTokenizer = getTokenizer();

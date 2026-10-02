@@ -24,7 +24,6 @@ import { detectOverflow } from "../../features/magic-context/overflow-detection"
 import { createScheduler } from "../../features/magic-context/scheduler";
 import { backfillSessionActivity } from "../../features/magic-context/session-activity";
 import {
-    clearSession,
     getOrCreateSessionMeta,
     getOverflowState,
     isDatabasePersisted,
@@ -34,6 +33,7 @@ import {
     recordOverflowDetected,
 } from "../../features/magic-context/storage";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
+import { clearSession } from "../../features/magic-context/storage-meta-session";
 import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
 import {
@@ -113,9 +113,9 @@ import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
+import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
 import { nativeSessionRemove } from "../hidden-child-native";
 import { createLateHiddenExecutor, createV2HiddenCompletionExecutor } from "../hidden-completion";
-import { type HostServiceOwner, removeHostSession } from "../host-service";
 import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { deliverPendingChannel2, deliverSynthetic, isAdmittedSynthetic } from "./channel2";
 import { registerV2Commands } from "./commands";
@@ -132,6 +132,7 @@ import { interruptBeforeProvider, V2ContextRefusal } from "./refusal";
 import { RestoredRowCache } from "./restore-rows";
 import { createV2RpcLiveSessionState } from "./rpc-live-state";
 import { createV2RustRefusalRecovery, resolveV2RustModeModuleClient } from "./rust-mode";
+import { hasRequiredSessionAPI, OPENCODE2_SESSION_API_NOTICE } from "./session-api-gate";
 import { runV2SessionProjectBackfill } from "./session-project-backfill";
 import { createV2StorageGate, probeV2StorageAtBoot } from "./storage-gate";
 import {
@@ -511,6 +512,37 @@ export async function registerContext(context: V2Context) {
     const config = loadPluginConfigDetailed(directory).config;
     setHomeProjectPermission(config.allow_home_project);
     if (!config.enabled) return;
+    const nativeRemove = nativeSessionRemove(context.session);
+    if (!hasRequiredSessionAPI(context.session) || !nativeRemove) {
+        const message = OPENCODE2_SESSION_API_NOTICE;
+        console.warn(`[magic-context] v2 host API unavailable: ${message}`);
+        log(`[magic-context] ${message}`);
+        let noticed = false;
+        const refuseUnsupportedHost = async (draft: { sessionID: string }) => {
+            if (!noticed) {
+                noticed = true;
+                pushNotification("toast", { message, variant: "error" }, draft.sessionID);
+                void context.session
+                    .wait({ sessionID: draft.sessionID })
+                    .then(() => deliverSynthetic(context, draft.sessionID, message))
+                    .catch((error: unknown) =>
+                        sessionLog(
+                            draft.sessionID,
+                            "host API notice could not be delivered:",
+                            error,
+                        ),
+                    );
+            }
+            await refuseBeforeProvider(context.session, draft.sessionID, "unsupported-session-api");
+        };
+        await context.session.hook("context", refuseUnsupportedHost);
+        await context.session.hook("compaction", async (draft) => {
+            // Supplying a result prevents the host from calling its own summary model.
+            draft.result = { summary: message };
+            await refuseUnsupportedHost(draft);
+        });
+        return;
+    }
     const liveConfigReader = pluginConfigReader(directory, config);
     const compactionOff = !isCompactionEnabled(config);
     const conflicts = detectConflicts(directory, {
@@ -551,6 +583,13 @@ export async function registerContext(context: V2Context) {
     // Discovery yields to HTTP while setup waits, with a bounded degraded fallback.
     let db: ReturnType<typeof openDatabase> | undefined = await probeV2StorageAtBoot(storage);
     const storageOpenedAtBoot = db !== undefined;
+    let legacyCleanupStarted = false;
+    const cleanupLegacyOnce = async (database: NonNullable<typeof db>) => {
+        if (legacyCleanupStarted) return;
+        legacyCleanupStarted = true;
+        await cleanupLegacyHiddenChildren(database, nativeRemove, log);
+    };
+    if (db && isDatabasePersisted(db)) await cleanupLegacyOnce(db);
     let storageRecoveryAnnounced = false;
     const storageNoticeBySession = new Map<string, string>();
     /**
@@ -659,9 +698,9 @@ export async function registerContext(context: V2Context) {
     const hiddenChildHook = new HiddenChildHook();
     await registerHiddenChildAgents(context.agent);
     let hiddenAgentsReady: Promise<void> | undefined;
-    const nativeRemove = nativeSessionRemove(context.session);
-    const createHiddenExecutor = (database: NonNullable<typeof db>) =>
-        createV2HiddenCompletionExecutor(
+    const createHiddenExecutor = async (database: NonNullable<typeof db>) => {
+        await cleanupLegacyOnce(database);
+        return createV2HiddenCompletionExecutor(
             {
                 ...context.session,
                 get: async (input) => {
@@ -682,25 +721,7 @@ export async function registerContext(context: V2Context) {
                     hiddenSessionErrors.delete(input.sessionID);
                     return context.session.prompt(input);
                 },
-                // Newer hosts give plugins `session.remove`; its presence moves hidden runs onto
-                // children parented to the user's session and removed when each run ends.
-                ...(nativeRemove ? { removeSession: nativeRemove } : {}),
-                // Older hosts' injected session surface stops short of deletion, so retiring a hidden
-                // child reaches the host's delete route directly — through the registration
-                // the child recorded when it was created, never through whichever service
-                // happens to be registered now.
-                remove: (input: {
-                    sessionID: string;
-                    owner?: HostServiceOwner;
-                    directory?: string;
-                }) =>
-                    removeHostSession(
-                        input.sessionID,
-                        input.owner,
-                        process.env,
-                        fetch,
-                        input.directory,
-                    ),
+                removeSession: nativeRemove,
             },
             {
                 db: database,
@@ -717,6 +738,7 @@ export async function registerContext(context: V2Context) {
                     ),
             },
         );
+    };
     const dreamerAtBoot = config.dreamer;
     const startDreamer = (executor: HiddenCompletionExecutor) =>
         resolveProjectIdentityForSession(directory, config.allow_home_project) &&

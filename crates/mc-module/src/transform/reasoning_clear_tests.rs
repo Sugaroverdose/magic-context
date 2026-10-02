@@ -585,3 +585,68 @@ fn opencode_removal_skips_messages_carrying_openrouter_reasoning_details_under_a
     assert!(!selected.contains("a1"), "{selected:?}");
     assert!(selected.contains("a0"));
 }
+
+// The TypeScript hosts serve an aged assistant text block with inline <think>
+// markup as the frozen caveman payload with the markup removed: they replay
+// caveman compression first and then strip inline thinking from that result.
+// Rust renders the caveman payload first too, but the surface strip must read
+// the rendered payload rather than the request's pristine text, or the block
+// is served uncompressed and the two runtimes send different bytes.
+#[test]
+#[ignore = "fixing this changes served bytes on deploy; enable with the next cache-format epoch change"]
+fn aged_inline_thinking_strip_keeps_the_frozen_caveman_payload() {
+    let source = "The implementation has been completed <think>stale private thought</think> and the verification results are available for the reviewer. I just really wanted to basically explain the context clearly. ".repeat(3);
+    let mut answer = item("m1", 1, &source);
+    answer.ck.role = "assistant".to_string();
+    let mut latest = item("m3", 3, "latest answer");
+    latest.ck.role = "assistant".to_string();
+    let mut request = req(
+        "caveman-inline-thinking",
+        "cfg",
+        vec![answer, item("m2", 2, "next request"), latest],
+    );
+    request.caveman_enabled = true;
+    let projection = project_messages(&request.messages).unwrap();
+    let payload = crate::caveman::compress(&source, crate::caveman::CavemanLevel::Ultra);
+    assert!(payload.contains("<think>stale private thought</think>"));
+    assert_ne!(
+        inline_thinking_replacement(&payload),
+        inline_thinking_replacement(&source),
+        "the fixture must make caveman change the stripped bytes"
+    );
+    let core = CoreState {
+        frozen_units: vec![caveman_unit("m1#0", 3, &payload)],
+        ..CoreState::default()
+    };
+    let tag_numbers = BTreeMap::from([
+        ("m1".to_string(), 1),
+        ("m2".to_string(), 2),
+        ("m3".to_string(), 3),
+    ]);
+    // Watermark 1 ages m1 for the inline-thinking strip.
+    let output = build_output_with_tags(
+        &core,
+        &ModuleMeta::default(),
+        &projection,
+        &request,
+        None,
+        false,
+        None,
+        &tag_numbers,
+        1,
+        false,
+        None,
+        true,
+    )
+    .unwrap();
+    let served = output
+        .messages
+        .into_iter()
+        .map(ServedMessage::into_message)
+        .find(|message| message.meta.harness_id.as_deref() == Some("m1"))
+        .expect("m1 is served");
+    assert_eq!(
+        first_block_text(&served.content[0]),
+        Some(inline_thinking_replacement(&payload).as_str())
+    );
+}

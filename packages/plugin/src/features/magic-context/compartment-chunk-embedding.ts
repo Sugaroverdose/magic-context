@@ -1,6 +1,9 @@
 import { createHash } from "node:crypto";
 
-import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
+import {
+    estimateTokens,
+    getTokenEstimatorFingerprint,
+} from "../../hooks/magic-context/read-session-formatting";
 import { getHarness } from "../../shared/harness";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
@@ -875,9 +878,17 @@ export function chunkEmbeddingWindowsAreCurrent(
     return windows.every((window) => existing.get(window.windowIndex) === window.chunkHash);
 }
 
+/**
+ * Replace one compartment's windows for one model. Pass `windowSourceKey` (from
+ * {@link chunkWindowSourceKey}, computed right after chunking) when every row's
+ * window came from one `chunkCanonicalText` call. The key is then recorded with
+ * the rows in the same transaction, so a later coverage check of unchanged text
+ * can confirm the rows without chunking it again.
+ */
 export function replaceCompartmentChunkEmbeddings(
     db: Database,
     rows: readonly SaveCompartmentChunkEmbeddingInput[],
+    windowSourceKey?: string,
 ): void {
     if (rows.length === 0 || rows.some((row) => isSynapseEmbeddingTruncated(row.vector))) return;
     const compartmentId = rows[0].compartmentId;
@@ -900,6 +911,14 @@ export function replaceCompartmentChunkEmbeddings(
                 row.vector.length,
                 vectorBlob(row.vector),
                 row.createdAt ?? now,
+            );
+        }
+        if (windowSourceKey) {
+            recordChunkWindowSource(
+                db,
+                compartmentId,
+                windowSourceKey,
+                rows.map((row) => [row.window.windowIndex, row.window.chunkHash]),
             );
         }
     }).immediate();
@@ -1063,7 +1082,8 @@ export function loadUnembeddedShadowChunkCandidates(
 
 /**
  * Auto-drain selector that gives the host a turn after every mapped span read.
- * `leaseHeldRenumber` is reserved for callers holding the project's write lease.
+ * `leaseHeldRenumber` is reserved for callers holding the project's write lease;
+ * it enables the repairs in applyLeaseHeldCoverageRepair.
  */
 export async function loadUnembeddedCompartmentChunkCandidatesPolite(
     db: Database,
@@ -1079,17 +1099,17 @@ export async function loadUnembeddedCompartmentChunkCandidatesPolite(
     const stale: CompartmentChunkBackfillCandidate[] = [];
     let sliceStarted = performance.now();
     for (const candidate of candidates) {
-        const { defect, windows } = classifyChunkCoverageDefect(
+        const classification = classifyChunkCoverageDefect(
             db,
             projectPath,
             modelId,
             candidate,
             maxInputTokens,
         );
-        if (defect === "missing") missing.push(candidate);
-        else if (defect === "stale") stale.push(candidate);
-        else if (defect === "renumber" && leaseHeldRenumber) {
-            renumberOneBasedChunkWindows(db, candidate, projectPath, modelId, windows);
+        if (classification.defect === "missing") missing.push(candidate);
+        else if (classification.defect === "stale") stale.push(candidate);
+        else if (leaseHeldRenumber) {
+            applyLeaseHeldCoverageRepair(db, candidate, projectPath, modelId, classification);
         }
         sliceStarted = await yieldCoverageSlice(sliceStarted);
     }
@@ -1123,6 +1143,9 @@ type ChunkCoverageDefect = "missing" | "stale" | "renumber" | "deferred" | null;
 // The window memo below keys on canonical transcript text, token budget and
 // embedding model. If indexed message text or the summary changes, old window
 // hashes cannot be reused. Its size limit prevents unbounded transcript retention.
+// CHUNKER_VERSION is also part of every persisted window source key: bump it
+// whenever chunkCanonicalText can return different windows for the same input,
+// so windows recorded by an older build are re-checked by chunking.
 const CHUNKER_VERSION = 1;
 const BACKOFF_PREFIX = "chunk_embed_backoff:";
 
@@ -1130,10 +1153,21 @@ function backoffKey(compartmentId: number): string {
     return `${BACKOFF_PREFIX}${compartmentId}`;
 }
 
+/** Also removes the compartments' recorded window sources (see recordChunkWindowSource). */
+export function deleteChunkEmbedBackoffForCompartments(db: Database, ids: readonly number[]): void {
+    if (ids.length === 0) return;
+    db.prepare(
+        `DELETE FROM schema_migrations_meta WHERE key IN (${ids.map(() => "?, ?").join(",")})`,
+    ).run(...ids.flatMap((id) => [`${BACKOFF_PREFIX}${id}`, windowSourceMetaKey(id)]));
+}
+
+/** Also removes the session's recorded window sources (see recordChunkWindowSource). */
 export function deleteChunkEmbedBackoffForSession(db: Database, sessionId: string): void {
     db.prepare(`DELETE FROM schema_migrations_meta WHERE key IN (
         SELECT ? || id FROM compartments WHERE session_id = ?
-    )`).run(BACKOFF_PREFIX, sessionId);
+        UNION ALL
+        SELECT ? || id FROM compartments WHERE session_id = ?
+    )`).run(BACKOFF_PREFIX, sessionId, WINDOW_SOURCE_PREFIX, sessionId);
 }
 
 export function recordChunkEmbedBackoff(
@@ -1210,24 +1244,157 @@ function chunkEmbedBackoffActive(
         return false;
     }
 }
+// Window sources: a persisted record of which windows `chunkCanonicalText`
+// produced for a given input, so the coverage check after a process restart can
+// confirm stored rows without tokenizing the transcript again.
+//
+// Chunking is a pure function of the canonical text, the compartment's ordinal
+// range, the token budget, the chunker code and the token estimator. The source
+// key hashes all five. Each record pairs a source key with a digest of the
+// (window index, chunk hash) set chunking produced for it. A record therefore
+// stays true whatever later happens to the embedding rows: coverage trusts it
+// only when the current input has the same source key AND the rows stored now
+// for the model have exactly that digest, which is the same verdict re-chunking
+// would reach. Records live in the existing `schema_migrations_meta` key-value
+// table, one key per compartment, next to the chunk_embed_backoff keys.
+const WINDOW_SOURCE_PREFIX = "chunk_embed_windows:";
+// Primary and shadow providers can window the same compartment under different
+// token budgets; a few records cover both plus a recent budget change.
+const WINDOW_SOURCE_RECORD_LIMIT = 4;
+
+interface ChunkWindowSourceRecord {
+    source: string;
+    windows: string;
+}
+
+const windowSourceReadStatements = new WeakMap<Database, PreparedStatement>();
+const windowSourceWriteStatements = new WeakMap<Database, PreparedStatement>();
+
+function windowSourceMetaKey(compartmentId: number): string {
+    return `${WINDOW_SOURCE_PREFIX}${compartmentId}`;
+}
+
+function windowSourceKeyFromTextHash(
+    textHash: string,
+    startOrdinal: number,
+    endOrdinal: number,
+    maxInputTokens: number,
+): string {
+    return hashChunkText(
+        JSON.stringify([
+            CHUNKER_VERSION,
+            getTokenEstimatorFingerprint(),
+            normalizeCompartmentChunkMaxInputTokens(maxInputTokens),
+            startOrdinal,
+            endOrdinal,
+            textHash,
+        ]),
+    );
+}
+
+/**
+ * Identity of one `chunkCanonicalText(canonicalText, startOrdinal, endOrdinal,
+ * maxInputTokens)` call in this process. Compute it right after chunking and
+ * pass it to {@link replaceCompartmentChunkEmbeddings}.
+ */
+export function chunkWindowSourceKey(
+    canonicalText: string,
+    startOrdinal: number,
+    endOrdinal: number,
+    maxInputTokens: number,
+): string {
+    return windowSourceKeyFromTextHash(
+        hashChunkText(canonicalText),
+        startOrdinal,
+        endOrdinal,
+        maxInputTokens,
+    );
+}
+
+function windowSetDigest(windows: Iterable<readonly [number, string]>): string {
+    const sorted = [...windows].sort((a, b) => a[0] - b[0]);
+    return hashChunkText(sorted.map(([index, hash]) => `${index}:${hash}`).join("\n"));
+}
+
+function readChunkWindowSources(db: Database, compartmentId: number): ChunkWindowSourceRecord[] {
+    let stmt = windowSourceReadStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare("SELECT value FROM schema_migrations_meta WHERE key = ?");
+        windowSourceReadStatements.set(db, stmt);
+    }
+    const row = stmt.get(windowSourceMetaKey(compartmentId)) as { value?: unknown } | undefined;
+    if (typeof row?.value !== "string") return [];
+    try {
+        const parsed = JSON.parse(row.value) as unknown;
+        if (!Array.isArray(parsed)) return [];
+        return parsed.filter(
+            (entry): entry is ChunkWindowSourceRecord =>
+                entry !== null &&
+                typeof entry === "object" &&
+                typeof (entry as ChunkWindowSourceRecord).source === "string" &&
+                typeof (entry as ChunkWindowSourceRecord).windows === "string",
+        );
+    } catch {
+        // An unreadable value only means coverage re-chunks; the next record replaces it.
+        return [];
+    }
+}
+
+/** Record which windows a source key produced. Callers hold a write transaction. */
+function recordChunkWindowSource(
+    db: Database,
+    compartmentId: number,
+    sourceKey: string,
+    windows: Iterable<readonly [number, string]>,
+): void {
+    const record: ChunkWindowSourceRecord = {
+        source: sourceKey,
+        windows: windowSetDigest(windows),
+    };
+    const kept = readChunkWindowSources(db, compartmentId).filter(
+        (entry) => entry.source !== sourceKey,
+    );
+    let stmt = windowSourceWriteStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(`INSERT INTO schema_migrations_meta (key, value) VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value`);
+        windowSourceWriteStatements.set(db, stmt);
+    }
+    stmt.run(
+        windowSourceMetaKey(compartmentId),
+        JSON.stringify([record, ...kept].slice(0, WINDOW_SOURCE_RECORD_LIMIT)),
+    );
+}
+
+function storedWindowsMatchRecordedSource(
+    db: Database,
+    compartmentId: number,
+    sourceKey: string,
+    existing: ReadonlyMap<number, string>,
+): boolean {
+    const record = readChunkWindowSources(db, compartmentId).find(
+        (entry) => entry.source === sourceKey,
+    );
+    return record !== undefined && record.windows === windowSetDigest(existing);
+}
+
 const COVERAGE_MEMO_LIMIT = 2048;
 const cachedCoverageWindows = new Map<string, CompartmentChunkWindow[]>();
+
+/** Forget memoized coverage windows, as a process restart does. */
+export function _resetCompartmentChunkCoverageMemoForTests(): void {
+    cachedCoverageWindows.clear();
+}
 
 function memoizedCoverageWindows(
     candidate: CompartmentChunkBackfillCandidate,
     canonicalText: string,
+    sourceKey: string,
     modelId: string,
     maxInputTokens: number,
 ): CompartmentChunkWindow[] {
-    const key = JSON.stringify([
-        candidate.id,
-        candidate.startMessage,
-        candidate.endMessage,
-        createHash("sha256").update(canonicalText).digest("hex"),
-        CHUNKER_VERSION,
-        modelId,
-        maxInputTokens,
-    ]);
+    // The source key covers the text, range, budget, chunker and estimator.
+    const key = JSON.stringify([candidate.id, sourceKey, modelId]);
     const cached = cachedCoverageWindows.get(key);
     if (cached) {
         cachedCoverageWindows.delete(key);
@@ -1257,7 +1424,12 @@ async function yieldCoverageSlice(started: number): Promise<number> {
 
 interface ChunkCoverageClassification {
     defect: ChunkCoverageDefect;
+    /** Current windows; empty when deferred or when a recorded window source confirmed coverage. */
     windows: CompartmentChunkWindow[];
+    /** Source key of the current input; absent when deferred. */
+    sourceKey?: string;
+    /** True when a recorded window source confirmed the rows without chunking. */
+    confirmedByRecord?: boolean;
 }
 
 function renumberOneBasedChunkWindows(
@@ -1266,6 +1438,7 @@ function renumberOneBasedChunkWindows(
     projectPath: string,
     modelId: string,
     windows: readonly CompartmentChunkWindow[],
+    sourceKey: string | undefined,
 ): void {
     const update = getRenumberEmbeddingWindowStatement(db);
     db.transaction(() => {
@@ -1284,6 +1457,15 @@ function renumberOneBasedChunkWindows(
                     `Failed to renumber compartment ${candidate.id} window ${window.windowIndex + 1}`,
                 );
             }
+        }
+        // The rows now equal the current windows; record them as a confirmed source.
+        if (sourceKey) {
+            recordChunkWindowSource(
+                db,
+                candidate.id,
+                sourceKey,
+                windows.map((window) => [window.windowIndex, window.chunkHash]),
+            );
         }
     }).immediate();
     invalidateDecodedSearchPools(
@@ -1317,29 +1499,72 @@ function classifyChunkCoverageDefect(
     ) {
         return { defect: "deferred", windows: [] };
     }
-    const windows = memoizedCoverageWindows(candidate, canonicalText, modelId, maxInputTokens);
+    const sourceKey = chunkWindowSourceKey(
+        canonicalText,
+        candidate.startMessage,
+        candidate.endMessage,
+        maxInputTokens,
+    );
     const existing = getExistingChunkHashes(db, candidate.id, modelId, projectPath);
+    // Same verdict as re-chunking below, without tokenizing (see recordChunkWindowSource).
+    if (storedWindowsMatchRecordedSource(db, candidate.id, sourceKey, existing)) {
+        return { defect: null, windows: [], sourceKey, confirmedByRecord: true };
+    }
+    const windows = memoizedCoverageWindows(
+        candidate,
+        canonicalText,
+        sourceKey,
+        modelId,
+        maxInputTokens,
+    );
 
     const isMatchingOneBasedSet =
         windows.length > 0 &&
         existing.size === windows.length &&
         windows.every((window) => existing.get(window.windowIndex + 1) === window.chunkHash);
-    if (isMatchingOneBasedSet) return { defect: "renumber", windows };
+    if (isMatchingOneBasedSet) return { defect: "renumber", windows, sourceKey };
 
     const expectedWindowIndexes = new Set(windows.map((window) => window.windowIndex));
     if ([...existing.keys()].some((windowIndex) => !expectedWindowIndexes.has(windowIndex))) {
-        return { defect: "stale", windows };
+        return { defect: "stale", windows, sourceKey };
     }
     if (windows.some((window) => !existing.has(window.windowIndex))) {
-        return { defect: "missing", windows };
+        return { defect: "missing", windows, sourceKey };
     }
     if (
         existing.size !== windows.length ||
         windows.some((window) => existing.get(window.windowIndex) !== window.chunkHash)
     ) {
-        return { defect: "stale", windows };
+        return { defect: "stale", windows, sourceKey };
     }
-    return { defect: null, windows };
+    return { defect: null, windows, sourceKey };
+}
+
+/**
+ * Lease-held scans repair what coverage found: renumber matching one-based rows,
+ * and record the window source of rows confirmed by chunking, so the next
+ * process confirms them without tokenizing. Plain coverage counts stay read-only.
+ */
+function applyLeaseHeldCoverageRepair(
+    db: Database,
+    candidate: CompartmentChunkBackfillCandidate,
+    projectPath: string,
+    modelId: string,
+    classification: ChunkCoverageClassification,
+): void {
+    const { defect, windows, sourceKey, confirmedByRecord } = classification;
+    if (defect === "renumber") {
+        renumberOneBasedChunkWindows(db, candidate, projectPath, modelId, windows, sourceKey);
+    } else if (defect === null && !confirmedByRecord && sourceKey) {
+        db.transaction(() => {
+            recordChunkWindowSource(
+                db,
+                candidate.id,
+                sourceKey,
+                windows.map((window) => [window.windowIndex, window.chunkHash]),
+            );
+        }).immediate();
+    }
 }
 
 /**
@@ -1359,17 +1584,17 @@ function selectHashIncompleteChunkCandidates(
     const missing: CompartmentChunkBackfillCandidate[] = [];
     const stale: CompartmentChunkBackfillCandidate[] = [];
     for (const candidate of candidates) {
-        const { defect, windows } = classifyChunkCoverageDefect(
+        const classification = classifyChunkCoverageDefect(
             db,
             projectPath,
             modelId,
             candidate,
             maxInputTokens,
         );
-        if (defect === "missing") missing.push(candidate);
-        else if (defect === "stale") stale.push(candidate);
-        else if (defect === "renumber" && leaseHeldRenumber) {
-            renumberOneBasedChunkWindows(db, candidate, projectPath, modelId, windows);
+        if (classification.defect === "missing") missing.push(candidate);
+        else if (classification.defect === "stale") stale.push(candidate);
+        else if (leaseHeldRenumber) {
+            applyLeaseHeldCoverageRepair(db, candidate, projectPath, modelId, classification);
         }
     }
     return [...missing, ...stale].slice(0, limit);
@@ -1383,7 +1608,8 @@ const sessionBackfillCandidateStatements = new WeakMap<Database, PreparedStateme
  *  each defect class remains oldest-first so progress is deterministic.
  *
  *  `excludeIds` lets the drain loop advance past compartments that produced no
- *  embeddable work or provider failures this run. `leaseHeldRenumber` is reserved
+ *  embeddable work or provider failures this run. `leaseHeldRenumber` (which enables
+ *  the repairs in applyLeaseHeldCoverageRepair) is reserved
  *  for callers holding the project's write lease. */
 export function loadUnembeddedSessionChunkCandidates(
     db: Database,
@@ -1469,17 +1695,17 @@ export async function loadUnembeddedSessionChunkCandidatesPolite(
     let started = performance.now();
     for (const candidate of getSessionBackfillRows(db, projectPath, sessionId)) {
         if (excluded.has(candidate.id)) continue;
-        const { defect, windows } = classifyChunkCoverageDefect(
+        const classification = classifyChunkCoverageDefect(
             db,
             projectPath,
             modelId,
             candidate,
             maxInputTokens,
         );
-        if (defect === "missing") missing.push(candidate);
-        else if (defect === "stale") stale.push(candidate);
-        else if (defect === "renumber" && leaseHeldRenumber) {
-            renumberOneBasedChunkWindows(db, candidate, projectPath, modelId, windows);
+        if (classification.defect === "missing") missing.push(candidate);
+        else if (classification.defect === "stale") stale.push(candidate);
+        else if (leaseHeldRenumber) {
+            applyLeaseHeldCoverageRepair(db, candidate, projectPath, modelId, classification);
         }
         started = await yieldCoverageSlice(started);
     }

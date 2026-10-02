@@ -32,6 +32,7 @@ export const CREDENTIAL_IDS = [
     "apikey:openrouter",
     "apikey:deepseek",
     "apikey:kimi-for-coding",
+    "oauth:anthropic",
 ] as const;
 export type CredentialId = (typeof CREDENTIAL_IDS)[number];
 

@@ -15,6 +15,11 @@ const scannedRoots = ["packages/plugin/src", "packages/pi-plugin/src"];
 // call in an allow-listed file still trips the fence.
 const userFacingAllowList: Array<{ path: string; contains: string; why: string }> = [
     {
+        path: "packages/plugin/src/v2/hooks/context.ts",
+        contains: "v2 host API unavailable",
+        why: "startup error: the host lacks the required session API; shown once with the minimum version",
+    },
+    {
         path: "packages/plugin/src/plugin/tool-registry.ts",
         contains: "persistent storage unavailable; disabling magic-context tools",
         why: "startup error: storage failed to open, so no ctx_* tool is registered",

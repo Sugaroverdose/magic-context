@@ -144,8 +144,8 @@ function clonePiContentDecisions(
 }
 
 function runImmediate<T>(db: Database, body: () => T): T {
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let committed = false;
     try {
         const result = body();

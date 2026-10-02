@@ -6,6 +6,7 @@ import {
     canonicalizeInMemoryChunkTextForEmbedding,
     chunkCanonicalText,
     chunkEmbeddingWindowsAreCurrent,
+    chunkWindowSourceKey,
     replaceCompartmentChunkEmbeddings,
     type SaveCompartmentChunkEmbeddingInput,
 } from "./compartment-chunk-embedding";
@@ -88,6 +89,12 @@ export async function embedAndStoreCompartmentChunks(
                 maxInputTokens,
             );
             if (windows.length === 0) continue;
+            const windowSourceKey = chunkWindowSourceKey(
+                canonicalText,
+                compartment.startMessage,
+                compartment.endMessage,
+                maxInputTokens,
+            );
 
             const currentModelId = getProjectChunkEmbeddingModelId(projectPath);
             if (
@@ -141,7 +148,7 @@ export async function embedAndStoreCompartmentChunks(
                 });
             }
             if (rows.length === windows.length) {
-                replaceCompartmentChunkEmbeddings(db, rows);
+                replaceCompartmentChunkEmbeddings(db, rows, windowSourceKey);
                 enqueueShadowEmbeddingItems(projectPath, "chunk", [String(compartment.id)]);
             }
         } catch (error) {

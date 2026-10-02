@@ -14,7 +14,6 @@ import {
     clearDetectedContextLimit,
     clearHistorianFailureState,
     clearPendingCompactionMarkerStateIf,
-    clearSession,
     deleteIndexedMessage,
     deleteTagsByMessageId,
     getHistorianFailureState,
@@ -37,6 +36,7 @@ import {
     getChannel2NudgeState,
     getPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
+import { clearSession } from "../../features/magic-context/storage-meta-session";
 import type { Tagger } from "../../features/magic-context/tagger";
 import {
     clearTransformDecisionSession,
@@ -451,6 +451,24 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     detection.reportedLimitProvenance,
                     detection.reportedInputTokens,
                 );
+                if (detection.reportedInputTokens) {
+                    const provenLimit = getOverflowState(
+                        deps.db,
+                        errInfo.sessionID,
+                        overflowModelKey,
+                    ).detectedContextLimit;
+                    deps.contextUsageMap.set(errInfo.sessionID, {
+                        usage: {
+                            inputTokens: detection.reportedInputTokens,
+                            percentage:
+                                provenLimit > 0
+                                    ? (detection.reportedInputTokens / provenLimit) * 100
+                                    : 100,
+                        },
+                        hasUsageTokens: true,
+                        updatedAt: Date.now(),
+                    });
+                }
                 sessionLog(
                     errInfo.sessionID,
                     `overflow detected via session.error: reportedLimit=${detection.reportedLimit ?? "unknown"} provenance=${detection.reportedLimitProvenance ?? "n/a"} pattern=${detection.matchedPattern ?? "n/a"} (previousRecovery=${existing.needsEmergencyRecovery})`,
@@ -627,6 +645,25 @@ export function createEventHandler(deps: EventHandlerDeps) {
                                 detection.reportedLimitProvenance,
                                 detection.reportedInputTokens,
                             );
+                            if (detection.reportedInputTokens) {
+                                const provenLimit = getOverflowState(
+                                    deps.db,
+                                    info.sessionID,
+                                    overflowModelKey,
+                                ).detectedContextLimit;
+                                deps.contextUsageMap.set(info.sessionID, {
+                                    usage: {
+                                        inputTokens: detection.reportedInputTokens,
+                                        percentage:
+                                            provenLimit > 0
+                                                ? (detection.reportedInputTokens / provenLimit) *
+                                                  100
+                                                : 100,
+                                    },
+                                    hasUsageTokens: true,
+                                    updatedAt: Date.now(),
+                                });
+                            }
                             sessionLog(
                                 info.sessionID,
                                 `overflow detected via message.updated: reportedLimit=${detection.reportedLimit ?? "unknown"} provenance=${detection.reportedLimitProvenance ?? "n/a"} pattern=${detection.matchedPattern ?? "n/a"}`,

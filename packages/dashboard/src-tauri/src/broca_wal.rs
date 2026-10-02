@@ -11,6 +11,7 @@
 //! frame   := [len u32 LE][ver u8][seq u64 LE][fence u64 LE][digest 32][payload: len bytes]
 //! record  := ver 1, seq >= 1, payload = one record as JSON
 //! lineage := ver 2, seq 0, fence 0, payload = 16 opaque identity bytes
+//! gated   := ver 3, seq >= 1, payload = {"requires": [feature names], "record": record}
 //! digest  := SHA-256 over (ver ‖ seq LE ‖ fence LE ‖ payload)
 //! ```
 //!
@@ -21,8 +22,10 @@
 //! - a short final frame, or a complete final frame that fails its digest or
 //!   JSON decode, is a torn tail (Broca is mid-append): stop before it, and
 //!   look again on the next poll;
-//! - a bad frame anywhere else, an unknown frame version, or a record
-//!   sequence gap makes the whole file unreadable: nothing is guessed past it,
+//! - unknown features or framing versions stop projection at that frame and
+//!   retain the verified prefix with a compatibility note; nothing is skipped;
+//! - a bad frame anywhere else or a record sequence gap makes the whole file
+//!   unreadable: nothing is guessed past it,
 //!   and the caller falls back to `run-index.db` run totals;
 //! - lineage frames recur anywhere in a file and are verified then skipped;
 //! - record types this reader does not use are skipped (Broca keeps adding
@@ -46,6 +49,21 @@ use std::time::SystemTime;
 const HEADER_LEN: usize = 4 + 1 + 8 + 8 + 32;
 const RECORD_VERSION: u8 = 1;
 const LINEAGE_VERSION: u8 = 2;
+const GATED_VERSION: u8 = 3;
+const KNOWN_FEATURES: &[&str] = &[
+    "scope/v1",
+    "plan-manifest/v1",
+    "steer-queue/v1",
+    "archive-index/v2",
+    "dispatch-module/v1",
+];
+
+#[derive(serde::Deserialize)]
+struct GatedRequires {
+    requires: Vec<String>,
+    #[allow(dead_code)]
+    record: serde::de::IgnoredAny,
+}
 const LINEAGE_PAYLOAD_LEN: usize = 16;
 const MAX_PAYLOAD_LEN: u32 = 64 * 1024 * 1024;
 
@@ -146,11 +164,27 @@ pub(crate) struct WalRun {
 
 /// The session's runs as far as its WAL has been read, or `None` when the WAL
 /// is missing, unreadable, or corrupt and the caller must use run totals.
-pub(crate) fn session_runs(state_root: &Path, identity: &SessionIdentity) -> Option<Vec<WalRun>> {
+pub(crate) fn session_runs(
+    state_root: &Path,
+    identity: &SessionIdentity,
+) -> Option<(Vec<WalRun>, Option<String>)> {
+    session_snapshot(state_root, identity).map(|fold| (fold.runs, fold.activity_note))
+}
+
+pub(crate) fn session_activity_note(
+    state_root: &Path,
+    identity: &SessionIdentity,
+) -> Option<String> {
+    session_snapshot(state_root, identity)?.activity_note
+}
+
+fn session_snapshot(state_root: &Path, identity: &SessionIdentity) -> Option<Fold> {
     static CACHE: OnceLock<Mutex<WalCache>> = OnceLock::new();
-    let cache = CACHE.get_or_init(|| Mutex::new(WalCache::default()));
-    let mut cache = cache.lock().ok()?;
-    cache.session_runs(state_root, identity)
+    let mut cache = CACHE
+        .get_or_init(|| Mutex::new(WalCache::default()))
+        .lock()
+        .ok()?;
+    cache.session_snapshot(state_root, identity)
 }
 
 // ── Frame decoding ─────────────────────────────────────────────────────────
@@ -173,7 +207,9 @@ enum Corruption {
 }
 
 enum Next<'a> {
+    NewerWriter(String),
     Record {
+        gated: bool,
         seq: u64,
         payload: &'a [u8],
         consumed: usize,
@@ -197,10 +233,8 @@ fn decode_next(buf: &[u8]) -> Next<'_> {
     let version = buf[4];
     let seq = u64::from_le_bytes(buf[5..13].try_into().expect("8 bytes"));
     let fence = u64::from_le_bytes(buf[13..21].try_into().expect("8 bytes"));
-    if version != RECORD_VERSION && version != LINEAGE_VERSION {
-        return Next::Corrupt(Corruption::Other(format!(
-            "unsupported frame version {version}"
-        )));
+    if version != RECORD_VERSION && version != LINEAGE_VERSION && version != GATED_VERSION {
+        return Next::NewerWriter(format!("frame version {version}"));
     }
     if len > MAX_PAYLOAD_LEN {
         return Next::Corrupt(Corruption::Other(format!(
@@ -224,6 +258,7 @@ fn decode_next(buf: &[u8]) -> Next<'_> {
         return Next::Lineage { consumed: total };
     }
     Next::Record {
+        gated: version == GATED_VERSION,
         seq,
         payload,
         consumed: total,
@@ -237,9 +272,12 @@ enum ScanStop {
     End,
     /// The buffer ends inside a frame but the file continues; read at least
     /// `needed` bytes from the stop point to decode it.
-    NeedMore { needed: usize },
+    NeedMore {
+        needed: usize,
+    },
     /// The file ends in a torn frame, left for a later poll.
     TornTail,
+    NewerWriter(String),
 }
 
 /// Decodes frames from `buf` into `fold`, returning how many bytes were
@@ -276,14 +314,34 @@ fn scan(
             Next::Corrupt(Corruption::Other(reason)) => {
                 return Err(format!("{reason} at byte {pos}"));
             }
+            Next::NewerWriter(reason) => return Ok((pos, ScanStop::NewerWriter(reason))),
             Next::Lineage { consumed } => pos += consumed,
             Next::Record {
+                gated,
                 seq,
                 payload,
                 consumed,
             } => {
                 if seq != *expected_seq {
                     return Err(format!("expected sequence {expected_seq}, found {seq}"));
+                }
+                if gated {
+                    let requires = match serde_json::from_slice::<GatedRequires>(payload) {
+                        Ok(envelope) => envelope.requires,
+                        Err(_) if at_eof && pos + consumed == buf.len() => {
+                            return Ok((pos, ScanStop::TornTail));
+                        }
+                        Err(error) => return Err(format!("frame {seq}: {error}")),
+                    };
+                    let mut missing: Vec<_> = requires
+                        .into_iter()
+                        .filter(|name| !KNOWN_FEATURES.contains(&name.as_str()))
+                        .collect();
+                    missing.sort_unstable();
+                    missing.dedup();
+                    if !missing.is_empty() {
+                        return Ok((pos, ScanStop::NewerWriter(missing.join(", "))));
+                    }
                 }
                 let envelope = match serde_json::from_slice::<Value>(payload) {
                     Ok(value) => value,
@@ -317,7 +375,10 @@ fn open_envelope(envelope: &Value) -> Result<(Option<i64>, &Map<String, Value>),
     let object = envelope
         .as_object()
         .ok_or_else(|| "payload is not an object".to_owned())?;
-    let ts_ms = match object.get("ts_ms") {
+    let ts_ms = match object
+        .get("ts_ms")
+        .or_else(|| object.get("record").and_then(|r| r.get("ts_ms")))
+    {
         None | Some(Value::Null) => None,
         Some(value) => {
             Some(non_negative_int(value).ok_or_else(|| format!("invalid ts_ms {value}"))?)
@@ -366,6 +427,8 @@ struct Fold {
     runs: Vec<WalRun>,
     step_started_ts: HashMap<u64, i64>,
     attempt_ts: HashMap<u64, i64>,
+    last_ts_ms: Option<i64>,
+    activity_note: Option<String>,
 }
 
 impl Fold {
@@ -374,6 +437,9 @@ impl Fold {
         envelope_ts: Option<i64>,
         record: &Map<String, Value>,
     ) -> Result<(), String> {
+        if let Some(ts) = envelope_ts {
+            self.last_ts_ms = Some(ts);
+        }
         let kind = record
             .get("type")
             .and_then(Value::as_str)
@@ -491,7 +557,11 @@ impl WalCursor {
         if len < self.offset {
             *self = Self::default();
         }
-        if self.failed.is_some() || len == self.offset || len == self.seen_len {
+        if self.failed.is_some()
+            || self.fold.activity_note.is_some()
+            || len == self.offset
+            || len == self.seen_len
+        {
             return;
         }
         let available = len - self.offset;
@@ -515,6 +585,20 @@ impl WalCursor {
                         // One frame larger than the budget: read it whole.
                         ScanStop::NeedMore { needed } if consumed == 0 && needed as u64 > want => {
                             want = available.min(needed as u64);
+                        }
+                        ScanStop::NewerWriter(reason) => {
+                            let through = self
+                                .fold
+                                .last_ts_ms
+                                .and_then(chrono::DateTime::from_timestamp_millis)
+                                .map(|time| time.to_rfc3339())
+                                .unwrap_or_else(|| {
+                                    "the beginning of the WAL (no timestamp read)".to_owned()
+                                });
+                            self.fold.activity_note = Some(format!(
+                                "Broca recorded features this dashboard doesn't understand ({reason}); showing data up to {through}."
+                            ));
+                            return;
                         }
                         _ => return,
                     }
@@ -722,15 +806,21 @@ pub(crate) struct WalCache {
     live: HashMap<PathBuf, WalCursor>,
     containers: HashMap<PathBuf, CachedContainer>,
     /// Decoded archived members by (container, member offset, container length).
-    archived: HashMap<(PathBuf, u64, u64), Result<Vec<WalRun>, String>>,
+    archived: HashMap<(PathBuf, u64, u64), Result<Fold, String>>,
 }
 
 impl WalCache {
+    #[cfg(test)]
     pub(crate) fn session_runs(
         &mut self,
         state_root: &Path,
         identity: &SessionIdentity,
     ) -> Option<Vec<WalRun>> {
+        self.session_snapshot(state_root, identity)
+            .map(|fold| fold.runs)
+    }
+
+    fn session_snapshot(&mut self, state_root: &Path, identity: &SessionIdentity) -> Option<Fold> {
         let address = identity.addr();
         let live_path = state_root.join("wal").join(format!("{address}.wal"));
         match File::open(&live_path) {
@@ -744,7 +834,7 @@ impl WalCache {
                 if cursor.failed.is_some() {
                     return None;
                 }
-                Some(cursor.fold.runs.clone())
+                Some(cursor.fold.clone())
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 self.live.remove(&live_path);
@@ -757,7 +847,7 @@ impl WalCache {
     /// The session's runs from the newest container holding it. `None` when
     /// no container holds it, or when a container that might hold a newer
     /// copy cannot be read.
-    fn archived_runs(&mut self, archive_dir: &Path, address: &str) -> Option<Vec<WalRun>> {
+    fn archived_runs(&mut self, archive_dir: &Path, address: &str) -> Option<Fold> {
         let mut containers = Vec::new();
         for entry in std::fs::read_dir(archive_dir).ok()? {
             let path = entry.ok()?.path();
@@ -799,9 +889,10 @@ impl WalCache {
                 continue;
             };
             let key = (path, member.offset, len);
-            let runs = self.archived.entry(key).or_insert_with(|| {
-                read_archived_member(&mut file, len, address, member).map(|fold| fold.runs)
-            });
+            let runs = self
+                .archived
+                .entry(key)
+                .or_insert_with(|| read_archived_member(&mut file, len, address, member));
             return runs.clone().ok();
         }
         None
@@ -1004,6 +1095,99 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn broca_encoder_golden_gated_frames_decode() {
+        let bytes = include_bytes!("../tests/fixtures/broca-gated/frames.wal");
+        let mut fold = Fold::default();
+        let mut seq = 1;
+        assert_eq!(
+            scan(bytes, true, &mut seq, &mut fold).unwrap(),
+            (bytes.len(), ScanStop::End)
+        );
+        assert_eq!(seq, 3);
+        assert!(fold.activity_note.is_none());
+        assert!(matches!(
+            decode_next(bytes),
+            Next::Record {
+                gated: false,
+                seq: 1,
+                ..
+            }
+        ));
+        let first_len = HEADER_LEN + u32::from_le_bytes(bytes[..4].try_into().unwrap()) as usize;
+        assert!(matches!(
+            decode_next(&bytes[first_len..]),
+            Next::Record {
+                gated: true,
+                seq: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    #[ignore = "requires a copied Broca state root and independently extracted run facts"]
+    fn copied_broca_sessions_match_export_facts() {
+        let root = PathBuf::from(std::env::var("BROCA_WAL_COPY_ROOT").expect("copy root"));
+        let facts: Value =
+            serde_json::from_slice(&std::fs::read(root.join("expected.json")).unwrap()).unwrap();
+        let mut cache = WalCache::default();
+        let sessions = facts.as_array().unwrap();
+        assert!(sessions.len() >= 3);
+        for fact in sessions {
+            let identity = SessionIdentity::from_json(&fact["session"].to_string()).unwrap();
+            assert!(root
+                .join("wal")
+                .join(format!("{}.wal", identity.addr()))
+                .is_file());
+            let fold = cache.session_snapshot(&root, &identity).unwrap();
+            assert!(fold.activity_note.is_none());
+            let mut checked = 0;
+            for expected in fact["runs"].as_array().unwrap() {
+                let run = fold
+                    .runs
+                    .iter()
+                    .find(|run| run.run_id == expected["run_id"].as_str().unwrap())
+                    .unwrap();
+                assert!(!run.steps.is_empty());
+                for (key, count) in [
+                    ("input_tokens", 0),
+                    ("cached_input_tokens", 1),
+                    ("cache_write_tokens", 2),
+                    ("output_tokens", 3),
+                ] {
+                    let sum: i64 = run
+                        .steps
+                        .iter()
+                        .map(|step| {
+                            match count {
+                                0 => step.usage.input_tokens,
+                                1 => step.usage.cached_input_tokens,
+                                2 => step.usage.cache_write_tokens,
+                                _ => step.usage.output_tokens,
+                            }
+                            .unwrap_or(0)
+                        })
+                        .sum();
+                    assert_eq!(
+                        sum,
+                        expected["usage"][key].as_i64().unwrap(),
+                        "{} {} {key}",
+                        identity.addr(),
+                        run.run_id
+                    );
+                }
+                checked += 1;
+            }
+            assert!(checked > 0);
+            println!(
+                "address={} runs={checked} steps={}",
+                identity.addr(),
+                fold.runs.iter().map(|run| run.steps.len()).sum::<usize>()
+            );
+        }
+    }
+
+    #[test]
     fn multi_step_runs_decode_with_usage_model_and_times() {
         let runs = decode(&two_runs().bytes).unwrap();
         assert_eq!(
@@ -1100,16 +1284,114 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn an_unknown_frame_version_makes_the_file_unreadable() {
-        let mut wal = two_runs();
-        wal.bytes.extend(frame(3, 0, 0, b"future"));
-        let error = decode(&wal.bytes).unwrap_err();
-        assert!(error.contains("version 3"), "{error}");
-        // Even with valid frames after it.
+    fn unknown_frame_versions_keep_the_prefix_and_stop_with_a_note() {
+        for version in [4, 9, 255] {
+            let mut wal = two_runs();
+            let stop = wal.bytes.len();
+            wal.bytes.extend(frame(version, wal.seq + 1, 0, b"future"));
+            wal.push(step_finished(2, usage(999, 999, 999, 999)));
+            let mut cursor = WalCursor::default();
+            cursor.advance(
+                &mut std::io::Cursor::new(&wal.bytes),
+                wal.bytes.len() as u64,
+                READ_BUDGET_BYTES,
+            );
+            assert!(cursor.failed.is_none());
+            assert_eq!(cursor.offset, stop as u64);
+            assert_eq!(step_ids(&cursor.fold.runs).len(), 3);
+            let note = cursor.fold.activity_note.as_deref().unwrap();
+            assert!(note.contains(&format!("frame version {version}")), "{note}");
+            assert!(note.contains("1970-01-01T00:00:02.010"), "{note}");
+            wal.push(step_finished(3, usage(999, 999, 999, 999)));
+            cursor.advance(
+                &mut std::io::Cursor::new(&wal.bytes),
+                wal.bytes.len() as u64,
+                READ_BUDGET_BYTES,
+            );
+            assert_eq!(cursor.offset, stop as u64);
+            assert_eq!(step_ids(&cursor.fold.runs).len(), 3);
+        }
+    }
+
+    #[test]
+    fn gated_known_features_decode_usage_and_inner_timestamps() {
         let mut wal = Wal::new();
-        wal.bytes.extend(frame(9, 1, 0, b"{}"));
-        wal.push(run_started("r1", 1));
-        assert!(decode(&wal.bytes).is_err());
+        for record in [
+            run_started("gated", 400),
+            step_finished(1, usage(10, 20, 30, 40)),
+        ] {
+            wal.seq += 1;
+            wal.bytes.extend(frame(
+                3,
+                wal.seq,
+                3,
+                json!({"requires": KNOWN_FEATURES, "record": record})
+                    .to_string()
+                    .as_bytes(),
+            ));
+        }
+        let runs = decode(&wal.bytes).unwrap();
+        assert_eq!(runs[0].ts_ms, Some(400));
+        assert_eq!(
+            runs[0].steps[0].usage,
+            StepUsage {
+                input_tokens: Some(10),
+                cached_input_tokens: Some(20),
+                cache_write_tokens: Some(30),
+                output_tokens: Some(40)
+            }
+        );
+    }
+
+    #[test]
+    fn gated_unknown_features_keep_steps_and_do_not_interpret_the_record() {
+        let mut wal = two_runs();
+        let stop = wal.bytes.len();
+        wal.seq += 1;
+        wal.bytes.extend(frame(
+            3,
+            wal.seq,
+            3,
+            br#"{"requires":["future/v1"],"record":42}"#,
+        ));
+        wal.push(step_finished(2, usage(999, 999, 999, 999)));
+        let mut cursor = WalCursor::default();
+        cursor.advance(
+            &mut std::io::Cursor::new(&wal.bytes),
+            wal.bytes.len() as u64,
+            READ_BUDGET_BYTES,
+        );
+        assert!(cursor.failed.is_none());
+        assert_eq!(cursor.offset, stop as u64);
+        assert_eq!(step_ids(&cursor.fold.runs).len(), 3);
+        let note = cursor.fold.activity_note.unwrap();
+        assert!(note.contains("future/v1"), "{note}");
+        assert!(
+            note.contains("showing data up to 1970-01-01T00:00:02.010"),
+            "{note}"
+        );
+    }
+
+    #[test]
+    fn gated_frames_preserve_digest_sequence_and_torn_tail_rules() {
+        let original = two_runs();
+        let payload = br#"{"requires":["scope/v1"],"record":{"type":"turn_finished","step_id":1}}"#;
+        let tail = frame(3, original.seq + 1, 3, payload);
+        for cut in [3, HEADER_LEN - 1, tail.len() - 1] {
+            let mut bytes = original.bytes.clone();
+            bytes.extend(&tail[..cut]);
+            assert_eq!(step_ids(&decode(&bytes).unwrap()).len(), 3);
+        }
+        let mut bad = tail.clone();
+        bad[21] ^= 1;
+        let mut bytes = original.bytes.clone();
+        bytes.extend(&bad);
+        assert_eq!(step_ids(&decode(&bytes).unwrap()).len(), 3);
+        bytes.extend(lineage());
+        assert!(decode(&bytes).unwrap_err().contains("digest"));
+        let mut bytes = original.bytes.clone();
+        bytes.extend(frame(3, original.seq + 2, 3, payload));
+        assert!(decode(&bytes).unwrap_err().contains("sequence"));
     }
 
     #[test]
@@ -1438,6 +1720,30 @@ pub(crate) mod tests {
             step_ids(&runs),
             [("r1".to_string(), 1), ("r1".to_string(), 2)]
         );
+    }
+
+    #[test]
+    fn compatibility_notes_and_prefix_steps_survive_live_and_archive_caches() {
+        for archived in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let mut wal = two_runs();
+            wal.bytes.extend(frame(4, wal.seq + 1, 0, b"future"));
+            if archived {
+                write_container(
+                    dir.path(),
+                    100,
+                    &container(&[(&identity().addr(), &wal.bytes)], true),
+                );
+            } else {
+                write_live(dir.path(), &wal.bytes);
+            }
+            for _ in 0..2 {
+                let (runs, note) = session_runs(dir.path(), &identity()).unwrap();
+                assert_eq!(step_ids(&runs).len(), 3);
+                assert!(note.as_deref().unwrap().contains("showing data up to"));
+                assert_eq!(session_activity_note(dir.path(), &identity()), note);
+            }
+        }
     }
 
     #[test]

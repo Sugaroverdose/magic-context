@@ -539,7 +539,6 @@ export function getWrapupInProgressState(
     const state = readRawWrapupState(db, sessionId);
     if (!state) return null;
     if (state.expiresAt > now) return state;
-    const transactionStartedAt = performance.now();
     try {
         db.exec("BEGIN IMMEDIATE");
     } catch {
@@ -548,6 +547,7 @@ export function getWrapupInProgressState(
         // reclaim the stale blob.
         return null;
     }
+    const transactionStartedAt = performance.now();
     let finished = false;
     try {
         const current = readRawWrapupState(db, sessionId);
@@ -588,8 +588,8 @@ export function acquireWrapupInProgress(
         expiresAt: acquiredAt + WRAPUP_IN_PROGRESS_TTL_MS,
         updatedAt: acquiredAt,
     };
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let finished = false;
     try {
         ensureSessionMetaRow(db, sessionId);
@@ -626,8 +626,8 @@ export function updateWrapupInProgress(
     updates: Partial<Omit<WrapupInProgressState, "holderId" | "acquiredAt">>,
     now = Date.now(),
 ): WrapupInProgressState | null {
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let finished = false;
     try {
         const current = readRawWrapupState(db, sessionId);
@@ -663,8 +663,8 @@ export function updateWrapupInProgress(
 }
 
 export function releaseWrapupInProgress(db: Database, sessionId: string, holderId: string): void {
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let finished = false;
     try {
         const current = readRawWrapupState(db, sessionId);

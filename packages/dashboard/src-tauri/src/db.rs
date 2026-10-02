@@ -2970,12 +2970,15 @@ fn get_broca_session_cache_events(
     let Ok(conn) = open_broca_store(&root.join("run-index.db")) else {
         return Vec::new();
     };
-    let wal_runs = broca_wal::SessionIdentity::from_json(session_id)
+    let snapshot = broca_wal::SessionIdentity::from_json(session_id)
         .and_then(|identity| broca_wal::session_runs(&root, &identity));
-    load_broca_cache_events_from_conn(
+    let wal_runs = snapshot.as_ref().map(|(runs, _)| runs.as_slice());
+    let partial = snapshot.as_ref().is_some_and(|(_, note)| note.is_some());
+    load_broca_cache_events_with_compatibility(
         &conn,
         session_id,
-        wal_runs.as_deref(),
+        wal_runs,
+        !partial,
         limit,
         since_timestamp,
     )
@@ -2998,6 +3001,7 @@ fn get_broca_session_cache_events(
 //
 // `limit` and `since_timestamp` select runs, not steps: a run's steps are
 // always loaded together so a run is never cut in half.
+#[cfg(test)]
 fn load_broca_cache_events_from_conn(
     conn: &Connection,
     session_id: &str,
@@ -3005,11 +3009,35 @@ fn load_broca_cache_events_from_conn(
     limit: Option<usize>,
     since_timestamp: Option<i64>,
 ) -> rusqlite::Result<Vec<RawDbCacheEvent>> {
+    load_broca_cache_events_with_compatibility(
+        conn,
+        session_id,
+        wal_runs,
+        true,
+        limit,
+        since_timestamp,
+    )
+}
+
+fn load_broca_cache_events_with_compatibility(
+    conn: &Connection,
+    session_id: &str,
+    wal_runs: Option<&[broca_wal::WalRun]>,
+    allow_totals: bool,
+    limit: Option<usize>,
+    since_timestamp: Option<i64>,
+) -> rusqlite::Result<Vec<RawDbCacheEvent>> {
     struct RunRows {
         activity: i64,
         rows: Vec<RawDbCacheEvent>,
     }
-    let totals = load_broca_run_totals(conn, session_id)?;
+    // A compatibility stop promises only the verified WAL prefix, not later
+    // completed runs from the index that the reader could not interpret.
+    let totals = if !allow_totals {
+        Vec::new()
+    } else {
+        load_broca_run_totals(conn, session_id)?
+    };
     let mut runs: Vec<RunRows> = Vec::with_capacity(totals.len());
     let mut stepped: HashSet<&str> = HashSet::new();
     for run in wal_runs.unwrap_or_default() {
@@ -3873,6 +3901,14 @@ pub fn get_session_cache_stats_from_db(
         .into_iter()
         .map(|row| {
             let key = (row.harness, row.session_id.clone());
+            let broca_note = if row.harness == Harness::Broca {
+                broca_state_root().and_then(|root| {
+                    broca_wal::SessionIdentity::from_json(&row.session_id)
+                        .and_then(|identity| broca_wal::session_activity_note(&root, &identity))
+                })
+            } else {
+                None
+            };
             SessionCacheStats {
                 harness: row.harness,
                 session_id: row.session_id,
@@ -3890,7 +3926,8 @@ pub fn get_session_cache_stats_from_db(
                 activity_note: (row.harness == Harness::Opencode2)
                     .then_some(opencode_activity_note)
                     .flatten()
-                    .map(str::to_owned),
+                    .map(str::to_owned)
+                    .or(broca_note),
             }
         })
         .collect()
@@ -12341,6 +12378,31 @@ mod broca_cache_tests {
         })
         .collect();
         (conn, id, vec![wal_run("r1", 1_000, steps)])
+    }
+
+    #[test]
+    fn compatibility_stop_does_not_add_later_index_totals() {
+        let (conn, id, runs) = stepped_session();
+        insert(
+            &conn,
+            "later",
+            "r2",
+            &id,
+            2000,
+            serde_json::json!({"input_tokens": 999}),
+        );
+        let rows = load_broca_cache_events_with_compatibility(
+            &conn,
+            &id.to_string(),
+            Some(&runs),
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        let events = build_db_cache_events(rows, false);
+        assert_eq!(ids(&events), ["r1#1", "r1#2", "r1#3", "r1#4"]);
+        assert!(events.iter().all(|e| !e.aggregate));
     }
 
     #[test]

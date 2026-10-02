@@ -101,3 +101,45 @@ test("exhausted routed acquisition never enters the callback or multiplies privi
         rmSync(dir, { recursive: true, force: true });
     }
 });
+
+for (const mode of ["run", "get", "all", "exec"] as const) {
+    test(`foreground ${mode} autocommit waits share one turn budget and restore production timeout`, () => {
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-autocommit-budget-"));
+        const path = join(dir, "context.db");
+        const db = new Database(path);
+        db.exec(
+            "PRAGMA journal_mode=WAL; CREATE TABLE result(value TEXT); PRAGMA busy_timeout=5000",
+        );
+        const blocker = new Database(path);
+        blocker.exec("BEGIN IMMEDIATE");
+        try {
+            const started = performance.now();
+            withSqliteTransformPass(() => {
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    // Nested foreground wrappers must reuse the turn's remaining budget.
+                    expect(() =>
+                        withSqliteTransformPass(() => {
+                            if (mode === "exec") db.exec("INSERT INTO result VALUES ('blocked')");
+                            else
+                                db.prepare("INSERT INTO result VALUES ('blocked') RETURNING value")[
+                                    mode
+                                ]();
+                        }),
+                    ).toThrow("acquisition remained busy");
+                }
+                expect(() => db.exec("BEGIN IMMEDIATE")).toThrow("acquisition remained busy");
+            });
+            expect(performance.now() - started).toBeLessThan(650);
+            expect(db.prepare("PRAGMA busy_timeout").get()).toEqual({ timeout: 5000 });
+            expect(db.prepare("SELECT * FROM result").all()).toEqual([]);
+            blocker.exec("ROLLBACK");
+            withSqliteTransformPass(() => db.prepare("INSERT INTO result VALUES ('free')").run());
+            expect(db.prepare("SELECT * FROM result").all()).toEqual([{ value: "free" }]);
+        } finally {
+            if (blocker.inTransaction) blocker.exec("ROLLBACK");
+            blocker.close();
+            db.close();
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+}

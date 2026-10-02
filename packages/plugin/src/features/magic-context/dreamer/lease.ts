@@ -107,8 +107,8 @@ function runImmediate<T>(
     site?: string,
     slowWriteThresholdMs?: number,
 ): T {
-    const transactionStartedAt = site === undefined ? undefined : performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = site === undefined ? undefined : performance.now();
     let committed = false;
     try {
         const result = body();

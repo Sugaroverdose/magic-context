@@ -61,6 +61,7 @@ export function createNativeHiddenChildren(
         generation: string;
         keepSubagents: boolean;
         log: (message: string) => void;
+        removalTimeoutMs?: number;
     },
 ): HiddenChildLifecycle {
     // Removals in flight, so a finished run can wait for the removal its own failure started.
@@ -71,7 +72,20 @@ export function createNativeHiddenChildren(
         if (inFlight) return inFlight;
         const done = (async () => {
             try {
-                await removeSession({ sessionID: child.id });
+                let timer: ReturnType<typeof setTimeout> | undefined;
+                try {
+                    await Promise.race([
+                        removeSession({ sessionID: child.id }),
+                        new Promise<never>((_, reject) => {
+                            timer = setTimeout(
+                                () => reject(new Error("session.remove timed out")),
+                                options.removalTimeoutMs ?? 5000,
+                            );
+                        }),
+                    ]);
+                } finally {
+                    if (timer) clearTimeout(timer);
+                }
             } catch (error) {
                 if (isSessionNotFound(error)) return;
                 options.log(
@@ -109,10 +123,11 @@ export function createNativeHiddenChildren(
         model: HiddenChildModel,
     ): Promise<PersistedHiddenChild> => {
         const parentID = identity.parentSessionId;
-        const created = await host.create({
-            ...childCreateInput(identity, role, model),
-            ...(parentID ? { parentID } : {}),
-        });
+        const input = childCreateInput(identity, role, model);
+        const { location, ...parented } = input;
+        const created = await host.create(
+            parentID ? { ...parented, parentID } : { ...parented, location },
+        );
         if (!created.id) throw new Error("OpenCode 2 did not return a child session id");
         // Registered before anything else can fail, so a child removed after a failed read-back is
         // still recognised by the hidden-child hook while it lives.
@@ -125,13 +140,11 @@ export function createNativeHiddenChildren(
             title: roleTitle(role),
             model,
             created_at: Date.now(),
-            title_reasserted: false,
             directory: identity.directory,
         };
     };
 
-    // `keep_subagents` asks for finished hidden runs to stay inspectable, so it applies here as it
-    // does to the other lifecycle; a kept child sits under the user's session.
+    // keep_subagents retains inspectable runs under the user's session.
     const kept = (child: PersistedHiddenChild) => keptUnderRetention(options.keepSubagents, child);
 
     return {
@@ -148,7 +161,6 @@ export function createNativeHiddenChildren(
             if (!kept(child)) await remove(child);
         },
         updateModel: (child, model) => ({ ...child, model }),
-        markTitleReasserted: (child) => ({ ...child, title_reasserted: true }),
         markEverSettled: (child) => ({ ...child, ever_settled: true }),
     };
 }

@@ -282,6 +282,7 @@ import {
 	reconcilePiLkgEntryIds,
 	resolvePiLkgOutputEntryIds,
 } from "./pi-lkg";
+import { readPiLkgFitEnvelope } from "./pi-lkg-fit-envelope";
 import {
 	clearPiLiveUsageClassification,
 	formatPiPressureForLog,
@@ -2092,8 +2093,8 @@ function runImmediateTransaction<T>(db: ContextDatabase, fn: () => T): T {
 	if (databaseIsInTransaction(db)) {
 		return db.transaction(fn).immediate();
 	}
-	const transactionStartedAt = performance.now();
 	db.exec("BEGIN IMMEDIATE");
+	const transactionStartedAt = performance.now();
 	try {
 		const result = fn();
 		db.exec("COMMIT");
@@ -3935,7 +3936,19 @@ export function registerPiContextHandler(
 				assertTailHygieneLastWriter();
 			}
 			if (!lkgCompactionOff && lkgPassSnapshot) {
+				let hostEnvelopeSignature: string | undefined;
+				try {
+					hostEnvelopeSignature = readPiLkgFitEnvelope(
+						ctx,
+						pi,
+						resolvePiContextModelKey(ctx),
+						sessionDecisionCalibration(baseOptions.db, sessionId),
+					)?.envelopeSignature;
+				} catch {
+					/* Missing optional attribution must not prevent capturing the good prefix. */
+				}
 				lkgCoordinator.captureAppliedPass({
+					hostEnvelopeSignature,
 					snapshot: lkgPassSnapshot,
 					outputMessages,
 					outputEntryIds: resolvePiLkgOutputEntryIds(
@@ -4006,7 +4019,10 @@ export function registerPiContextHandler(
 				!lkgEmergencyRecoveryArmed
 			) {
 				try {
-					const replay = lkgCoordinator.replay(lkgPassSnapshot);
+					const replay = lkgCoordinator.replay(
+						lkgPassSnapshot,
+						(id) => ctx.sessionManager.getEntry?.(id)?.parentId,
+					);
 					if (replay.ok) {
 						// A valid stored prefix does not bound the newly appended raw tail.
 						assertPiRawFallbackFits(
@@ -4017,6 +4033,13 @@ export function registerPiContextHandler(
 									logPiLkgRecovery(sessionIdForError, line);
 							},
 							err,
+							readPiLkgFitEnvelope(
+								ctx,
+								pi,
+								resolvePiContextModelKey(ctx),
+								sessionDecisionCalibration(baseOptions.db, sessionIdForError),
+							),
+							replay.measuredPrefix,
 						);
 						const reason = piStorageErrorReason(err);
 						logPiLkgRecovery(
@@ -4030,13 +4053,13 @@ export function registerPiContextHandler(
 					}
 					logPiLkgRecovery(
 						sessionIdForError,
-						`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); checking raw ${rawMessageCount}-message input`,
+						`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); ${transientStorageFailure ? `refusing unreduced ${rawMessageCount}-message input` : `checking raw ${rawMessageCount}-message input`}`,
 					);
 				} catch (replayError) {
 					if (replayError instanceof PiStorageBusyError) throw replayError;
 					logPiLkgRecovery(
 						sessionIdForError,
-						`${failureLabel} ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); checking raw ${rawMessageCount}-message input`,
+						`${failureLabel} ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); ${transientStorageFailure ? `refusing unreduced ${rawMessageCount}-message input` : `checking raw ${rawMessageCount}-message input`}`,
 					);
 				}
 			} else if (replayOrRefuse && sessionIdForError) {
@@ -4047,11 +4070,12 @@ export function registerPiContextHandler(
 						: (lkgPassSnapshot?.preparationFailure ?? "lkg_miss");
 				logPiLkgRecovery(
 					sessionIdForError,
-					`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); checking raw ${rawMessageCount}-message input`,
+					`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); ${transientStorageFailure ? `refusing unreduced ${rawMessageCount}-message input` : `checking raw ${rawMessageCount}-message input`}`,
 				);
 			}
 			// Keep refusal outside the replay try/catch: it must reach Pi, not be
 			// mistaken for another replay failure and swallowed into raw fallthrough.
+			if (transientStorageFailure) throw new PiStorageBusyError({ cause: err });
 			if (replayOrRefuse) {
 				assertPiRawFallbackFits(
 					event.messages,
@@ -6041,6 +6065,36 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// `replayClearedReasoning` + `replayStrippedInlineThinking`
 	// in transform-postprocess-phase.ts.
 	const messageIdToMaxTag = buildMessageIdToMaxTag(targets);
+
+	// Pi rebuilds messages from raw history on every request. Replay persisted
+	// caveman compression first, then remove inline reasoning again. Compression
+	// reads pristine source, so running it last would restore reasoning text that
+	// an earlier request removed under the persisted reasoning-clear tag cutoff.
+	if (args.heuristics?.caveman?.enabled && !args.isSubagent) {
+		const tCavemanReplay = performance.now();
+		try {
+			const tags = getTagsByNumbers(args.db, args.sessionId, targetTagNumbers);
+			const replayed = replayCavemanCompression(
+				args.sessionId,
+				args.db,
+				targets,
+				tags,
+			);
+			if (replayed > 0) {
+				sessionLog(
+					args.sessionId,
+					`caveman replay: ${replayed} tags re-compressed from source`,
+				);
+			}
+		} catch (err) {
+			sessionLog(
+				args.sessionId,
+				`caveman replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+		logTransformTiming(args.sessionId, "cavemanReplay", tCavemanReplay);
+	}
+
 	if (args.reasoningClearing) {
 		try {
 			const tReplayReasoning = performance.now();
@@ -6081,46 +6135,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				`reasoning replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
-	}
-
-	// 3c. Caveman compression replay (cache-stable, runs on EVERY pass).
-	// applyPiHeuristicCleanup persists per-tag caveman_depth on execute
-	// passes, but the actual compressed text only lives in memory; on
-	// the next defer pass the AgentMessage[] is rebuilt fresh from the
-	// JSONL and arrives uncompressed. Without replay, every defer pass
-	// after a caveman pass would bust the provider cache prefix because
-	// the compressed text vanishes and reverts to the original.
-	//
-	// Mirrors OpenCode's `replayCavemanCompression` call in
-	// transform.ts:793. Idempotent — `cavemanCompress(originalText, level)`
-	// is deterministic, so replay produces the exact text the original
-	// execute pass produced, regardless of how many times it runs.
-	if (args.heuristics?.caveman?.enabled && !args.isSubagent) {
-		const tCavemanReplay = performance.now();
-		try {
-			// P0 perf: caveman replay only acts on tags whose tag_number is in
-			// `targets`, so fetch just that slice instead of the whole session
-			// (~50k rows on long sessions).
-			const tags = getTagsByNumbers(args.db, args.sessionId, targetTagNumbers);
-			const replayed = replayCavemanCompression(
-				args.sessionId,
-				args.db,
-				targets,
-				tags,
-			);
-			if (replayed > 0) {
-				sessionLog(
-					args.sessionId,
-					`caveman replay: ${replayed} tags re-compressed from source`,
-				);
-			}
-		} catch (err) {
-			sessionLog(
-				args.sessionId,
-				`caveman replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
-			);
-		}
-		logTransformTiming(args.sessionId, "cavemanReplay", tCavemanReplay);
 	}
 
 	// 3d. Cleanup stages NOT applicable to Pi (intentionally omitted):
@@ -6451,6 +6465,30 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 			sessionLog(
 				args.sessionId,
 				`reasoning clearing failed; restored original reasoning: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+
+	// Fresh caveman compression in the heuristic cleanup above rebuilds text from
+	// its original source, which brings back inline thinking that the replay at the
+	// start of this pass removed. The fresh strip only reaches this pass's cutoff
+	// (and never runs on prefix-bound models), while every later pass replays up to
+	// the persisted watermark. Strip up to that watermark again so this pass serves
+	// the bytes the next deferred pass will replay. This also covers the rollback
+	// above. Not counted as a new edit: it only restores what replay already removed.
+	if (args.reasoningClearing && shouldRunHeuristics && routineCleanupApplied) {
+		try {
+			replayStrippedInlineThinkingPi({
+				db: args.db,
+				sessionId: args.sessionId,
+				messages: workingMessages,
+				messageIdToMaxTag,
+				piMessageStableId: stableIdResolver,
+			});
+		} catch (err) {
+			sessionLog(
+				args.sessionId,
+				`inline thinking re-strip after cleanup failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
 	}

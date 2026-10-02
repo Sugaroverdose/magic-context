@@ -1,14 +1,15 @@
 import { expect, it, spyOn } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { Database } from "@magic-context/core/shared/sqlite";
+import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import { createPiTagSnapshotReader } from "./tag-snapshot-pi";
 
 it("tag snapshots reuse unchanged rows and invalidate local, external and rollback changes", () => {
-	const root = mkdtempSync(join(tmpdir(), "pi-tags-"));
+	const root = createTestTempDirFromPath(join(tmpdir(), "pi-tags-"));
 	const db = new Database(join(root, "context.db"));
 	initializeDatabase(db);
 	runMigrations(db);

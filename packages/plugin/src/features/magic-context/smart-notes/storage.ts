@@ -53,8 +53,8 @@ export function commitSmartNoteState(
     // does not apply to upgrades, so concurrent processes produced spurious
     // "database is locked" failures here. Taking the write lock at BEGIN time
     // waits under busy_timeout like every other writer.
-    const transactionStartedAt = performance.now();
     db.exec("BEGIN IMMEDIATE");
+    const transactionStartedAt = performance.now();
     let leaseLost = false;
     let committed = false;
     try {

@@ -87,7 +87,7 @@ forEachHost(import.meta.url, "drops", (host) => {
             // competing for the mock provider; the scenario above is tuned for neither.
             const probe = createOutboundShapeProbe();
             const v2 = await createScenarioHarness(host, {
-                modelContextLimit: 20_000,
+                modelContextLimit: 100_000,
                 magicContextConfig: {
                     protected_tokens: 4_000,
                     execute_threshold_percentage: 20,
@@ -158,6 +158,9 @@ forEachHost(import.meta.url, "drops", (host) => {
                             "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, 'drop', ?, ?)",
                         )
                         .run(sessionId, toolTag.tag_number, Date.now(), v2.harnessId);
+                    // Force the priced pass explicitly; a small host window can compact
+                    // away the arcs before this outbound-shape guard exercises them.
+                    writable.prepare("UPDATE session_meta SET cached_m0_system_hash = 'stale' WHERE session_id = ?").run(sessionId);
                 } finally {
                     writable.close();
                 }

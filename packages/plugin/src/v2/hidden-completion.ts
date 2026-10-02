@@ -16,7 +16,6 @@ import type { PromptArgs } from "../shared/model-suggestion-retry";
 import { parseProviderModel, toModelEntry } from "../shared/resolve-fallbacks";
 import { runTokenLog } from "../shared/run-token-log";
 import type { Database } from "../shared/sqlite";
-import { createLegacyHiddenChildren } from "./hidden-child-legacy";
 import { createNativeHiddenChildren } from "./hidden-child-native";
 import {
     assistantOutcome,
@@ -36,10 +35,8 @@ import {
     type HiddenChildHook,
     hiddenToolLoop,
 } from "./hooks/hidden-child";
-import type { HostServiceOwner } from "./host-service";
 import type { StoreRow } from "./store-reader";
 
-export { hiddenChildrenMetaKey } from "./hidden-child-legacy";
 export type { HiddenChildHost, HiddenChildRows } from "./hidden-child-record";
 
 type Model = HiddenChildModel;
@@ -52,17 +49,8 @@ export interface V2HiddenCompletionOptions {
     openReader: () => HiddenChildRows & { close?: () => void };
     ensureAgent?(): Promise<void>;
     generation?: string;
-    /**
-     * Legacy lifecycle only. Gap left between two session removals. Deleting a session walks its children one at a time
-     * inside the host and publishes an event per deletion, so a backlog is drained slowly on
-     * purpose rather than fired off in parallel.
-     */
-    removalSpacingMs?: number;
-    /**
-     * Legacy lifecycle only. Which host service registration, if any, owns the children this process creates. Called once
-     * per created child so a host that starts serving later still binds correctly.
-     */
-    resolveOwner?: () => HostServiceOwner | undefined;
+    /** Maximum time shutdown waits for the host to remove a child. */
+    removalTimeoutMs?: number;
     /**
      * The user's `keep_subagents` setting. When true, retired children that the OpenCode 1 lane
      * would keep are left in the host instead of deleted (see `keptUnderRetention`).
@@ -351,19 +339,19 @@ export async function createV2HiddenCompletionExecutor(
     const roleTails = new Map<HiddenChildRole, Promise<void>>();
     const note = options.log ?? log;
 
-    // The one place the two hidden-child lifecycles are chosen between (see hidden-child-record.ts).
-    // A host whose plugin session API can remove sessions gets fresh children parented to the
-    // user's session and removed when each run ends; any other host keeps the recorded, reused
-    // root children. Once older hosts are no longer supported, the legacy branch and its module go.
     const removeSession = host.removeSession;
-    const lifecycle: HiddenChildLifecycle = removeSession
-        ? createNativeHiddenChildren(host, (input) => removeSession.call(host, input), {
-              hook: options.hook,
-              generation,
-              keepSubagents: options.keepSubagents === true,
-              log: note,
-          })
-        : await createLegacyHiddenChildren(host, options, generation);
+    if (!removeSession) throw new Error("Magic Context requires OpenCode 2.0.22 session.remove");
+    const lifecycle: HiddenChildLifecycle = createNativeHiddenChildren(
+        host,
+        (input) => removeSession.call(host, input),
+        {
+            hook: options.hook,
+            generation,
+            keepSubagents: options.keepSubagents === true,
+            log: note,
+            removalTimeoutMs: options.removalTimeoutMs,
+        },
+    );
 
     const acquireRole = async (role: HiddenChildRole): Promise<() => void> => {
         const previous = roleTails.get(role) ?? Promise.resolve();
@@ -657,10 +645,6 @@ export async function createV2HiddenCompletionExecutor(
                         "Host did not dispatch the hidden child context hook",
                         true,
                     );
-                }
-                if (!run.child.title_reasserted) {
-                    await host.update({ sessionID: run.child.id, title: run.child.title });
-                    run.child = lifecycle.markTitleReasserted(run.child);
                 }
                 const text = assistantText(row);
                 const system =

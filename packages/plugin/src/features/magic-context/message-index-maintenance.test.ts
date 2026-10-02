@@ -4,7 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { _resetHarnessForTesting, setHarness } from "../../shared/harness";
+import { _resetHarnessForTesting, getHarness, setHarness } from "../../shared/harness";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -362,6 +362,7 @@ describe("message history orphan sweep on a host without an OpenCode store", () 
 });
 
 test("a harness-scoped orphan sweep retains counters until the last harness's compartments are gone", () => {
+    const previousHarness = getHarness();
     const db = createStoreDb();
     try {
         setHarness("opencode");
@@ -404,5 +405,7 @@ test("a harness-scoped orphan sweep retains counters until the last harness's co
         ).toBeNull();
     } finally {
         db.close();
+        _resetHarnessForTesting();
+        setHarness(previousHarness);
     }
 });

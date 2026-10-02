@@ -41,7 +41,7 @@ export function sharedOpenCode2Root(home: string = homedir()): string {
 }
 
 export interface SharedOpenCode2Install {
-	/** The version directory, e.g. `<root>/2.0.15`. */
+	/** The version directory, e.g. `<root>/2.0.22`. */
 	directory: string;
 	/** The installed package's manifest; its `version` field is what the lane trusts. */
 	packageJson: string;

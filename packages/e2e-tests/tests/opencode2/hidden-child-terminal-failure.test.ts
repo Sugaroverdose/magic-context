@@ -145,13 +145,13 @@ test("OpenCode 2 hidden historian survives a retried and a terminal provider fai
         const first = await command(1);
         expect(first.ok).toBe(true);
 
-        // A retryable provider error on the reused child: the host retries the step, running
+        // A retryable provider error on a fresh child: the host retries the step, running
         // the context hook again over the child's whole history, which still starts with the
         // first run's marker. The retry must go through and carry only this run's prompt.
         hiddenFailure = { status: 500, remaining: 1 };
         const retried = await command(2);
         expect(retried.ok).toBe(true);
-        expect(retried.childID).toBe(first.childID);
+        expect(retried.childID).not.toBe(first.childID);
         const secondWires = host.mock
             .requests()
             .filter((request) =>
@@ -174,7 +174,7 @@ test("OpenCode 2 hidden historian survives a retried and a terminal provider fai
         expect(failed.error).toContain("outcome=failed");
         expect(failed.error).toContain("provider.invalid-request");
         expect(failed.error).toContain("forced hidden failure 400");
-        expect(failed.childID).toBe(first.childID);
+        expect(failed.childID).not.toBe(first.childID);
 
         // The next run gets a clean child while the user session keeps taking turns.
         const [concurrentTurn, next] = await Promise.all([userTurn("concurrent turn"), command(4)]);
@@ -184,12 +184,12 @@ test("OpenCode 2 hidden historian survives a retried and a terminal provider fai
         for (let index = 0; index < 5; index++) turns.push(await userTurn(`after ${index}`));
         // Without keep_subagents the retired child's session is deleted from the host store.
         const storePath = gaDatabasePath(host.env.XDG_DATA_HOME!, "latest", host.env);
-        await eventually(() => !sessionStored(storePath, first.childID));
+        await eventually(() => !sessionStored(storePath, failed.childID));
 
         // Nothing touched the retired child after its failed run returned, and no pass on any
         // hidden child was refused.
         expect(
-            calls().filter((call) => call.sessionID === first.childID && call.at > failed.finishedAt),
+            calls().filter((call) => call.sessionID === failed.childID && call.at > failed.finishedAt),
         ).toEqual([]);
         expect(calls().filter((call) => call.outcome === "threw")).toEqual([]);
         expect(logLines().filter((line) => line.includes("hidden_prompt_unrecognized"))).toEqual([]);

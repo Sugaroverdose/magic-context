@@ -272,7 +272,7 @@ function firstDifference(
 
 /**
  * Owns the fail-closed bridge between a child prompt marker and the exact
- * calibrated request. Hidden children are visible root sessions in OpenCode 2,
+ * calibrated request. Hidden children can still be selected by a user in OpenCode 2,
  * so a user-selected or otherwise unregistered prompt must never inherit the
  * child's privileged internal identity.
  */
@@ -435,12 +435,9 @@ export class HiddenChildHook {
                 { role: "user", content: this.calibratedParts(selected, draft, raw) },
             ];
         } else {
-            // A reused historian child still holds the rows of its earlier runs, so on a
-            // later step of this run (for example the host retrying a provider error)
-            // this run's marker is not the first message. This run starts at its own
-            // marker, or at the host checkpoint that replaced the marker's message when
-            // the host compacted mid-run: everything before it belongs to earlier runs
-            // and is dropped.
+            // Later steps preserve this run's tool history, starting at its marker or
+            // the host checkpoint that replaced it during compaction. Provider retries
+            // must use the same calibrated prompt rather than the carrier placeholder.
             let start = -1;
             draft.messages.forEach((message, index) => {
                 const text = newestUserText({ ...draft, messages: [message] });

@@ -3995,6 +3995,50 @@ describe("Rust mode authority adapter", () => {
         expect(secondSlot?.inputContentDigests).not.toEqual(firstSlot?.inputContentDigests);
     });
 
+    it("replays byte-identical LKG after transform_transport_interrupted without retrying", async () => {
+        const sessionId = `rust-interrupted-lkg-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let interrupted = false;
+        let calls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                calls++;
+                if (interrupted)
+                    throw Object.assign(
+                        new Error("Transform transport interrupted; abandon this pass"),
+                        {
+                            code: "transform_transport_interrupted",
+                            cause: new Error("subc closed the connection"),
+                        },
+                    );
+                return {
+                    decision: "HARD",
+                    native_messages: [
+                        {
+                            info: { id: "served", role: "assistant", sessionID: sessionId },
+                            parts: [{ type: "text", text: "last good module bytes" }],
+                        },
+                    ],
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const input = makeMessages(sessionId);
+        const firstOutput = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, firstOutput, makeMeta(db, sessionId));
+        const firstBytes = JSON.stringify(firstOutput.messages);
+        expect(firstBytes).not.toBe(JSON.stringify(input));
+        interrupted = true;
+        const failedOutput = { messages: [...input] as unknown[] };
+        await transform.run(sessionId, input, failedOutput, makeMeta(db, sessionId));
+        expect(JSON.stringify(failedOutput.messages)).toBe(firstBytes);
+        expect(calls).toBe(2);
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
+    });
+
     it("replays byte-identical LKG on a typed mc-store transform failure", async () => {
         const sessionId = `rust-module-store-busy-${Date.now()}`;
         sessions.push(sessionId);
@@ -4438,6 +4482,72 @@ describe("Rust mode authority adapter", () => {
         expect(JSON.stringify(output.messages)).toContain("managed fold");
         expect(transform.getState(sessionId).consecutiveFailures).toBe(0);
         expect(transform.getState(sessionId).parked).toBe(false);
+    });
+
+    it("refuses transform_transport_interrupted without LKG instead of serving unmanaged history", async () => {
+        const sessionId = `rust-interrupted-no-lkg-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        let calls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                calls++;
+                throw Object.assign(
+                    new Error("Transform transport interrupted; abandon this pass"),
+                    {
+                        code: "transform_transport_interrupted",
+                        cause: new Error("subc closed the connection"),
+                    },
+                );
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        const output = { messages: [] as unknown[] };
+        await expect(
+            transform.run(sessionId, makeMessages(sessionId), output, makeMeta(db, sessionId)),
+        ).rejects.toThrow("Magic Context's engine is reconnecting");
+        expect(output.messages).toEqual([]);
+        expect(calls).toBe(1);
+        expect(transform.getState(sessionId).consecutiveFailures).toBe(1);
+    });
+
+    it("refuses transform_transport_interrupted with compaction disabled instead of serving unmanaged history", async () => {
+        const sessionId = `rust-interrupted-compaction-off-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installRawProvider(sessionId);
+        recordDetectedContextLimit(db, sessionId, 20_000, "test-provider/test-model");
+        let calls = 0;
+        const moduleClient: RustModeModuleClient = {
+            call: async ({ method }) => {
+                if (method !== "transform") return { ok: true };
+                calls++;
+                throw Object.assign(
+                    new Error("Transform transport interrupted; abandon this pass"),
+                    { code: "transform_transport_interrupted" },
+                );
+            },
+        };
+        const deps = makeDeps(db, moduleClient);
+        deps.compactionOff = true;
+        const transform = createRustModeTransform(deps, {
+            moduleClient,
+            rawFallbackEstimatorForTests: () => ({
+                tokens: 1,
+                trusted: true,
+                messageTokens: { conversation: 1, toolCall: 0 },
+                systemTokens: 0,
+                toolDefinitionTokens: 0,
+            }),
+        });
+        const output = { messages: [] as unknown[] };
+        await expect(
+            transform.run(sessionId, makeMessages(sessionId), output, makeMeta(db, sessionId)),
+        ).rejects.toThrow("Magic Context's engine is reconnecting");
+        expect(output.messages).toEqual([]);
+        expect(calls).toBe(1);
     });
 
     it("refuses a module timeout without LKG instead of serving raw", async () => {

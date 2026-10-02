@@ -622,11 +622,22 @@ export function applyPiHeuristicCleanup(
 	let compressedTextTags = 0;
 	let mutatedTextTags = 0;
 	if (routine && config.caveman?.enabled) {
-		const cavemanResult = applyCavemanCleanup(sessionId, db, targets, tags, {
-			enabled: true,
-			minChars: config.caveman.minChars,
-			protectedCutoff,
-		});
+		// System-injection cleanup above drops tags but keeps their pristine source.
+		// Reload active rows so compression skips tags dropped during this request.
+		// Otherwise compression restores a dropped injection now, and the persisted
+		// drop takes effect only on the next request, causing a second cache rebuild.
+		const cavemanTags = getActiveTagsBySession(db, sessionId);
+		const cavemanResult = applyCavemanCleanup(
+			sessionId,
+			db,
+			targets,
+			cavemanTags,
+			{
+				enabled: true,
+				minChars: config.caveman.minChars,
+				protectedCutoff,
+			},
+		);
 		compressedTextTags =
 			cavemanResult.compressedToLite +
 			cavemanResult.compressedToFull +

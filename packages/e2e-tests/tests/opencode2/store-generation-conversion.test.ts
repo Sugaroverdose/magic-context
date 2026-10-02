@@ -1265,7 +1265,14 @@ test("the converted store serves one HARD and four byte-identical cache hits", (
     ]);
 });
 
-test("doctor reports the pending flip the next open would perform", () => {
+test("doctor reports the conversion state for its selected store host", () => {
+    // With both generations installed, doctor deliberately checks the native
+    // store host even when the OpenCode 1 binary is first on PATH.
+    if (/Store and conversion checks below use OpenCode 2\./.test(evidence.doctorBetween)) {
+        expect(evidence.doctorBetween).toContain("already anchored to this host's v2 store projection");
+        expect(evidence.doctorBetween).not.toContain("would be re-anchored on next open");
+        return;
+    }
     expect(evidence.doctorBetween).toContain("would be re-anchored on next open");
     const pending = /(\d+) session\(s\) with compartments would be re-anchored/.exec(
         evidence.doctorBetween,
