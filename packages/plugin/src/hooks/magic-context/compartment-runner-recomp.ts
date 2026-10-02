@@ -172,14 +172,27 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
     // steps after it (depth reset, drop queue, publication signal, embedding, compaction
     // marker) can each be repaired later. One failing must not report the committed
     // recomp as failed or skip the steps after it, the publication signal included.
-    const afterPublish = async (step: string, run: () => unknown): Promise<void> => {
+    const logPostPublishFailure = (step: string, error: unknown): void => {
+        sessionLog(
+            sessionId,
+            `recomp post-publish step=${step} failed; publication stands: ${getErrorMessage(error)}`,
+        );
+    };
+    // Synchronous on purpose: wrapping a step must not add a yield point between
+    // promotion and the publication signal, where a concurrent transform pass could
+    // observe the promoted rows before the drop queue and signal are in place.
+    const afterPublish = (step: string, run: () => void): void => {
+        try {
+            run();
+        } catch (error) {
+            logPostPublishFailure(step, error);
+        }
+    };
+    const afterPublishAsync = async (step: string, run: () => Promise<void>): Promise<void> => {
         try {
             await run();
         } catch (error) {
-            sessionLog(
-                sessionId,
-                `recomp post-publish step=${step} failed; publication stands: ${getErrorMessage(error)}`,
-            );
+            logPostPublishFailure(step, error);
         }
     };
     // State file for the current pass — hoisted to be accessible in finally{}
@@ -293,7 +306,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // would otherwise skip or wrongly tier the fresh compartments. Wipe
             // per-session depth state so the rebuilt compartments start at depth
             // 0, matching what partial recomp does for its rebuilt range.
-            await afterPublish("compression-depth", () => clearCompressionDepth(db, sessionId));
+            afterPublish("compression-depth", () => clearCompressionDepth(db, sessionId));
 
             if (deps.preserveInjectionCacheUntilConsumed !== true) {
                 clearInjectionCache(sessionId);
@@ -310,7 +323,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // the search substrate (gated only by the embedding provider, not by
             // `memory.enabled`), distinct from fact promotion (which recomp
             // deliberately skips). Fire-and-forget.
-            await afterPublish("embedding", async () => {
+            await afterPublishAsync("embedding", async () => {
                 const projectIdentity = resolveProjectIdentity(sessionDirectory);
                 // Register the project's embedding provider before embedding;
                 // embedBatchForProject silently no-ops for unregistered projects,
@@ -326,7 +339,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             });
 
             if (lastCompartmentEnd > 0 && compartmentTagKeys) {
-                await afterPublish("drop-queue", () =>
+                afterPublish("drop-queue", () =>
                     queueDropsForCompartmentalizedMessages(
                         db,
                         sessionId,
@@ -343,9 +356,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // Placed before the embedding await + marker because neither is
             // consumed by those signals, and the await window is exactly where the
             // race fired. Mirrors the incremental path.
-            await afterPublish("publication-signal", () =>
-                deps.onCompartmentStatePublished?.(sessionId),
-            );
+            afterPublish("publication-signal", () => deps.onCompartmentStatePublished?.(sessionId));
 
             // Update compaction marker after recomp.
             // Recomp is explicit (eagerly clears injection cache), so the marker
@@ -353,7 +364,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // marker that a prior in-flight incremental publish may have left
             // behind — recomp now owns the boundary.
             if (lastCompartmentEnd > 0) {
-                await afterPublish("compaction-marker", () => {
+                afterPublish("compaction-marker", () => {
                     const markerUpdated = updateCompactionMarkerAfterPublication(
                         db,
                         sessionId,
@@ -669,7 +680,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         }
         // Full recomp rebuilds every compartment, so all pre-existing depth
         // rows are stale. Matches partial recomp's behavior for rebuilt ranges.
-        await afterPublish("compression-depth", () => clearCompressionDepth(db, sessionId));
+        afterPublish("compression-depth", () => clearCompressionDepth(db, sessionId));
         if (deps.preserveInjectionCacheUntilConsumed !== true) {
             clearInjectionCache(sessionId);
         }
@@ -686,7 +697,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         void finalFacts;
 
         if (lastCompartmentEnd > 0 && compartmentTagKeys) {
-            await afterPublish("drop-queue", () =>
+            afterPublish("drop-queue", () =>
                 queueDropsForCompartmentalizedMessages(
                     db,
                     sessionId,
@@ -699,9 +710,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // Signal LAST relative to the drop queue (mirrors the incremental +
         // early-publish paths): a concurrent transform pass consuming the one-shot
         // history/materialize signals must find the drop rows durable.
-        await afterPublish("publication-signal", () =>
-            deps.onCompartmentStatePublished?.(sessionId),
-        );
+        afterPublish("publication-signal", () => deps.onCompartmentStatePublished?.(sessionId));
 
         // v2: recompute raw chunk embeddings for the rebuilt compartments. This is
         // the NORMAL full-completion path (distinct from promoteAndFinalize, which
@@ -710,7 +719,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // → they vanish from ctx_search semantic results. Gated only by the
         // embedding provider (not `memory.enabled`), distinct from fact
         // promotion (recomp skips).
-        await afterPublish("embedding", async () => {
+        await afterPublishAsync("embedding", async () => {
             const projectIdentity = resolveProjectIdentity(sessionDirectory);
             // Register the embedding provider first; embedBatchForProject silently
             // no-ops for unregistered projects, leaving no chunk embeddings.
@@ -728,7 +737,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // promoteAndFinalize early-exit path already does this). Without it, the
         // next incremental run may reprocess already-compartmentalized messages.
         if (lastCompartmentEnd > 0) {
-            await afterPublish("compaction-marker", () => {
+            afterPublish("compaction-marker", () => {
                 const markerUpdated = updateCompactionMarkerAfterPublication(
                     db,
                     sessionId,
