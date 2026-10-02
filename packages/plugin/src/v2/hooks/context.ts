@@ -33,7 +33,7 @@ import {
     recordOverflowDetected,
 } from "../../features/magic-context/storage";
 import { getPersistedCompactionMarkerState } from "../../features/magic-context/storage-meta-persisted";
-import { drainSessionCleanup } from "../../features/magic-context/storage-meta-session";
+import { clearSession } from "../../features/magic-context/storage-meta-session";
 import { rebaseSessionCoordinatesAsync } from "../../features/magic-context/store-generation-rebase";
 import { createTagger } from "../../features/magic-context/tagger";
 import {
@@ -994,7 +994,7 @@ export async function registerContext(context: V2Context) {
                     deletedSessions.add(sessionID);
                     if (db) {
                         markSessionCleanupPending(db, sessionID);
-                        await drainSessionCleanup(db, sessionID);
+                        clearSession(db, sessionID);
                     }
                     rawProviders.get(sessionID)?.();
                     rawProviders.delete(sessionID);

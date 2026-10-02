@@ -1,15 +1,13 @@
 import { Buffer } from "node:buffer";
-import { drainBackgroundBatches } from "../../shared/background-batch-drain";
 import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
-import type { Database } from "../../shared/sqlite";
-import { withSqliteBackgroundWriter } from "../../shared/sqlite";
+import {
+    type Database,
+    withoutSqliteTransformPass,
+    withSqliteBackgroundWriter,
+} from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { resolveIsSubagentFromOpenCodeDb } from "./resolve-subagent-fallback";
-import {
-    prepareSessionCleanupBatch,
-    type SessionCleanupBatchResult,
-} from "./session-cleanup-batch";
 import {
     BOOLEAN_META_KEYS,
     ensureSessionMetaRow,
@@ -218,48 +216,30 @@ export function markSessionCleanupPending(
 
 export function retryPendingSessionCleanups(
     db: Database,
-    limit = 1,
-    orphanAuthority?: { harness: string; isAbsent: (sessionId: string) => boolean | null },
+    limit = 200,
 ): PendingSessionCleanupRetryResult {
     const rows = db
         .prepare(
-            `SELECT session_id, harness
+            `SELECT session_id
              FROM pending_session_cleanup
              WHERE harness NOT LIKE '%:rust'
-               AND (harness NOT LIKE '%:orphan' OR harness = ?)
-             ORDER BY COALESCE(last_attempt_at, requested_at) ASC, requested_at ASC, session_id ASC
+             ORDER BY requested_at ASC, session_id ASC
              LIMIT ?`,
         )
-        .all(
-            orphanAuthority ? `${orphanAuthority.harness}:orphan` : "",
-            Math.min(1, Math.max(1, Math.floor(limit))),
-        ) as Array<{
-        session_id: string;
-        harness: string;
-    }>;
+        .all(Math.max(1, Math.floor(limit))) as Array<{ session_id: string }>;
     const failedSessionIds: string[] = [];
     let cleared = 0;
     for (const row of rows) {
         try {
-            // A queued orphan may become live again before a later slice. Only
-            // its owning host's authority can approve resumed deletion.
-            if (row.harness.endsWith(":orphan")) {
-                const absent = orphanAuthority?.isAbsent(row.session_id);
-                if (absent !== true) {
-                    if (absent === false)
-                        withSqliteBackgroundWriter(() =>
-                            db
-                                .prepare(
-                                    "DELETE FROM pending_session_cleanup WHERE session_id=? AND harness=?",
-                                )
-                                .run(row.session_id, row.harness),
-                        );
-                    else failedSessionIds.push(row.session_id);
-                    continue;
-                }
-            }
-            const scope = row.harness.endsWith(":orphan") ? row.harness.slice(0, -7) : undefined;
-            if (clearSessionBatch(db, row.session_id, false, scope).completed) cleared += 1;
+            withoutSqliteTransformPass(() =>
+                withSqliteBackgroundWriter(() => {
+                    db.prepare(
+                        "UPDATE pending_session_cleanup SET last_attempt_at = ? WHERE session_id = ?",
+                    ).run(Date.now(), row.session_id);
+                    clearSession(db, row.session_id);
+                }),
+            );
+            cleared += 1;
         } catch {
             failedSessionIds.push(row.session_id);
         }
@@ -291,102 +271,25 @@ export async function retryPendingRustSessionCleanupsForProject(
     }>;
     const failedSessionIds: string[] = [];
     let cleared = 0;
-    let attempted = 0;
-    const deadline = performance.now() + 2000;
     for (const row of rows) {
-        if (performance.now() >= deadline) break;
-        attempted++;
         try {
-            db.prepare(
-                "UPDATE pending_session_cleanup SET last_attempt_at = ? WHERE session_id = ?",
-            ).run(Date.now(), row.session_id);
-            await deleteSession(row.session_id);
-            let completed = false;
-            await drainBackgroundBatches(
-                () => {
-                    const batch = clearSessionBatch(db, row.session_id, true);
-                    completed = batch.completed;
-                    return !completed && !batch.blocked && batch.rowsDeleted > 0;
-                },
-                { budgetMs: Math.max(0, deadline - performance.now()) },
+            withoutSqliteTransformPass(() =>
+                withSqliteBackgroundWriter(() =>
+                    db
+                        .prepare(
+                            "UPDATE pending_session_cleanup SET last_attempt_at = ? WHERE session_id = ?",
+                        )
+                        .run(Date.now(), row.session_id),
+                ),
             );
-            if (completed) cleared += 1;
+            await deleteSession(row.session_id);
+            clearSession(db, row.session_id, true);
+            cleared += 1;
         } catch {
             failedSessionIds.push(row.session_id);
         }
     }
-    return { attempted, cleared, failedSessionIds };
-}
-
-export function clearSessionBatch(
-    db: Database,
-    sessionId: string,
-    rustModuleCleanupAcknowledged = false,
-    cleanupHarness?: string,
-): SessionCleanupBatchResult {
-    const commit = prepareSessionCleanupBatch(db, sessionId, cleanupHarness, {
-        rustModuleCleanupAcknowledged,
-    });
-    let transactionStartedAt = 0;
-    const result = withSqliteBackgroundWriter(() =>
-        db
-            .transaction(() => {
-                transactionStartedAt = performance.now();
-                db.prepare(`INSERT OR IGNORE INTO pending_session_cleanup
-            (session_id, harness, requested_at, last_attempt_at) VALUES (?, ?, ?, NULL)`).run(
-                    sessionId,
-                    rustModuleCleanupAcknowledged ? rustCleanupHarness() : getHarness(),
-                    Date.now(),
-                );
-                db.prepare(
-                    "UPDATE pending_session_cleanup SET last_attempt_at=? WHERE session_id=?",
-                ).run(Date.now(), sessionId);
-                return commit();
-            })
-            .immediate(),
-    );
-    logSlowWriteTransaction("clear-session", transactionStartedAt);
-    return result;
-}
-
-export async function drainSessionCleanup(
-    db: Database,
-    sessionId: string,
-    rustModuleCleanupAcknowledged = false,
-    budgetMs = 2000,
-): Promise<boolean> {
-    let completed = false;
-    await drainBackgroundBatches(
-        () => {
-            const batch = clearSessionBatch(db, sessionId, rustModuleCleanupAcknowledged);
-            completed = batch.completed;
-            return !completed && !batch.blocked && batch.rowsDeleted > 0;
-        },
-        { budgetMs },
-    );
-    return completed;
-}
-
-export async function drainPendingSessionCleanups(
-    db: Database,
-    budgetMs = 2000,
-): Promise<PendingSessionCleanupRetryResult> {
-    const total: PendingSessionCleanupRetryResult = {
-        attempted: 0,
-        cleared: 0,
-        failedSessionIds: [],
-    };
-    await drainBackgroundBatches(
-        () => {
-            const result = retryPendingSessionCleanups(db);
-            total.attempted += result.attempted;
-            total.cleared += result.cleared;
-            total.failedSessionIds.push(...result.failedSessionIds);
-            return result.attempted > 0 && result.failedSessionIds.length === 0;
-        },
-        { budgetMs },
-    );
-    return total;
+    return { attempted: rows.length, cleared, failedSessionIds };
 }
 
 export function clearSession(
@@ -395,11 +298,17 @@ export function clearSession(
     rustModuleCleanupAcknowledged = false,
 ): void {
     let transactionStartedAt = 0;
-    db.transaction(() => {
-        transactionStartedAt = performance.now();
-        deleteSessionScopedRows(db, [sessionId], undefined, {
-            rustModuleCleanupAcknowledged,
-        });
-    }).immediate();
+    withoutSqliteTransformPass(() =>
+        withSqliteBackgroundWriter(() =>
+            db
+                .transaction(() => {
+                    transactionStartedAt = performance.now();
+                    deleteSessionScopedRows(db, [sessionId], undefined, {
+                        rustModuleCleanupAcknowledged,
+                    });
+                })
+                .immediate(),
+        ),
+    );
     logSlowWriteTransaction("clear-session", transactionStartedAt);
 }

@@ -36,7 +36,7 @@ import {
     getChannel2NudgeState,
     getPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
-import { drainSessionCleanup } from "../../features/magic-context/storage-meta-session";
+import { clearSession } from "../../features/magic-context/storage-meta-session";
 import type { Tagger } from "../../features/magic-context/tagger";
 import {
     clearTransformDecisionSession,
@@ -1156,7 +1156,7 @@ export function createEventHandler(deps: EventHandlerDeps) {
                     // clearSession's session_meta DELETE wipes it automatically — no
                     // separate CAS-clear needed here.
                     removeCompactionMarkerForSession(deps.db, sessionId);
-                    await drainSessionCleanup(deps.db, sessionId, deps.rustSessionCleanup === true);
+                    clearSession(deps.db, sessionId, deps.rustSessionCleanup === true);
                 }
             } catch (error) {
                 sessionLog(sessionId, "event session.deleted persistence failed:", error);

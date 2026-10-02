@@ -1,5 +1,6 @@
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
 import type { Database } from "../../shared/sqlite";
+import { withoutSqliteTransformPass, withSqliteBackgroundWriter } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
 export const MESSAGE_TIME_BACKFILL_BATCH_SIZE = 500;
@@ -133,6 +134,10 @@ export function backfillMessageTimesBatch(
     let transactionStartedAt = 0;
     db.transaction(() => {
         transactionStartedAt = performance.now();
+        db.prepare(`INSERT OR IGNORE INTO message_time_backfill_state
+            (id, cursor_session_id, cursor_ordinal, completed) VALUES (?, '', 0, 0)`).run(
+            BACKFILL_STATE_ID,
+        );
         const update = db.prepare(
             `UPDATE message_fts_rowid_map
                 SET message_time_ms = ?
@@ -163,6 +168,7 @@ export async function runMessageTimeBackfill(
     db: Database,
     reader: MessageTimeBackfillReader,
 ): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     for (;;) {
         const progress = backfillMessageTimesBatch(db, reader);
         if (progress.completed) return;
@@ -176,7 +182,9 @@ export function startMessageTimeBackfill(
 ): Promise<void> {
     const active = activeBackfills.get(db);
     if (active) return active;
-    const run = runMessageTimeBackfill(db, reader).finally(() => activeBackfills.delete(db));
+    const run = withoutSqliteTransformPass(() =>
+        withSqliteBackgroundWriter(() => runMessageTimeBackfill(db, reader)),
+    ).finally(() => activeBackfills.delete(db));
     activeBackfills.set(db, run);
     return run;
 }

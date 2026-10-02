@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
+import { withoutSqliteTransformPass, withSqliteBackgroundWriter } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
 export const MESSAGE_FTS_ROWID_MAP_BACKFILL_BATCH_SIZE = 100;
@@ -136,6 +136,8 @@ export function backfillMessageFtsRowidMapBatch(
     let transactionStartedAt = 0;
     db.transaction(() => {
         transactionStartedAt = performance.now();
+        db.prepare(`INSERT OR IGNORE INTO message_fts_rowid_map_backfill_state
+            (id, watermark_rowid, completed) VALUES (?, 0, 0)`).run(BACKFILL_STATE_ID);
         const state = getBackfillState(db);
         if (state.completed) {
             progress = state;
@@ -185,6 +187,7 @@ export function backfillMessageFtsRowidMapBatch(
 
 /** Drain legacy FTS rows in bounded turns so SQLite never owns the host loop. */
 export async function runMessageFtsRowidMapBackfill(db: Database): Promise<void> {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
     for (;;) {
         const progress = backfillMessageFtsRowidMapBatch(db);
         if (progress.completed) return;
@@ -196,7 +199,9 @@ export async function runMessageFtsRowidMapBackfill(db: Database): Promise<void>
 export function startMessageFtsRowidMapBackfill(db: Database): Promise<void> {
     const active = activeBackfills.get(db);
     if (active) return active;
-    const run = runMessageFtsRowidMapBackfill(db).finally(() => {
+    const run = withoutSqliteTransformPass(() =>
+        withSqliteBackgroundWriter(() => runMessageFtsRowidMapBackfill(db)),
+    ).finally(() => {
         activeBackfills.delete(db);
     });
     activeBackfills.set(db, run);

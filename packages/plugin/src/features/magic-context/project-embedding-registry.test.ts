@@ -32,7 +32,7 @@ import {
     loadAllEmbeddings,
     saveEmbedding,
 } from "./memory/storage-memory-embeddings";
-import { recordMessageFtsRowid } from "./message-fts-rowid-map";
+import { backfillMessageFtsRowidMapBatch, recordMessageFtsRowid } from "./message-fts-rowid-map";
 import {
     _resetProjectEmbeddingRegistryForTests,
     _setShadowBackfillNowForTests,
@@ -262,7 +262,10 @@ describe("project embedding registry", () => {
         const dir = createTestTempDirFromPath(join(tmpdir(), "project-embedding-registry-"));
         tempDirs.push(dir);
         process.env.XDG_DATA_HOME = dir;
-        return openDatabase();
+        const db = openDatabase();
+        // These fixtures model upgraded stores; do not depend on startup completing synchronously.
+        if (db) backfillMessageFtsRowidMapBatch(db);
+        return db;
     }
 
     afterEach(() => {

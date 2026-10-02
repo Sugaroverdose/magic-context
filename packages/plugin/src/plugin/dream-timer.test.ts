@@ -329,8 +329,8 @@ describe("dream-timer message-history maintenance (static)", () => {
             source.indexOf("function startupJitterMs("),
         );
         expect(tick).toContain("runMessageHistoryMaintenance(db)");
-        expect(tick).toContain("await drainPendingSessionCleanups(db)");
-        expect(tick).toContain("await drainOrphanedOpenCodeMessageIndexes(db, openOpenCodeDb)");
+        expect(tick).toContain("retryPendingSessionCleanups(db)");
+        expect(tick).toContain("sweepOrphanedOpenCodeMessageIndexes(db, openOpenCodeDb)");
     });
 });
 

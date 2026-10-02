@@ -1,4 +1,3 @@
-import { drainPendingSessionCleanups } from "../../features/magic-context/storage-meta-session";
 import { promptAsyncAndWaitForIdle } from "../../shared/prompt-async-transport";
 import { drainNotifications } from "../../shared/rpc-notifications";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -1382,7 +1381,7 @@ describe("createEventHandler", () => {
         const originalPrepare = deps.db.prepare.bind(deps.db);
         let failCleanup = true;
         (deps.db as unknown as { prepare: typeof deps.db.prepare }).prepare = ((sql: string) => {
-            if (failCleanup && sql.startsWith("DELETE FROM tags WHERE")) {
+            if (failCleanup && sql === "DELETE FROM source_contents WHERE session_id IN (?)") {
                 failCleanup = false;
                 throw new Error("synthetic session cleanup failure");
             }
@@ -1406,11 +1405,11 @@ describe("createEventHandler", () => {
         expect(countIndexedMessages("ses-delete-retry", "m-1")).toBe(1);
 
         (deps.db as unknown as { prepare: typeof deps.db.prepare }).prepare = originalPrepare;
-        expect(failCleanup).toBe(false);
-        const retry = await drainPendingSessionCleanups(deps.db);
-        expect(retry.attempted).toBeGreaterThanOrEqual(1);
-        expect(retry.cleared).toBe(1);
-        expect(retry.failedSessionIds).toEqual([]);
+        expect(retryPendingSessionCleanups(deps.db)).toEqual({
+            attempted: 1,
+            cleared: 1,
+            failedSessionIds: [],
+        });
         expect(countIndexedMessages("ses-delete-retry", "m-1")).toBe(0);
         expect(getTagsBySession(deps.db, "ses-delete-retry")).toHaveLength(0);
         expect(

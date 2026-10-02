@@ -48,7 +48,7 @@ import {
     getProjectEmbeddingSnapshot,
 } from "../features/magic-context/memory/embedding";
 import { isUsableProjectIdentity } from "../features/magic-context/memory/project-identity";
-import { drainOrphanedOpenCodeMessageIndexes } from "../features/magic-context/message-index";
+import { sweepOrphanedOpenCodeMessageIndexes } from "../features/magic-context/message-index";
 import {
     drainCommitBacklogForProject,
     drainProjectEmbeddingIdentityMaintenance,
@@ -60,7 +60,7 @@ import {
     retryPendingRustSessionCleanupsForProject,
     runSqliteOptimize,
 } from "../features/magic-context/storage";
-import { drainPendingSessionCleanups } from "../features/magic-context/storage-meta-session";
+import { retryPendingSessionCleanups } from "../features/magic-context/storage-meta-session";
 import { drainStaleLkgSlots } from "../hooks/magic-context/lkg-persist";
 import type { RawMessageProvider } from "../hooks/magic-context/read-session-chunk";
 import { projectNeedsSingleStoreMigration } from "../hooks/magic-context/single-store-refusal";
@@ -425,7 +425,7 @@ async function runMessageHistoryMaintenance(db: Database): Promise<void> {
         // A busy writer should not prevent unrelated maintenance from running.
         log("[magic-context] LKG pruning deferred:", error);
     }
-    const cleanup = await drainPendingSessionCleanups(db);
+    const cleanup = retryPendingSessionCleanups(db);
     if (cleanup.cleared > 0 || cleanup.failedSessionIds.length > 0) {
         log(
             `[message-index] pending session cleanup: cleared=${cleanup.cleared} failed=${cleanup.failedSessionIds.length}`,
@@ -453,7 +453,7 @@ async function runMessageHistoryMaintenance(db: Database): Promise<void> {
         }
     }
 
-    const sweep = await drainOrphanedOpenCodeMessageIndexes(db, openOpenCodeDb);
+    const sweep = sweepOrphanedOpenCodeMessageIndexes(db, openOpenCodeDb);
     if (sweep.deleted > 0) {
         log(
             `[message-index] orphan sweep: scanned=${sweep.scanned} deleted=${sweep.deleted} cursor=${sweep.cursor || "<complete>"}`,
