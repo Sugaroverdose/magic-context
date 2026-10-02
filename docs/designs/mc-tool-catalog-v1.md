@@ -228,7 +228,7 @@ choose. Each choice keeps what the handlers already enforce.
 | Tool | v1 | Plugin today | Rust module today |
 |---|---|---|---|
 |---|---|---|---|
-| `ctx_reduce` | `drop` string, required, no extra properties | `drop` optional (`ctx-reduce/tools.ts:53-58`) | same as v1. Thalamus authorizes `ctx_reduce` calls against this exact shape (`prompt_surface.rs:241-257`), so v1 keeps it unchanged, and freezes it. |
+| `ctx_reduce` | `drop` string, required, no extra properties | `drop` optional (`ctx-reduce/tools.ts:53-58`) | same as v1. Magic Context advertises this exact shape (`prompt_surface.rs:241-257`), and the gateway authorizes `ctx_reduce` calls against it (`classify_ctx_reduce_tool`, thalamus `crates/thalamus-core/src/tool_surface.rs:43`), so v1 keeps it unchanged, and freezes it. |
 | `ctx_expand` | `tag` number or string; `start`, `end` and `message` integers ≥ 0; `verbose` | plain numbers, no bounds | as v1, but `additionalProperties: true` (`crates/mc-module/src/lib.rs:18203-18215`) |
 | `ctx_note` | Rust bounds; no `memory_project` | no bounds on `limit` or `offset` | adds `memory_project`, `additionalProperties: true` (`lib.rs:18217-18232`) |
 | `ctx_memory` | `category` enum of the five categories; `ids` integers ≥ 1, at most 100; bounds on `content` and `reason` | category enum, no bounds (`ctx-memory/tools.ts:394-419`) | free-string category, plus `id`, `target_id`, `source_ids` and `memory_project` (`lib.rs:18120-18172`) |
@@ -430,7 +430,8 @@ model only through compaction (m0 and m1) and step transforms, never the catalog
     tags.
   - `ctx_reduce` counts as present only if its wire name and its schema both
     match, through the same predicate as the gateway's reduce authority gate
-    (today's shape check is `prompt_surface.rs:241-257`). A drifted `ctx_reduce`
+    (`classify_ctx_reduce_tool` in thalamus `crates/thalamus-core/src/tool_surface.rs:43`,
+    exact name at :16). A drifted `ctx_reduce`
     is left out of the composition and excluded from the fetch, so the session
     gets the no-reduce text and never a stamping text without working drops.
     That is why `ctx_reduce`'s name and schema are frozen for v1 (§2.2).
