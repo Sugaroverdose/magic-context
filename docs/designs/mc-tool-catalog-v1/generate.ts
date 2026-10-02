@@ -985,7 +985,7 @@ const COMMONS_REF = "42949fc331d8c318225d8ffa0faa024584237c57";
  * prefrontal at a commit whose fetch-plan vectors (compositions and plans, each
  * as pretty JSON, JCS bytes and SHA-256) the design document cites.
  */
-const PREFRONTAL_REF = "26590b8d4e45a7bab38c1ab2ddef8294dc9d228a";
+const PREFRONTAL_REF = "7079a4025b28f66e76f30bb19cc77caa0d9a1335";
 
 function git(repo: string, args: string[]): string | undefined {
     const run = spawnSync("git", ["-C", repo, ...args], { encoding: "utf8", maxBuffer: 64 << 20 });

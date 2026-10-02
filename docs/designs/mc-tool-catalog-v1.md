@@ -67,7 +67,7 @@ module's guidance assets and the commons and prefrontal test vectors, by
 | E | `.cortexkit/alfonso/plans/ck-extensibility-r7.3-errata.md`. Overrides D where they differ. |
 | TP | commons `crates/cortexkit-role-tool-provider/CONTRACT.md`, `src/catalog.rs` and `src/lib.rs`, `origin/master` at `42949fc3` (cortexkit-role-tool-provider 0.4.3, which defines the ten unprefixed tags and `check_capability_tag`). `catalog.rs` is unchanged since `5262544e`, which r1 cited. |
 | TPV | commons `test-vectors/tool-provider-v1/` at the same commit |
-| FP | prefrontal `test-vectors/fetch-plan-v1/` at `26590b8d4` (README and vectors) |
+| FP | prefrontal `test-vectors/fetch-plan-v1/` at `7079a4025` (README and vectors) |
 
 Magic Context sources are cited by repository path and line.
 
@@ -319,7 +319,7 @@ The generator re-checks its JCS and structural-schema code on every run. It
 reproduces every vector without floats in TPV's `composition-digest.json` and
 `schema-digest.json` (commons at `42949fc3`), and every FP composition and plan
 whose `.json` canonicalises to its `.jcs` and hashes to its `.sha256`
-(prefrontal at `26590b8d4`). It reads both repositories with `git show` from
+(prefrontal at `7079a4025`). It reads both repositories with `git show` from
 next to this repository's main checkout, and says so when it skips one.
 
 ### 2.7 The examples
