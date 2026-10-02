@@ -155,6 +155,19 @@ test("doctor cleans up retired hidden children on a store converted from OpenCod
 			const ids = retiredChildren(fixture.contextDbPath);
 			return ids.length > 0 ? ids : undefined;
 		}, "the hidden child to be recorded as retired");
+		// Stop only after the dream run has finished and recorded itself, so the host is
+		// not torn down while the run is still starting or finishing work of its own.
+		await eventually(
+			() =>
+				withDb(fixture.contextDbPath, (db) =>
+					db
+						.prepare("SELECT 1 FROM dream_runs WHERE tasks_json LIKE '%map-memories%'")
+						.get()
+						? true
+						: undefined,
+				),
+			"the dream run to be recorded",
+		);
 		await v2.stopHost();
 		v2 = undefined;
 
