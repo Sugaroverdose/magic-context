@@ -21,6 +21,8 @@ export type RelayCall = {
     usage?: Record<string, any>;
     timings?: Record<string, any>;
     error?: string;
+    /** The caller disconnected before the reply finished; the upstream request was aborted. */
+    cancelledByClient?: boolean;
 };
 
 export type RelayOptions = {
@@ -111,6 +113,10 @@ export class Relay {
 
     private async forward(call: RelayCall, serialized: string): Promise<Response> {
         let response: Response;
+        // A caller that gives up (OpenCode aborting a slow historian prompt) must stop
+        // the server's generation too, as a direct connection would; otherwise the
+        // abandoned reply keeps the single-slot server busy for minutes.
+        const abort = new AbortController();
         try {
             // Bun's fetch gives up after five minutes by default, shorter than a
             // cache-missing historian prompt takes on this server.
@@ -118,6 +124,7 @@ export class Relay {
                 method: "POST",
                 headers: { "content-type": "application/json", authorization: `Bearer ${this.options.apiKey}` },
                 body: serialized,
+                signal: abort.signal,
                 timeout: false,
             } as RequestInit);
         } catch (error) {
@@ -141,7 +148,19 @@ export class Relay {
             this.pending.delete(capture);
         });
         this.pending.add(capture);
-        return new Response(forward, {
+        const reader = forward.getReader();
+        const downstream = new ReadableStream<Uint8Array>({
+            async pull(controller) {
+                const chunk = await reader.read();
+                if (chunk.done) controller.close();
+                else controller.enqueue(chunk.value);
+            },
+            cancel(reason) {
+                call.cancelledByClient = true;
+                abort.abort(reason);
+            },
+        });
+        return new Response(downstream, {
             status: response.status,
             headers: { "content-type": response.headers.get("content-type") ?? "text/event-stream" },
         });

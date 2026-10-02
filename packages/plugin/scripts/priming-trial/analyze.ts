@@ -7,7 +7,7 @@
 // view of the provider stream) against the request it answered.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import type { RelayCall } from "./relay";
 import { classifyLeadingTag, isMarkerOnlyOutput, measureExposure, placeholderHits } from "./placeholder";
@@ -255,9 +255,15 @@ export function analyzeRun(root: string) {
 
 /** Removes local paths and anything shaped like a key before a trajectory is written to the repository. */
 export function scrub(text: string, root: string): string {
+    const normalized = resolve(root);
     return text
-        .replaceAll(`/private${root}`, "<run>")
+        .replaceAll(`/private${normalized}`, "<run>")
+        .replaceAll(normalized, "<run>")
         .replaceAll(root, "<run>")
+        .replace(/(?:\/private)?\/var\/folders\/\S*?\/issue-563-priming\/[\w-]+/g, "<run>")
+        // A path cut short by clipping no longer matches the run root above.
+        .replace(/(?:\/private)?\/var\/folders\/[^\s"'\\]*/g, "<tmp>")
+        .replace(/\/Users\/[^/\s]+/g, "<home>")
         .replace(/sk-[A-Za-z0-9_-]{8,}/g, "[REDACTED]")
         .replace(/Bearer\s+\S+/g, "Bearer [REDACTED]");
 }
@@ -280,7 +286,20 @@ export function trajectory(root: string, label: string): string {
     const turns = readJsonl<Turn>(join(root, "turns.jsonl"));
     const calls = loadCalls(root);
     const mainIndices = [...calls.values()].filter((call) => call.lane === "main").map((call) => call.index).sort((a, b) => a - b);
-    const lines = [`# Trajectory: ${label}`, "", "Assistant text is verbatim (provider stream). Tool arguments are clipped to 300 characters and tool results to 240. Local paths are replaced with `<run>`.", ""];
+    const lines = [
+        `# Trajectory: ${label}`,
+        "",
+        "One run of the issue 563 priming trial (see docs/reports/issue-563-priming-trial.md). Each turn lists the scripted user prompt and every model call made while answering it.",
+        "",
+        "- Assistant text is verbatim from the provider stream, including the `§N§` tag Magic Context's guidance asks the model to write at the start of a reply. Tool results carry the tags Magic Context assigned.",
+        "- `visible max tag`: the highest tag at the start of any message in the request; a correct reply tag is one more.",
+        "- `drops in context`: drop placeholders (`[dropped §N§]`) present in the request.",
+        "- `prompt N (cached M)`: prompt tokens, and how many the server served from its prefix cache.",
+        "- `finish`: `tool_calls` when the model called tools, `stop` when it ended its turn.",
+        "- `aux call`: a call Magic Context's historian made to the same model to summarize older history.",
+        "- Tool arguments are clipped to 300 characters and tool results to 240. Local paths are replaced with `<run>`, `<tmp>` and `<home>`.",
+        "",
+    ];
     for (const turn of turns) {
         lines.push(`## Turn ${turn.turn} (${Math.round(turn.durationMs / 1000)} s)`, "", `**User:** ${turn.prompt}`, "");
         if (turn.error) lines.push(`**Turn error:** ${turn.error}`, "");

@@ -11,7 +11,7 @@ export type PlaceholderArm = "bracket" | "neutral";
 
 /** The neutral wording for a dropped item. It names the tag so `ctx_expand(tag=N)` still works. */
 export const neutralPlaceholder = (tag: number | string): string => `(removed: tag ${tag})`;
-/** The neutral wording for a message Magic Context emptied entirely (master: `[dropped]`). */
+/** The neutral wording for a message Magic Context emptied entirely; unmodified Magic Context renders such a message as `[dropped]`. */
 export const NEUTRAL_WHOLE_MESSAGE = "(removed)";
 
 const BRACKET_TAGGED = /\[dropped §(\d+|N)§\]/g;
@@ -225,7 +225,11 @@ export function isMarkerOnlyOutput(text: string): boolean {
 
 export type LeadingTag = { kind: "correct" | "wrong" | "missing"; tag: number | null; delta: number | null };
 
-/** Classifies a reply's leading tag against the guidance's rule: one more than the highest visible tag. */
+/**
+ * Classifies a reply's leading `§N§` tag. Magic Context's prompt guidance tells the model
+ * to open each reply with one more than the highest tag it can see: such a tag is
+ * correct, any other number is wrong, and no leading tag is missing.
+ */
 export function classifyLeadingTag(text: string, maxVisibleTag: number): LeadingTag {
     const match = /^\s*§(\d+)§/.exec(text);
     if (!match) return { kind: "missing", tag: null, delta: null };
