@@ -664,10 +664,12 @@ pub fn parse_log_line(line: &str) -> Option<LogEntry> {
         "dreamer"
     } else if record.message.contains("historian") || record.message.contains("compartment") {
         "historian"
+    } else if record.message.contains("note-nudge") || record.message.contains("note nudge") {
+        // Checked before the generic "nudge" match, which would otherwise
+        // claim every note-nudge line too.
+        "note-nudge"
     } else if record.message.contains("nudge") {
         "nudge"
-    } else if record.message.contains("note-nudge") || record.message.contains("note nudge") {
-        "note-nudge"
     } else {
         "general"
     }
@@ -916,7 +918,10 @@ fn detect_bust_cause(entries: &[LogEntry], event_idx: usize) -> String {
     if causes.is_empty() {
         "Unknown cause".to_string()
     } else {
-        causes.dedup();
+        // Several lines in the window can name the same cause, not always next
+        // to each other; keep the first mention of each.
+        let mut seen = std::collections::HashSet::new();
+        causes.retain(|cause| seen.insert(cause.clone()));
         causes.join(", ")
     }
 }
@@ -997,9 +1002,9 @@ pub fn read_log_tails(paths: &[PathBuf], max_lines: usize) -> Vec<LogEntry> {
 #[cfg(test)]
 mod tests {
     use super::{
-        extract_cache_events, log_spec_admits, parse_log_line, parse_log_record, read_log_tail,
+        detect_bust_cause, extract_cache_events, log_spec_admits, parse_log_line, parse_log_record, read_log_tail,
         read_log_tails, resolve_log_path_for, resolve_log_path_from_temp_dir, resolve_log_paths,
-        Harness, LogGrammar, Regex,
+        Harness, LogEntry, LogGrammar, Regex,
     };
     use std::collections::HashMap;
     use std::path::{Path, PathBuf};
@@ -1330,6 +1335,32 @@ mod tests {
             assert_eq!(events[0].input_tokens, 10);
             assert_eq!(events[0].hit_ratio, 0.7);
         }
+    }
+
+    #[test]
+    fn note_nudge_lines_get_their_own_component() {
+        let line = "2026-09-05T10:41:03.130Z INFO  magic-context session=opencode:ses_n note nudge delivered";
+        assert_eq!(parse_log_line(line).unwrap().component, "note-nudge");
+        let line = "2026-09-05T10:41:03.130Z INFO  magic-context session=opencode:ses_n nudge sent";
+        assert_eq!(parse_log_line(line).unwrap().component, "nudge");
+    }
+
+    #[test]
+    fn bust_causes_name_each_cause_once_even_when_not_adjacent() {
+        let entries: Vec<LogEntry> = [
+            "2026-09-05T10:41:01.000Z INFO  magic-context session=opencode:ses_b cache event cache.read=70 cache.write=20 tokens.input=10",
+            "2026-09-05T10:41:02.000Z INFO  magic-context session=opencode:ses_b Execute pass started",
+            "2026-09-05T10:41:02.100Z INFO  magic-context session=opencode:ses_b heuristic cleanup ran",
+            "2026-09-05T10:41:02.200Z INFO  magic-context session=opencode:ses_b Execute pass finished",
+            "2026-09-05T10:41:03.000Z INFO  magic-context session=opencode:ses_b cache event cache.read=0 cache.write=90 tokens.input=10",
+        ]
+        .iter()
+        .map(|line| parse_log_line(line).unwrap())
+        .collect();
+        assert_eq!(
+            detect_bust_cause(&entries, 4),
+            "Execute pass, Heuristic cleanup"
+        );
     }
 
     #[test]
