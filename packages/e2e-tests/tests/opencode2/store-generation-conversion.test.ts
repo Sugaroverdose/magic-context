@@ -888,17 +888,25 @@ beforeAll(async () => {
     const gapDb = new Database(fixture.contextDbPath);
     try {
         gapDb.exec("PRAGMA busy_timeout = 30000");
+        // Bun's run().changes includes the v93 history-trigger write as well as
+        // the compartment update. RETURNING counts only matched compartments,
+        // so a stale endpoint still fails the exactly-one-row assertion.
         const update = gapDb
             .prepare(
-                "UPDATE compartments SET end_message = ? WHERE session_id = ? AND sequence = ? AND end_message = ?",
+                "UPDATE compartments SET end_message = ? WHERE session_id = ? AND sequence = ? AND end_message = ? RETURNING sequence, end_message",
             )
-            .run(
+            .all(
                 splitOrdinal,
                 sessionId,
                 healedGapCompartment.sequence,
                 syntheticGapOrdinal,
             );
-        if (update.changes !== 1) throw new Error("failed to recreate the stored synthetic gap");
+        if (update.length !== 1) throw new Error("failed to recreate the stored synthetic gap");
+        expect(update).toEqual([{ sequence: healedGapCompartment.sequence, end_message: splitOrdinal }]);
+        expect(
+            gapDb.prepare("SELECT end_message FROM compartments WHERE session_id = ? AND sequence = ?")
+                .get(sessionId, healedGapCompartment.sequence),
+        ).toEqual({ end_message: splitOrdinal });
     } finally {
         gapDb.close();
     }
