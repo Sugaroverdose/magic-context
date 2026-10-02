@@ -394,12 +394,14 @@ export function* iterateEntriesToRawMessageRange(
 		const msg = entry.message;
 		const role = (msg as { role?: string }).role;
 		if (role === "toolResult") {
-			const synthesized = synthesizeToolResultParts(msg);
-			if (synthesized.length === 0) continue;
+			const callId = (msg as { toolCallId?: unknown }).toolCallId;
+			if (typeof callId !== "string" || callId.length === 0) continue;
 			const version = rawEntryVersion(entry);
 			hasPendingToolParts = true;
 			if (nextOrdinal > normalizedAfter && nextOrdinal <= normalizedWatermark) {
-				pendingToolParts.push(...attachPiPartVersion(synthesized, version));
+				pendingToolParts.push(
+					...attachPiPartVersion(synthesizeToolResultParts(msg), version),
+				);
 			}
 			if (pendingFirstRealId === "") {
 				pendingFirstRealId = entry.id;
@@ -647,4 +649,29 @@ function synthesizeToolResultParts(msg: unknown): unknown[] {
 			},
 		},
 	];
+}
+
+/** Count folded ordinals without constructing historical tool output or copying content. */
+export function countPiRawMessages(entries: readonly unknown[]): number {
+	let count = 0;
+	let pendingTools = false;
+	for (const entry of entries) {
+		if (!isMessageEntry(entry)) continue;
+		const message = entry.message as { role?: unknown; toolCallId?: unknown };
+		if (message.role === "toolResult") {
+			if (
+				typeof message.toolCallId === "string" &&
+				message.toolCallId.length > 0
+			)
+				pendingTools = true;
+			continue;
+		}
+		if (message.role === "user") pendingTools = false;
+		else if (message.role === "assistant" && pendingTools) {
+			count++;
+			pendingTools = false;
+		}
+		count++;
+	}
+	return count + Number(pendingTools);
 }

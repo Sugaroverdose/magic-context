@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { runMigrations } from "@magic-context/core/features/magic-context/migrations";
 import { initializeDatabase } from "@magic-context/core/features/magic-context/storage-db";
 import { resetLkgSlotsForTest } from "@magic-context/core/hooks/magic-context/lkg-slot";
@@ -262,7 +262,10 @@ describe("Pi contracted LKG", () => {
 		harness.flushCapture();
 		expect(
 			harness.coordinator.replay(harness.coordinator.beginPass(args)),
-		).toEqual({ ok: true, messages: args.messages });
+		).toEqual({
+			ok: true,
+			messages: args.messages,
+		});
 		expect(
 			harness.coordinator.beginPass({
 				...args,
@@ -415,4 +418,150 @@ it("maps synthetic todo results to their assistant owner without guessing ambigu
 					: undefined,
 		),
 	).toEqual(["first", "second", undefined]);
+});
+
+it("reuses cloned output serialization and skips unchanged LKG persistence", () => {
+	const harness = createHarness();
+	databases.push(harness.db);
+	const inputs = [message("large image data".repeat(10000))];
+	const args = {
+		sessionId: "pi-lkg-unchanged-output-cost",
+		messages: inputs,
+		entryIds: ["one"],
+		modelKey: "model",
+		providerKey: "provider",
+	};
+	const capture = (messages: typeof inputs) => {
+		harness.coordinator.captureAppliedPass({
+			snapshot: harness.coordinator.beginPass({ ...args, messages }),
+			outputMessages: messages,
+			outputEntryIds: ["one"],
+			cacheBusting: false,
+		});
+		harness.flushCapture();
+	};
+	capture(inputs);
+	const changes = () =>
+		(harness.db.prepare("SELECT total_changes() AS n").get() as { n: number })
+			.n;
+	const before = changes();
+	const clone = structuredClone(inputs);
+	const stringify = spyOn(JSON, "stringify");
+	try {
+		capture(clone);
+		expect(
+			stringify.mock.calls.filter(
+				([value]) => value === clone || value === clone[0],
+			),
+		).toHaveLength(0);
+		expect(changes()).toBe(before);
+	} finally {
+		stringify.mockRestore();
+	}
+	const clonedMessage = clone[0];
+	if (!clonedMessage) throw new Error("expected cloned message");
+	clonedMessage.content = "rewritten";
+	capture(clone);
+	expect(changes()).toBeGreaterThan(before);
+	expect(
+		harness.coordinator.replay(
+			harness.coordinator.beginPass({ ...args, messages: clone }),
+		),
+	).toEqual({ ok: true, messages: clone });
+});
+
+it("reuses input fingerprints across a cache-busting capture while invalidating replay", () => {
+	const timings: PiLkgCaptureTiming[] = [];
+	const harness = createHarness((sample) => timings.push(sample));
+	databases.push(harness.db);
+	const args = {
+		sessionId: "pi-lkg-busted-prefix-reuse",
+		messages: [message("one"), message("two")],
+		entryIds: ["one", "two"],
+		modelKey: "model",
+		providerKey: "provider",
+	};
+	harness.coordinator.captureAppliedPass({
+		snapshot: harness.coordinator.beginPass(args),
+		outputMessages: args.messages,
+		outputEntryIds: args.entryIds,
+		cacheBusting: false,
+	});
+	harness.flushCapture();
+	const appended = {
+		...args,
+		messages: [...args.messages, message("three")],
+		entryIds: [...args.entryIds, "three"],
+	};
+	harness.coordinator.captureAppliedPass({
+		snapshot: harness.coordinator.beginPass(appended),
+		outputMessages: appended.messages,
+		outputEntryIds: appended.entryIds,
+		cacheBusting: true,
+	});
+	expect(
+		harness.coordinator.replay(harness.coordinator.beginPass(appended)).ok,
+	).toBe(false);
+	harness.flushCapture();
+	expect(timings.at(-1)?.reusedPrefix).toBe(2);
+	expect(
+		harness.coordinator.replay(harness.coordinator.beginPass(appended)),
+	).toEqual({ ok: true, messages: appended.messages });
+});
+
+it("preserves JSON serialization for non-plain output values", () => {
+	const harness = createHarness();
+	databases.push(harness.db);
+	const args = {
+		sessionId: "pi-lkg-date-output",
+		messages: [message("input")],
+		entryIds: ["one"],
+		modelKey: null,
+		providerKey: null,
+	};
+	for (const date of ["2026-01-01", "2026-02-01"]) {
+		const output = [{ ...message("output"), details: new Date(date) }];
+		harness.coordinator.captureAppliedPass({
+			snapshot: harness.coordinator.beginPass(args),
+			outputMessages: output,
+			outputEntryIds: ["one"],
+			cacheBusting: false,
+		});
+		harness.flushCapture();
+		expect(
+			harness.coordinator.replay(harness.coordinator.beginPass(args)),
+		).toEqual({ ok: true, messages: JSON.parse(JSON.stringify(output)) });
+	}
+});
+
+it("serializes custom output accessors exactly once", () => {
+	const harness = createHarness();
+	databases.push(harness.db);
+	const args = {
+		sessionId: "pi-lkg-accessor-output",
+		messages: [message("input")],
+		entryIds: ["one"],
+		modelKey: null,
+		providerKey: null,
+	};
+	let reads = 0;
+	const output = [
+		{
+			role: "user",
+			get content() {
+				return `read-${++reads}`;
+			},
+		},
+	];
+	harness.coordinator.captureAppliedPass({
+		snapshot: harness.coordinator.beginPass(args),
+		outputMessages: output,
+		outputEntryIds: ["one"],
+		cacheBusting: false,
+	});
+	harness.flushCapture();
+	expect(reads).toBe(1);
+	expect(
+		harness.coordinator.replay(harness.coordinator.beginPass(args)),
+	).toEqual({ ok: true, messages: [{ role: "user", content: "read-1" }] });
 });

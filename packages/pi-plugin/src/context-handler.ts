@@ -244,6 +244,7 @@ import {
 	applyPiHeuristicCleanup,
 	type PiHeuristicCleanupResult,
 } from "./heuristic-cleanup-pi";
+import { readPiHistorianTail } from "./historian-tail-pi";
 import {
 	clearM0M1PiCache,
 	clearPiInjectionTokenCountCache,
@@ -306,6 +307,7 @@ import {
 import {
 	convertEntriesToRawMessagePage,
 	convertEntriesToRawMessages,
+	countPiRawMessages,
 	findRestartModelSeedFromBranch,
 	readPiSessionMessagePage,
 	readPiSessionMessages,
@@ -330,6 +332,7 @@ import {
 	resolvePiEffectiveSystemState,
 } from "./system-entry-pi";
 import { clearPiSystemPromptSession } from "./system-prompt";
+import { getPiTagSnapshot } from "./tag-snapshot-pi";
 import {
 	assertPiTailHygieneContentUnchanged,
 	countRealPiUserMessages,
@@ -2453,10 +2456,16 @@ export function registerPiContextHandler(
 				sessionId,
 				branchEntries,
 			});
+			let rawOrdinalCount: number | undefined;
 			const rawMessageProvider = {
+				getMessageCount: () =>
+					(rawOrdinalCount ??=
+						branchEntries !== null
+							? countPiRawMessages(branchEntries)
+							: readPiSessionMessages(ctx).length),
 				readMessages: () =>
 					branchEntries !== null
-						? convertEntriesToRawMessages([...branchEntries])
+						? convertEntriesToRawMessages(branchEntries)
 						: readPiSessionMessages(ctx),
 				readMessagePage: (
 					afterOrdinal: number,
@@ -4576,6 +4585,12 @@ function maybeFireHistorian(args: {
 	activeTags?: ReturnType<typeof getActiveTagsBySession>;
 	rawMessageProvider?: {
 		readMessages: () => ReturnType<typeof readPiSessionMessages>;
+		readMessagePage?: (
+			after: number,
+			limit: number,
+			watermark: number,
+		) => ReturnType<typeof readPiSessionMessages>;
+		getMessageCount?: () => number;
 	};
 	taggerFloor?: number;
 	sessionMeta: ReturnType<typeof getOrCreateSessionMeta>;
@@ -4858,10 +4873,7 @@ function maybeFireHistorian(args: {
 			triggerInputs.commitClusterTrigger,
 			args.activeTags,
 			boundaryContextLimit,
-			() => {
-				const messages = provider.readMessages();
-				return { messages, absoluteMessageCount: messages.length };
-			},
+			() => readPiHistorianTail(db, sessionId, provider),
 			args.taggerFloor,
 			{ canClearReasoning: true },
 			{
@@ -6136,7 +6148,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const tActiveTags = performance.now();
 	// Load the canonical tag set once after pending operations. Heuristics use its
 	// active projection; Channel-1 baseline construction reuses the full set.
-	const allTagsForPass = getTagsBySession(args.db, args.sessionId);
+	const allTagsForPass = getPiTagSnapshot(args.db, args.sessionId);
 	const activeTags = allTagsForPass.filter((tag) => tag.status === "active");
 	logTransformTiming(
 		args.sessionId,
