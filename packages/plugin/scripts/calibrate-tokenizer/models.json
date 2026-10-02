@@ -25,6 +25,7 @@
         { "label": "anthropic/claude-opus-5", "provider": "anthropic", "modelId": "claude-opus-5", "tokenizerKey": "anthropic/claude-opus-4.5" },
         { "label": "anthropic/claude-opus-5-5", "provider": "anthropic", "modelId": "claude-opus-5-5", "tokenizerKey": "anthropic/claude-opus-4.5" },
         { "label": "anthropic/claude-sonnet-5", "provider": "anthropic", "modelId": "claude-sonnet-5", "tokenizerKey": "anthropic/claude-opus-4.5" },
+        { "label": "anthropic/claude-sonnet-5-5", "provider": "anthropic", "modelId": "claude-sonnet-5-5", "tokenizerKey": "anthropic/claude-opus-4.5" },
         {
             "label": "anthropic/claude-opus-4-7",
             "provider": "anthropic",

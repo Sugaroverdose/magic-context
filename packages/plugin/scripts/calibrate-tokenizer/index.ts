@@ -327,7 +327,12 @@ async function main(): Promise<void> {
     ) as ModelTestSet;
     const keyPath = join(homedir(), ".config/anthro.key");
     const key = process.env.ANTHROPIC_API_KEY?.trim() || (existsSync(keyPath) ? readFileSync(keyPath, "utf8").trim() : "");
-    const auth: AuthFile = key ? { anthropic: { type: "api", key } } : {};
+    const oauthAccess = process.env.ANTHROPIC_OAUTH_ACCESS_TOKEN?.trim();
+    const auth: AuthFile = key
+        ? { anthropic: { type: "api", key } }
+        : oauthAccess
+          ? { anthropic: { type: "oauth", access: oauthAccess } }
+          : {};
     const prose = buildProseProbe();
 
     let tests = testSet.tests;
@@ -347,12 +352,7 @@ async function main(): Promise<void> {
     }
     const fallbackTests = tests.filter((test) => !FREE_ADAPTERS[authProvider(test)] && !auth[authProvider(test)]);
     if (fallbackTests.length > 0) {
-        console.log("Missing API key: usage fallback requires OAuth credentials; jwt auth is not yet supported on count_tokens. PROSE is never sent through usage.");
-        const authPath = join(homedir(), ".local/share/opencode/auth.json");
-        if (existsSync(authPath)) {
-            const fallback = JSON.parse(readFileSync(authPath, "utf8")) as AuthFile;
-            for (const test of fallbackTests) if (fallback[test.provider]) auth[authProvider(test)] = fallback[test.provider];
-        }
+        console.log("Missing credentials: provider fallback credentials must be supplied explicitly. PROSE is never sent through usage.");
     }
 
     console.log(

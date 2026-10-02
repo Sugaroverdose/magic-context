@@ -15,23 +15,25 @@ interface AuthEntry {
 interface MeasureResult {
     systemApi: number | null;
     toolsApi: number | null;
-    method: "count_tokens" | "usage";
+    method: "count_tokens";
     proseApi: number | null;
     sections: Record<string, number>;
 }
 
 const ANTHROPIC_BETA = "oauth-2025-04-20";
 const COUNT_URL = "https://api.anthropic.com/v1/messages/count_tokens?beta=true";
+const CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 async function callCountTokens(
     body: Record<string, unknown>,
     accessToken: string,
     method: "count_tokens" | "usage",
+    authType: string,
 ): Promise<number> {
     const res = await fetch(method === "count_tokens" ? COUNT_URL : "https://api.anthropic.com/v1/messages?beta=true", {
         method: "POST",
         headers: {
-            ...(method === "count_tokens" ? { "x-api-key": accessToken } : { authorization: `Bearer ${accessToken}` }),
+            ...(authType === "api" ? { "x-api-key": accessToken } : { authorization: `Bearer ${accessToken}` }),
             "anthropic-version": "2023-06-01",
             "anthropic-beta": ANTHROPIC_BETA,
             "content-type": "application/json",
@@ -59,19 +61,19 @@ export async function measureAnthropic(
     toolsArray: unknown[],
     proseSections: Record<string, string> = {},
 ): Promise<MeasureResult> {
-    const method = auth.type === "api" ? "count_tokens" : "usage";
+    const method = "count_tokens";
     const access = auth.type === "api" ? auth.key : auth.access;
     if (!access) throw new Error("Missing Anthropic credentials");
-    if (method === "usage") console.log("No API key: falling back to usage; jwt auth is not yet supported on count_tokens. PROSE skipped.");
-
     // System-only request: keep system prompt as one big text block (single block
     // so per-block overhead doesn't dominate; matches what the plugin renders).
     const systemBody = {
         model: test.modelId,
-        system: systemText,
+        system: auth.type === "oauth" && !systemText.startsWith(CLAUDE_CODE_SYSTEM_PREFIX)
+            ? `${CLAUDE_CODE_SYSTEM_PREFIX}\n\n${systemText}`
+            : systemText,
         messages: [{ role: "user", content: "x" }],
     };
-    const systemApi = await callCountTokens(systemBody, access, method);
+    const systemApi = await callCountTokens(systemBody, access, method, auth.type);
 
     // Tools-only request
     const toolsBody = {
@@ -79,7 +81,7 @@ export async function measureAnthropic(
         tools: toolsArray,
         messages: [{ role: "user", content: "x" }],
     };
-    const toolsApi = await callCountTokens(toolsBody, access, method);
+    const toolsApi = await callCountTokens(toolsBody, access, method, auth.type);
 
     // Subtract baseline (~9 tokens for the {role:user,content:"x"} envelope plus
     // the floor) so the returned numbers reflect just the system / tools content.
@@ -87,11 +89,11 @@ export async function measureAnthropic(
         model: test.modelId,
         messages: [{ role: "user", content: "x" }],
     };
-    const baseline = await callCountTokens(baselineBody, access, method);
+    const baseline = await callCountTokens(baselineBody, access, method, auth.type);
     const sections: Record<string, number> = {};
     let proseApi: number | null = null;
     if (method === "count_tokens" && Object.keys(proseSections).length > 0) {
-        const countProse = async (content: string) => Math.max(0, await callCountTokens({ model: test.modelId, messages: [{ role: "user", content: `x\n${content}` }] }, access, method) - baseline);
+        const countProse = async (content: string) => Math.max(0, await callCountTokens({ model: test.modelId, messages: [{ role: "user", content: `x\n${content}` }] }, access, method, auth.type) - baseline);
         proseApi = await countProse(Object.values(proseSections).join("\n\n"));
         for (const [name, content] of Object.entries(proseSections)) sections[name] = await countProse(content);
     }
