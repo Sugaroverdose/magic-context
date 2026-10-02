@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from "node:fs";
-import { basename } from "node:path";
+import { basename, dirname } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { isCompactionEnabled } from "@magic-context/core/config/agent-disable";
 import { detectConflicts } from "@magic-context/core/shared/conflict-detector";
@@ -145,7 +145,7 @@ function planOpenCodeConfigUpdate(
             (plugin) =>
                 isLocalPathPluginEntry(plugin) &&
                 String(plugin).includes("magic-context") &&
-                !isDevPathPluginEntry(plugin),
+                !isDevPathPluginEntry(plugin, dirname(configPath)),
         )
     ) {
         log.warn(
@@ -167,7 +167,9 @@ function planOpenCodeConfigUpdate(
     }
 
     const hasNpmEntry = retainedPlugins.some((plugin) => matchesPluginEntry(plugin, PLUGIN_NAME));
-    const hasDevEntry = retainedPlugins.some((plugin) => isDevPathPluginEntry(plugin));
+    const hasDevEntry = retainedPlugins.some((plugin) =>
+        isDevPathPluginEntry(plugin, dirname(configPath)),
+    );
     if (!hasNpmEntry && !hasDevEntry) {
         text = Array.isArray(existing[registrationKey])
             ? appendJsoncArrayValues(text, [registrationKey], [PLUGIN_ENTRY])
@@ -229,7 +231,7 @@ function planTuiConfigUpdate(configPath: string): string | null {
             (plugin) =>
                 isLocalPathPluginEntry(plugin) &&
                 String(plugin).includes("magic-context") &&
-                !isDevPathPluginEntry(plugin),
+                !isDevPathPluginEntry(plugin, dirname(configPath)),
         )
     ) {
         log.warn(
@@ -238,7 +240,9 @@ function planTuiConfigUpdate(configPath: string): string | null {
     }
 
     const hasNpmEntry = rawPlugins.some((plugin) => matchesPluginEntry(plugin, PLUGIN_NAME));
-    const hasDevEntry = rawPlugins.some((plugin) => isDevPathPluginEntry(plugin));
+    const hasDevEntry = rawPlugins.some((plugin) =>
+        isDevPathPluginEntry(plugin, dirname(configPath)),
+    );
     if (hasNpmEntry || hasDevEntry) return null;
 
     const document = readJsoncTextForEdit(configPath);

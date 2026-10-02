@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { isCompactionEnabled } from "@magic-context/core/config/agent-disable";
 import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
@@ -1600,17 +1600,24 @@ export async function runDoctor(
             const config = parse(raw) as Record<string, unknown>;
             const configName =
                 paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
+            // Relative checkout paths resolve against the config file's directory.
+            const configDir = dirname(paths.opencodeConfig);
             // Duplicates first, so the single-entry checks below see the
             // deduplicated config when --fix removed the extra entries.
             if (
-                checkPluginDuplicates(config, configName, options, {
-                    warn,
-                    pass: (message) => {
-                        pass(message);
-                        fixed++;
+                checkPluginDuplicates(
+                    config,
+                    configName,
+                    { fix: options.fix, configDir },
+                    {
+                        warn,
+                        pass: (message) => {
+                            pass(message);
+                            fixed++;
+                        },
+                        info: (message) => log.info(message),
                     },
-                    info: (message) => log.info(message),
-                })
+                )
             ) {
                 writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
             }
@@ -1623,7 +1630,7 @@ export async function runDoctor(
                     ({ entry }) =>
                         isLocalPathPluginEntry(entry) &&
                         String(entry).includes("magic-context") &&
-                        !isDevPathPluginEntry(entry),
+                        !isDevPathPluginEntry(entry, configDir),
                 )
             ) {
                 warn(
@@ -1636,7 +1643,11 @@ export async function runDoctor(
                 checkOpenCodePluginEntry(
                     config,
                     configName,
-                    { force: options.force, registrationKey: pluginConfigKeyFor(hostGeneration) },
+                    {
+                        force: options.force,
+                        registrationKey: pluginConfigKeyFor(hostGeneration),
+                        configDir,
+                    },
                     {
                         pass,
                         warn,
@@ -1726,19 +1737,21 @@ export async function runDoctor(
             try {
                 const tuiRaw = readFileSync(paths.tuiConfig, "utf-8");
                 const tuiConfig = parse(tuiRaw) as Record<string, unknown>;
+                const tuiConfigDir = dirname(paths.tuiConfig);
                 const tuiRawPlugins: unknown[] = Array.isArray(tuiConfig?.plugin)
                     ? tuiConfig.plugin
                     : [];
                 const tuiIdx = tuiRawPlugins.findIndex(
                     (entry) =>
-                        matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
+                        matchesPluginEntry(entry, PLUGIN_NAME) ||
+                        isDevPathPluginEntry(entry, tuiConfigDir),
                 );
                 if (
                     tuiRawPlugins.some(
                         (entry) =>
                             isLocalPathPluginEntry(entry) &&
                             String(entry).includes("magic-context") &&
-                            !isDevPathPluginEntry(entry),
+                            !isDevPathPluginEntry(entry, tuiConfigDir),
                     )
                 ) {
                     warn(
@@ -1748,7 +1761,7 @@ export async function runDoctor(
                 if (tuiIdx >= 0) {
                     const tuiEntry = tuiRawPlugins[tuiIdx];
                     const tuiEntryStr = pluginEntryPackage(tuiEntry) ?? "";
-                    if (isDevPathPluginEntry(tuiEntry)) {
+                    if (isDevPathPluginEntry(tuiEntry, tuiConfigDir)) {
                         pass(`TUI sidebar plugin configured (dev path: ${tuiEntryStr})`);
                     } else {
                         const tuiPinned = isPinnedOpenCodePluginSpecifier(tuiEntryStr);

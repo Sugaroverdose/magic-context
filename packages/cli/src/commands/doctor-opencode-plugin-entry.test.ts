@@ -11,7 +11,7 @@ function run(config: Record<string, unknown>, force = false) {
     const changed = checkOpenCodePluginEntry(
         config,
         "opencode.json",
-        { force, registrationKey: "plugins" },
+        { force, registrationKey: "plugins", configDir: "/config" },
         {
             pass: (message) => lines.push({ level: "pass", message }),
             warn: (message) => lines.push({ level: "warn", message }),

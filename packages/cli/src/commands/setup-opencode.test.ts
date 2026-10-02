@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { parse as parseJsonc } from "comment-json";
@@ -492,5 +492,28 @@ describe("applyOpenCodeSetupConfigs", () => {
             [paths.opencodeConfig, paths.tuiConfig].map((path) => readFileSync(path, "utf-8")),
         ).toEqual(before);
         expect(readFileSync(paths.magicContextConfig, "utf-8")).toBe(magicContext);
+    });
+});
+
+describe("setup-opencode relative development checkout", () => {
+    it("does not add the npm entry next to a checkout registered relative to the config", () => {
+        const configDir = tempDir();
+        const elsewhere = tempDir();
+        mkdirSync(join(configDir, "mc", "plugin"), { recursive: true });
+        writeFileSync(
+            join(configDir, "mc", "plugin", "package.json"),
+            JSON.stringify({ name: "@cortexkit/opencode-magic-context" }),
+        );
+        const path = join(configDir, "opencode.jsonc");
+        const original = `{\n  "plugin": ["./mc/plugin"],\n  "compaction": { "auto": false, "prune": false }\n}\n`;
+        writeFileSync(path, original);
+        const originalCwd = process.cwd();
+        process.chdir(elsewhere);
+        try {
+            addPluginToOpenCodeConfig(path, "jsonc", false, true, "v1");
+        } finally {
+            process.chdir(originalCwd);
+        }
+        expect(readFileSync(path, "utf-8")).toBe(original);
     });
 });

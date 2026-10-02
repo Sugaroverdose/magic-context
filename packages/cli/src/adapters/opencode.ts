@@ -156,7 +156,9 @@ export class OpenCodeAdapter implements HarnessAdapter {
             // so an entry under either is a live registration.
             const entries = readPluginEntries(cfg);
             const existing = entries.find(({ entry }) => matchesPluginEntry(entry, PLUGIN_NAME));
-            const existingDev = entries.find(({ entry }) => isDevPathPluginEntry(entry));
+            const existingDev = entries.find(({ entry }) =>
+                isDevPathPluginEntry(entry, dirname(target)),
+            );
 
             // Local dev-path entries are recognized so we don't double-add
             // an @latest entry on top, but they are NEVER replaced by setup.
@@ -426,10 +428,11 @@ export function isLocalPathPluginEntry(entry: unknown): boolean {
 
 /**
  * Match a local plugin entry only when its nearest package.json identifies the
- * OpenCode Magic Context package. A basename substring is not sufficient: paths
+ * OpenCode Magic Context package. `configDir` is the directory of the config
+ * file the entry came from. A basename substring is not sufficient: paths
  * such as `magic-context-theme` must not suppress the real plugin registration.
  */
-export function isDevPathPluginEntry(entry: unknown): boolean {
+export function isDevPathPluginEntry(entry: unknown, configDir: string): boolean {
     const candidate = pluginEntryPackage(entry);
     if (!candidate || !isLocalPathPluginEntry(entry)) return false;
 
@@ -438,7 +441,10 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
         if (candidate.startsWith("file://")) {
             localPath = fileURLToPath(candidate);
         } else {
-            localPath = resolve(candidate);
+            // OpenCode resolves a relative entry against the directory of the
+            // config file that declares it, so the CLI's working directory
+            // must play no part (otherwise setup adds a second registration).
+            localPath = resolve(configDir, candidate);
         }
 
         if (statSync(localPath).isFile()) localPath = dirname(localPath);

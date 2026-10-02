@@ -83,6 +83,8 @@ function followsLatest(specifier: string): boolean {
 /** Every Magic Context entry (npm or verified local checkout) across both plugin keys, in host load order. */
 export function listMagicContextPluginEntries(
     config: Record<string, unknown>,
+    /** Directory of the config file, which relative checkout paths resolve against. */
+    configDir: string,
 ): MagicContextPluginEntry[] {
     const out: MagicContextPluginEntry[] = [];
     for (const { key, index, entry } of readPluginEntries(config)) {
@@ -90,7 +92,7 @@ export function listMagicContextPluginEntries(
         if (specifier === null) continue;
         let kind: MagicContextPluginEntry["kind"] | null = null;
         if (matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME)) kind = "npm";
-        else if (isDevPathPluginEntry(entry)) kind = "dev-path";
+        else if (isDevPathPluginEntry(entry, configDir)) kind = "dev-path";
         if (kind === null) continue;
         out.push({ key, index, entry, specifier, kind, options: entryOptions(entry) });
     }
@@ -98,8 +100,11 @@ export function listMagicContextPluginEntries(
 }
 
 /** Decide what `doctor --fix` would do with the Magic Context entries in a parsed config. */
-export function planPluginDuplicates(config: Record<string, unknown>): PluginDuplicatePlan {
-    const entries = listMagicContextPluginEntries(config);
+export function planPluginDuplicates(
+    config: Record<string, unknown>,
+    configDir: string,
+): PluginDuplicatePlan {
+    const entries = listMagicContextPluginEntries(config, configDir);
     if (entries.length <= 1) return { action: "none", entries };
 
     if (entries.some((entry) => entry.kind === "dev-path")) {
@@ -186,10 +191,14 @@ export interface PluginDuplicateCheckReporter {
 export function checkPluginDuplicates(
     config: Record<string, unknown>,
     configName: string,
-    options: { fix?: boolean },
+    options: {
+        fix?: boolean;
+        /** Directory of the config file, which relative checkout paths resolve against. */
+        configDir: string;
+    },
     report: PluginDuplicateCheckReporter,
 ): boolean {
-    const plan = planPluginDuplicates(config);
+    const plan = planPluginDuplicates(config, options.configDir);
     if (plan.action === "none") return false;
 
     report.warn(
