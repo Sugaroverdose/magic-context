@@ -3755,6 +3755,18 @@ export function createRustModeTransform(
                         messages,
                         modelKey: keys.modelKey,
                         providerKey: keys.providerKey,
+                        // The stored prefix already carries the binding-mismatch strips;
+                        // the replayed tail comes from the raw input, so apply the
+                        // persisted set there too, before validation, so the array that
+                        // is validated is the array that is served. A removed thinking
+                        // block must not return on a replayed pass.
+                        prepareReplay: (replayed) =>
+                            replayRustModeBindingMismatchStrips({
+                                db: deps.db,
+                                sessionId,
+                                messages: replayed,
+                                resolvedProviderID: model?.providerID,
+                            }),
                     });
                     if (!frozen.ok) {
                         cacheBustingPass = true;
@@ -3777,16 +3789,6 @@ export function createRustModeTransform(
                             frozenReleaseLastServed = lastServedSnapshot();
                         } else {
                             appliedMessages = frozen.messages;
-                            // The stored prefix already carries the binding-mismatch
-                            // strips; the replayed tail comes from the raw input, so
-                            // apply the persisted set there too. A removed thinking
-                            // block must not return on a replayed pass.
-                            replayRustModeBindingMismatchStrips({
-                                db: deps.db,
-                                sessionId,
-                                messages: appliedMessages as MessageLike[],
-                                resolvedProviderID: model?.providerID,
-                            });
                             replayedFrozenRepresentation = true;
                             servedFrom = "lkg_frozen";
                             sessionLog(sessionId, "lkg_frozen_replay_served");

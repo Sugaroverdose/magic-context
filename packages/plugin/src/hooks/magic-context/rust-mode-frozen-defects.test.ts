@@ -38,7 +38,7 @@ import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import { resolveTrustedContextLimit } from "./event-resolvers";
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { createDbLkgPersistence } from "./lkg-persist";
-import { registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
+import { getInMemorySlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
@@ -739,5 +739,47 @@ describe("a healthy frozen pass is admitted like any other replay", () => {
         );
         expect(s.frozenFields()).toEqual(before);
         expect(s.transform.getState(sid).consecutiveFailures).toBe(0);
+    });
+});
+
+describe("the frozen path validates the array it serves", () => {
+    it("a persisted strip that makes a frozen reasoning run valid keeps the freeze", async () => {
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            const s = frozenSession("frozen-run-valid-after-strip");
+            const sid = s.sessionId;
+            await s.run([user(sid, "m1", "question")], "HARD");
+            // Two adjacent thinking assistants merge into one provider assistant turn,
+            // where thinking is only valid at the start of the first message. The
+            // newer one's thinking is in the persisted strip set, which makes the
+            // run valid once the strip is applied.
+            expect(
+                addMergedReasoningStrippedIds(s.db, sid, [thinkingBindingRecoveryFrozenId("a2")]),
+            ).toBe(true);
+            const conversation: MessageLike[] = [
+                user(sid, "m1", "question"),
+                thinkingAssistant(sid, "a1"),
+                thinkingAssistant(sid, "a2"),
+                user(sid, "m2", "turn 2"),
+            ];
+            const replayed = await s.run([...conversation], "throw");
+            expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
+
+            s.setModuleOutput(tagAllUsers);
+            conversation.push(assistant(sid, "a3"), user(sid, "m3", "turn 3"));
+            const served = await s.run([...conversation], "SOFT+");
+            expect(sha(served.slice(0, replayed.length))).toBe(sha(replayed));
+            expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
+            const lines = logSpy.mock.calls
+                .filter(([loggedSession]) => loggedSession === sid)
+                .map(([, message]) => String(message));
+            expect(lines).toContain("lkg_frozen_replay_served");
+            expect(lines.some((line) => line.includes("lkg_anthropic_reasoning_run_invalid"))).toBe(
+                false,
+            );
+            expect(getInMemorySlot(sid)).toBeDefined();
+        } finally {
+            logSpy.mockRestore();
+        }
     });
 });
