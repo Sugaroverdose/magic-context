@@ -2,7 +2,6 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import {
     formatDreamerTickFailure,
     getDreamerTickFailure,
@@ -347,10 +346,11 @@ async function runHealthChecks(options: {
 
 function writeDefaultConfig(path: string): void {
     mkdirSync(dirname(path), { recursive: true });
+    // Only the editor schema reference: writing every schema default explicitly
+    // would pin those values, so later default changes would never take effect.
     const config = {
         $schema:
             "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
-        ...MagicContextConfigSchema.parse({}),
     };
     writeFileAtomic(path, `${stringifyJsonc(config, null, 2)}\n`);
 }

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { recordDreamerTickFailure } from "@magic-context/core/features/magic-context/dreamer/tick-failure";
@@ -319,7 +319,16 @@ describe("OMP doctor", () => {
         });
 
         expect(code).toBe(0);
-        expect(existsSync(join(root, ".config", "cortexkit", "magic-context.jsonc"))).toBe(true);
+        // Only $schema is written: explicit copies of every schema default would
+        // pin them, so later default changes would never reach this user.
+        expect(
+            JSON.parse(
+                readFileSync(join(root, ".config", "cortexkit", "magic-context.jsonc"), "utf-8"),
+            ),
+        ).toEqual({
+            $schema:
+                "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
+        });
         expect(prompts.messages.join("\n")).toContain("Wrote default Magic Context config");
     });
 
