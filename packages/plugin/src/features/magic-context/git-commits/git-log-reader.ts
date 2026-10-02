@@ -8,7 +8,7 @@
  *
  * Parsing contract:
  *   - We request `--format=%H%x1f%s%x1f%ae%x1f%ct%x1f%b%x1e`:
- *       %H = full 40-char SHA
+ *       %H = full object name (40 hex chars, or 64 in a SHA-256 repository)
  *       %s = subject (one line)
  *       %ae = author email
  *       %ct = committer time (seconds since epoch)
@@ -38,6 +38,8 @@ const GIT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_COMMITS = 5000;
 const RECORD_SEPARATOR = "\x1e";
 const FIELD_SEPARATOR = "\x1f";
+/** A full SHA-1 (40 hex) or SHA-256 (64 hex) object name, as printed by `%H`. */
+const FULL_OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/;
 
 /**
  * Why `git log` produced no commits, when it failed. `not_a_repo` and
@@ -62,7 +64,7 @@ export function classifyGitLogFailure(message: string): GitLogFailureKind {
 }
 
 export interface GitCommit {
-    /** Full 40-char SHA. */
+    /** Full object name: 40 hex chars, or 64 in a SHA-256 repository. */
     sha: string;
     /** First 7 chars of SHA for display. */
     shortSha: string;
@@ -119,9 +121,9 @@ export async function readGitCommitsResult(
     // would be parsed as a git OPTION (not a revision) since it sits ahead of
     // the format/since flags below. No shell is involved (execFile), so this
     // was never command injection — but the exported contract invites future
-    // untrusted `branch` callers. We can't use a `--` separator here because
-    // git treats everything after `--` as a PATHSPEC, not a revision, so we
-    // validate instead. (`HEAD`, `main`, `refs/heads/x`, `a1b2c3d` all pass.)
+    // untrusted `branch` callers. A `--` ahead of the revision would make git
+    // read it as a PATHSPEC, so we validate instead. (`HEAD`, `main`,
+    // `refs/heads/x`, `a1b2c3d` all pass.)
     const revision = options.branch ?? "HEAD";
     if (revision.startsWith("-")) {
         throw new Error(
@@ -144,6 +146,10 @@ export async function readGitCommitsResult(
         const iso = new Date(options.sinceMs).toISOString();
         args.push(`--since=${iso}`);
     }
+    // A trailing `--` with no paths after it tells git every argument above is
+    // a revision. Without it, a worktree file named like the revision (e.g.
+    // `HEAD`) fails with "ambiguous argument" on every sweep.
+    args.push("--");
 
     let stdout: string;
     try {
@@ -217,7 +223,7 @@ export function parseGitLogOutput(stdout: string): GitCommit[] {
         const timeSec = Number.parseInt(fields[3].trim(), 10);
         const body = fields[4].trim();
 
-        if (sha.length !== 40 || !Number.isFinite(timeSec) || timeSec <= 0) {
+        if (!FULL_OBJECT_NAME.test(sha) || !Number.isFinite(timeSec) || timeSec <= 0) {
             continue;
         }
 
