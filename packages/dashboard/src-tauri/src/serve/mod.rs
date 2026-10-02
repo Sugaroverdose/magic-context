@@ -571,7 +571,6 @@ fn has_gui_display() -> bool {
 mod tests {
     use super::*;
     use axum::http::HeaderValue;
-    use std::sync::Mutex;
     use tempfile::tempdir;
     use tokio::task::JoinHandle;
 
@@ -589,9 +588,7 @@ mod tests {
     }
 
     fn state_without_db() -> AppState {
-        AppState {
-            db_path: Mutex::new(None),
-        }
+        AppState::with_resolver(|| None)
     }
 
     async fn spawn_test_server() -> TestServer {

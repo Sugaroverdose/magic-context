@@ -660,7 +660,7 @@ pub async fn dispatch(state: &AppState, cmd: &str, args: Value) -> Result<Value,
         }
         "get_project_configs" => {
             parse_args::<NoArgs>(args)?;
-            let db_path = state.db_path.lock().ok().and_then(|guard| guard.clone());
+            let db_path = state.get_db_path().ok();
             json(config::discover_project_configs_with_db(
                 db_path.as_ref(),
                 &crate::db::data_home(),
@@ -805,13 +805,10 @@ fn to_command<E: ToString>(err: E) -> DispatchError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
     use tempfile::tempdir;
 
     fn state_without_db() -> AppState {
-        AppState {
-            db_path: Mutex::new(None),
-        }
+        AppState::with_resolver(|| None)
     }
 
     #[tokio::test]
