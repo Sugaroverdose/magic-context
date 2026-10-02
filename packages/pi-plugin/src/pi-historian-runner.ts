@@ -132,6 +132,7 @@ import {
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { describeError } from "@magic-context/core/shared/error-message";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
+import { isTransientHistorianPromptError } from "@magic-context/core/shared/historian-transient-error";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type {
 	ModelInput,
@@ -169,34 +170,6 @@ function getHistorianRetryBackoffMs(retryIndex: number): number {
 	}
 
 	return 6_000 + Math.floor(Math.random() * 2_001);
-}
-
-function isTransientHistorianPromptError(message: string): boolean {
-	const normalized = message.toLowerCase();
-	if (
-		normalized.includes("invalid request") ||
-		normalized.includes("bad request") ||
-		normalized.includes("unauthorized") ||
-		normalized.includes("forbidden") ||
-		normalized.includes("authentication") ||
-		normalized.includes("auth") ||
-		normalized.includes(" 400") ||
-		normalized.startsWith("400")
-	) {
-		return false;
-	}
-
-	return [
-		"429",
-		"rate limit",
-		"timeout",
-		"econnreset",
-		"etimedout",
-		"503",
-		"502",
-		"500",
-		"overloaded",
-	].some((token) => normalized.includes(token));
 }
 
 function isTransientHistorianRunFailure(

@@ -30,6 +30,7 @@ import {
     getProjectMagicContextHistorianDir,
 } from "../../shared/data-path";
 import { describeError, getErrorMessage } from "../../shared/error-message";
+import { isTransientHistorianPromptError } from "../../shared/historian-transient-error";
 import type { ModelInput, ResolvedModelEntry } from "../../shared/model-resolution";
 import { getSdkContextLimit, getSdkOutputLimit } from "../../shared/models-dev-cache";
 import { isRecord } from "../../shared/record-type-guard";
@@ -995,34 +996,6 @@ function getHistorianRetryBackoffMs(retryIndex: number): number {
     }
 
     return 6_000 + Math.floor(Math.random() * 2_001);
-}
-
-function isTransientHistorianPromptError(message: string): boolean {
-    const normalized = message.toLowerCase();
-    if (
-        normalized.includes("invalid request") ||
-        normalized.includes("bad request") ||
-        normalized.includes("unauthorized") ||
-        normalized.includes("forbidden") ||
-        normalized.includes("authentication") ||
-        normalized.includes("auth") ||
-        normalized.includes(" 400") ||
-        normalized.startsWith("400")
-    ) {
-        return false;
-    }
-
-    return [
-        "429",
-        "rate limit",
-        "timeout",
-        "econnreset",
-        "etimedout",
-        "503",
-        "502",
-        "500",
-        "overloaded",
-    ].some((token) => normalized.includes(token));
 }
 
 function sleep(ms: number): Promise<void> {
