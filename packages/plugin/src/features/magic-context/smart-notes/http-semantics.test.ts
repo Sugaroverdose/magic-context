@@ -123,18 +123,26 @@ test("existing compiled checks throwing on readable-resource 404 return not met"
     ).toEqual({ ok: true, result: { met: false } });
 });
 
-test("missing and gone resources cannot surface even when compiled code catches errors", async () => {
-    for (const status of [404, 410]) {
-        expect(
-            await check(
-                get(status),
-                `function check(cap) {
-            try { cap.httpGet("${resource}"); } catch(e) {}
-            return {met: true};
-        }`,
-            ),
-        ).toEqual({ ok: true, result: { met: false } });
-    }
+test("deletion checks trust normal guest verdicts on readable-resource 404", async () => {
+    expect(
+        await check(
+            get(404),
+            `function check(cap) {
+                return {met: cap.httpGet("${resource}").status === 404};
+            }`,
+        ),
+    ).toEqual({ ok: true, result: { met: true } });
+});
+
+test("withdrawal checks trust normal guest verdicts on readable-resource 410", async () => {
+    expect(
+        await check(
+            get(410),
+            `function check(cap) {
+                return {met: cap.httpGet("${resource}").status === 410};
+            }`,
+        ),
+    ).toEqual({ ok: true, result: { met: true } });
 });
 
 test("private or missing repository and package containers are persistent access failures", async () => {

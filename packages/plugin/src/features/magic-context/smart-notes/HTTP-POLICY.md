@@ -18,12 +18,13 @@ The local readFile limit remains 64 KiB and the sandbox heap remains 8 MiB.
 
 ## Absence versus inaccessible data
 
-A watched resource returning 404 or 410 is normally absent (not met). Old compiled
-checks sometimes throw on every non-200 status. The shared fetch helper now
-classifies HTTP access failures, and the sandbox preserves the absence observation
-outside guest code: an old exception or an unconditional guest `met: true` cannot
-turn that absence into a failure or a surface event. Network failures likewise
-cannot be swallowed by guest code and turned into `met: true`.
+A watched resource returning 404 or 410 is absent. Normal guest verdicts are
+trusted: absence can mean met for a deletion or withdrawal condition. Old compiled
+checks sometimes throw on every non-200 status. The shared fetch helper classifies
+HTTP access failures, and the sandbox preserves the absence observation outside
+guest code: when a check throws after observing absence without a host network
+failure, it becomes not met instead of an exception. Host network failures remain
+failures even when guest code catches them and returns `met: true`.
 
 GitHub conceals private repositories with 404. For GitHub API, raw-content and web
 URLs, an absent resource first requires a readable `/repos/OWNER/REPO` response.
@@ -37,7 +38,7 @@ inside readable containers are normal waiting states. They can be retried after
 the existing week-long persistent-failure backoff.
 
 Generic document origins have no universal container-metadata API, so their
-404/410 responses mean not met without a probe. This cannot detect arbitrary
+404/410 responses indicate absence without a probe. This cannot detect arbitrary
 sites disguising authorization failures as 404. Explicit 401/403 and legal-access
 451 responses are persistent access failures. HTTP 401/403/429 with exhausted
 rate-limit headers or Retry-After is transient, not an authorization diagnosis.

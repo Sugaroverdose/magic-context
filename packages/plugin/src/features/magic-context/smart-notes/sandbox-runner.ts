@@ -306,10 +306,10 @@ async function runCompiledSmartNoteCheckLocked(
             });
             disableAmbientDynamicCode(context);
             const result = await evalCheck(context, options.compiledCheck);
-            // Missing watched resources mean not met, even for old checks that throw.
-            // Keep host network failures visible when guest code catches them.
+            // Accept a returned {met} verdict: HTTP 404/410 can prove deletion.
+            // Fetch failures (access, rate limit, size or timeout) still fail the
+            // check, even if its JavaScript caught the error and returned a verdict.
             if (httpFailure) throw httpFailure;
-            if (missingResource) return { ok: true, result: { met: false } };
             const checkResult = result as { met?: unknown } | null;
             if (!checkResult || typeof checkResult.met !== "boolean") {
                 return failureResult("check() must return { met: boolean }", false);
