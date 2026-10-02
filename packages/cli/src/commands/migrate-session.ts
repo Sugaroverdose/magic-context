@@ -695,10 +695,16 @@ export async function runMigrateSessionCli(args: string[]): Promise<number> {
             return 0;
         }
 
-        const ok = await promptIO.confirm(
-            "This edits opencode.db + context.db directly. Is OpenCode (TUI / Desktop / serve) fully stopped?",
-            false,
-        );
+        // --yes is documented as skipping this confirmation, for scripted runs.
+        const ok =
+            skipConfirm ||
+            (await promptIO.confirm(
+                "This edits opencode.db + context.db directly. Is OpenCode (TUI / Desktop / serve) fully stopped?",
+                false,
+            ));
+        if (skipConfirm) {
+            promptIO.log.warn("--yes: assuming OpenCode (TUI / Desktop / serve) is fully stopped.");
+        }
         if (!ok) {
             promptIO.log.warn("Aborted. Stop OpenCode, then re-run.");
             return 1;
