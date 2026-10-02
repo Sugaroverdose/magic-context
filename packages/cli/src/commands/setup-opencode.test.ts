@@ -7,6 +7,7 @@ import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-
 import {
     addPluginToOpenCodeConfig,
     addPluginToTuiConfig,
+    applyOpenCodeSetupConfigs,
     findDcpPluginIndexes,
     writeMagicContextConfig,
 } from "./setup-opencode";
@@ -376,5 +377,120 @@ describe("setup-opencode plugin key across host generations", () => {
         const config = parseJsonc(readFileSync(path, "utf-8")) as Record<string, unknown>;
         expect(config.plugin).toEqual(["@cortexkit/opencode-magic-context@latest"]);
         expect(config.plugins).toBeUndefined();
+    });
+});
+
+describe("setup-opencode Claude Max cache TTL", () => {
+    it("keeps a string cache_ttl as the default when adding the Claude Max overrides", () => {
+        const path = join(tempDir(), "magic-context.jsonc");
+        writeFileSync(path, `{ "cache_ttl": "1h" }\n`);
+
+        writeMagicContextConfig(path, {
+            historianModel: null,
+            dreamerEnabled: false,
+            dreamerModel: null,
+            claudeMax: true,
+        });
+
+        const config = parseJsonc(readFileSync(path, "utf-8")) as { cache_ttl?: unknown };
+        expect(config.cache_ttl).toEqual({
+            default: "1h",
+            "anthropic/claude-sonnet-4-6": "59m",
+            "anthropic/claude-opus-4-6": "59m",
+        });
+    });
+});
+
+describe("setup-opencode byte-order mark", () => {
+    const BOM = "\uFEFF";
+
+    it("adds the plugin to an opencode.jsonc that starts with a BOM", () => {
+        const path = join(tempDir(), "opencode.jsonc");
+        writeFileSync(path, `${BOM}{\n  // mine\n  "plugin": ["other"]\n}\n`);
+
+        addPluginToOpenCodeConfig(path, "jsonc", false, false, "v1");
+
+        const text = readFileSync(path, "utf-8");
+        expect(text.startsWith(BOM)).toBe(true);
+        expect(text).toContain("// mine");
+        expect((parseJsonc(text) as { plugin?: unknown[] }).plugin).toEqual([
+            "other",
+            "@cortexkit/opencode-magic-context@latest",
+        ]);
+    });
+
+    it("adds the plugin to a tui.jsonc that starts with a BOM", () => {
+        const path = join(tempDir(), "tui.jsonc");
+        writeFileSync(path, `${BOM}{\n  "theme": "dark"\n}\n`);
+
+        addPluginToTuiConfig(path, "jsonc");
+
+        const text = readFileSync(path, "utf-8");
+        expect(text.startsWith(BOM)).toBe(true);
+        expect((parseJsonc(text) as { plugin?: unknown[] }).plugin).toEqual([
+            "@cortexkit/opencode-magic-context@latest",
+        ]);
+    });
+});
+
+describe("applyOpenCodeSetupConfigs", () => {
+    function targets() {
+        const dir = tempDir();
+        const paths = {
+            opencodeConfig: join(dir, "opencode.jsonc"),
+            magicContextConfig: join(dir, "magic-context.jsonc"),
+            tuiConfig: join(dir, "tui.jsonc"),
+        };
+        writeFileSync(paths.opencodeConfig, `{\n  "plugin": []\n}\n`);
+        writeFileSync(paths.tuiConfig, `\uFEFF{\n  "theme": "dark"\n}\n`);
+        return paths;
+    }
+    const choices = {
+        removeDcp: false,
+        compactionEnabled: true,
+        hostGeneration: "v1" as const,
+        magicContext: {
+            historianModel: "a/historian",
+            dreamerEnabled: false,
+            dreamerModel: null,
+            claudeMax: true,
+        },
+    };
+
+    it("writes all three configs, including a BOM-prefixed tui.jsonc", () => {
+        const paths = targets();
+        applyOpenCodeSetupConfigs(paths, choices);
+
+        expect(readFileSync(paths.opencodeConfig, "utf-8")).toContain(
+            "@cortexkit/opencode-magic-context@latest",
+        );
+        expect(readFileSync(paths.tuiConfig, "utf-8")).toContain(
+            "@cortexkit/opencode-magic-context@latest",
+        );
+        expect(
+            (
+                parseJsonc(readFileSync(paths.magicContextConfig, "utf-8")) as {
+                    historian?: { opencode?: { model?: string } };
+                }
+            ).historian?.opencode?.model,
+        ).toBe("a/historian");
+    });
+
+    it("writes nothing when one config cannot be updated", () => {
+        const paths = targets();
+        // An array cache_ttl cannot take per-model overrides; setup must stop
+        // before opencode.jsonc is changed, not after.
+        const magicContext = `{ "cache_ttl": ["5m"] }\n`;
+        writeFileSync(paths.magicContextConfig, magicContext);
+        const before = [paths.opencodeConfig, paths.tuiConfig].map((path) =>
+            readFileSync(path, "utf-8"),
+        );
+
+        expect(() => applyOpenCodeSetupConfigs(paths, choices)).toThrow(/cache_ttl/);
+
+        expect(
+            [paths.opencodeConfig, paths.tuiConfig].map((path) => readFileSync(path, "utf-8")),
+        ).toEqual(before);
+        expect(readFileSync(paths.magicContextConfig, "utf-8")).toBe(magicContext);
     });
 });
