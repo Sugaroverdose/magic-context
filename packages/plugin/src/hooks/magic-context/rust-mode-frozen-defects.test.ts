@@ -774,11 +774,34 @@ describe("a healthy frozen pass is admitted like any other replay", () => {
         // the tokenizer is quadratic on a single multi-megabyte word.
         const overProven = "lorem ipsum dolor sit amet ".repeat(40_000);
         conversation.push(assistant(sid, "a4"), user(sid, "m-huge", overProven));
-        await expect(s.run([...conversation], "SOFT+")).rejects.toBeInstanceOf(
-            EmergencyFailClosedError,
-        );
+        const refusal = s.run([...conversation], "SOFT+");
+        await expect(refusal).rejects.toBeInstanceOf(EmergencyFailClosedError);
+        // The module is healthy, so the user is told what is wrong and what to do,
+        // not that the engine is reconnecting.
+        await expect(refusal).rejects.toThrow("(MC-H06)");
+        await expect(refusal).rejects.not.toThrow("reconnecting");
         expect(s.frozenFields()).toEqual(before);
         expect(s.transform.getState(sid).consecutiveFailures).toBe(0);
+
+        // The freeze can still end: a module bust (what /ctx-flush requests) whose
+        // output fits is served, and thinking the freeze served raw is stripped.
+        s.setModuleOutput((input) =>
+            tagAllUsers(input).map((message) =>
+                (message as MessageLike).info.id === "m-huge"
+                    ? {
+                          ...(message as MessageLike),
+                          parts: [{ type: "text", text: "[compacted]" }],
+                      }
+                    : message,
+            ),
+        );
+        const served = await s.run([...conversation], "HARD");
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+        expect(JSON.stringify(served)).toContain("[compacted]");
+        const a1 = (served as MessageLike[]).find((message) => message.info.id === "a1");
+        expect(a1?.parts.some((part) => (part as { type?: string }).type === "reasoning")).toBe(
+            false,
+        );
     });
 });
 

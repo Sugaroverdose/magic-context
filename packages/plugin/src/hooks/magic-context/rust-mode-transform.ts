@@ -54,6 +54,7 @@ import {
     withSqliteBackgroundWriter,
     withSqliteTransformPass,
 } from "../../shared/sqlite";
+import { renderUserFacingFailure } from "../../shared/user-facing-codes";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
 import {
     cachedToolPermissionDenied,
@@ -4185,9 +4186,14 @@ export function createRustModeTransform(
                     `mc_rust_emergency_refusal frozen_over_proven_limit module=${error.moduleFit} limit=${error.limit}`,
                 );
                 finishPass(false, false);
-                throw new EmergencyFailClosedError(ENGINE_RECONNECTING_USER_MESSAGE, {
-                    cause: error,
-                });
+                // The module is healthy, so "reconnecting" would be wrong. The freeze
+                // stays (the provider still holds the frozen bytes) and ends on the
+                // first pass whose module output fits (a release) or that the module
+                // busts, which /ctx-flush requests.
+                throw new EmergencyFailClosedError(
+                    renderUserFacingFailure("frozen_history_over_window", "plain"),
+                    { cause: error },
+                );
             }
             if (error instanceof SharedCompartmentBoundaryError) {
                 decision = "error";
