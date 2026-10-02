@@ -3459,6 +3459,9 @@ export function createRustModeTransform(
             // pass priced, but it changes bytes only from the first message the freeze
             // served raw, so it is not a permission to rewrite from the start.
             const moduleDecisionBusts = cacheBustingPass;
+            // Read the freeze flag before the deferred m0/m1 divergence below can set it, so
+            // `passStartedFrozen` records only a freeze an earlier pass entered.
+            const passStartedFrozen = state.lkgRepresentationFrozen;
             let frozenReleaseLastServed: FrozenReleaseLastServed = {
                 messages: null,
                 proven: false,
@@ -3508,20 +3511,29 @@ export function createRustModeTransform(
                 );
                 let appliedMessages = moduleMessages;
                 let replayedFrozenRepresentation = false;
+                // While frozen, the last-known-good slot holds the array the last pass served
+                // (or its prefix). Read it before any replay, because a replay that fails
+                // validation drops the slot, and also on a module-busting pass: that bust
+                // replaces messages the freeze served raw, and the thinking strip in
+                // postprocess compares against this array to find the first changed message.
+                const lastServedSlot = state.lkgRepresentationFrozen
+                    ? getSlot(sessionId)
+                    : undefined;
+                const lastServedSnapshot = (): FrozenReleaseLastServed => ({
+                    messages: parseLastServedSnapshot(lastServedSlot?.jsonPrefix),
+                    proven:
+                        lastServedSlot !== undefined &&
+                        lastServedCaptureSequence !== null &&
+                        lastServedSlot.captureSequence === lastServedCaptureSequence,
+                });
+                if (passStartedFrozen && cacheBustingPass) {
+                    frozenReleaseLastServed = lastServedSnapshot();
+                }
                 if (state.lkgRepresentationFrozen && !cacheBustingPass) {
                     if (state.lkgFrozenAtInputCount === null) {
                         state.lkgFrozenAtInputCount = inputCount;
                     }
                     const keys = resolveLkgModelKeys(messages);
-                    // Read before the replay: a replay that fails validation drops the slot.
-                    const lastServedSlot = getSlot(sessionId);
-                    const lastServedSnapshot = (): FrozenReleaseLastServed => ({
-                        messages: parseLastServedSnapshot(lastServedSlot?.jsonPrefix),
-                        proven:
-                            lastServedSlot !== undefined &&
-                            lastServedCaptureSequence !== null &&
-                            lastServedSlot.captureSequence === lastServedCaptureSequence,
-                    });
                     const frozen = replayLkg({
                         sessionId,
                         messages,
@@ -3602,7 +3614,16 @@ export function createRustModeTransform(
                         ),
                         cacheBustingPass: moduleDecisionBusts,
                         moduleReasoningTrimOnly: response.reasoning_trim_only === true,
-                        ...(frozenReleaseReason ? { frozenReleaseLastServed } : {}),
+                        // A frozen session hands the strip gate the last-served array on
+                        // every pass that reaches postprocess. That includes a module bust
+                        // whose own edit only trims the oldest reasoning: it still replaces
+                        // the raw tail the freeze served with tagged module output, and a
+                        // signed thinking block is valid only while every byte before it is
+                        // unchanged, so thinking after the first changed message must be
+                        // stripped.
+                        ...(passStartedFrozen || frozenReleaseReason
+                            ? { frozenReleaseLastServed }
+                            : {}),
                         trailingBlankSourceDecisions,
                         trailingBlankNewestAssistantId:
                             typeof trailingBlankNewestAssistantId === "string"
