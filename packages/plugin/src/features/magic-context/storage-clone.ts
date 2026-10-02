@@ -332,6 +332,31 @@ function cloneReplayDocument(
     };
 }
 
+/**
+ * SQLite builds used by node:sqlite (Pi, OpenCode Desktop) accept at most
+ * 32,766 bound variables per statement, so a long session's tag list is read
+ * in slices well under that limit, matching `getTagsByNumbers`.
+ */
+const TAG_ID_QUERY_CHUNK_SIZE = 900;
+
+/** Run `<sqlPrefix> (?, ?, …)` once per slice of `tagIds` and return every row. */
+function selectRowsByTagIds<T>(
+    db: Database,
+    sqlPrefix: string,
+    sessionId: string,
+    tagIds: readonly number[],
+): T[] {
+    const rows: T[] = [];
+    for (let start = 0; start < tagIds.length; start += TAG_ID_QUERY_CHUNK_SIZE) {
+        const chunk = tagIds.slice(start, start + TAG_ID_QUERY_CHUNK_SIZE);
+        const placeholders = chunk.map(() => "?").join(", ");
+        rows.push(
+            ...(db.prepare(`${sqlPrefix} (${placeholders})`).all(sessionId, ...chunk) as T[]),
+        );
+    }
+    return rows;
+}
+
 function clampWatermark(value: number | null, maxCopiedTag: number): number {
     if (typeof value !== "number" || !Number.isFinite(value) || value <= 0) return 0;
     return Math.min(Math.floor(value), maxCopiedTag);
@@ -490,20 +515,19 @@ export function copySessionStateForClone(
         }
 
         if (copiedTagNumbers.length > 0) {
-            const sourceTagIds = [...copiedTagIds.keys()];
-            const placeholders = sourceTagIds.map(() => "?").join(", ");
-            const sourceContents = db
-                .prepare(
-                    `SELECT tag_id, content, created_at, harness
-                       FROM source_contents
-                      WHERE session_id = ? AND tag_id IN (${placeholders})`,
-                )
-                .all(sourceSessionId, ...sourceTagIds) as Array<{
+            const sourceContents = selectRowsByTagIds<{
                 tag_id: number;
                 content: string | null;
                 created_at: number | null;
                 harness: string;
-            }>;
+            }>(
+                db,
+                `SELECT tag_id, content, created_at, harness
+                   FROM source_contents
+                  WHERE session_id = ? AND tag_id IN`,
+                sourceSessionId,
+                [...copiedTagIds.keys()],
+            );
             const insertSourceContent = db.prepare(
                 "INSERT INTO source_contents (tag_id, session_id, content, created_at, harness) VALUES (?, ?, ?, ?, ?)",
             );
@@ -519,27 +543,32 @@ export function copySessionStateForClone(
                 );
             }
 
-            const pendingOps = db
-                .prepare(
-                    `SELECT tag_id, operation, queued_at, harness
-                       FROM pending_ops
-                      WHERE session_id = ? AND tag_id IN (${placeholders})`,
-                )
-                .all(sourceSessionId, ...sourceTagIds) as Array<{
+            // Queued operations always name the tag by its per-session tag
+            // number (that is what ctx_reduce and the historian queue, and what
+            // the drain resolves), and the clone keeps every tag number. They
+            // therefore never go through the row-id remap that source contents
+            // may need.
+            const pendingOps = selectRowsByTagIds<{
+                id: number;
                 tag_id: number;
                 operation: string | null;
                 queued_at: number | null;
                 harness: string;
-            }>;
+            }>(
+                db,
+                `SELECT id, tag_id, operation, queued_at, harness
+                   FROM pending_ops
+                  WHERE session_id = ? AND tag_id IN`,
+                sourceSessionId,
+                copiedTagNumbers,
+            ).sort((a, b) => a.id - b.id);
             const insertPendingOp = db.prepare(
                 "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, ?, ?, ?)",
             );
             for (const row of pendingOps) {
-                const destinationTagId = copiedTagIds.get(row.tag_id);
-                if (destinationTagId === undefined) continue;
                 insertPendingOp.run(
                     destinationSessionId,
-                    destinationTagId,
+                    row.tag_id,
                     row.operation,
                     row.queued_at,
                     row.harness,
