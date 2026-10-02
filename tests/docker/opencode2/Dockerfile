@@ -24,7 +24,7 @@ ENV PATH="/root/.bun/bin:/test/host/node_modules/.bin:$PATH"
 RUN mkdir -p /test/host && npm install --prefix /test/host --no-audit --no-fund \
     @opencode/cli@2.0.22 \
     @opencode/cli-linux-x64@2.0.22 \
-    @opencode/client@2.0.15
+    @opencode/client@2.0.22
 
 # Reconstruct the files npm publishes. The Docker build consumes the locally
 # built dist plus the raw TUI sources rather than the registry release.

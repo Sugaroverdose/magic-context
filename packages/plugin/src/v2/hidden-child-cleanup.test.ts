@@ -111,15 +111,17 @@ test("legacy cleanup retains timed out children for another boot", async () => {
 test("legacy cleanup respects a total boot budget even when many removals stall", async () => {
     const db = store();
     const removed: string[] = [];
+    let now = 0;
     try {
         await cleanupLegacyHiddenChildren(
             db,
             async ({ sessionID }) => {
                 removed.push(sessionID);
-                await Bun.sleep(50);
+                now = 100;
+                await new Promise<void>(() => {});
             },
             () => {},
-            { budgetMs: 5 },
+            { budgetMs: 100, now: () => now },
         );
         expect(removed).toEqual(["active"]);
         expect(pending(db)).toHaveLength(1);

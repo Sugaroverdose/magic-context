@@ -121,8 +121,9 @@ class Rows {
                 ...(options.usage === false
                     ? {}
                     : {
-                          tokens: options.rawTokens
-                              ? ({ input: null, output: "not-a-number", reasoning: 3 } as never)
+                          // Deliberately exercise corrupt and older rows with incomplete token data.
+                          tokens: (options.rawTokens
+                              ? { input: null, output: "not-a-number", reasoning: 3 }
                               : {
                                     input: 101,
                                     output: 11,
@@ -130,7 +131,7 @@ class Rows {
                                     ...(options.cache === false
                                         ? {}
                                         : { cache: { read: 7, write: 5 } }),
-                                },
+                                }) as StoreRow<"assistant">["data"]["tokens"],
                       }),
                 time: { created: Date.now(), completed: Date.now() },
             },
@@ -870,7 +871,7 @@ describe("OpenCode 2 hidden child completion", () => {
                 ...(tools[id] ?? []).map((tool) => ({
                     action: tool,
                     resource: "*",
-                    effect: "allow",
+                    effect: "allow" as const,
                 })),
             ]);
         }

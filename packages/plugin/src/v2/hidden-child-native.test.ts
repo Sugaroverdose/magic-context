@@ -103,7 +103,12 @@ async function setup(
                     : {
                           content: [{ type: "text", text: `reply ${seq}` }],
                           finish: "stop",
-                          tokens: { input: 10, output: 2 },
+                          tokens: {
+                              input: 10,
+                              output: 2,
+                              reasoning: 0,
+                              cache: { read: 0, write: 0 },
+                          },
                           time: { created: Date.now(), completed: Date.now() },
                       },
             };

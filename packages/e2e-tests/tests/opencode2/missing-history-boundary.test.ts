@@ -73,7 +73,9 @@ function writeRows(path: string, sql: string, ...params: unknown[]): number {
 	if (!existsSync(path)) throw new Error(`missing store ${path}`);
 	const db = new Database(path);
 	try {
-		return db.prepare(sql).run(...params).changes;
+		db.prepare(sql).run(...params);
+		// Count the target rows, not the history-version trigger's additional writes.
+		return (db.prepare("SELECT changes() AS changed").get() as { changed: number }).changed;
 	} finally {
 		db.close();
 	}

@@ -14,7 +14,7 @@ export async function cleanupLegacyHiddenChildren(
     db: Database,
     remove: (input: { sessionID: string }) => Promise<void>,
     note: (message: string) => void,
-    options: { limit?: number; timeoutMs?: number; budgetMs?: number } = {},
+    options: { limit?: number; timeoutMs?: number; budgetMs?: number; now?: () => number } = {},
 ): Promise<void> {
     if (db.prepare("SELECT 1 FROM schema_migrations_meta WHERE key = ?").get(COMPLETE)) return;
     const rows = db
@@ -23,7 +23,8 @@ export async function cleanupLegacyHiddenChildren(
         )
         .all(`${PREFIX}*`) as Array<{ key: string; value: string }>;
     let remaining = options.limit ?? 25;
-    const deadline = performance.now() + (options.budgetMs ?? 2000);
+    const now = options.now ?? (() => performance.now());
+    const deadline = now() + (options.budgetMs ?? 2000);
     for (const row of rows) {
         let record: LegacyRecord;
         try {
@@ -47,7 +48,7 @@ export async function cleanupLegacyHiddenChildren(
             ...(record.retired_children ?? []),
         ];
         for (const child of children) {
-            if (remaining-- <= 0 || performance.now() >= deadline) return;
+            if (remaining-- <= 0 || now() >= deadline) return;
             if (typeof child?.id !== "string") {
                 note(
                     `[magic-context] legacy hidden-child cleanup has an invalid child in ${row.key}`,
@@ -62,10 +63,7 @@ export async function cleanupLegacyHiddenChildren(
                         new Promise<never>((_, reject) => {
                             timer = setTimeout(
                                 () => reject(new Error("session.remove timed out")),
-                                Math.min(
-                                    options.timeoutMs ?? 1000,
-                                    Math.max(1, deadline - performance.now()),
-                                ),
+                                Math.min(options.timeoutMs ?? 1000, Math.max(1, deadline - now())),
                             );
                         }),
                     ]);

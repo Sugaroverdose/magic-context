@@ -20,7 +20,7 @@ The runner never uses the operator's config or provider credentials. The mock bi
 
 The runner never reads the operator's live database or configuration for a snapshot. It checks private DB placement by inode and lsof, inspects writable descriptors, and fences protected directory metadata. Mapped read-only libraries (including temporary `.so` files) and TUI source files are not writable host output. Finder's `.DS_Store` does not fail the directory fence.
 
-The lane is pinned to OpenCode 2.0.15 (`@opencode/cli`, `@opencode/plugin` and `@opencode/client` in `packages/plugin`, `@opencode/client` in `packages/e2e-tests`, and the Docker lane under `tests/docker/opencode2`). `MC_E2E_OPENCODE2_CLI` points the lane at another installed build without touching `node_modules`. The OpenCode 1 arms (conversion and mixed-generation tests) need the v1 CLI on `PATH` and in `MC_E2E_OPENCODE1_CLI`.
+The lane is pinned to OpenCode 2.0.22 (`@opencode/cli`, `@opencode/plugin` and `@opencode/client` in `packages/plugin`, `@opencode/client` in `packages/e2e-tests`, and the Docker lane under `tests/docker/opencode2`). `MC_E2E_OPENCODE2_CLI` points the lane at another installed build without touching `node_modules`. The OpenCode 1 arms (conversion and mixed-generation tests) need the v1 CLI on `PATH` and in `MC_E2E_OPENCODE1_CLI`.
 
 ## 2.0.15 lane run
 
