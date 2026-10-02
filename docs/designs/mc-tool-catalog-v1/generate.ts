@@ -98,7 +98,7 @@ const FROZEN_CTX_REDUCE_SCHEMA_DIGEST =
 
 /**
  * The unprefixed capability tags the tool-provider role defines
- * (`DEFINED_CAPABILITY_TAGS` in commons' cortexkit-role-tool-provider 0.4.2).
+ * (`DEFINED_CAPABILITY_TAGS` in commons' cortexkit-role-tool-provider 0.4.3).
  * The cross-check below compares this list with the crate's.
  */
 const DEFINED_CAPABILITY_TAGS = [
@@ -110,10 +110,12 @@ const DEFINED_CAPABILITY_TAGS = [
     "code.outline/v1",
     "code.callgraph/v1",
     "code.diagnostics/v1",
+    "browser.use/v1",
+    "computer.use/v1",
 ];
 
 /**
- * A port of `check_capability_tag` from cortexkit-role-tool-provider 0.4.2:
+ * A port of `check_capability_tag` from cortexkit-role-tool-provider 0.4.3:
  * a tag is one of the defined unprefixed tags, or `<namespace>:<name>/v<N>`
  * with a namespace of lowercase letters and digits in `-`-separated words, a
  * name of `.`-separated words of lowercase letters, digits and `_`, and a
@@ -841,15 +843,17 @@ const AFT_HEAD: JsonObject = {
 };
 
 /**
- * Prefrontal's forwarding tools. The role defines no unprefixed browser or
- * computer tag, so these carry a namespace to pass the tag check; the
- * namespace is illustrative, and only its shape matters to these examples.
+ * Prefrontal's forwarding tools, tagged in the role's two tiers: the generic
+ * unprefixed tag (`browser.use/v1`, `computer.use/v1`), which promises only
+ * that a browser or desktop is driven, beside the namespaced tag of the
+ * provider whose specific contract the tool follows. Tags are listed in
+ * bytewise order, as the compositions' canonical form requires.
  */
 const PREFRONTAL_HEAD: JsonObject = {
     provider: "prefrontal-core",
     tools: [
-        { name: "browser_use", capabilities: ["prefrontal-core:browser.use/v1"] },
-        { name: "computer_use", capabilities: ["prefrontal-core:computer.use/v1"] },
+        { name: "browser_use", capabilities: ["browser.use/v1", "cerebellum:browser.use/v1"] },
+        { name: "computer_use", capabilities: ["cerebellum:computer.use/v1", "computer.use/v1"] },
     ],
 };
 
@@ -975,8 +979,8 @@ function outputs(): Map<string, string> {
 
 // ── Cross-checks against the tool-provider and fetch-plan test vectors ────
 
-/** commons at cortexkit-role-tool-provider 0.4.2, which defines the unprefixed tags. */
-const COMMONS_REF = "57305c74426123067e7647bab628a00a1706a176";
+/** commons at cortexkit-role-tool-provider 0.4.3, which defines the ten unprefixed tags. */
+const COMMONS_REF = "42949fc331d8c318225d8ffa0faa024584237c57";
 /**
  * prefrontal at a commit whose fetch-plan vectors (compositions and plans, each
  * as pretty JSON, JCS bytes and SHA-256) the design document cites.

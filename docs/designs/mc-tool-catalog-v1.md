@@ -65,7 +65,7 @@ module's guidance assets and the commons and prefrontal test vectors, by
 |---|---|
 | D | `.cortexkit/alfonso/plans/ck-extensibility-design-r7.3.md` (gitignored, present in worktrees) |
 | E | `.cortexkit/alfonso/plans/ck-extensibility-r7.3-errata.md`. Overrides D where they differ. |
-| TP | commons `crates/cortexkit-role-tool-provider/CONTRACT.md`, `src/catalog.rs` and `src/lib.rs`, `origin/master` at `57305c74` (cortexkit-role-tool-provider 0.4.2, which defines the unprefixed tags and `check_capability_tag`). `catalog.rs` is unchanged since `5262544e`, which r1 cited. |
+| TP | commons `crates/cortexkit-role-tool-provider/CONTRACT.md`, `src/catalog.rs` and `src/lib.rs`, `origin/master` at `42949fc3` (cortexkit-role-tool-provider 0.4.3, which defines the ten unprefixed tags and `check_capability_tag`). `catalog.rs` is unchanged since `5262544e`, which r1 cited. |
 | TPV | commons `test-vectors/tool-provider-v1/` at the same commit |
 | FP | prefrontal `test-vectors/fetch-plan-v1/` at `26590b8d4` (README and vectors) |
 
@@ -182,20 +182,22 @@ Order is the plugin's single tool list, `ACTIVE_TOOL_IDS`
 | `ctx_search` | `magic-context:archive.search/v1` | `prepend`, `append` | 1 | `f0d56f456f2ee9569c030072d33a001ae45d8a57d792dbf4d51c59eb12da28e9` |
 
 - **Tags are namespaced.** Tool-provider §3 (cortexkit-role-tool-provider
-  0.4.2) defines eight unprefixed tags: `shell.exec/v1`, `code.read/v1`,
+  0.4.3) defines ten unprefixed tags: `shell.exec/v1`, `code.read/v1`,
   `code.edit/v1`, `code.search/v1`, `code.files/v1`, `code.outline/v1`,
-  `code.callgraph/v1` and `code.diagnostics/v1`. Every other tag is
-  `<namespace>:<name>/v<N>`. None of the eight describes a Magic Context tool,
-  so Magic Context ships only `magic-context:*` tags (decision 9). A peer that
-  relies on stamping matches `magic-context:context.reduce/v1`.
+  `code.callgraph/v1`, `code.diagnostics/v1`, `browser.use/v1` and
+  `computer.use/v1`. Every other tag is `<namespace>:<name>/v<N>`. None of the
+  ten describes a Magic Context tool, so Magic Context ships only
+  `magic-context:*` tags (decision 9). A peer that relies on stamping matches
+  `magic-context:context.reduce/v1`.
 - **Every tag in the payloads passes the role's check.** The generator checks
   every tag in every example request and answer with a port of
   `check_capability_tag`, and compares its list of defined tags with the
-  crate's `DEFINED_CAPABILITY_TAGS` at `57305c74`. The crate's own function,
-  compiled from that commit, accepts all twelve distinct tags in the payloads.
-  The examples give Prefrontal's forwarding tools namespaced tags
-  (`prefrontal-core:browser.use/v1`): the unprefixed `browser.use/v1` that FP's
-  vectors use is not one of the eight, so the check refuses it.
+  crate's `DEFINED_CAPABILITY_TAGS` at `42949fc3`. The module's tests run the
+  crate's own function (0.4.3) over every tag in the payloads. The examples tag
+  Prefrontal's forwarding tools in the role's two tiers: the generic
+  `browser.use/v1` or `computer.use/v1`, which promises only that a browser or
+  desktop is driven, beside `cerebellum:browser.use/v1` or
+  `cerebellum:computer.use/v1` for the specific contract the tool follows.
 - **`ctx_reduce`'s name and schema are frozen for v1.** The Claude Code gateway
   grants stamping only to a tool whose wire name and schema both match (§4), so
   `ctx_reduce` keeps its catalog name and its structural schema
@@ -315,7 +317,7 @@ files byte for byte.
 
 The generator re-checks its JCS and structural-schema code on every run. It
 reproduces every vector without floats in TPV's `composition-digest.json` and
-`schema-digest.json` (commons at `57305c74`), and every FP composition and plan
+`schema-digest.json` (commons at `42949fc3`), and every FP composition and plan
 whose `.json` canonicalises to its `.jcs` and hashes to its `.sha256`
 (prefrontal at `26590b8d4`). It reads both repositories with `git show` from
 next to this repository's main checkout, and says so when it skips one.
@@ -335,13 +337,13 @@ which no example uses, is the definition's light no-reduce text.
 | Example | Request | `catalog_digest` | Text (`item_digest`, UTF-8 bytes) |
 |---|---|---|---|
 | `preflight` | `primary`, no composition, no text | `4dbfd638576261155e2f10b6dddfbd16ba652da5529e8a978b0ca625e2a994f2` | none |
-| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` present, so the tagged text | `428739ab99cf73e506c3b7813ac32481cec97b6d31565cfc55a3432b07baeeed` | `ee720eeb…`, 6,016 |
+| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` present, so the tagged text | `629f6a1724f7ded5e64537552511133d2ae77e2943ba2c45ac8d85fd7a73a276` | `ee720eeb…`, 6,016 |
 | `primary-full.digest-only` | same, `digest_only: true` | same as above | none |
-| `primary-light` | `tool_descs: concise`, `surface: light` | `c1254019d4519db58510e863684e1a2ef040f953ae7e61ded5403a1fe4f33b9c` | `f03cec64…`, 4,736 |
+| `primary-light` | `tool_descs: concise`, `surface: light` | `706719affdc2edd24757098e6b12b99dfbe84bc6639842de46be0b5cc1773fd9` | `f03cec64…`, 4,736 |
 | `subagent` | `subagent`, AFT and MC only | `b0e33d2d121a0f987e4958692cc61882ace971413fc5267209aa69d8fd30f180` | `561c5cb3…`, 2,249 |
-| `no-reduce` | `primary`, `exclude: ["ctx_reduce"]`; the composition lacks it | `6024ae5637324c07d8966d301ce9ef32b9667d76fa96a089a995ec99f691bbae` | `80e42ffa…`, 4,221 |
-| `tools-only` | `tools-only`, no params; the composition lists Magic Context's four tools without `ctx_reduce` | `a0702af864d7696bd790f9f927820152cbbfc51e42f0e4682ddfdc9a37fd6265` | `73c67970…`, 802 |
-| `tools-only-light` | `tools-only`, `model: anthropic/claude-haiku-4-5` on both items, which the config maps to light | `d9e17c66d159a715d02cd3c318f748dffd4e40376f684ab4d9fa21c6da4d78c4` | `7ab35687…`, 675 |
+| `no-reduce` | `primary`, `exclude: ["ctx_reduce"]`; the composition lacks it | `8baff6228ce394fe303ddb734cd7a11d9ab4a1ff3c04424c5cfe65679792c89d` | `80e42ffa…`, 4,221 |
+| `tools-only` | `tools-only`, no params; the composition lists Magic Context's four tools without `ctx_reduce` | `319c2b82687b9c6e6201d1c90441b96b8cba55fb7326c339f49fdd01fe407e23` | `73c67970…`, 802 |
+| `tools-only-light` | `tools-only`, `model: anthropic/claude-haiku-4-5` on both items, which the config maps to light | `80a9675ae14f3514c3f86dbe9b12e1bf76b5331645b0875e7c2f6df90148e62a` | `7ab35687…`, 675 |
 
 `tools-only` and `no-reduce` serve the same tools but different texts
 (§7.2). The full and light `tools-only` examples differ in both the text and
@@ -353,7 +355,7 @@ trailing newline. `.gitattributes` keeps both byte-exact files from being
 rewritten on checkout. The compositions follow FP's canonical order (providers,
 tools and tags sorted bytewise; FP README lines 262–271). The AFT entries carry
 the tags AFT's catalog declares for those tools (`crates/aft/src/subc/tool_provider.rs`,
-`METADATA`), all of them among the eight defined tags.
+`METADATA`), all of them among the defined unprefixed tags.
 
 ## 3. Variation and purity
 
@@ -572,11 +574,13 @@ to r1's recommendation, so it stands as written.
 8. **Legacy argument forms** (`id`, `target_id`, `source_ids`, extra fields).
    *Adopted:* not advertised. Refused on `tool-provider/v1` routes after
    coercion, and still accepted on legacy routes until they retire.
-9. **Unprefixed tags.** *Ruled by AFT:* the eight unprefixed standard names are
-   defined in tool-provider §3 on commons master (cortexkit-role-tool-provider
-   0.4.2), together with the tag-shape rule `<namespace>:<name>/v<N>` for every
-   other tag. Magic Context ships only `magic-context:*` tags, and every tag in
-   the payloads passes the crate's `check_capability_tag` (§2.2).
+9. **Unprefixed tags.** *Ruled by AFT:* the unprefixed standard names are
+   defined in tool-provider §3 on commons master (eight in
+   cortexkit-role-tool-provider 0.4.2; 0.4.3 adds `browser.use/v1` and
+   `computer.use/v1`), together with the tag-shape rule
+   `<namespace>:<name>/v<N>` for every other tag. Magic Context ships only
+   `magic-context:*` tags, and every tag in the payloads passes the crate's
+   `check_capability_tag` (§2.2).
 10. **`preflight.digest`.** D §4.2 and §13.1 name `preflight.digest(cwd,
     params)`, but TP has no such op. *Ruled by the room:* owners use
     `tool.catalog` with `digest_only: true` and the frozen request. There is no
