@@ -1268,6 +1268,60 @@ describe("project embedding registry", () => {
         }
     });
 
+    // Registration runs on every OpenCode auto-embed claim and on every
+    // maintenance tick (ensureProjectRegisteredFromOpenCodeDirectory is not
+    // cached). Once every legacy model has a marker and no chunk is mis-scoped,
+    // re-registration should cost a few indexed lookups. The legacy-model query
+    // is a DISTINCT over every memory, commit and chunk vector of the project,
+    // measured at 107-234 ms on a real store, and it runs synchronously on the
+    // host's event loop even though it no longer holds the writer lock.
+    it("does not rescan the project's vector tables for legacy models on a steady-state re-registration", () => {
+        const db = useTempDb();
+        const project = "git:steady-state";
+        const memory = insertMemory(db, {
+            projectPath: project,
+            category: "CONSTRAINTS",
+            content: "Steady state",
+        });
+        for (let i = 0; i < 3; i++)
+            saveEmbedding(db, memory.id, new Float32Array([1, 0]), `legacy-${i}`);
+        const prepare = db.prepare.bind(db);
+        let counting = false;
+        let legacyScans = 0;
+        const spy = spyOn(db, "prepare").mockImplementation((sql: string) => {
+            const statement = prepare(sql);
+            if (!sql.includes("SELECT DISTINCT e.model_id")) return statement;
+            for (const method of ["all", "run", "get", "iterate"] as const) {
+                const original = (statement as unknown as Record<string, unknown>)[method];
+                if (typeof original !== "function") continue;
+                Object.defineProperty(statement, method, {
+                    configurable: true,
+                    value: (...args: unknown[]) => {
+                        if (counting) legacyScans++;
+                        return (original as (...a: unknown[]) => unknown).apply(statement, args);
+                    },
+                });
+            }
+            return statement;
+        });
+        try {
+            const register = () =>
+                registerProjectEmbedding(
+                    db,
+                    project,
+                    localConfig("current"),
+                    { memoryEnabled: true, gitCommitEnabled: true },
+                    "/tmp/steady-state",
+                );
+            register();
+            counting = true;
+            register();
+            expect(legacyScans).toBe(0);
+        } finally {
+            spy.mockRestore();
+        }
+    });
+
     it("deletes stale embedding rows in bounded batches and resumes on the next sweep", () => {
         const db = useTempDb();
         const projectIdentity = "git:gc-batched";
