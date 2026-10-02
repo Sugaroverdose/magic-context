@@ -557,6 +557,66 @@ describe("executeContextRecomp", () => {
         ]);
     });
 
+    it("reports a published recomp complete and signaled when post-publish project registration throws", async () => {
+        useTempDataHome("magic-recomp-post-publish-throw-");
+        const sessionId = "ses-recomp-post-publish-throw";
+        createOpenCodeDb(sessionId, [
+            { id: "m-1", role: "user", text: "eligible one" },
+            { id: "m-2", role: "assistant", text: "eligible two" },
+            { id: "m-3", role: "user", text: "eligible three" },
+            { id: "m-4", role: "assistant", text: "eligible four" },
+            { id: "m-5", role: "user", text: "protected 1" },
+            { id: "m-6", role: "user", text: "protected 2" },
+            { id: "m-7", role: "user", text: "protected 3" },
+            { id: "m-8", role: "user", text: "protected 4" },
+            { id: "m-9", role: "user", text: "protected 5" },
+        ]);
+        const db = openDatabase();
+        const client = {
+            session: {
+                get: mock(async () => ({ data: { directory: "/tmp/post-publish-throw" } })),
+                create: mock(async () => ({ data: { id: "ses-agent-post-publish" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async (input: { query?: { directory?: string } }) => {
+                    if (!input.query?.directory) return { data: [] };
+                    return {
+                        data: [
+                            {
+                                info: { role: "assistant", time: { created: 1 } },
+                                parts: [
+                                    {
+                                        type: "text",
+                                        text: `<output><compartment start="1" end="4" title="rebuilt"><p1>summary</p1></compartment></output>`,
+                                    },
+                                ],
+                            },
+                        ],
+                    };
+                }),
+                delete: mock(async () => ({})),
+            },
+        } as unknown as PluginContext["client"];
+        const onPublished = mock(() => undefined);
+
+        const result = await executeContextRecomp({
+            client,
+            db,
+            sessionId,
+            historianChunkTokens: 10_000,
+            directory: "/tmp",
+            ensureProjectRegistered: async () => {
+                throw new Error("embedding provider unavailable");
+            },
+            onCompartmentStatePublished: onPublished,
+        });
+
+        expect(result).toContain("## Magic Recomp — Complete");
+        expect(onPublished).toHaveBeenCalledWith(sessionId);
+        expect(getCompartments(db, sessionId)).toEqual([
+            expect.objectContaining({ title: "rebuilt", endMessage: 4 }),
+        ]);
+    });
+
     it("records exhausted flat v1 output without writing legacy rows", async () => {
         useTempDataHome("magic-recomp-flat-exhausted-");
         const sessionId = "ses-recomp-flat-exhausted";
@@ -1588,6 +1648,97 @@ describe("runCompartmentAgent", () => {
                 .get("ses-post-commit-registration"),
         ).toEqual({ status: "success" });
     });
+
+    for (const variant of [
+        {
+            name: "the compaction-marker update throws",
+            // Caught where it is raised, so the steps after it still run.
+            laterStepsRun: true,
+            deps: () => ({
+                compactionMarkerStrategy: {
+                    publish: () => {
+                        throw Object.assign(new Error("database is locked"), {
+                            code: "SQLITE_BUSY",
+                        });
+                    },
+                },
+            }),
+        },
+        {
+            // Not caught where it is raised, so this exercises the run's outer handler.
+            name: "the deferred-marker signal throws",
+            laterStepsRun: false,
+            deps: () => ({
+                preserveInjectionCacheUntilConsumed: true,
+                onDeferredMarkerPending: () => {
+                    throw new Error("signal consumer failed");
+                },
+            }),
+        },
+    ]) {
+        it(`keeps a committed publish succeeded when ${variant.name} after COMMIT`, async () => {
+            useTempDataHome("compartment-runner-post-commit-step-throw-");
+            const sessionId = "ses-post-commit-step";
+            createOpenCodeDb(sessionId, [
+                { id: "m-1", role: "user", text: "First" },
+                { id: "m-2", role: "assistant", text: "Second" },
+                { id: "m-3", role: "user", text: "protected 1" },
+                { id: "m-4", role: "user", text: "protected 2" },
+                { id: "m-5", role: "user", text: "protected 3" },
+                { id: "m-6", role: "user", text: "protected 4" },
+                { id: "m-7", role: "user", text: "protected 5" },
+            ]);
+            const db = openDatabase();
+            const onPublished = mock(() => undefined);
+            const prompt = mock(async () => ({}));
+            const client = {
+                session: {
+                    get: mock(async () => ({ data: { directory: "/tmp/post-commit-step" } })),
+                    create: mock(async () => ({ data: { id: "ses-agent-post-commit-step" } })),
+                    prompt,
+                    messages: mock(async () => ({
+                        data: [
+                            {
+                                info: { role: "assistant", time: { created: 1 } },
+                                parts: [
+                                    {
+                                        type: "text",
+                                        text: `<compartment start="1" end="2" title="Published"><p1>Summary</p1></compartment>`,
+                                    },
+                                ],
+                            },
+                        ],
+                    })),
+                    delete: mock(async () => ({})),
+                },
+            } as unknown as PluginContext["client"];
+
+            await runCompartmentAgentWithLease({
+                client,
+                db,
+                sessionId,
+                historianChunkTokens: 10_000,
+                directory: "/tmp",
+                onCompartmentStatePublished: onPublished,
+                ...variant.deps(),
+            });
+
+            expect(getCompartments(db, sessionId)).toHaveLength(1);
+            expect(onPublished).toHaveBeenCalledWith(sessionId);
+            // A post-publish step failing must not count as a historian failure or be
+            // announced as one.
+            expect(getHistorianFailureState(db, sessionId).failureCount).toBe(0);
+            expect(getRpcNotificationTexts(prompt).join("\n")).not.toContain("failed");
+            expect(getOrCreateSessionMeta(db, sessionId).compartmentInProgress).toBe(false);
+            const run = db
+                .prepare(
+                    "SELECT status, compartments_produced FROM historian_runs WHERE session_id = ? ORDER BY id DESC LIMIT 1",
+                )
+                .get(sessionId) as { status: string; compartments_produced: number };
+            expect(run.status).toBe("success");
+            if (variant.laterStepsRun) expect(run.compartments_produced).toBe(1);
+        });
+    }
 
     it("rolls back compartments and boundary when durable fact insertion fails inside publish tx", async () => {
         useTempDataHome("compartment-runner-fact-insert-rollback-");
