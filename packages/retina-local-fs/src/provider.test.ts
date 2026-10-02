@@ -198,6 +198,25 @@ describe("git predicates", () => {
         const next = await poll(config, matching.scalar);
         expect(next.events[0]?.id).not.toBe(matching.events[0]?.id);
     });
+
+    // No shell is involved, but git still parses an argument that starts with
+    // "-" as an option, so a pattern like --format=... changed what the provider
+    // reported as tags. Such values are refused before git runs.
+    test("refuses ref, sha and pattern values git would parse as options", async () => {
+        const { repo, firstSha } = await createRepository();
+        await git(repo, "tag", "v1.0.0");
+        const optionLike = [
+            { kind: "git_tag_matching", repo_path: repo, pattern: "--format=injected" },
+            { kind: "git_tag_matching", repo_path: repo, pattern: "-n99" },
+            { kind: "git_commit_after", repo_path: repo, sha: "--all" },
+            { kind: "git_commit_after", repo_path: repo, sha: firstSha, ref: "--branches" },
+            { kind: "git_tag_matching", repo_path: repo, pattern: "v*\n--format=x" },
+        ] as const;
+        for (const config of optionLike) {
+            expect(validateProviderConfig(config)).toMatchObject({ success: false });
+            await expect(poll(config)).rejects.toMatchObject({ code: "invalid_config" });
+        }
+    });
 });
 
 describe("compound scalar behavior", () => {
