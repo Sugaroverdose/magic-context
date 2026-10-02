@@ -2237,6 +2237,11 @@ export function createRustModeTransform(
         }
         const serveRawFallback = (cause?: unknown): void => {
             servedFrom = "refused";
+            // A lost transform reply cannot authorize unmanaged history, even when
+            // compaction is disabled; only a verified last-good replay may continue.
+            if (moduleFailureCode(cause) === "transform_transport_interrupted") {
+                throw new EmergencyFailClosedError(ENGINE_RECONNECTING_USER_MESSAGE, { cause });
+            }
             if (!deps.compactionOff && isTransientSqliteError(cause)) {
                 throw new StorageBusyRefusalError(cause, "rust-mode-transform");
             }

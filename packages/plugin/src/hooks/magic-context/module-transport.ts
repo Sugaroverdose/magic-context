@@ -17,6 +17,7 @@ import {
 import { getDataDir } from "../../shared/data-path";
 import { getHarness } from "../../shared/harness";
 import { isRecord } from "../../shared/record-type-guard";
+import { assembleReplyPages } from "./reply-pages";
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
 import { storeAheadOfBinaryFailure } from "./store-ahead-refusal";
 
@@ -590,7 +591,15 @@ export class SubcModuleTransport {
                     const body =
                         args.body instanceof Uint8Array
                             ? args.body
-                            : Buffer.from(JSON.stringify(args.body));
+                            : Buffer.from(
+                                  JSON.stringify(
+                                      args.body !== null &&
+                                          typeof args.body === "object" &&
+                                          !Array.isArray(args.body)
+                                          ? { ...args.body, accept_reply_pages: true }
+                                          : args.body,
+                                  ),
+                              );
                     timings.encode += performance.now() - encodeStartedAt;
                     const issueStartedAt = performance.now();
                     const request = ensuredRoute.client.request(ensuredRoute.route, body, {
@@ -614,7 +623,42 @@ export class SubcModuleTransport {
                             "subc connection changed while awaiting the module response",
                         );
                     }
-                    return response;
+                    const pageRoute = ensuredRoute;
+                    const assembled = await assembleReplyPages(response, async (id, index) => {
+                        if (args.signal?.aborted) throw args.signal.reason;
+                        const page = await this.beforeDeadline(
+                            Promise.race([
+                                pageRoute.client.request(
+                                    pageRoute.route,
+                                    Buffer.from(
+                                        JSON.stringify({
+                                            method: "reply.page",
+                                            reply_page_id: id,
+                                            reply_page_index: index,
+                                        }),
+                                    ),
+                                    {
+                                        priority: Priority.Background,
+                                        admissionClass: AdmissionClass.Normal,
+                                        timeoutMs: Math.max(1, attemptDeadlineMs - Date.now()),
+                                    },
+                                ),
+                                aborted,
+                            ]),
+                            attemptDeadlineMs,
+                            "waiting for a module reply page",
+                        );
+                        if (
+                            this.client !== pageRoute.client ||
+                            this.connectionGeneration !== pageRoute.generation
+                        ) {
+                            throw this.connectionChangedError(
+                                "subc connection changed during reply paging",
+                            );
+                        }
+                        return page;
+                    });
+                    return assembled;
                 } catch (error) {
                     if (args.signal?.aborted) throw args.signal.reason ?? error;
                     // One typed error for every caller: the transform, the tools and the
@@ -657,6 +701,15 @@ export class SubcModuleTransport {
                             this.invalidateConnection(ensuredRoute.client);
                         } else {
                             this.invalidateConnection();
+                        }
+                        // A disconnected transform may already have committed. Never resend
+                        // its history automatically, including after a partial reply download.
+                        if (args.method === "transform") {
+                            if (!ensuredRoute) throw error;
+                            throw Object.assign(
+                                new Error("Transform transport interrupted; abandon this pass"),
+                                { code: "transform_transport_interrupted", cause: error },
+                            );
                         }
                         if (args.generationSensitive && !args.signal?.aborted) {
                             return {

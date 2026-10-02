@@ -382,6 +382,19 @@ export async function buildHermeticBinaries(
     return buildPromise;
 }
 
+/** Build the test-only module that delays synchronous MC dispatch for health probes. */
+export async function buildSlowTransformProbe(): Promise<string> {
+    const configured = process.env.MC_E2E_SLOW_TRANSFORM_PROBE_BIN;
+    if (configured && existsSync(configured)) return configured;
+    const args = ["build", "--release", "-p", "mc-module", "--example", "slow_transform_probe"];
+    const result = await runCargo(args, REPO_ROOT, rustE2eCargoEnv());
+    const binary = join(RUST_E2E_CARGO_TARGET_DIR, "release/examples/slow_transform_probe");
+    if (!result.ok || !existsSync(binary)) {
+        throw new Error(`failed to build slow transform probe: ${result.stderr.slice(-4000)}`);
+    }
+    return binary;
+}
+
 // ── daemon + module lifecycle ─────────────────────────────────────────────────
 
 function sleep(ms: number): Promise<void> {
@@ -1029,13 +1042,23 @@ export class HermeticSubcStack {
         child.stderr?.on("data", append);
     }
 
-    /** Best-effort read of the daemon log (diagnostics on failure). */
+    /** Read the daemon's dated file sink as well as captured stdout/stderr. */
     daemonLog(): string {
-        try {
-            return readFileSync(this.daemonLogPath, "utf8");
-        } catch {
-            return "";
+        const segments = existsSync(this.daemonLogDir)
+            ? readdirSync(this.daemonLogDir)
+                  .filter((name) => name.startsWith("subc") && name.endsWith(".log"))
+                  .sort()
+                  .map((name) => join(this.daemonLogDir, name))
+            : [];
+        let output = "";
+        for (const path of [...segments, this.daemonLogPath]) {
+            try {
+                output += readFileSync(path, "utf8");
+            } catch {
+                // Startup failures can precede either log sink's creation.
+            }
         }
+        return output;
     }
 
     /** Read the module's dated file sink and its separately captured stderr. */

@@ -2051,6 +2051,21 @@
             ]
         },
         {
+            "path": "tests/rust-oversize-reply.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "hermetic daemon verifies opt-in bounded screenshot replies, byte-identical replay, legacy unary compatibility and responsive health during slow transforms",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/rust-paired-session-replay.test.ts",
             "tier": "rust-only",
             "invocation": {

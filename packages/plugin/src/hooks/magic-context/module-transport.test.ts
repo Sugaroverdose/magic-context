@@ -3,6 +3,7 @@ import { SingleStoreMigrationRequiredError } from "./single-store-refusal";
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
+import { createHash } from "node:crypto";
 import { chmodSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -230,7 +231,8 @@ describe("SubcModuleTransport", () => {
                     session: "session-1",
                 },
             });
-            expect(requestBody).toEqual(flatBody);
+            expect(requestBody).toEqual({ ...flatBody, accept_reply_pages: true });
+            expect(flatBody).not.toHaveProperty("accept_reply_pages");
             expect(routeHeader).toEqual(
                 expect.objectContaining({
                     ver: PROTOCOL_VERSION,
@@ -276,7 +278,7 @@ describe("SubcModuleTransport", () => {
         expect(__moduleTransportTest.isConnectionFailure(foreignStaleRouteError)).toBe(true);
     });
 
-    it("reconnects once when a cached client reports that it closed", async () => {
+    it("does not resend a transform when its connection closes", async () => {
         const transport = new SubcModuleTransport("unused-connection-file", "magic-context", 100);
         const route = { channel: 7, epoch: 77 } as RouteHandle;
         let connectionCount = 0;
@@ -315,9 +317,58 @@ describe("SubcModuleTransport", () => {
                 method: "transform",
                 body: { method: "transform", v: 1 },
             }),
-        ).resolves.toEqual({ result: { reconnected: true } });
-        expect(connectionCount).toBe(2);
+        ).rejects.toMatchObject({ code: "transform_transport_interrupted" });
+        expect(connectionCount).toBe(1);
         expect(firstCloseCount).toBe(1);
+    });
+
+    it("abandons a partial reply without resending the transform", async () => {
+        const transport = new SubcModuleTransport("unused-connection-file", "magic-context", 100);
+        const original = JSON.stringify({ messages: ["x".repeat(100_000)] });
+        const id = createHash("sha256").update(original).digest("hex");
+        const requests: unknown[] = [];
+        let connects = 0;
+        const client = {
+            routeOpen: async () => ({ channel: 7, epoch: 77 }),
+            request: async (_route: RouteHandle, body: unknown) => {
+                requests.push(decodedBody(body));
+                if (requests.length === 1)
+                    return {
+                        reply_page: {
+                            id,
+                            index: 0,
+                            total: 2,
+                            bytes: Buffer.byteLength(original),
+                            data: original.slice(0, 65_536),
+                        },
+                    };
+                throw new Error("connection closed during reply page");
+            },
+            close: () => undefined,
+        } as unknown as SubcClient;
+        const internals = transport as unknown as {
+            client: SubcClient | null;
+            ensureConnected(): Promise<SubcClient>;
+        };
+        internals.ensureConnected = async () => {
+            connects += 1;
+            internals.client = client;
+            return client;
+        };
+        await expect(
+            transport.call({
+                sessionId: "partial",
+                projectRoot: "/workspace/project",
+                method: "transform",
+                generationSensitive: true,
+                body: { method: "transform" },
+            }),
+        ).rejects.toMatchObject({ code: "transform_transport_interrupted" });
+        expect(requests).toEqual([
+            { method: "transform", accept_reply_pages: true },
+            { method: "reply.page", reply_page_id: id, reply_page_index: 1 },
+        ]);
+        expect(connects).toBe(1);
     });
 
     it("turns a store-ahead error frame into one typed refusal and does not retry it", async () => {
@@ -460,7 +511,7 @@ describe("SubcModuleTransport", () => {
         expect(connectionCount).toBe(1);
     });
 
-    it("bounds a half-open route and stops after one fresh-connection retry", async () => {
+    it("bounds a half-open transform route without retrying", async () => {
         const timeoutMs = 30;
         const transport = new SubcModuleTransport(
             "unused-connection-file",
@@ -500,11 +551,11 @@ describe("SubcModuleTransport", () => {
 
         await expect(failure).rejects.toMatchObject({ code: "ETIMEDOUT" });
         expect(performance.now() - startedAt).toBeLessThan(1_000);
-        expect(connectionCount).toBe(2);
-        expect(routeOpenCount).toBe(2);
+        expect(connectionCount).toBe(1);
+        expect(routeOpenCount).toBe(1);
     });
 
-    it("bounds hung transform attempts and stops after one fresh-connection retry", async () => {
+    it("bounds a hung transform without a fresh-connection resend", async () => {
         const timeoutMs = 30;
         const transport = new SubcModuleTransport(
             "unused-connection-file",
@@ -544,10 +595,16 @@ describe("SubcModuleTransport", () => {
             body: { method: "transform", v: 1 },
         });
 
-        await expect(failure).rejects.toMatchObject({ code: "ETIMEDOUT" });
+        await expect(failure).rejects.toMatchObject({
+            code: "transform_transport_interrupted",
+            cause: { code: "ETIMEDOUT" },
+        });
         expect(performance.now() - startedAt).toBeLessThan(1_000);
-        expect(connectionCount).toBe(2);
-        expect(requestCount).toBe(2);
+        expect(connectionCount).toBe(1);
+        expect(requestCount).toBe(1);
+        const interrupted = await failure.catch((error: Error) => error);
+        if (!(interrupted instanceof Error)) throw new Error("expected interrupted transform");
+        expect(interrupted.message).not.toMatch(/timed out|deadline/i);
     });
 
     it("scales cold execution for ENGRAM and ASTRO while retaining a bounded ceiling", () => {
@@ -729,8 +786,8 @@ describe("SubcModuleTransport", () => {
             const args = {
                 sessionId: "session-restart",
                 projectRoot: "/workspace/project",
-                method: "transform" as const,
-                body: { method: "transform", v: 1 },
+                method: "session.status" as const,
+                body: { method: "session.status", v: 1 },
             };
             await expect(transport.call(args)).resolves.toEqual({ result: { requestCount: 1 } });
 
@@ -1023,14 +1080,14 @@ describe("SubcModuleTransport", () => {
             transport.call({
                 sessionId: "session-a",
                 projectRoot: "/invalidation-a",
-                method: "transform",
-                body: { method: "transform", session_id: "session-a" },
+                method: "session.status",
+                body: { method: "session.status", session_id: "session-a" },
             }),
             transport.call({
                 sessionId: "session-b",
                 projectRoot: "/invalidation-b",
-                method: "transform",
-                body: { method: "transform", session_id: "session-b" },
+                method: "session.status",
+                body: { method: "session.status", session_id: "session-b" },
             }),
         ]);
 
@@ -1556,7 +1613,11 @@ it("attributes encode, route, request issue, response wait and settlement on one
         request: async (_route: RouteHandle, body: unknown, options: { binary?: boolean }) => {
             expect(body).toBeInstanceOf(Uint8Array);
             expect(options.binary).not.toBe(true);
-            expect(decodedBody(body)).toEqual({ method: "transform", text: "🚀" });
+            expect(decodedBody(body)).toEqual({
+                method: "transform",
+                text: "🚀",
+                accept_reply_pages: true,
+            });
             await Bun.sleep(20);
             return { ok: true };
         },
