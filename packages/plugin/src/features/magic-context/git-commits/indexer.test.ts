@@ -9,10 +9,11 @@ import { createTestTempDirFromPath } from "../../../shared/test-temp-dir";
 import { runMigrations } from "../migrations";
 import { initializeDatabase } from "../storage-db";
 import { readGitCommitsResult } from "./git-log-reader";
+import { indexCommitsForProject } from "./indexer";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-describe("readGitCommitsResult against a real repository", () => {
+describe("indexCommitsForProject against a real repository", () => {
     let db: Database;
     let dir: string;
 
@@ -56,6 +57,46 @@ describe("readGitCommitsResult against a real repository", () => {
     afterEach(() => {
         closeQuietly(db);
         rmSync(dir, { recursive: true, force: true });
+    });
+
+    it("indexes merged branch commits whose committer date predates the indexed tip", async () => {
+        const now = Date.now();
+        commit("base.txt", "base commit", now - 5 * DAY_MS);
+        git(["checkout", "-q", "-b", "feature"]);
+        commit("feature.txt", "feature work from two days ago", now - 2 * DAY_MS);
+        git(["checkout", "-q", "main"]);
+        commit("main.txt", "main tip commit", now - 60 * 60 * 1000);
+
+        await sweep();
+        expect(indexedMessages()).toEqual(["base commit", "main tip commit"]);
+
+        git(
+            ["-c", "commit.gpgsign=false", "merge", "-q", "--no-ff", "-m", "merge", "feature"],
+            now,
+        );
+        await sweep();
+
+        expect(indexedMessages()).toEqual([
+            "base commit",
+            "feature work from two days ago",
+            "main tip commit",
+        ]);
+    });
+
+    it("falls back to the full window when the latest indexed commit no longer exists", async () => {
+        const now = Date.now();
+        commit("a.txt", "first commit", now - 3 * DAY_MS);
+        commit("b.txt", "second commit", now - 2 * DAY_MS);
+        // The latest indexed commit was rewritten away and garbage-collected.
+        db.prepare(
+            `INSERT INTO git_commits (sha, project_path, short_sha, message, author, committed_at, indexed_at)
+             VALUES (?, 'git:repo', 'aaaaaaa', 'rewritten away', NULL, ?, ?)`,
+        ).run("a".repeat(40), now - DAY_MS, now - DAY_MS);
+
+        const result = await sweep();
+
+        expect(result.nonIndexable).toBe(false);
+        expect(indexedMessages()).toEqual(["first commit", "rewritten away", "second commit"]);
     });
 
     it("reads history when a worktree file is named HEAD", async () => {

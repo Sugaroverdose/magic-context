@@ -84,6 +84,15 @@ export interface ReadGitCommitsOptions {
     /** Hard cap on returned commits. Default 5000. */
     maxCommits?: number;
     /**
+     * Full name of a commit whose history is already indexed. Commits
+     * reachable from it are skipped, so an incremental read returns exactly
+     * the commits that became reachable since, including merged branch
+     * commits whose dates are older than anything indexed. Ignored when it
+     * is not a full object name; when the object no longer exists (rewritten
+     * and garbage-collected), the read falls back to no exclusion.
+     */
+    excludeReachableFrom?: string;
+    /**
      * Project identity (`git:<sha>` / `dir:<hash>`) used ONLY for log
      * correlation. We never log the absolute `directory` — it carries the
      * username + project name (privacy, and these logs flow into
@@ -134,9 +143,14 @@ export async function readGitCommitsResult(
     // absolute cwd (which carries the username + project name and lands in
     // doctor --issue reports).
     const projectLabel = options.projectIdentity ?? "<project>";
+    const exclusion =
+        options.excludeReachableFrom && FULL_OBJECT_NAME.test(options.excludeReachableFrom)
+            ? options.excludeReachableFrom
+            : null;
     const args = [
         "log",
         revision,
+        ...(exclusion ? [`^${exclusion}`] : []),
         "--no-merges",
         `--max-count=${options.maxCommits ?? DEFAULT_MAX_COMMITS}`,
         `--format=%H${FIELD_SEPARATOR}%s${FIELD_SEPARATOR}%ae${FIELD_SEPARATOR}%ct${FIELD_SEPARATOR}%b${RECORD_SEPARATOR}`,
@@ -171,6 +185,14 @@ export async function readGitCommitsResult(
         // We DO log the reason though — a silent empty-result masked a real
         // cwd / PATH / timeout bug during the v0.14 git-commits rollout.
         const message = error instanceof Error ? error.message : String(error);
+        if (exclusion && message.includes("bad object")) {
+            // The excluded commit is gone, so it no longer bounds anything:
+            // read the full window and let the upsert skip known commits.
+            log(
+                `[git-commits] indexed tip ${exclusion.slice(0, 7)} is missing for ${projectLabel}; reading the full window`,
+            );
+            return readGitCommitsResult(directory, { ...options, excludeReachableFrom: undefined });
+        }
         const failure = classifyGitLogFailure(message);
         if (failure === "transient") {
             log(
