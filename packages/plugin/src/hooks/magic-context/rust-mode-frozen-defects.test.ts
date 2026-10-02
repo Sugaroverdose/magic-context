@@ -6,7 +6,7 @@
 // provider last saw (plus the new raw tail) until a pass installs something
 // else; a pass that serves nothing must leave that state exactly as it was.
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import { createHash } from "node:crypto";
 
 import { runMigrations } from "../../features/magic-context/migrations";
@@ -31,10 +31,12 @@ import {
 } from "../../features/magic-context/tool-definition-tokens";
 import { __test as transformDecisionTest } from "../../features/magic-context/transform-decision-log";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
+import * as logger from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import { resolveTrustedContextLimit } from "./event-resolvers";
+import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { createDbLkgPersistence } from "./lkg-persist";
 import { registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { setRawMessageProvider } from "./read-session-chunk";
@@ -201,11 +203,14 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         getModelKey: () => MODEL_KEY,
         ...(options.compactionOff ? { compactionOff: true } : {}),
     };
+    let estimatorOverride: typeof estimateFinalWireInputTokens | undefined;
     const makeAdapter = () =>
         createRustModeTransform(deps, {
             moduleClient,
             modulePageMaxBytes: 512 * 1024,
             scheduleLkgCapture: (capture) => capture(),
+            rawFallbackEstimatorForTests: (args) =>
+                (estimatorOverride ?? estimateFinalWireInputTokens)(args),
         });
     let transform = makeAdapter();
     const meta = () => {
@@ -278,6 +283,10 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         frozenFields,
         setStatusFails: (value: boolean) => {
             statusFails = value;
+        },
+        /** Replace the adapter's token estimator for fit checks (undefined restores it). */
+        setEstimator: (value: typeof estimateFinalWireInputTokens | undefined) => {
+            estimatorOverride = value;
         },
         setModuleOutput: (value: (input: MessageLike[]) => unknown[]) => {
             moduleOutput = value;
@@ -627,5 +636,108 @@ describe("a restart resumes a freeze the durable slot proves", () => {
         const served = await s.run([...conversation], "SOFT+");
         expect(textOf(served, "m2")).toBe("§3§ turn 2");
         expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+    });
+});
+
+describe("a healthy frozen pass is admitted like any other replay", () => {
+    // Eight megabytes of text: over any context limit by the four-bytes-per-token
+    // proxy, so the measurement needs no tokenizer run.
+    const HUGE = "x".repeat(8 * 1024 * 1024);
+
+    /** The module compacts the huge message to a short placeholder. */
+    function compacting(input: MessageLike[]): unknown[] {
+        return tagAllUsers(input).map((message) => {
+            const record = message as MessageLike;
+            return record.info.id === "m-huge"
+                ? { ...record, parts: [{ type: "text", text: "[compacted tool output]" }] }
+                : message;
+        });
+    }
+
+    function logLines(spy: ReturnType<typeof spyOn>, sessionId: string): string[] {
+        return spy.mock.calls
+            .filter(([loggedSession]) => loggedSession === sessionId)
+            .map(([, message]) => String(message));
+    }
+
+    it("frozen bytes over a trusted limit release only when module output fits", async () => {
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            for (const moduleCompacts of [true, false]) {
+                const s = frozenSession(moduleCompacts ? "fit-release" : "fit-both-over");
+                const sid = s.sessionId;
+                const { conversation, lastServed } = await freezeWithTwoDefers(s);
+                s.setModuleOutput(moduleCompacts ? compacting : tagAllUsers);
+                conversation.push(assistant(sid, "a4"), user(sid, "m-huge", HUGE));
+                const served = await s.run([...conversation], "SOFT+");
+                const lines = logLines(logSpy, sid);
+                if (moduleCompacts) {
+                    // The frozen bytes cannot be sent and the module's can: adopt them.
+                    expect(lines).toContain(
+                        "lkg_frozen_replay_released reason=frozen_over_context_limit",
+                    );
+                    expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+                    const huge = (served as MessageLike[]).find(
+                        (message) => message.info.id === "m-huge",
+                    );
+                    expect(JSON.stringify(huge?.parts)).toContain("[compacted tool output]");
+                } else {
+                    // Both are over: adopting would bust the cache and fit no better.
+                    expect(lines.some((line) => line.startsWith("frozen_fit_both_over"))).toBe(
+                        true,
+                    );
+                    expect(
+                        lines.some((line) => line.startsWith("lkg_frozen_replay_released")),
+                    ).toBe(false);
+                    expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
+                    expect(sha(served.slice(0, lastServed.length))).toBe(sha(lastServed));
+                }
+            }
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it("an untrusted estimate keeps the freeze", async () => {
+        const logSpy = spyOn(logger, "sessionLog").mockImplementation(() => {});
+        try {
+            const s = frozenSession("fit-untrusted");
+            const sid = s.sessionId;
+            const { conversation, lastServed } = await freezeWithTwoDefers(s);
+            // The estimate says far over the limit but is not trusted, and the byte
+            // proxy is under: nothing is proven, so the freeze stays.
+            s.setEstimator(() => ({ tokens: 50_000_000, trusted: false }) as never);
+            s.setModuleOutput(compacting);
+            conversation.push(assistant(sid, "a4"), user(sid, "m5", "turn 5"));
+            const served = await s.run([...conversation], "SOFT+");
+            expect(sha(served.slice(0, lastServed.length))).toBe(sha(lastServed));
+            expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
+            expect(
+                logLines(logSpy, sid).some((line) => line.startsWith("frozen_fit_unproven")),
+            ).toBe(true);
+        } finally {
+            logSpy.mockRestore();
+        }
+    });
+
+    it("frozen bytes over a provider-proven limit with module output also over refuse and keep the freeze", async () => {
+        const s = frozenSession("emergency-both-over");
+        const sid = s.sessionId;
+        const { conversation } = await freezeWithTwoDefers(s);
+        // Emergency recovery is armed and the provider proved a 200k limit for this
+        // model; the huge message keeps both arrays over it.
+        s.armEmergency();
+        s.setModuleOutput(tagAllUsers);
+        const before = s.frozenFields();
+        // Over the 200k proven limit by the byte proxy (about 1 MB). Real words, not
+        // one unbroken run: with recovery armed the adapter tokenizes the input, and
+        // the tokenizer is quadratic on a single multi-megabyte word.
+        const overProven = "lorem ipsum dolor sit amet ".repeat(40_000);
+        conversation.push(assistant(sid, "a4"), user(sid, "m-huge", overProven));
+        await expect(s.run([...conversation], "SOFT+")).rejects.toBeInstanceOf(
+            EmergencyFailClosedError,
+        );
+        expect(s.frozenFields()).toEqual(before);
+        expect(s.transform.getState(sid).consecutiveFailures).toBe(0);
     });
 });

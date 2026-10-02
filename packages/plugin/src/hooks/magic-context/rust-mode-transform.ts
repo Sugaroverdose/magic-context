@@ -164,6 +164,25 @@ class RustTransformProtocolError extends Error {
     }
 }
 
+/**
+ * A frozen replay is over the provider-proven context limit while emergency
+ * recovery is armed, and the module's output is over it too (or cannot be shown
+ * to fit). Neither array can be sent, so the pass refuses. The module itself is
+ * healthy, so this is not counted as a module failure.
+ */
+class FrozenReplayOverProvenLimitRefusal extends Error {
+    constructor(
+        readonly moduleFit: FrozenFit,
+        readonly limit: number,
+    ) {
+        super(`frozen replay and module output are over the provider-proven limit ${limit}`);
+        this.name = "FrozenReplayOverProvenLimitRefusal";
+    }
+}
+
+/** Where an array stands against a context limit; see `measureAgainstLimit` in `run`. */
+type FrozenFit = "under" | "over" | "unproven";
+
 export const RUST_FAILURE_PARK_THRESHOLD = 3;
 export const RUST_PARK_RETRY_INTERVAL = 5;
 export const RUST_EMERGENCY_WALL_PCT = 95;
@@ -2372,6 +2391,105 @@ export function createRustModeTransform(
             state.lkgFrozenHealthyPasses = 0;
             state.lkgFrozenAtInputCount = null;
         };
+        /**
+         * Where `candidate` stands against `limit`. Over when either the four-bytes-per-
+         * token proxy or a trusted token estimate exceeds the limit; under only when the
+         * proxy is under and a trusted estimate is at or under it; unproven when the
+         * estimate is untrusted or unavailable and the proxy does not prove it over.
+         */
+        const measureAgainstLimit = (candidate: readonly unknown[], limit: number): FrozenFit => {
+            const proxy = rawFallbackSerializedBytes(
+                candidate as MessageLike[],
+                limit * RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
+            );
+            if (proxy === null) return "unproven";
+            if (
+                proxy.aborted ||
+                Math.ceil(proxy.bytes / RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN) > limit
+            ) {
+                return "over";
+            }
+            let estimate: ReturnType<typeof estimateFinalWireInputTokens>;
+            try {
+                estimate = rawFallbackEstimator({
+                    messages: candidate as MessageLike[],
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: model?.providerID,
+                    modelID: model?.modelID,
+                    agentName: deps.getNotificationParams?.(sessionId)?.agent,
+                });
+            } catch {
+                return "unproven";
+            }
+            if (!estimate.trusted || !Number.isFinite(estimate.tokens) || estimate.tokens <= 0) {
+                return "unproven";
+            }
+            return estimate.tokens > limit ? "over" : "under";
+        };
+        /**
+         * Admission for a healthy pass that would serve the frozen replay `candidate`
+         * instead of `moduleOutput`. Returns a release reason when the frozen bytes no
+         * longer fit but the module's output does, null to keep serving the freeze, and
+         * throws `FrozenReplayOverProvenLimitRefusal` when emergency recovery is armed
+         * and neither array fits the provider-proven limit. An unproven measurement
+         * never releases: adopting module output on a guess would bust the cache of
+         * every frozen session on a model whose estimate is incomplete.
+         */
+        const frozenReplayAdmission = (
+            candidate: readonly unknown[],
+            moduleOutput: readonly unknown[],
+        ): string | null => {
+            const emergency =
+                isEmergencyRecoveryArmed(sessionId) || overflowState?.needsEmergencyRecovery;
+            if (emergency) {
+                const provenLimit =
+                    overflowState &&
+                    overflowState.detectedContextLimit > 0 &&
+                    (overflowState.detectedContextLimitModelKey === null ||
+                        canonicalModelIdentity(overflowState.detectedContextLimitModelKey) ===
+                            canonicalModelIdentity(modelKey ?? ""))
+                        ? overflowState.detectedContextLimit
+                        : undefined;
+                if (provenLimit !== undefined) {
+                    const frozenFit = measureAgainstLimit(candidate, provenLimit);
+                    if (frozenFit === "over") {
+                        const moduleFit = measureAgainstLimit(moduleOutput, provenLimit);
+                        if (moduleFit === "under") return "frozen_over_proven_limit";
+                        throw new FrozenReplayOverProvenLimitRefusal(moduleFit, provenLimit);
+                    }
+                    if (frozenFit === "unproven") {
+                        sessionLog(sessionId, `frozen_emergency_fit_unproven limit=${provenLimit}`);
+                    }
+                } else {
+                    sessionLog(sessionId, "frozen_emergency_limit_unknown");
+                }
+            }
+            const limit =
+                transformGeometry?.usable_hard ??
+                resolvedContextLimit ??
+                (overflowState && overflowState.detectedContextLimit > 0
+                    ? overflowState.detectedContextLimit
+                    : undefined);
+            if (limit === undefined || limit <= 0) {
+                sessionLog(sessionId, "frozen_fit_unproven limit=unknown");
+                return null;
+            }
+            const frozenFit = measureAgainstLimit(candidate, limit);
+            if (frozenFit === "unproven") {
+                sessionLog(sessionId, `frozen_fit_unproven limit=${limit}`);
+                return null;
+            }
+            if (frozenFit === "under") return null;
+            const moduleFit = measureAgainstLimit(moduleOutput, limit);
+            if (moduleFit === "under") return "frozen_over_context_limit";
+            sessionLog(
+                sessionId,
+                moduleFit === "over"
+                    ? `frozen_fit_both_over limit=${limit}`
+                    : `frozen_fit_unproven module=unproven limit=${limit}`,
+            );
+            return null;
+        };
         const finishPass = (applied: boolean, served = true): void => {
             // A pass that serves nothing leaves the provider's last-seen array unchanged,
             // so the proof that the slot holds that array must survive the refusal.
@@ -3646,12 +3764,13 @@ export function createRustModeTransform(
                         frozenHealthyPassesAfterApply = state.lkgFrozenHealthyPasses + 1;
                         const rawTailGrowth = Math.max(0, inputCount - state.lkgFrozenAtInputCount);
                         const releaseReason =
-                            rawTailGrowth >= RUST_LKG_FROZEN_RAW_TAIL_GROWTH_LIMIT
+                            frozenReplayAdmission(frozen.messages, moduleMessages) ??
+                            (rawTailGrowth >= RUST_LKG_FROZEN_RAW_TAIL_GROWTH_LIMIT
                                 ? "raw_tail_growth_limit"
                                 : frozenHealthyPassesAfterApply >=
                                     RUST_LKG_FROZEN_HEALTHY_PASS_LIMIT
                                   ? "healthy_pass_limit"
-                                  : null;
+                                  : null);
                         if (releaseReason) {
                             cacheBustingPass = true;
                             frozenReleaseReason = releaseReason;
@@ -4027,6 +4146,18 @@ export function createRustModeTransform(
             });
             finishPass(true);
         } catch (error) {
+            if (error instanceof FrozenReplayOverProvenLimitRefusal) {
+                decision = "error";
+                materializeReason = "frozen_over_proven_limit";
+                sessionLog(
+                    sessionId,
+                    `mc_rust_emergency_refusal frozen_over_proven_limit module=${error.moduleFit} limit=${error.limit}`,
+                );
+                finishPass(false, false);
+                throw new EmergencyFailClosedError(ENGINE_RECONNECTING_USER_MESSAGE, {
+                    cause: error,
+                });
+            }
             if (error instanceof SharedCompartmentBoundaryError) {
                 decision = "error";
                 materializeReason = error.code;
