@@ -8,23 +8,7 @@ import { isEmbeddingHostBusy } from "../../shared/embedding-activity";
 import { log } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
-import {
-    buildCanonicalChunkTextFromFts,
-    buildCompartmentSummaryFallbackText,
-    type CompartmentChunkBackfillCandidate,
-    chunkCanonicalText,
-    chunkEmbeddingWindowsAreCurrent,
-    countSessionCompartmentEmbedCoverage,
-    countSessionCompartmentEmbedCoveragePolite,
-    countUnembeddedSessionCompartmentsPolite,
-    loadUnembeddedCompartmentChunkCandidatesPolite,
-    loadUnembeddedSessionChunkCandidatesPolite,
-    loadUnembeddedShadowChunkCandidates,
-    normalizeCompartmentChunkMaxInputTokens,
-    recordChunkEmbedBackoff,
-    replaceCompartmentChunkEmbeddings,
-    type SaveCompartmentChunkEmbeddingInput,
-} from "./compartment-chunk-embedding";
+import { type CompartmentChunkBackfillCandidate, type SaveCompartmentChunkEmbeddingInput, buildCanonicalChunkTextFromFts, buildCompartmentSummaryFallbackText, chunkCanonicalText, chunkEmbeddingWindowsAreCurrent, chunkWindowSourceKey, countSessionCompartmentEmbedCoverage, countSessionCompartmentEmbedCoveragePolite, countUnembeddedSessionCompartmentsPolite, loadUnembeddedCompartmentChunkCandidatesPolite, loadUnembeddedSessionChunkCandidatesPolite, loadUnembeddedShadowChunkCandidates, normalizeCompartmentChunkMaxInputTokens, recordChunkEmbedBackoff, replaceCompartmentChunkEmbeddings } from './compartment-chunk-embedding';
 import {
     countEmbeddedCommits,
     loadUnembeddedCommits,
@@ -2238,6 +2222,7 @@ async function processShadowQueueItem(item: ShadowQueueItem): Promise<ShadowBack
     const prepared: Array<{
         candidate: (typeof candidates)[number];
         windows: ReturnType<typeof chunkCanonicalText>;
+        windowSourceKey: string;
     }> = [];
     let ftsMappingIncomplete = false;
     let emptyCanonicalText = false;
@@ -2252,13 +2237,20 @@ async function processShadowQueueItem(item: ShadowQueueItem): Promise<ShadowBack
             ftsMappingIncomplete = true;
         } else {
             const text = mappedText || buildCompartmentSummaryFallbackText(db, candidate.id);
+            const shadowMaxInputTokens = shadowMaxInputTokensFor(registration);
             const windows = chunkCanonicalText(
                 text,
                 candidate.start_message,
                 candidate.end_message,
-                shadowMaxInputTokensFor(registration),
+                shadowMaxInputTokens,
             );
-            if (windows.length > 0) prepared.push({ candidate, windows });
+            const windowSourceKey = chunkWindowSourceKey(
+                text,
+                candidate.start_message,
+                candidate.end_message,
+                shadowMaxInputTokens,
+            );
+            if (windows.length > 0) prepared.push({ candidate, windows, windowSourceKey });
             else emptyCanonicalText = true;
         }
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
@@ -2303,7 +2295,7 @@ async function processShadowQueueItem(item: ShadowQueueItem): Promise<ShadowBack
                 : [];
         });
         if (rows.length === item.windows.length) {
-            replaceCompartmentChunkEmbeddings(db, rows);
+            replaceCompartmentChunkEmbeddings(db, rows, item.windowSourceKey);
             writes += 1;
         } else {
             partialVectorSet = true;
@@ -2976,6 +2968,7 @@ async function embedCandidateChunkBatch(
     type Prepared = {
         candidate: CompartmentChunkBackfillCandidate;
         windows: ReturnType<typeof chunkCanonicalText>;
+        windowSourceKey: string;
     };
     const prepared: Prepared[] = [];
     for (const candidate of candidates) {
@@ -3010,7 +3003,16 @@ async function embedCandidateChunkBatch(
             noWork.push(candidate.id);
             continue;
         }
-        prepared.push({ candidate, windows });
+        prepared.push({
+            candidate,
+            windows,
+            windowSourceKey: chunkWindowSourceKey(
+                canonicalText,
+                candidate.startMessage,
+                candidate.endMessage,
+                maxInputTokens,
+            ),
+        });
     }
 
     if (prepared.length === 0) return { embedded: 0, noWork, failed, failureReasons };
@@ -3106,7 +3108,7 @@ async function embedCandidateChunkBatch(
                             vector: vectors[index] as Float32Array,
                         }),
                     );
-                    replaceCompartmentChunkEmbeddings(db, rows);
+                    replaceCompartmentChunkEmbeddings(db, rows, item.windowSourceKey);
                     persistedIds.add(item.candidate.id);
                     enqueueShadowEmbeddingItems(projectIdentity, "chunk", [
                         String(item.candidate.id),
