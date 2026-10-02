@@ -594,6 +594,42 @@ describe("a restart resumes a freeze the durable slot proves", () => {
         expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
     });
 
+    it("a restart resumes a frozen slot whose raw tail carries a persisted thinking strip", async () => {
+        const s = frozenSession("restart-frozen-stripped-tail");
+        const sid = s.sessionId;
+        s.setModuleOutput(tagAllUsers);
+        await s.run([user(sid, "m1", "question")], "HARD");
+        // a3's thinking is in the persisted strip set, so every replay sends it
+        // stripped while the host still sends it with its thinking.
+        expect(
+            addMergedReasoningStrippedIds(s.db, sid, [thinkingBindingRecoveryFrozenId("a3")]),
+        ).toBe(true);
+        const conversation: MessageLike[] = [
+            user(sid, "m1", "question"),
+            assistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+        ];
+        await s.run([...conversation], "throw");
+        conversation.push(assistant(sid, "a2"), user(sid, "m3", "turn 3"));
+        await s.run([...conversation], "SOFT+");
+        // The last frozen pass ends on a3 (a turn still in progress), so the
+        // captured slot ends with a3 stripped.
+        conversation.push(thinkingAssistant(sid, "a3"));
+        const lastServed = await s.run([...conversation], "SOFT+");
+        expect(
+            (lastServed.at(-1) as MessageLike).parts.some(
+                (part) => (part as { type?: string }).type === "reasoning",
+            ),
+        ).toBe(false);
+
+        // After the restart, only a key that applies the persisted strips sees the
+        // slot's stripped a3 as the host's a3, which keeps the slot's raw run intact.
+        s.restart();
+        const served = await s.run([...conversation], "SOFT+");
+        expect(sha(served)).toBe(sha(lastServed));
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
+    });
+
     it("a restart of a healthy session does not freeze", async () => {
         const s = frozenSession("restart-healthy");
         const sid = s.sessionId;

@@ -655,13 +655,20 @@ function messageIdOf(message: unknown): string | undefined {
  * Index of the first snapshot message that a previous process served raw from a
  * frozen replay, or null when there is none.
  *
- * A frozen healthy pass captures exactly what it served, so after a restart the
- * durable snapshot can hold messages exactly as the host sent them (untouched by
- * the module) where the module now renders the same message differently. A
- * healthy snapshot cannot match that: it holds module output, so for each message
- * either the module renders it like the raw input (module equals raw) or it does
- * not (snapshot differs from raw). Host additions such as nudges only make the
- * snapshot differ from raw as well.
+ * A frozen replay serves the snapshot's prefix followed by the raw input's newer
+ * messages, and a frozen healthy pass captures exactly that. So after a restart, a
+ * snapshot the freeze captured ends in a run of messages exactly as the host sent
+ * them, and inside that run the module now renders at least one message
+ * differently. Only that trailing run is searched.
+ *
+ * A healthy snapshot holds module output. For each message either the module
+ * renders it like the raw input (module equals raw) or it does not (snapshot
+ * differs from raw); host additions such as nudges also make the snapshot differ
+ * from raw. A healthy snapshot that is only stale (for example a database restored
+ * from an older backup) can hold a message the module has since re-rendered, but
+ * module output that differs from raw (tagged user turns) normally follows it, so
+ * it does not sit inside an all-raw trailing run. Requiring the run to reach the
+ * snapshot's end is what keeps such a snapshot from resuming a freeze.
  *
  * `key` must compare messages as the provider would see them; it must apply the
  * session's persisted thinking strips to all three arrays alike, so a stripped
@@ -683,14 +690,26 @@ export function coldStartRawServedIndex(args: {
     };
     const raw = byId(args.rawInput);
     const rendered = byId(args.moduleOutput);
-    for (const [index, served] of args.slotMessages.entries()) {
+    // Walk back from the end over messages the snapshot holds exactly as the host
+    // sent them; `runStart` is where that trailing raw run begins.
+    const rawKeys: string[] = [];
+    let runStart = args.slotMessages.length;
+    while (runStart > 0) {
+        const served = args.slotMessages[runStart - 1];
         const id = messageIdOf(served);
-        if (id === undefined) continue;
-        const rawMessage = raw.get(id);
-        const moduleMessage = rendered.get(id);
-        if (rawMessage === undefined || moduleMessage === undefined) continue;
+        const rawMessage = id === undefined ? undefined : raw.get(id);
+        if (rawMessage === undefined) break;
         const rawKey = args.key(rawMessage);
-        if (args.key(served) === rawKey && args.key(moduleMessage) !== rawKey) return index;
+        if (args.key(served) !== rawKey) break;
+        runStart -= 1;
+        rawKeys[runStart] = rawKey;
+    }
+    for (let index = runStart; index < args.slotMessages.length; index += 1) {
+        const id = messageIdOf(args.slotMessages[index]) as string;
+        const moduleMessage = rendered.get(id);
+        if (moduleMessage !== undefined && args.key(moduleMessage) !== rawKeys[index]) {
+            return index;
+        }
     }
     return null;
 }
