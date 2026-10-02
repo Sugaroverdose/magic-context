@@ -8,6 +8,7 @@ import {
     closeDatabase,
     getOrCreateSessionMeta,
     openDatabase,
+    recordOverflowDetected,
 } from "../../features/magic-context/storage";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import type { TransformDeps } from "../../hooks/magic-context/transform";
@@ -217,5 +218,109 @@ describe("persistV2UsageReading", () => {
         expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(1_000);
         persist(41_000, 3_000);
         expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(3_000);
+    });
+
+    it("retains rejection-derived usage reading on a subsequent context pass with no new reply", () => {
+        process.env.XDG_DATA_HOME = makeTempDir("v2-usage-persist-rejection-");
+        const db = openDatabase();
+        const sessionID = "ses_f026cf502ffegwOeLMe8Oaw5l3";
+        const contextUsageMap: TransformDeps["contextUsageMap"] = new Map();
+        const draftModel = { providerID: "google", id: "probe-model" };
+
+        // 1. Initial accepted assistant reading (seq 158 with 129,777 input tokens at t=1,000)
+        persistV2UsageReading({
+            db,
+            sessionID,
+            draftModel,
+            reading: {
+                inputTokens: 129_777,
+                limit: 100_000,
+                admissionLimit: 100_000,
+                modelKey: "google/probe-model",
+                completed: 1_000,
+            },
+            contextUsageMap,
+        });
+
+        expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(129_777);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(1_000);
+        expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(129_777);
+
+        // 2. Provider rejection writes a larger value (123,456 tokens at t=1,050)
+        recordOverflowDetected(
+            db,
+            sessionID,
+            100_000,
+            "google/probe-model",
+            "provider_overflow",
+            "prompt_only",
+            123_456,
+        );
+        contextUsageMap.set(sessionID, {
+            usage: { inputTokens: 123_456, percentage: (123_456 / 100_000) * 100 },
+            hasUsageTokens: true,
+            updatedAt: 1_050,
+        });
+
+        expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(123_456);
+        expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(123_456);
+
+        // 3. Next context pass runs before any new reply exists; the newest accepted reply is still seq 158
+        persistV2UsageReading({
+            db,
+            sessionID,
+            draftModel,
+            reading: {
+                inputTokens: 129_777,
+                limit: 100_000,
+                admissionLimit: 100_000,
+                modelKey: "google/probe-model",
+                completed: 1_000,
+            },
+            contextUsageMap,
+        });
+
+        // The rejection-derived reading must NOT be overwritten by the older reply
+        expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(123_456);
+        expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(123_456);
+
+        // 4. A genuinely new accepted reply arrives (seq 169 with 10,458 input tokens at t=2,000)
+        persistV2UsageReading({
+            db,
+            sessionID,
+            draftModel,
+            reading: {
+                inputTokens: 10_458,
+                limit: 100_000,
+                admissionLimit: 100_000,
+                modelKey: "google/probe-model",
+                completed: 2_000,
+            },
+            contextUsageMap,
+        });
+
+        // The new reply must update the reading
+        expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(10_458);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(2_000);
+        expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(10_458);
+
+        // 5. Subsequent accepted reply (10,502 input tokens at t=3,000)
+        persistV2UsageReading({
+            db,
+            sessionID,
+            draftModel,
+            reading: {
+                inputTokens: 10_502,
+                limit: 100_000,
+                admissionLimit: 100_000,
+                modelKey: "google/probe-model",
+                completed: 3_000,
+            },
+            contextUsageMap,
+        });
+
+        expect(getOrCreateSessionMeta(db, sessionID).lastInputTokens).toBe(10_502);
+        expect(getOrCreateSessionMeta(db, sessionID).lastResponseTime).toBe(3_000);
+        expect(contextUsageMap.get(sessionID)?.usage.inputTokens).toBe(10_502);
     });
 });

@@ -1,4 +1,8 @@
-import { type ContextDatabase, updateSessionMeta } from "../../features/magic-context/storage";
+import {
+    type ContextDatabase,
+    getOrCreateSessionMeta,
+    updateSessionMeta,
+} from "../../features/magic-context/storage";
 import type { TransformDeps } from "../../hooks/magic-context/transform";
 import { sessionLog } from "../../shared/logger";
 import { type UsageReading, usageReadingMatchesDraft } from "./usage-reading";
@@ -29,20 +33,39 @@ export interface PersistV2UsageReadingArgs {
  */
 export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
     const { db, sessionID, draftModel, reading } = args;
+    const currentMeta = getOrCreateSessionMeta(db, sessionID);
+    // Persist a reading only when it is newer than what is already recorded.
+    // A context pass runs on every turn and on recovery passes following provider
+    // rejection; resolving the latest assistant message from the store gives the
+    // previous accepted reply, which must not overwrite newer rejection-derived
+    // pressure (or re-persist the exact same reading).
+    if (
+        reading.completed !== undefined &&
+        currentMeta.lastResponseTime > 0 &&
+        reading.completed <= currentMeta.lastResponseTime
+    ) {
+        sessionLog(
+            sessionID,
+            `v2 usage: skipped stale reading completed=${reading.completed} <= lastResponseTime=${currentMeta.lastResponseTime}`,
+        );
+        return;
+    }
+
     const draftModelKey = `${draftModel.providerID}/${draftModel.id}`;
     const readingMatchesDraft = usageReadingMatchesDraft(reading, draftModel);
     // last_response_time is the idle clock for the provider cache. A reply with
     // no tokens (a request the provider refused) refreshed no cache, so it does
     // not move the clock; the same rule OpenCode 1 and Pi apply.
-    if (reading.completed !== undefined && reading.inputTokens > 0)
-        updateSessionMeta(db, sessionID, { lastResponseTime: reading.completed });
     const percentage = (reading.inputTokens / reading.limit) * 100;
-    updateSessionMeta(db, sessionID, {
+    const updates: Parameters<typeof updateSessionMeta>[2] = {
         lastContextPercentage: percentage,
         lastInputTokens: reading.inputTokens,
         lastUsageContextLimit: reading.limit,
         lastObservedModelKey: reading.modelKey ?? draftModelKey,
-    });
+    };
+    if (reading.completed !== undefined && reading.inputTokens > 0)
+        updates.lastResponseTime = reading.completed;
+    updateSessionMeta(db, sessionID, updates);
     sessionLog(
         sessionID,
         `v2 usage: inputTokens=${reading.inputTokens} contextLimit=${reading.limit} percentage=${percentage} responseModel=${reading.modelKey ?? "legacy"} draftContextLimit=${reading.admissionLimit} pressure=${readingMatchesDraft ? "current" : "stale-model-ignored"}`,
