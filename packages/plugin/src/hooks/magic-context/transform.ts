@@ -2210,6 +2210,19 @@ export function createTransform(deps: TransformDeps) {
             `strippedParts=${strippedStructuralNoise}`,
         );
 
+        // Tagging restores pristine source on every request, so replay persisted
+        // caveman compression even when no new cleanup is allowed. Replay it before
+        // inline-reasoning removal: compression would otherwise bring back thinking
+        // that an earlier request removed. Fresh cleanup uses the same ordering.
+        if (!reducedMode && !compactionOff && deps.cavemanTextCompression?.enabled) {
+            const tCavemanReplay = performance.now();
+            const replayedCaveman = replayCavemanCompression(sessionId, db, targets, activeTags);
+            if (replayedCaveman > 0) {
+                sessionLog(sessionId, `caveman replay: re-applied ${replayedCaveman} text tags`);
+            }
+            logTransformTiming(sessionId, "replayCavemanCompression", tCavemanReplay);
+        }
+
         // Replay persisted reasoning clearing on EVERY pass (including defer).
         // This ensures reasoning cleared on a previous cache-busting pass stays cleared
         // even when OpenCode rebuilds messages fresh from its own DB.
@@ -2243,27 +2256,6 @@ export function createTransform(deps: TransformDeps) {
                 );
             }
             logTransformTiming(sessionId, "replayReasoningClearing", tReplay);
-        }
-
-        // Re-apply persisted caveman compression on EVERY pass (defer too).
-        // tagMessages restores the pristine original from source_contents on
-        // every pass, so without this replay step compressed text would
-        // oscillate between compressed (post-execute) and original (defer),
-        // busting the provider prompt cache. Cheap when no tags carry
-        // caveman_depth > 0 (early exit). Only runs for primary sessions —
-        // matches the gate that lets applyCavemanCleanup deepen depth in the
-        // first place.
-        //
-        // Reuse this pass's active tags; replay filters to targets.has itself.
-        // Only message bytes have changed since that load: no await or tag
-        // status/depth write intervenes, so the snapshot is still current.
-        if (!reducedMode && !compactionOff && deps.cavemanTextCompression?.enabled) {
-            const tCavemanReplay = performance.now();
-            const replayedCaveman = replayCavemanCompression(sessionId, db, targets, activeTags);
-            if (replayedCaveman > 0) {
-                sessionLog(sessionId, `caveman replay: re-applied ${replayedCaveman} text tags`);
-            }
-            logTransformTiming(sessionId, "replayCavemanCompression", tCavemanReplay);
         }
 
         const t4 = performance.now();

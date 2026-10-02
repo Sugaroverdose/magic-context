@@ -6053,6 +6053,36 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	// `replayClearedReasoning` + `replayStrippedInlineThinking`
 	// in transform-postprocess-phase.ts.
 	const messageIdToMaxTag = buildMessageIdToMaxTag(targets);
+
+	// Pi rebuilds messages from raw history on every request. Replay persisted
+	// caveman compression first, then remove inline reasoning again. Compression
+	// reads pristine source, so running it last would restore reasoning text that
+	// an earlier request removed under the persisted reasoning-clear tag cutoff.
+	if (args.heuristics?.caveman?.enabled && !args.isSubagent) {
+		const tCavemanReplay = performance.now();
+		try {
+			const tags = getTagsByNumbers(args.db, args.sessionId, targetTagNumbers);
+			const replayed = replayCavemanCompression(
+				args.sessionId,
+				args.db,
+				targets,
+				tags,
+			);
+			if (replayed > 0) {
+				sessionLog(
+					args.sessionId,
+					`caveman replay: ${replayed} tags re-compressed from source`,
+				);
+			}
+		} catch (err) {
+			sessionLog(
+				args.sessionId,
+				`caveman replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+		logTransformTiming(args.sessionId, "cavemanReplay", tCavemanReplay);
+	}
+
 	if (args.reasoningClearing) {
 		try {
 			const tReplayReasoning = performance.now();
@@ -6093,46 +6123,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				`reasoning replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
 			);
 		}
-	}
-
-	// 3c. Caveman compression replay (cache-stable, runs on EVERY pass).
-	// applyPiHeuristicCleanup persists per-tag caveman_depth on execute
-	// passes, but the actual compressed text only lives in memory; on
-	// the next defer pass the AgentMessage[] is rebuilt fresh from the
-	// JSONL and arrives uncompressed. Without replay, every defer pass
-	// after a caveman pass would bust the provider cache prefix because
-	// the compressed text vanishes and reverts to the original.
-	//
-	// Mirrors OpenCode's `replayCavemanCompression` call in
-	// transform.ts:793. Idempotent — `cavemanCompress(originalText, level)`
-	// is deterministic, so replay produces the exact text the original
-	// execute pass produced, regardless of how many times it runs.
-	if (args.heuristics?.caveman?.enabled && !args.isSubagent) {
-		const tCavemanReplay = performance.now();
-		try {
-			// P0 perf: caveman replay only acts on tags whose tag_number is in
-			// `targets`, so fetch just that slice instead of the whole session
-			// (~50k rows on long sessions).
-			const tags = getTagsByNumbers(args.db, args.sessionId, targetTagNumbers);
-			const replayed = replayCavemanCompression(
-				args.sessionId,
-				args.db,
-				targets,
-				tags,
-			);
-			if (replayed > 0) {
-				sessionLog(
-					args.sessionId,
-					`caveman replay: ${replayed} tags re-compressed from source`,
-				);
-			}
-		} catch (err) {
-			sessionLog(
-				args.sessionId,
-				`caveman replay failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
-			);
-		}
-		logTransformTiming(args.sessionId, "cavemanReplay", tCavemanReplay);
 	}
 
 	// 3d. Cleanup stages NOT applicable to Pi (intentionally omitted):
