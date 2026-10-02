@@ -643,6 +643,58 @@ export function replayLkg(args: {
     return { ok: true, messages: replayed };
 }
 
+function messageIdOf(message: unknown): string | undefined {
+    if (typeof message !== "object" || message === null) return undefined;
+    const info = (message as { info?: unknown }).info;
+    if (typeof info !== "object" || info === null) return undefined;
+    const id = (info as { id?: unknown }).id;
+    return typeof id === "string" ? id : undefined;
+}
+
+/**
+ * Index of the first snapshot message that a previous process served raw from a
+ * frozen replay, or null when there is none.
+ *
+ * A frozen healthy pass captures exactly what it served, so after a restart the
+ * durable snapshot can hold messages exactly as the host sent them (untouched by
+ * the module) where the module now renders the same message differently. A
+ * healthy snapshot cannot match that: it holds module output, so for each message
+ * either the module renders it like the raw input (module equals raw) or it does
+ * not (snapshot differs from raw). Host additions such as nudges only make the
+ * snapshot differ from raw as well.
+ *
+ * `key` must compare messages as the provider would see them; it must apply the
+ * session's persisted thinking strips to all three arrays alike, so a stripped
+ * block in the snapshot does not read as a difference.
+ */
+export function coldStartRawServedIndex(args: {
+    slotMessages: readonly unknown[];
+    rawInput: readonly unknown[];
+    moduleOutput: readonly unknown[];
+    key: (message: unknown) => string;
+}): number | null {
+    const byId = (messages: readonly unknown[]) => {
+        const map = new Map<string, unknown>();
+        for (const message of messages) {
+            const id = messageIdOf(message);
+            if (id !== undefined) map.set(id, message);
+        }
+        return map;
+    };
+    const raw = byId(args.rawInput);
+    const rendered = byId(args.moduleOutput);
+    for (const [index, served] of args.slotMessages.entries()) {
+        const id = messageIdOf(served);
+        if (id === undefined) continue;
+        const rawMessage = raw.get(id);
+        const moduleMessage = rendered.get(id);
+        if (rawMessage === undefined || moduleMessage === undefined) continue;
+        const rawKey = args.key(rawMessage);
+        if (args.key(served) === rawKey && args.key(moduleMessage) !== rawKey) return index;
+    }
+    return null;
+}
+
 export function validateLkgEntry(slot: LkgSlot, entryIds: string[]): boolean {
     return entryIdsAreValid(slot, entryIds);
 }

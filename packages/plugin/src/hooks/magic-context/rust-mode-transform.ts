@@ -83,7 +83,7 @@ import {
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { createHistorianHostRunner } from "./historian-host-runner";
 import { saveLkgSlotToDb } from "./lkg-persist";
-import { replayLkg, resolveLkgModelKeys } from "./lkg-replay";
+import { coldStartRawServedIndex, replayLkg, resolveLkgModelKeys } from "./lkg-replay";
 import { lkgReplayFits } from "./lkg-replay-fit";
 import {
     captureSlot,
@@ -150,6 +150,7 @@ import {
     applyRustModeDeferredCompactionMarker,
     replayRustModeBindingMismatchStrips,
     runRustModePostprocess,
+    rustModeServedKeyAfterPersistedStrips,
     type ThinkingBindingRecoveryApplication,
 } from "./transform-postprocess-phase";
 import { logTransformTiming } from "./transform-stage-logger";
@@ -410,6 +411,13 @@ interface RustSessionState extends ModuleStateSyncState {
     lkgRepresentationFrozen: boolean;
     lkgFrozenHealthyPasses: number;
     lkgFrozenAtInputCount: number | null;
+    /**
+     * True until this process's first pass for the session applies module output.
+     * That pass checks whether the durable slot it inherited was captured from a
+     * frozen serve (a previous process froze and captured raw bytes) and, if so,
+     * resumes the freeze instead of adopting module output.
+     */
+    lkgColdStartCheckPending: boolean;
     /** Highest fold coverage ordinal this process has already armed the deferred-note
      * nudge for. Null until the first committed boundary of the process is observed. */
     noteNudgePublishedOrdinal: number | null;
@@ -1052,6 +1060,7 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             lkgRepresentationFrozen: false,
             lkgFrozenHealthyPasses: 0,
             lkgFrozenAtInputCount: null,
+            lkgColdStartCheckPending: true,
             noteNudgePublishedOrdinal: null,
         };
         states.set(sessionId, state);
@@ -1984,6 +1993,45 @@ export function createRustModeTransform(
         modelFromMessages(messages) ??
         deps.liveModelBySession?.get(sessionId) ??
         hostModelFallback(sessionId);
+
+    /**
+     * On this process's first applied pass for a session, resume a freeze that a
+     * previous process left behind. A frozen healthy pass captures the raw bytes it
+     * served, so a durable slot holding a message exactly as the host sent it, which
+     * the module now renders differently, proves the provider last saw the frozen
+     * representation. Uses the module output from before postprocess, which has
+     * side effects a pass that ends in a frozen serve must not run.
+     */
+    const resumeFreezeFromColdStartSlot = (
+        state: RustSessionState,
+        sessionId: string,
+        rawInput: MessageLike[],
+        moduleOutput: readonly unknown[],
+        providerID: string | undefined,
+    ): void => {
+        try {
+            const slot = getSlot(sessionId);
+            const slotMessages = parseLastServedSnapshot(slot?.jsonPrefix);
+            if (!slotMessages) return;
+            const index = coldStartRawServedIndex({
+                slotMessages,
+                rawInput,
+                moduleOutput,
+                key: rustModeServedKeyAfterPersistedStrips({
+                    db: deps.db,
+                    sessionId,
+                    resolvedProviderID: providerID,
+                }),
+            });
+            if (index === null) return;
+            state.lkgRepresentationFrozen = true;
+            state.forceFullWire = true;
+            state.lkgFrozenAtInputCount = rawInput.length;
+            sessionLog(sessionId, `lkg_cold_start_frozen_slot_resumed raw_served_index=${index}`);
+        } catch (error) {
+            sessionLog(sessionId, "lkg cold-start freeze check failed (ignored):", error);
+        }
+    };
 
     registerRustLkgReplayParticipant({
         ownsSession: (sessionId) => states.has(sessionId),
@@ -3545,6 +3593,22 @@ export function createRustModeTransform(
                 );
                 let appliedMessages = moduleMessages;
                 let replayedFrozenRepresentation = false;
+                if (state.lkgColdStartCheckPending) {
+                    state.lkgColdStartCheckPending = false;
+                    if (
+                        !cacheBustingPass &&
+                        !state.lkgRepresentationFrozen &&
+                        state.lkgAcceptedCapture === undefined
+                    ) {
+                        resumeFreezeFromColdStartSlot(
+                            state,
+                            sessionId,
+                            messages,
+                            moduleMessages,
+                            model?.providerID,
+                        );
+                    }
+                }
                 // While frozen, the last-known-good slot holds the array the last pass served
                 // (or its prefix). Read it before any replay, because a replay that fails
                 // validation drops the slot, and also on a module-busting pass: that bust

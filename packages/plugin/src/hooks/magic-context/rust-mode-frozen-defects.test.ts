@@ -35,6 +35,8 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import { resolveTrustedContextLimit } from "./event-resolvers";
+import { createDbLkgPersistence } from "./lkg-persist";
+import { registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
@@ -52,6 +54,8 @@ let sessionCounter = 0;
 afterEach(() => {
     __resetToolDefinitionMeasurements();
     resetEmergencyRecoveryRegistryForTest();
+    registerLkgPersistence(undefined);
+    resetLkgSlotsForTest();
     closeReadOnlySessionDb();
     transformDecisionTest.reset();
     for (const unregister of unregisters.splice(0)) unregister();
@@ -197,11 +201,13 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         getModelKey: () => MODEL_KEY,
         ...(options.compactionOff ? { compactionOff: true } : {}),
     };
-    const transform = createRustModeTransform(deps, {
-        moduleClient,
-        modulePageMaxBytes: 512 * 1024,
-        scheduleLkgCapture: (capture) => capture(),
-    });
+    const makeAdapter = () =>
+        createRustModeTransform(deps, {
+            moduleClient,
+            modulePageMaxBytes: 512 * 1024,
+            scheduleLkgCapture: (capture) => capture(),
+        });
+    let transform = makeAdapter();
     const meta = () => {
         const sessionMeta = getOrCreateSessionMeta(db, sessionId);
         recordToolDefinition("anthropic", "claude-opus-5-5", undefined, "read", "read fixture", {
@@ -255,7 +261,18 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         sessionId,
         db,
         deps,
-        transform,
+        get transform() {
+            return transform;
+        },
+        /**
+         * A new process: a fresh adapter on the same database, with the in-memory
+         * slot store emptied so the next read hydrates the durable slot.
+         */
+        restart: () => {
+            resetLkgSlotsForTest();
+            registerLkgPersistence(createDbLkgPersistence(db));
+            transform = makeAdapter();
+        },
         run,
         runWrapped,
         frozenFields,
@@ -524,5 +541,91 @@ describe("the wrapper admits a replay the way the adapter does", () => {
         expect(reasoningOf("a1")).toBe(false);
         expect(reasoningOf("a2")).toBe(false);
         expect(reasoningOf("a3")).toBe(true);
+    });
+});
+
+describe("a restart resumes a freeze the durable slot proves", () => {
+    function textOf(messages: unknown[], id: string): string {
+        const message = (messages as MessageLike[]).find((candidate) => candidate.info.id === id);
+        return (message?.parts ?? [])
+            .map((part) => (part as { text?: string }).text ?? "")
+            .join("|");
+    }
+
+    it("a restarted adapter resumes the freeze from a captured frozen slot", async () => {
+        const s = frozenSession("restart-frozen");
+        const sid = s.sessionId;
+        s.setModuleOutput(tagAllUsers);
+        await s.run([user(sid, "m1", "question")], "HARD");
+        const conversation: MessageLike[] = [
+            user(sid, "m1", "question"),
+            thinkingAssistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+        ];
+        await s.run([...conversation], "throw");
+        conversation.push(assistant(sid, "a2"), user(sid, "m3", "turn 3"));
+        await s.run([...conversation], "SOFT+");
+        conversation.push(assistant(sid, "a3"), user(sid, "m4", "turn 4"));
+        const lastServed = await s.run([...conversation], "SOFT+");
+        // The freeze served m2 onward untagged and captured exactly that.
+        expect(textOf(lastServed, "m1")).toBe("§1§ question");
+        expect(textOf(lastServed, "m2")).toBe("turn 2");
+
+        s.restart();
+        conversation.push(assistant(sid, "a4"), user(sid, "m5", "turn 5"));
+        const served = await s.run([...conversation], "SOFT+");
+        expect(sha(served.slice(0, lastServed.length))).toBe(sha(lastServed));
+        expect(sha(served.slice(lastServed.length))).toBe(
+            sha(conversation.slice(lastServed.length)),
+        );
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
+    });
+
+    it("a restart of a healthy session does not freeze", async () => {
+        const s = frozenSession("restart-healthy");
+        const sid = s.sessionId;
+        s.setModuleOutput(tagAllUsers);
+        const conversation: MessageLike[] = [
+            user(sid, "m1", "question"),
+            thinkingAssistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+        ];
+        // The HARD strips a1's thinking and saves that strip, so the durable slot
+        // holds a1 without it while the module keeps rendering a1 as the host sent it.
+        const busted = await s.run([...conversation], "HARD");
+        conversation.push(assistant(sid, "a2"), user(sid, "m3", "turn 3"));
+        const defer = await s.run([...conversation], "SOFT+");
+        expect(sha(defer.slice(0, busted.length))).toBe(sha(busted));
+
+        s.restart();
+        conversation.push(assistant(sid, "a3"), user(sid, "m4", "turn 4"));
+        const served = await s.run([...conversation], "SOFT+");
+        expect(sha(served.slice(0, defer.length))).toBe(sha(defer));
+        expect(textOf(served, "m4")).toBe("§7§ turn 4");
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+    });
+
+    it("restart right after an uncaptured failure replay adopts module output (gap closed by the v95 marker)", async () => {
+        // A replay served after a failure is not captured, so the durable slot does
+        // not hold the raw tail it served and nothing inside the slot proves the
+        // freeze. Nothing else durable records the freeze either (the planned fix is a
+        // frozen marker column on the slot row, added by schema migration v95), so the
+        // restarted adapter adopts module output. This pins that known gap until then.
+        const s = frozenSession("restart-after-failure");
+        const sid = s.sessionId;
+        s.setModuleOutput(tagAllUsers);
+        await s.run([user(sid, "m1", "question")], "HARD");
+        const conversation: MessageLike[] = [
+            user(sid, "m1", "question"),
+            assistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+        ];
+        const replayed = await s.run([...conversation], "throw");
+        expect(textOf(replayed, "m2")).toBe("turn 2");
+
+        s.restart();
+        const served = await s.run([...conversation], "SOFT+");
+        expect(textOf(served, "m2")).toBe("§3§ turn 2");
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
     });
 });

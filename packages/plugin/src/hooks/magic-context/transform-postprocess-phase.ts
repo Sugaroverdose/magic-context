@@ -667,6 +667,35 @@ export function firstServedDivergenceIndex(
     return null;
 }
 
+/**
+ * A provider-visible key for one message as a replay would serve it: the
+ * session's persisted binding-mismatch strips are applied to a copy first, so a
+ * message whose stored thinking was stripped compares equal to its unstripped
+ * live form. The input is never mutated. Equal keys mean equal served bytes
+ * (see `servedMessageKey`).
+ */
+export function rustModeServedKeyAfterPersistedStrips(args: {
+    db: ContextDatabase;
+    sessionId: string;
+    resolvedProviderID?: string;
+}): (message: unknown) => string {
+    const recoveryMessageIds = new Set<string>();
+    for (const id of getMergedReasoningStrippedIds(args.db, args.sessionId)) {
+        if (!id.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) continue;
+        const messageId = id.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length);
+        if (messageId.length > 0) recoveryMessageIds.add(messageId);
+    }
+    return (message) => {
+        const id = isRecord(message) && isRecord(message.info) ? message.info.id : undefined;
+        if (typeof id !== "string" || !recoveryMessageIds.has(id)) {
+            return servedMessageKey(message, args.resolvedProviderID);
+        }
+        const copy = [structuredClone(message) as MessageLike];
+        stripReasoningFromAssistantIds(copy, args.resolvedProviderID, recoveryMessageIds);
+        return servedMessageKey(copy[0], args.resolvedProviderID);
+    };
+}
+
 /** Reapply durable binding-mismatch strips when a Rust LKG snapshot is replayed. */
 export function replayRustModeBindingMismatchStrips(args: {
     db: ContextDatabase;
