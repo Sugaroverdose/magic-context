@@ -56,4 +56,21 @@ describe("searchGitCommitsSync", () => {
                 .map((commit) => commit.sha),
         );
     });
+
+    it("treats % and _ in the LIKE fallback as literal characters", () => {
+        const projectPath = "git:like-escape";
+        const plain = { ...makeCommit(1), message: "tune worker pool" };
+        const percent = { ...makeCommit(2), message: "cap cpu at 90% load" };
+        const underscore = { ...makeCommit(3), message: "rename max_retries flag" };
+        upsertCommits(db, projectPath, [plain, percent, underscore]);
+        const shas = (query: string) =>
+            searchGitCommitsSync(db, projectPath, query, { limit: 10 }).map(
+                (result) => result.commit.sha,
+            );
+
+        // Neither query has a word token, so FTS finds nothing and the LIKE
+        // fallback runs; an unescaped wildcard would match every commit.
+        expect(shas("%")).toEqual([percent.sha]);
+        expect(shas("_")).toEqual([underscore.sha]);
+    });
 });

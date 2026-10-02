@@ -61,6 +61,11 @@ function getFtsStatement(db: Database, dated = false): PreparedStatement {
     return stmt;
 }
 
+/** Escape LIKE wildcards so the fallback matches the query as a literal substring. */
+function escapeLikePattern(text: string): string {
+    return text.replace(/[\\%_]/g, (char) => `\\${char}`);
+}
+
 function getLikeFallbackStatement(db: Database, dated = false): PreparedStatement {
     const statements = dated ? datedFtsPlainStatements : ftsPlainStatements;
     let stmt = statements.get(db);
@@ -70,7 +75,7 @@ function getLikeFallbackStatement(db: Database, dated = false): PreparedStatemen
              FROM git_commits
              WHERE project_path = ?
                ${dated ? "AND committed_at BETWEEN ? AND ?" : ""}
-               AND lower(message) LIKE '%' || lower(?) || '%'
+               AND lower(message) LIKE '%' || lower(?) || '%' ESCAPE '\\'
              ORDER BY committed_at DESC LIMIT ?`,
         );
         statements.set(db, stmt);
@@ -169,7 +174,7 @@ export function searchGitCommitsSync(
         for (const row of getLikeFallbackStatement(db, dated).all(
             projectPath,
             ...(dated ? [from, to] : []),
-            trimmed,
+            escapeLikePattern(trimmed),
             fetchLimit,
         ) as CommitRow[]) {
             ftsCandidates.push(rowToCommit(row));
