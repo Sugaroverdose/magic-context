@@ -298,6 +298,7 @@ All digests are SHA-256 written as 64 lowercase hex characters.
 | `schema_digest` | JCS of the structural schema: `description` removed from every schema object (TP §3; `catalog.rs:340-366,375-431`). |
 | `composition_digest` (top level and in `system_text`) | JCS of the request's `composition`, exactly as sent (TP §3; E line 151). Absent on a preflight call, which carries no composition. |
 | `system_text.item_digest` | The UTF-8 bytes of `text`. |
+| `system_text.tool_names` | The sorted, deduplicated names of Magic Context tools whose guidance the text describes, taken from the composition's Magic Context entry (or served tools when there is no composition). Present whenever `text` is present; absent when there is no text. |
 | `system_text.preflight_digest` | JCS of `{format: "magic-context/preflight/1", preset, params, config, text_revision}`, where `preset` and `params` are the text item's, `config` is the resolved inputs listed in `mc-tool-catalog-v1/config.json`, and `text_revision` hashes every model-facing string the build ships: JCS of `{texts, descriptions, parameters}` from the shared definition, where `texts` is every guidance template and fragment, the two tools-only texts included. The generator fails when a guidance asset in `crates/mc-module/assets/` is not covered. It doesn't depend on the composition. |
 | `catalog_digest` | JCS of the answer without `generation` and `catalog_digest`: `composition_digest`, `tools` and `system_text` when present. A `digest_only` request with the same inputs gets the same value (TP §3). |
 | `generation` | Equal to `catalog_digest`, as AFT does. Opaque to consumers. |
@@ -334,16 +335,16 @@ assets byte for byte (`crates/mc-module/assets/guidance_primary.txt`,
 compares them on every run, and checks that `guidance_light_no_reduce.txt`,
 which no example uses, is the definition's light no-reduce text.
 
-| Example | Request | `catalog_digest` | Text (`item_digest`, UTF-8 bytes) |
+| Example | Request | Old `catalog_digest` → new `catalog_digest` | Text (`item_digest`, UTF-8 bytes) |
 |---|---|---|---|
-| `preflight` | `primary`, no composition, no text | `4dbfd638576261155e2f10b6dddfbd16ba652da5529e8a978b0ca625e2a994f2` | none |
-| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` present, so the tagged text | `629f6a1724f7ded5e64537552511133d2ae77e2943ba2c45ac8d85fd7a73a276` | `ee720eeb…`, 6,016 |
-| `primary-full.digest-only` | same, `digest_only: true` | same as above | none |
-| `primary-light` | `tool_descs: concise`, `surface: light` | `706719affdc2edd24757098e6b12b99dfbe84bc6639842de46be0b5cc1773fd9` | `f03cec64…`, 4,736 |
-| `subagent` | `subagent`, AFT and MC only | `b0e33d2d121a0f987e4958692cc61882ace971413fc5267209aa69d8fd30f180` | `561c5cb3…`, 2,249 |
-| `no-reduce` | `primary`, `exclude: ["ctx_reduce"]`; the composition lacks it | `8baff6228ce394fe303ddb734cd7a11d9ab4a1ff3c04424c5cfe65679792c89d` | `80e42ffa…`, 4,221 |
-| `tools-only` | `tools-only`, no params; the composition lists Magic Context's four tools without `ctx_reduce` | `319c2b82687b9c6e6201d1c90441b96b8cba55fb7326c339f49fdd01fe407e23` | `73c67970…`, 802 |
-| `tools-only-light` | `tools-only`, `model: anthropic/claude-haiku-4-5` on both items, which the config maps to light | `80a9675ae14f3514c3f86dbe9b12e1bf76b5331645b0875e7c2f6df90148e62a` | `7ab35687…`, 675 |
+| `preflight` | `primary`, no composition, no text | `4dbfd638576261155e2f10b6dddfbd16ba652da5529e8a978b0ca625e2a994f2` → `4dbfd638576261155e2f10b6dddfbd16ba652da5529e8a978b0ca625e2a994f2` | none |
+| `primary-full` | a head with AFT's tools, Magic Context's five and Prefrontal's forwarding tools; `ctx_reduce` is present, so the guidance text is included | `629f6a1724f7ded5e64537552511133d2ae77e2943ba2c45ac8d85fd7a73a276` → `363be1ae56892bef2904595cf6644ddfbe4144d080d073776069a1f881ab5e4f` | `ee720eeb…`, 6,016 |
+| `primary-full.digest-only` | same, `digest_only: true` | `629f6a1724f7ded5e64537552511133d2ae77e2943ba2c45ac8d85fd7a73a276` → `363be1ae56892bef2904595cf6644ddfbe4144d080d073776069a1f881ab5e4f` | none |
+| `primary-light` | `tool_descs: concise`, `surface: light` | `706719affdc2edd24757098e6b12b99dfbe84bc6639842de46be0b5cc1773fd9` → `bf46a16344d6869af44648fb17a990aef33746ed46687bdeaa39914b73677a39` | `f03cec64…`, 4,736 |
+| `subagent` | `subagent`, AFT and MC only | `b0e33d2d121a0f987e4958692cc61882ace971413fc5267209aa69d8fd30f180` → `a297c427e1f4e821bb134081d8965f34a30c5abe0a98f2f00196b941de316f55` | `561c5cb3…`, 2,249 |
+| `no-reduce` | `primary`, `exclude: ["ctx_reduce"]`; the composition lacks it | `8baff6228ce394fe303ddb734cd7a11d9ab4a1ff3c04424c5cfe65679792c89d` → `f3fb053c5bbc680734978aee427804ec443a0114eea9a5f417f8e438a6346c62` | `80e42ffa…`, 4,221 |
+| `tools-only` | `tools-only`, no params; the composition lists Magic Context's four tools without `ctx_reduce` | `319c2b82687b9c6e6201d1c90441b96b8cba55fb7326c339f49fdd01fe407e23` → `9b776859dbfece430c08a798e4dd3dff0be9802d7fd2b88282e3adbedc7bd098` | `73c67970…`, 802 |
+| `tools-only-light` | `tools-only`, `model: anthropic/claude-haiku-4-5` on both items, which the config maps to light | `80a9675ae14f3514c3f86dbe9b12e1bf76b5331645b0875e7c2f6df90148e62a` → `e5ad1e0995f6985cfcca1e8dd15f125f9ae78f7c7b370f4d6a2c6c5a3db2554d` | `7ab35687…`, 675 |
 
 `tools-only` and `no-reduce` serve the same tools but different texts
 (§7.2). The full and light `tools-only` examples differ in both the text and

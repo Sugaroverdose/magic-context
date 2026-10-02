@@ -386,6 +386,7 @@ pub(crate) fn catalog_answer(
         if let Some(digest) = &composition_digest {
             system_text.insert("composition_digest".to_string(), json!(digest));
         }
+        system_text.insert("tool_names".to_string(), json!(own));
         system_text.insert("text".to_string(), Value::String(text));
         content.insert("system_text".to_string(), Value::Object(system_text));
     }
