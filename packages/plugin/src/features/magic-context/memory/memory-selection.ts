@@ -26,10 +26,12 @@ export function compareMemorySelectionPriority(
     if (left.status === "permanent" && right.status !== "permanent") return -1;
     if (right.status === "permanent" && left.status !== "permanent") return 1;
 
+    // A missing importance ranks below every set one. Two missing importances tie and fall
+    // through to reinforcement recency; subtracting them gave -Infinity - -Infinity = NaN,
+    // which sort() reads as "equal", so such memories kept their input order instead.
     const leftImportance = left.importance ?? Number.NEGATIVE_INFINITY;
     const rightImportance = right.importance ?? Number.NEGATIVE_INFINITY;
-    const importanceDiff = rightImportance - leftImportance;
-    if (importanceDiff !== 0) return importanceDiff;
+    if (leftImportance !== rightImportance) return rightImportance > leftImportance ? 1 : -1;
 
     const leftReinforcedAt = memoryReinforcementAt(left);
     const rightReinforcedAt = memoryReinforcementAt(right);
