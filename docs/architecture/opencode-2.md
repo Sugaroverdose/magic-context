@@ -11,7 +11,7 @@ Paths are relative to `packages/plugin/`.
 - `src/v2/hooks/payload.ts`: projects the host draft into the message shape the shared transform reads, and commits the result back.
 - `src/v2/store-reader.ts`, `src/v2/hooks/store.ts`: read raw history from the OpenCode 2 database.
 - `src/v2/fold/owner.ts`, `fold/restore.ts`, `fold/host-media.ts`, `fold/markers.ts`: fold ownership and restoring history around host checkpoints.
-- `src/v2/hidden-completion.ts`, `src/v2/hooks/hidden-child.ts`, `src/v2/host-service.ts`: hidden model calls and cleanup of their sessions.
+- `src/v2/hidden-completion.ts`, `src/v2/hooks/hidden-child.ts`, `src/v2/hidden-child-native.ts`, `src/v2/hidden-child-cleanup.ts`: hidden model calls and cleanup of their sessions.
 - `src/v2/hooks/refusal.ts`: refusing a turn before it reaches the provider.
 - `src/v2/hooks/usage-reading.ts`, `hooks/usage-persist.ts`: reading and recording the provider's usage for the latest reply.
 - `src/v2/hooks/channel2.ts`, `hooks/commands.ts`, `hooks/tools.ts`, `hooks/dream-trigger.ts`, `hooks/dream-manual.ts`, `hooks/update-check.ts`.
@@ -65,7 +65,7 @@ What runs through it:
 - **`/ctx-wrapup`** and manual `/ctx-dream` (`hooks/dream-manual.ts`).
 - **Scheduled dreamer tasks**, woken by execution events (`hooks/dream-trigger.ts`). `tool-loop` tasks run through fresh task-scoped hidden children; the host executes their permitted tools and the existing manifest parsers apply the result (see [dreamer.md](dreamer.md)).
 
-Retired hidden sessions are deleted through the host's own HTTP route (`DELETE /api/session/:id`), reached through the service registration discovered by `host-service.ts`. The child records which registration created it and is deleted only through that one. A child with no bound registration stays retriable and declares the `hidden_cleanup_unbound` limitation (`MC-H02`). `keep_subagents: true` keeps settled children.
+OpenCode 2.0.22 or newer is required: startup checks for `session.remove` and `session.compact`, not a version string. Unsupported hosts refuse turns before the provider and show one upgrade notice. Each hidden run gets a fresh child with `parentID`; its location is inherited rather than sent. The host removes it on completion, with idempotent not-found handling and a bounded shutdown wait. `keep_subagents: true` keeps settled children and historian children. On upgrade, legacy `opencode2_hidden_children:*` records are drained through `session.remove` in bounded, resumable boot batches; a completion record stops further sweeps.
 
 ## Commands, tools and Channel 2
 
@@ -79,7 +79,7 @@ Retired hidden sessions are deleted through the host's own HTTP route (`DELETE /
 
 ## Host limitations
 
-A host limitation is a capability the current host lacks for the life of the process. `declareHostLimitation` (`shared/host-limitations.ts`) records it once; status surfaces keep printing it with its `MC-*` code. The OpenCode 2 adapter declares `rust_mode_unsupported` (`MC-S06`, Rust transform mode configured but running TypeScript) and `hidden_cleanup_unbound` (`MC-H02`).
+A host limitation is a capability the current host lacks for the life of the process. `declareHostLimitation` (`shared/host-limitations.ts`) records it once; status surfaces keep printing it with its `MC-*` code. The OpenCode 2 adapter uses native session cleanup and supports Rust transform mode, so neither requires a host limitation.
 
 ## Moving between OpenCode 1 and 2 stores
 

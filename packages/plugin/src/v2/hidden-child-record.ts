@@ -6,21 +6,9 @@ import {
     hiddenAgentFor,
     hiddenToolLoop,
 } from "./hooks/hidden-child";
-import type { HostServiceOwner } from "./host-service";
 import type { StoreRow } from "./store-reader";
 
-/**
- * What the OpenCode 2 hidden-run executor and its two child lifecycles share. A lifecycle decides
- * where a hidden run's child session comes from and what happens to it afterwards:
- *
- * - `hidden-child-native.ts` serves hosts whose plugin session API can remove sessions. Each run
- *   gets a fresh child parented to the user's session, removed when the run ends.
- * - `hidden-child-legacy.ts` serves older hosts. Children are root sessions reused across runs,
- *   recorded in context.db, and deleted through the host's HTTP route; whatever that misses is
- *   deleted offline by the CLI's `doctor --fix` (doctor-hidden-children.ts in packages/cli).
- *
- * `createV2HiddenCompletionExecutor` picks one of the two, in one place.
- */
+/** Session carrier shared by the native hidden-run executor and lifecycle. */
 
 export interface HiddenChildModel {
     providerID: string;
@@ -37,24 +25,12 @@ export interface PersistedHiddenChild {
     title: string;
     model: HiddenChildModel;
     created_at: number;
-    title_reasserted: boolean;
-    /**
-     * The host service registration that owned this child when it was created, or absent when the
-     * creating host had registered none (and for rows written before this was recorded). Deletion
-     * goes through this and nothing else, so an absent binding means the child's session can only
-     * be left behind and reported. Only the legacy lifecycle records it.
-     */
-    owner?: HostServiceOwner;
     /** Directory passed to the host when creating this session, independent of later caller cwd. */
     directory?: string;
     /**
-     * True once any run in this child has completed with a settled reply. A child is reused across
-     * many runs, so this stays true whatever a later run does, and it is carried onto the retired
-     * entry. Absent on rows written before this was recorded, which count as never settled.
+     * True once the child has completed with a settled reply, for keep_subagents retention.
      */
     ever_settled?: boolean;
-    /** Number of boot attempts at resolving a legacy entry without its creation directory. */
-    cleanup_attempts?: number;
 }
 
 /** The parts of a retired child that the `keep_subagents` retention rule looks at. */
@@ -65,9 +41,9 @@ export interface HiddenChildHost {
         title: string;
         agent: string;
         model: { providerID: string; id: string; variant?: string };
-        location: { directory: string };
+        location?: { directory: string };
         metadata: { magic_context: "hidden-run"; role: HiddenChildRole };
-        /** Sent only on hosts with `removeSession`; older hosts never see the field. */
+        /** A child inherits this parent's location. */
         parentID?: string;
     }): Promise<{ id: string }>;
     get(input: { sessionID: string }): Promise<{
@@ -88,23 +64,9 @@ export interface HiddenChildHost {
     interrupt(input: { sessionID: string }): Promise<{ interrupted: boolean }>;
     update(input: { sessionID: string; title: string }): Promise<void>;
     /**
-     * The host's own `session.remove` from the plugin session API. Its presence is what selects the
-     * native lifecycle; OpenCode 2 releases up to 2.0.21 do not expose it to plugins.
+     * The host's own session.remove. Startup refuses hosts without this capability.
      */
     removeSession?(input: { sessionID: string }): Promise<void>;
-    /** Legacy lifecycle only: per-directory session status, used when migrating old bookkeeping. */
-    status?(input: { directory: string }): Promise<Record<string, { type: string }> | undefined>;
-    /**
-     * Legacy lifecycle only. Deletes a session and everything hanging off it, through the host that
-     * created it. Optional because the host surface this adapter is handed does not always carry
-     * it; when it is missing, a retired child keeps its entry in the retired list and the next boot
-     * sweep tries again.
-     */
-    remove?(input: {
-        sessionID: string;
-        owner?: HostServiceOwner;
-        directory?: string;
-    }): Promise<void>;
 }
 
 export interface HiddenChildRows {
@@ -116,10 +78,10 @@ export interface HiddenChildRows {
 
 /**
  * Where a hidden run's child comes from and where it goes. The executor drives the run itself
- * (prompting, waiting, reading the reply) the same way under either lifecycle.
+ * (prompting, waiting, reading the reply) independently of session cleanup.
  */
 export interface HiddenChildLifecycle {
-    /** The child a new run starts on: one an earlier run left reusable, or a new one. */
+    /** A fresh child for the new run. */
     open(
         identity: HiddenRunIdentity,
         role: HiddenChildRole,
@@ -139,7 +101,6 @@ export interface HiddenChildLifecycle {
      */
     finish(child: PersistedHiddenChild, retired: boolean): Promise<void>;
     updateModel(child: PersistedHiddenChild, model: HiddenChildModel): PersistedHiddenChild;
-    markTitleReasserted(child: PersistedHiddenChild): PersistedHiddenChild;
     markEverSettled(child: PersistedHiddenChild): PersistedHiddenChild;
 }
 
@@ -147,10 +108,7 @@ export interface HiddenChildLifecycle {
  * The `keep_subagents` rule of the OpenCode 1 lane, applied to a retired child. There, a child
  * whose prompt settled is kept, and an unsettled one is left to the age-gated orphan sweep,
  * which under `keep_subagents` still retains historian children but deletes the
- * privacy-sensitive dreamer ones. A legacy child holds many runs, so it counts as settled once
- * any of its runs settled: deleting it for a later unsettled run would throw away every
- * settled run it kept, which OpenCode 1 never does. Without the setting every retired child
- * is deleted.
+ * privacy-sensitive dreamer ones. Without the setting every finished child is deleted.
  */
 export function keptUnderRetention(keepSubagents: boolean, child: RetentionFacts): boolean {
     return keepSubagents && (child.ever_settled === true || child.role === "historian");
@@ -165,7 +123,7 @@ function roleAgent(role: HiddenChildRole): string {
     return role === "dreamer-curate" ? HIDDEN_CURATE_AGENT : HIDDEN_DREAMER_AGENT;
 }
 
-/** The `session.create` input both lifecycles send, before any parent is added. */
+/** The session.create input before adding a parent and inheriting its location. */
 export function childCreateInput(
     identity: HiddenRunIdentity,
     role: HiddenChildRole,

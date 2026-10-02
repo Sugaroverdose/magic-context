@@ -122,7 +122,6 @@ import {
     listDanglingCompartmentBoundaries,
 } from "./doctor-compartment-boundaries";
 import { reportUnresolvedHarnessRelabel } from "./doctor-harness-relabel";
-import { cleanupRetiredHiddenChildren } from "./doctor-hidden-children";
 import { clearPluginCache } from "./doctor-opencode-cache";
 import { checkPluginDuplicates } from "./doctor-opencode-plugin-duplicates";
 import {
@@ -981,6 +980,10 @@ function logOpenCodeInstallationTable(installations: OpenCodeInstallationReport[
     }
 }
 
+export function describeOpenCode2SessionAPIRequirement(hostVersion: string): string {
+    return `OpenCode host ${hostVersion}; Magic Context requires OpenCode 2.0.22 or newer with session.remove and session.compact.`;
+}
+
 export async function runDoctor(
     options: { force?: boolean; fix?: boolean; issue?: boolean } & V22BackfillCommandArgs = {},
 ): Promise<number> {
@@ -1095,6 +1098,9 @@ export async function runDoctor(
     }
 
     const hostGeneration = openCodeHostGenerationFromVersion(activeInstallation.version);
+    if (hostGeneration === "v2") {
+        log.info(describeOpenCode2SessionAPIRequirement(activeInstallation.version));
+    }
     // Plugin registration follows the active (PATH) install; store checks follow the
     // OpenCode 2 CLI when one is installed beside an OpenCode 1 that PATH resolves
     // first, because that is the host converting and serving the store.
@@ -1124,21 +1130,6 @@ export async function runDoctor(
     else fail(openCodeDbCheck.message);
 
     if (openCodeDbCheck.ok) {
-        if (storeGeneration === "v2") {
-            try {
-                const cleanup = await cleanupRetiredHiddenChildren({
-                    contextDbPath: authorityDbPath,
-                    hostDbPath: openCodeDbResolution.path,
-                    fix: options.fix,
-                    report: (line) => log.info(line),
-                });
-                fixed += cleanup.deleted;
-            } catch (error) {
-                fail(
-                    `Retired hidden-child cleanup refused: ${error instanceof Error ? error.message : String(error)}`,
-                );
-            }
-        }
         let markerDb: Database | null = null;
         try {
             markerDb = new Database(openCodeDbResolution.path, {

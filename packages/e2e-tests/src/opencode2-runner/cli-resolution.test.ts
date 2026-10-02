@@ -48,11 +48,11 @@ function fixture() {
 describe("OpenCode 2 CLI resolution order", () => {
 	test("MC_E2E_OPENCODE2_CLI wins over a valid shared install", () => {
 		const f = fixture();
-		f.share("2.0.15", "2.0.15");
+		f.share("2.0.22", "2.0.22");
 		expect(
 			resolveOpenCode2CLI({
 				override: f.override,
-				pinnedVersion: "2.0.15",
+				pinnedVersion: "2.0.22",
 				sharedRoot: f.sharedRoot,
 				nodeModulesCandidates: [f.nodeModules],
 			}),
@@ -61,11 +61,11 @@ describe("OpenCode 2 CLI resolution order", () => {
 
 	test("a missing MC_E2E_OPENCODE2_CLI is an error, not a fallthrough", () => {
 		const f = fixture();
-		f.share("2.0.15", "2.0.15");
+		f.share("2.0.22", "2.0.22");
 		expect(() =>
 			resolveOpenCode2CLI({
 				override: join(f.root, "absent"),
-				pinnedVersion: "2.0.15",
+				pinnedVersion: "2.0.22",
 				sharedRoot: f.sharedRoot,
 				nodeModulesCandidates: [f.nodeModules],
 			}),
@@ -74,10 +74,10 @@ describe("OpenCode 2 CLI resolution order", () => {
 
 	test("the shared install for the pinned version wins over node_modules", () => {
 		const f = fixture();
-		const install = f.share("2.0.15", "2.0.15");
+		const install = f.share("2.0.22", "2.0.22");
 		expect(
 			resolveOpenCode2CLI({
-				pinnedVersion: "2.0.15",
+				pinnedVersion: "2.0.22",
 				sharedRoot: f.sharedRoot,
 				nodeModulesCandidates: [f.nodeModules],
 			}),
@@ -87,10 +87,10 @@ describe("OpenCode 2 CLI resolution order", () => {
 	test("a shared install whose manifest reports another version falls through to node_modules", () => {
 		const f = fixture();
 		// Filed under the pinned directory name but actually a different build.
-		f.share("2.0.15", "2.0.14");
+		f.share("2.0.22", "2.0.21");
 		expect(
 			resolveOpenCode2CLI({
-				pinnedVersion: "2.0.15",
+				pinnedVersion: "2.0.22",
 				sharedRoot: f.sharedRoot,
 				nodeModulesCandidates: [f.nodeModules],
 			}),
@@ -99,10 +99,10 @@ describe("OpenCode 2 CLI resolution order", () => {
 
 	test("a shared install for a different version is never picked", () => {
 		const f = fixture();
-		f.share("2.0.14", "2.0.14");
+		f.share("2.0.21", "2.0.21");
 		expect(
 			resolveOpenCode2CLI({
-				pinnedVersion: "2.0.15",
+				pinnedVersion: "2.0.22",
 				sharedRoot: f.sharedRoot,
 				nodeModulesCandidates: [f.nodeModules],
 			}),
@@ -111,10 +111,10 @@ describe("OpenCode 2 CLI resolution order", () => {
 
 	test("a shared manifest without its binary falls through to node_modules", () => {
 		const f = fixture();
-		f.share("2.0.15", "2.0.15", false);
+		f.share("2.0.22", "2.0.22", false);
 		expect(
 			resolveOpenCode2CLI({
-				pinnedVersion: "2.0.15",
+				pinnedVersion: "2.0.22",
 				sharedRoot: f.sharedRoot,
 				nodeModulesCandidates: [f.nodeModules],
 			}),
@@ -123,7 +123,7 @@ describe("OpenCode 2 CLI resolution order", () => {
 
 	test("no readable pin skips the shared install", () => {
 		const f = fixture();
-		f.share("2.0.15", "2.0.15");
+		f.share("2.0.22", "2.0.22");
 		expect(
 			resolveOpenCode2CLI({
 				pinnedVersion: null,
@@ -138,14 +138,14 @@ describe("OpenCode 2 CLI resolution order", () => {
 		const missing = join(f.root, "plugin/node_modules/.bin/opencode2");
 		expect(
 			resolveOpenCode2CLI({
-				pinnedVersion: "2.0.15",
+				pinnedVersion: "2.0.22",
 				sharedRoot: f.sharedRoot,
 				nodeModulesCandidates: [missing, f.nodeModules],
 			}),
 		).toBe(f.nodeModules);
 		expect(
 			resolveOpenCode2CLI({
-				pinnedVersion: "2.0.15",
+				pinnedVersion: "2.0.22",
 				sharedRoot: f.sharedRoot,
 				nodeModulesCandidates: [missing, join(f.root, "also-missing")],
 			}),
@@ -155,7 +155,7 @@ describe("OpenCode 2 CLI resolution order", () => {
 
 describe("OpenCode 2 CLI pin", () => {
 	test("reads the exact @opencode/cli devDependency from packages/plugin", () => {
-		expect(pinnedOpenCode2Version()).toMatch(/^\d+\.\d+\.\d+$/);
+		expect(pinnedOpenCode2Version()).toBe("2.0.22");
 	});
 
 	test("refuses a range, since a shared install is matched by exact version", () => {
@@ -163,7 +163,7 @@ describe("OpenCode 2 CLI pin", () => {
 		const manifest = join(f.root, "package.json");
 		writeFileSync(
 			manifest,
-			JSON.stringify({ devDependencies: { "@opencode/cli": "^2.0.15" } }),
+			JSON.stringify({ devDependencies: { "@opencode/cli": "^2.0.22" } }),
 		);
 		expect(() => pinnedOpenCode2Version(manifest)).toThrow("exact version");
 	});
@@ -172,8 +172,8 @@ describe("OpenCode 2 CLI pin", () => {
 		expect(sharedOpenCode2Root("/home/u")).toBe(
 			"/home/u/.local/share/cortexkit/e2e-bin/opencode-cli",
 		);
-		expect(sharedOpenCode2Install("2.0.15", "/r").binary).toBe(
-			"/r/2.0.15/node_modules/@opencode/cli/bin/opencode.exe",
+		expect(sharedOpenCode2Install("2.0.22", "/r").binary).toBe(
+			"/r/2.0.22/node_modules/@opencode/cli/bin/opencode.exe",
 		);
 	});
 
@@ -181,7 +181,7 @@ describe("OpenCode 2 CLI pin", () => {
 		// The shared root must stay outside every directory the guard protects (for
 		// example ~/.local/share/cortexkit/magic-context), or every host run fails.
 		const binary = sharedOpenCode2Install(
-			"2.0.15",
+			"2.0.22",
 			sharedOpenCode2Root(homedir()),
 		).binary;
 		expect(() =>

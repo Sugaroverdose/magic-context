@@ -139,6 +139,13 @@ for (const arm of [
 			forceHard();
 			await turn("BASELINE-PASS");
 			expect(baselineId()).toBe(raw[base + 1]!.id);
+            const baselineTurn = reader.history(session.id).find((row) =>
+                row.type === "user" && JSON.stringify(row.data).includes("BASELINE-PASS"));
+            expect(baselineTurn).toBeDefined();
+            // session.wait settles execution before the plugin's buffered log flushes.
+            const logDeadline = Date.now() + 5000;
+            while (!log().includes(`turn=${baselineTurn!.id}`) && Date.now() < logDeadline) await Bun.sleep(25);
+            expect(log()).toContain(`turn=${baselineTurn!.id}`);
 
 			if (arm !== "historian-wrapup") {
 				insertCompartment.run(session.id, 1, base + 3, base + 7, raw[base + 2]!.id, instruction!.id, "Upgrade", "SUMMARY-UPGRADE", "SUMMARY-UPGRADE", Date.now());

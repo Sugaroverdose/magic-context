@@ -7,7 +7,7 @@ import {
     HiddenChildHook,
     registerHiddenChildAgents,
 } from "../../../plugin/src/v2/hooks/hidden-child";
-import { type HostServiceOwner, removeHostSession } from "../../../plugin/src/v2/host-service";
+import { nativeSessionRemove } from "../../../plugin/src/v2/hidden-child-native";
 import { gaDatabasePath, V2StoreReader } from "../../../plugin/src/v2/store-reader";
 
 interface Command {
@@ -50,10 +50,8 @@ export default {
             }
         });
         let agentsReady: Promise<void> | undefined;
-        const remove = (input: { sessionID: string; owner?: HostServiceOwner }) =>
-            removeHostSession(input.sessionID, input.owner);
         const executor = await createV2HiddenCompletionExecutor(
-            { ...context.session, remove },
+            { ...context.session, removeSession: nativeSessionRemove(context.session) },
             {
                 db,
                 projectIdentity: "shared-worktree-project",
@@ -65,7 +63,6 @@ export default {
                         gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
                     ),
                 generation: "terminal-failure-proof",
-                removalSpacingMs: 50,
             },
         );
         writeFileSync(join(dir, "hidden-child-ready"), "ready\n");

@@ -70,9 +70,7 @@ async function runTurns(gitRepo: boolean) {
 			join(host.env.MAGIC_CONTEXT_STORAGE_DIR!, "context.db"),
 			{ readonly: true },
 		);
-		// The OpenCode 2 plugin logs under its own `opencode2` subtree of the
-		// host's temp directory, beside (not inside) the OpenCode 1 log.
-		const logPath = join(host.env.TMPDIR!, "opencode2", "magic-context", "magic-context.log");
+		const logPath = host.env.MAGIC_CONTEXT_LOG_PATH!;
 		try {
 			return {
 				sessionID: session.id,

@@ -1027,31 +1027,13 @@
             ]
         },
         {
-            "path": "tests/opencode2/hidden-child-ga.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "Real GA reusable hidden-child prompt, model, usage, title, reuse and retirement proof runs in the dedicated v2 lane",
-            "contract_refs": [
-                "R36",
-                "R44",
-                "R44a",
-                "R44b"
-            ],
-            "hosts": [
-                "opencode2"
-            ]
-        },
-        {
             "path": "tests/opencode2/hidden-child-native-remove.test.ts",
             "tier": "excluded",
             "invocation": {
                 "ts": false,
                 "rust": false
             },
-            "rationale": "Real OpenCode 2 host, shipped plugin: on a build whose plugin session API has session.remove, historian and dreamer hidden children are created under the user's session and removed when each run ends, leaving no root session; on a build without it the reusable, recorded root children are unchanged. Point MC_E2E_OPENCODE2_CLI at the build under test; dedicated v2 lane",
+            "rationale": "OpenCode 2.0.22 native hidden children are parented, removed at completion, and leave no root sessions; dedicated v2 lane",
             "contract_refs": [
                 "R44",
                 "OC2-S1"
@@ -1067,7 +1049,7 @@
                 "ts": false,
                 "rust": false
             },
-            "rationale": "Real GA hidden historian: a retryable provider error on a reused child is retried by the host without the hidden-child hook refusing the retry, a terminal provider error retires the child so the next run gets a clean one, and a concurrent user session keeps taking turns throughout; runs in the dedicated v2 lane",
+            "rationale": "Native hidden children preserve host provider retries, clean up terminal failures and isolate user sessions; dedicated v2 lane",
             "contract_refs": [
                 "R44",
                 "R44b"
@@ -1083,21 +1065,6 @@
             "rationale": "Real OpenCode 2 host dispatches hidden runs from two git worktrees with shared project identity to their respective directory hooks; dedicated v2 lane",
             "contract_refs": ["R44"],
             "hosts": ["opencode2"]
-        },
-        {
-            "path": "tests/opencode2/hidden-child-unbound.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "OpenCode v2 lane: a GA host with no service registration has no route to delete a hidden child, so the child must stay recorded and the status surfaces must name that limitation instead of the plugin silently pruning its bookkeeping; the v2 lane runs from its own invocation (bun test tests/opencode2) and joins the release gates when the v2 hooks slice lands, not through the v1 mode-selected spawn seam",
-            "contract_refs": [
-                "OC2-S1"
-            ],
-            "hosts": [
-                "opencode2"
-            ]
         },
         {
             "path": "tests/opencode2/compaction-off-host-compaction.test.ts",
@@ -1123,22 +1090,6 @@
                 "rust": false
             },
             "rationale": "OpenCode v2 lane: a hidden child the real host compacts before its first step (started as /ctx-dream map-memories under serve --service) must still run its registered prompt, reach the provider and record progress, instead of being refused as an unregistered prompt; needs the real v2 host's compaction and checkpoint rendering, so it runs only in the dedicated v2 lane",
-            "contract_refs": [
-                "OC2-S1",
-                "ISSUE-602"
-            ],
-            "hosts": [
-                "opencode2"
-            ]
-        },
-        {
-            "path": "tests/opencode2/doctor-hidden-children-upgraded-store.test.ts",
-            "tier": "excluded",
-            "invocation": {
-                "ts": false,
-                "rust": false
-            },
-            "rationale": "OpenCode v2 lane with the OpenCode 1 arm: a store the real v2 host converted in place from a real 1.x store keeps the old message and part tables, and doctor's retired hidden-child cleanup must still accept it and delete only the retired hidden sessions; needs both real hosts, so it runs only in the dedicated v2 lane",
             "contract_refs": [
                 "OC2-S1",
                 "ISSUE-602"
@@ -2682,6 +2633,21 @@
             "rationale": "manual regression probe on OpenCode 1.18.30: a context.db writer lock held across the tagging step replays the last good request instead of sending the conversation without its persisted drops; opt-in TMPDIR root with host and locker PID lsof containment",
             "contract_refs": ["FOLD-UNDER-PRESSURE"],
             "hosts": ["opencode"]
+        },
+        {
+            "path": "tests/opencode2/session-api-cutover.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "Real 2.0.21 refusal and same-store legacy cleanup on 2.0.22; dedicated v2 lane",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
         }
     ]
 }

@@ -297,7 +297,7 @@ test("the first priced pass reclaims an over-window converted-store tail", async
             .slice(requestStart)
             .filter((request) => JSON.stringify(request.body).includes(marker));
         expect(served).toHaveLength(1);
-        expect(JSON.stringify(served[0]!.body)).toContain(callIds[0]!);
+        for (const callId of callIds) expect(JSON.stringify(served[0]!.body)).not.toContain(callId);
         const afterTokens = requestTokens(served[0]!.body);
         expect(afterTokens).toBeLessThan(CONTEXT_LIMIT);
         expect(afterTokens).toBeLessThan(beforeTokens);
@@ -316,9 +316,9 @@ test("the first priced pass reclaims an over-window converted-store tail", async
             "SELECT message_id AS messageId, drop_mode AS dropMode FROM tags WHERE session_id = ? AND type = 'tool' AND message_id IN (?, ?, ?)",
             sessionId, ...callIds,
         );
-        // A dropped call in the newest 20 with small input keeps its real arguments and only
-        // its result becomes the drop placeholder, so the pair is still served.
-        expect(dropModes.find((row) => row.messageId === callIds[0])?.dropMode).toBe("skeleton_real");
+        // Above 95% usage, emergency cleanup removes even recent calls instead of
+        // retaining skeletons. The host store still keeps the original tool arcs.
+        expect(dropModes.map((row) => row.dropMode)).toEqual(["full", "full", "full"]);
 
         await v2.stopHost();
         v2 = undefined;

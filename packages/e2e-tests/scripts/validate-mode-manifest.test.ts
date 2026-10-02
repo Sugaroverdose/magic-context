@@ -21,7 +21,7 @@ describe("mode manifest validator", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
         // removed. Moving a file between excluded and ts-only changes the invocation
         // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(157);
+        expect(validation.files.length).toBe(155);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -84,7 +84,6 @@ describe("mode manifest validator", () => {
             "tests/opencode2/context-s2-lanes.test.ts",
             "tests/opencode2/converted-drop-replay.test.ts",
             "tests/opencode2/converted-store-overwindow.test.ts",
-            "tests/opencode2/doctor-hidden-children-upgraded-store.test.ts",
             "tests/opencode2/dream-loop.test.ts",
             "tests/opencode2/dreamer-s2-carrier.test.ts",
             "tests/opencode2/emergency-refusal-visible.test.ts",
@@ -92,12 +91,10 @@ describe("mode manifest validator", () => {
             "tests/opencode2/execute-threshold-tokens.test.ts",
             "tests/opencode2/fold-s3-owner.test.ts",
             "tests/opencode2/harness-s3-identity.test.ts",
-            "tests/opencode2/hidden-child-ga.test.ts",
             "tests/opencode2/hidden-child-host-compaction.test.ts",
             "tests/opencode2/hidden-child-native-remove.test.ts",
             "tests/opencode2/hidden-child-terminal-failure.test.ts",
             "tests/opencode2/hidden-child-two-directories.test.ts",
-            "tests/opencode2/hidden-child-unbound.test.ts",
             "tests/opencode2/hidden-step-limit.test.ts",
             "tests/opencode2/image-attachment.test.ts",
             "tests/opencode2/marker-s3-runtime.test.ts",
@@ -114,6 +111,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/runner.test.ts",
             "tests/opencode2/rust-mode-boundary-restart-gate.test.ts",
             "tests/opencode2/rust-mode-limitation.test.ts",
+            "tests/opencode2/session-api-cutover.test.ts",
             "tests/opencode2/session-project-binding.test.ts",
             "tests/opencode2/sidebar-component.test.ts",
             "tests/opencode2/status-dialog.test.ts",

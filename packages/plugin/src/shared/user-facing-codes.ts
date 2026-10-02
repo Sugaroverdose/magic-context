@@ -7,11 +7,6 @@ export const USER_FACING_FAILURES = {
         sentence: "History compression could not finish this turn.",
         action: "It will retry automatically.",
     },
-    hidden_cleanup_unbound: {
-        code: "MC-H02",
-        sentence: "Some finished background sessions could not be removed from this host.",
-        action: "They are removed automatically the next time Magic Context runs inside a registered OpenCode service.",
-    },
     historian_saved_history_misaligned: {
         code: "MC-H03",
         sentence:

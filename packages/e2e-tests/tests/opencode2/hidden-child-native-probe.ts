@@ -1,4 +1,4 @@
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 /**
@@ -16,9 +16,11 @@ export default {
         // read it back. The scratch session is removed again where the host allows it; elsewhere it
         // stays as one ordinary (not hidden-run) session, which the test's assertions allow for.
         let metadataForward: string;
+        let metadataSemantics: string = "unknown";
         try {
             const scratch = await context.session.create({
                 title: "metadata forward probe",
+                metadata: { original: true },
                 location: { directory },
             });
             try {
@@ -28,6 +30,7 @@ export default {
                 });
                 const back = await context.session.get({ sessionID: scratch.id });
                 metadataForward = back.metadata?.probe === "updated" ? "stored" : "dropped";
+                metadataSemantics = back.metadata?.original === undefined ? "replace" : "merge";
             } finally {
                 if (typeof context.session.remove === "function")
                     await context.session.remove({ sessionID: scratch.id });
@@ -37,8 +40,21 @@ export default {
         }
         writeFileSync(
             join(directory, "native-probe-capability.json"),
-            JSON.stringify({ remove: typeof context.session.remove, metadataForward }),
+            JSON.stringify({ remove: typeof context.session.remove, metadataForward, metadataSemantics }),
         );
+        if (typeof context.session.remove === "function") {
+            void (async () => {
+                while (!existsSync(join(directory, "native-remove-start"))) await Bun.sleep(20);
+                const child = await context.session.create({ title: "running remove probe", location: { directory }, model: { providerID: "openai", id: "mock-model" } });
+                await context.session.prompt({ sessionID: child.id, text: "running remove probe" });
+                while (!existsSync(join(directory, "native-remove-now"))) await Bun.sleep(20);
+                await context.session.remove({ sessionID: child.id });
+                let missingError = "";
+                try { await context.session.remove({ sessionID: child.id }); }
+                catch (error) { missingError = String(error); }
+                writeFileSync(join(directory, "native-remove-done.json"), JSON.stringify({ id: child.id, missingError }));
+            })().catch((error) => writeFileSync(join(directory, "native-remove-done.json"), JSON.stringify({ error: String(error) })));
+        }
         const seen = new Set<string>();
         await context.session.hook("context", async (draft: { sessionID: string }) => {
             if (seen.has(draft.sessionID)) return;

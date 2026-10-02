@@ -256,6 +256,10 @@ export async function waitForPluginActive(
 
 
 export interface OpenCode2SpawnOptions {
+    /** Explicit host binary for a same-store upgrade scenario. */
+    cli?: string;
+    /** Built plugin snapshot used before a same-store upgrade. */
+    magicContextPlugin?: string;
 	probePlugin?: string;
 	providerID?: string;
 	probeStandalone?: boolean;
@@ -333,7 +337,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 			JSON.stringify({
 				...options.extraConfig,
 				plugins: [
-					...(options.includeMagicContext === false ? [] : [PLUGIN]),
+					...(options.includeMagicContext === false ? [] : [options.magicContextPlugin ?? PLUGIN]),
 					...(options.probePlugin ? [options.probePlugin] : []),
 					SCHEMA_GUARD,
 				],
@@ -393,7 +397,7 @@ export async function spawnOpencode2(options: OpenCode2SpawnOptions = {}) {
 		}
 		// serve owns its server directly; --standalone is a TUI/run flag, not a serve option.
 		const child = spawn(
-			CLI,
+			options.cli ?? CLI,
 			[
 				"serve",
 				"--hostname",
@@ -547,25 +551,34 @@ export function assertOpenPaths(
 	}
 }
 
+/** Retry only lsof's transient partial-inventory status, without treating it as success. */
+export function resampleTransientInventory<T extends { status: number | null }>(sample: () => T): T {
+    let result = sample();
+    for (let retry = 0; result.status === 1 && retry < 2; retry++) {
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+        result = sample();
+    }
+    return result;
+}
+
 /** Sample the whole child process group, not an unrelated operator process's writes. */
 export function inspectOpenFiles(
 	pid: number,
 	root: string,
 	env: NodeJS.ProcessEnv,
 ): string[] {
-	const ps = spawnSync("ps", ["-axo", "pid=,pgid="], { encoding: "utf8" });
-	if (ps.status !== 0) throw new Error("Cannot inspect v2 process group");
-	const pids = ps.stdout
-		.trim()
-		.split("\n")
-		.map((line) => line.trim().split(/\s+/))
-		.filter(([, group]) => Number(group) === pid)
-		.map(([id]) => id);
-	if (!pids.length)
-		throw new Error("v2 process group disappeared before fd inspection");
-	const result = spawnSync("lsof", ["-p", pids.join(","), "-Fin"], {
-		encoding: "utf8",
-	});
+	const sample = () => {
+		const ps = spawnSync("ps", ["-axo", "pid=,pgid="], { encoding: "utf8" });
+		if (ps.status !== 0) throw new Error("Cannot inspect v2 process group");
+		const pids = ps.stdout.trim().split("\n")
+			.map((line) => line.trim().split(/\s+/))
+			.filter(([, group]) => Number(group) === pid).map(([id]) => id);
+		if (!pids.length) throw new Error("v2 process group disappeared before fd inspection");
+		return spawnSync("lsof", ["-p", pids.join(","), "-Fin"], { encoding: "utf8" });
+	};
+	// A short-lived group member can exit between ps and lsof. Resample the whole
+	// live group, but still require a successful inventory and the database inode.
+	const result = resampleTransientInventory(sample);
 	if (result.status !== 0)
 		throw new Error(`Cannot inspect v2 open files: ${result.stderr}`);
 	let fd = "";

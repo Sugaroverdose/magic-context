@@ -6,6 +6,7 @@ import {
     readFileSync,
     realpathSync,
     rmSync,
+    writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,12 +24,9 @@ import {
 /**
  * Hidden runs (historian, dreamer) on a real OpenCode 2 host, through the shipped plugin.
  *
- * A host whose plugin session API has `session.remove` must create each hidden child under the
- * user's session and remove it when the run ends, leaving no root session behind. A host without
- * it (every release up to 2.0.21) must keep the old behaviour: reusable root children recorded in
- * context.db. The probe plugin reports which kind of host this is with the same feature check
- * Magic Context makes, so the file is run against both by pointing MC_E2E_OPENCODE2_CLI at the
- * build under test.
+ * OpenCode 2.0.22 creates each hidden child under the user's session and removes it when the
+ * run ends, leaving no root session behind. The probe reports the native capability and the
+ * parent and metadata observed while each child is running.
  */
 
 const REVIEW_PROMPT_MARKER = "Review User Memory Candidates";
@@ -66,7 +64,7 @@ function withContextDb<T>(env: NodeJS.ProcessEnv, use: (db: Database) => T, writ
     }
 }
 
-test("hidden runs on OpenCode 2 are parented and removed when the host can remove sessions, and unchanged otherwise", async () => {
+test("hidden runs on OpenCode 2.0.22 are parented and removed with no root children", async () => {
     const bundleDir = mkdtempSync(join(tmpdir(), "mc-hidden-child-native-probe-"));
     const build = await Bun.build({
         entrypoints: [join(import.meta.dir, "hidden-child-native-probe.ts")],
@@ -105,8 +103,10 @@ test("hidden runs on OpenCode 2 are parented and removed when the host can remov
         await waitForPluginActive(client, host.cwd, "mc-hidden-child-native-probe");
         const capability = JSON.parse(
             readFileSync(join(host.cwd, "native-probe-capability.json"), "utf8"),
-        ) as { remove: string; metadataForward: string };
+        ) as { remove: string; metadataForward: string; metadataSemantics: string };
         const native = capability.remove === "function";
+        expect(capability.metadataForward).toBe("stored");
+        expect(capability.metadataSemantics).toBe("replace");
         const cliVersion = (
             JSON.parse(
                 readFileSync(join(realpathSync(CLI), "..", "..", "package.json"), "utf8"),
@@ -149,6 +149,17 @@ test("hidden runs on OpenCode 2 are parented and removed when the host can remov
                 return false;
             }
         };
+        host.mock.setDefault({ text: "late reply", delayMs: 5000, usage: { input_tokens: 10, output_tokens: 2 } });
+        writeFileSync(join(host.cwd, "native-remove-start"), "start");
+        await eventually(() => host.mock.requests().some((request) => JSON.stringify(request.body).includes("running remove probe")) ? true : undefined, "running child's provider request");
+        writeFileSync(join(host.cwd, "native-remove-now"), "remove");
+        const removal = await eventually(() => {
+            const path = join(host.cwd, "native-remove-done.json");
+            return existsSync(path) ? JSON.parse(readFileSync(path, "utf8")) as { id: string; missingError: string; error?: string } : undefined;
+        }, "native removal of a running child");
+        expect(removal.error).toBeUndefined();
+        expect(await exists(removal.id)).toBe(false);
+        expect(removal.missingError).toMatch(/not.*found/i);
         const probed = (role: string): ProbedSession[] => {
             const path = join(host.cwd, "native-probe-sessions.jsonl");
             if (!existsSync(path)) return [];
@@ -256,7 +267,8 @@ test("hidden runs on OpenCode 2 are parented and removed when the host can remov
         const hiddenChildren = [...historianChildren, ...dreamerChildren];
         console.log(JSON.stringify({ hiddenChildren }));
 
-        if (native) {
+        expect(native).toBe(true);
+        {
             // Each hidden child was created under the user's session...
             for (const child of hiddenChildren) expect(child.parentID).toBe(user.id);
             // ...and is gone once its run has ended.
@@ -281,28 +293,6 @@ test("hidden runs on OpenCode 2 are parented and removed when the host can remov
                 ),
             ).toEqual([]);
             expect(pluginLog()).not.toContain("does not keep the parent of hidden-run sessions");
-        } else {
-            // The old path: root children with no parent, reused across runs and left in place,
-            // recorded in context.db for the next run and for `doctor --fix`.
-            for (const child of hiddenChildren) expect(child.parentID).toBeNull();
-            const rootsAfter = await roots();
-            console.log(JSON.stringify({ rootsAfter }));
-            const hiddenRoots = rootsAfter.filter((session) => session.hidden);
-            expect(hiddenRoots.map((session) => session.id).sort()).toEqual(
-                [...new Set(hiddenChildren.map((child) => child.sessionID))].sort(),
-            );
-            const recorded = withContextDb(host.env, (db) =>
-                (
-                    db
-                        .prepare(
-                            "SELECT value FROM schema_migrations_meta WHERE key LIKE 'opencode2_hidden_children:%'",
-                        )
-                        .all() as Array<{ value: string }>
-                ).map((row) => JSON.parse(row.value) as { active: Record<string, { id: string }> }),
-            );
-            expect(
-                recorded.flatMap((meta) => Object.values(meta.active).map((child) => child.id)).sort(),
-            ).toEqual(hiddenRoots.map((session) => session.id).sort());
         }
         expect(pluginLog()).not.toContain("could not be removed");
         expect(pluginLog()).not.toContain("could not read back hidden child");
