@@ -4001,6 +4001,101 @@ describe("registerPiContextHandler", () => {
 		}
 	});
 
+	it("serves injection drops and caveman compression identically on the next defer pass", async () => {
+		const db = createTestDb();
+		const sessionId = "ses-drop-caveman-same-pass";
+		const gates: Array<{
+			shouldRunHeuristics: boolean;
+			shouldRunReasoningCleanup: boolean;
+		}> = [];
+		const restoreObserver =
+			contextHandlerInternals.setMutationGateObserverForTests((snapshot) =>
+				gates.push(snapshot),
+			);
+		try {
+			const fake = createFakePi();
+			registerPiContextHandler(fake.pi as never, {
+				db,
+				protectedTags: 0,
+				heuristics: {
+					caveman: { enabled: true, minChars: 20 },
+					clearReasoningAge: 1,
+				},
+				scheduler: { executeThresholdPercentage: 80 },
+			});
+			const handler = fake.handlers.get("context") as (
+				event: { messages: never[] },
+				ctx: never,
+			) => Promise<{ messages: never[] } | undefined>;
+			const runPass = async (percent: number) => {
+				const messages = [
+					userMessage(
+						"<system-reminder>\n[BACKGROUND BASH COMPLETED]\nThe task has been completed and the results are available.\n</system-reminder>",
+						1,
+					),
+					assistantMessage(
+						"The implementation has been completed <think>stale private thought</think> and the verification results are available for the reviewer.",
+						2,
+					),
+					userMessage(
+						"Continue with the implementation and review the results carefully.",
+						3,
+					),
+					assistantMessage("latest answer", 4),
+					userMessage("latest request", 5),
+				];
+				const result = await handler({ messages: messages as never[] }, {
+					...fakeContext(
+						sessionId,
+						process.cwd(),
+						messages.map((_, i) => `entry-${i}`),
+						messages as never,
+					),
+					getContextUsage: () => ({
+						tokens: percent * 1_000,
+						percent,
+						contextWindow: 100_000,
+					}),
+				} as never);
+				if (!result) throw new Error("expected transformed messages");
+				return result.messages;
+			};
+			const executed = await runPass(90);
+			const tags = getTagsBySession(db, sessionId);
+			expect(tags.some((tag) => tag.status === "dropped")).toBe(true);
+			expect(
+				tags.some((tag) => tag.status === "active" && tag.cavemanDepth > 0),
+			).toBe(true);
+			expect(
+				getOrCreateSessionMeta(db, sessionId).clearedReasoningThroughTag,
+			).toBeGreaterThan(0);
+			expect(JSON.stringify(executed)).not.toContain("stale private thought");
+			updateSessionMeta(db, sessionId, {
+				lastResponseTime: Date.now(),
+				cacheTtl: "59m",
+				lastContextPercentage: 1,
+				lastInputTokens: 1_000,
+			});
+			const deferred = await runPass(1);
+			expect(gates.map((gate) => gate.shouldRunHeuristics)).toEqual([
+				true,
+				false,
+			]);
+			expect(gates.map((gate) => gate.shouldRunReasoningCleanup)).toEqual([
+				true,
+				false,
+			]);
+			expect(JSON.stringify(deferred)).toBe(JSON.stringify(executed));
+			expect(JSON.stringify(executed)).not.toContain(
+				"BACKGROUND BASH COMPLETED",
+			);
+		} finally {
+			restoreObserver();
+			clearContextHandlerSession(sessionId);
+			closeQuietly(db);
+		}
+	});
+
 	it("replays an inline-only watermark after restart without fresh age cleanup", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-inline-reasoning-watermark";
