@@ -123,6 +123,7 @@ export const MESSAGE_FTS_CHUNK_LOAD_SQL = `SELECT map.message_ordinal AS message
  ORDER BY map.message_ordinal ASC`;
 
 const loadFtsRowsStatements = new WeakMap<Database, PreparedStatement>();
+const searchPoolCompartmentStatements = new WeakMap<Database, PreparedStatement>();
 const existingHashStatements = new WeakMap<Database, PreparedStatement>();
 const existingHashByProjectStatements = new WeakMap<Database, PreparedStatement>();
 const deleteByCompartmentStatements = new WeakMap<Database, PreparedStatement>();
@@ -221,6 +222,59 @@ function getSearchPoolProbeStatement(db: Database): PreparedStatement {
         searchPoolProbeStatements.set(db, stmt);
     }
     return stmt;
+}
+
+/** Current title and range of every compartment in one decoded search pool. */
+function getSearchPoolCompartmentStatement(db: Database): PreparedStatement {
+    let stmt = searchPoolCompartmentStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare(
+            `SELECT id, title, start_message AS startOrdinal, end_message AS endOrdinal
+             FROM compartments
+             WHERE id IN (
+                 SELECT compartment_id FROM compartment_chunk_embeddings
+                 WHERE session_id = ? AND project_path = ? AND model_id = ?
+             )`,
+        );
+        searchPoolCompartmentStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+/**
+ * The decoded pool is validated against the embedding rows only, but each row
+ * also carries its compartment's title and range, which a coordinate rebase
+ * rewrites in place without touching embeddings. Re-read those few columns on
+ * every cache hit so expansion pointers and the ordinal cutoff use the stored
+ * ranges, and drop rows whose compartment no longer exists.
+ */
+function refreshPoolCompartmentFields(
+    db: Database,
+    sessionId: string,
+    projectPath: string,
+    modelId: string,
+    rows: StoredCompartmentChunkEmbedding[],
+): StoredCompartmentChunkEmbedding[] {
+    const current = new Map<number, { title: string; startOrdinal: number; endOrdinal: number }>();
+    for (const row of getSearchPoolCompartmentStatement(db).all(
+        sessionId,
+        projectPath,
+        modelId,
+    ) as { id: number; title: string; startOrdinal: number; endOrdinal: number }[]) {
+        current.set(row.id, row);
+    }
+    let missing = false;
+    for (const row of rows) {
+        const compartment = current.get(row.compartmentId);
+        if (!compartment) {
+            missing = true;
+            continue;
+        }
+        row.title = compartment.title;
+        row.startOrdinal = compartment.startOrdinal;
+        row.endOrdinal = compartment.endOrdinal;
+    }
+    return missing ? rows.filter((row) => current.has(row.compartmentId)) : rows;
 }
 
 function getSearchRowsStatement(db: Database, withModel: boolean): PreparedStatement {
@@ -990,7 +1044,7 @@ export function loadCompartmentChunkEmbeddingsForSearch(
     const cached = pool.get(key);
     if (cached && cached.rowCount === rowCount && cached.maxRowId === maxRowId) {
         touchDecodedSearchPoolEntry(cached);
-        return cached.rows;
+        return refreshPoolCompartmentFields(db, sessionId, projectPath, modelId, cached.rows);
     }
     if (cached) removeDecodedSearchPoolEntry(cached);
 

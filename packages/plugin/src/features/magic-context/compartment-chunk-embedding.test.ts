@@ -304,6 +304,54 @@ describe("compartment chunk embedding core", () => {
         }
     });
 
+    test("search pool reflects compartment ranges rewritten after the pool was cached", () => {
+        const db = createDb();
+        try {
+            appendCompartments(db, "ses-rebased", [
+                {
+                    sequence: 0,
+                    startMessage: 1,
+                    endMessage: 2,
+                    startMessageId: "u1",
+                    endMessageId: "a2",
+                    title: "Rebased range",
+                    content: "P1 content",
+                    p1: "P1 content",
+                },
+            ]);
+            const compartment = getCompartments(db, "ses-rebased")[0];
+            replaceCompartmentChunkEmbeddings(
+                db,
+                chunkCanonicalText("[1] U: hello\n[2] A: world", 1, 2, 10_000).map((window) => ({
+                    compartmentId: compartment.id,
+                    sessionId: "ses-rebased",
+                    projectPath: "/repo/rebased",
+                    window,
+                    modelId: "mock:model",
+                    vector: new Float32Array([1, 0]),
+                })),
+            );
+            const ranges = () =>
+                loadCompartmentChunkEmbeddingsForSearch(
+                    db,
+                    "ses-rebased",
+                    "/repo/rebased",
+                    "mock:model",
+                ).map((row) => [row.startOrdinal, row.endOrdinal]);
+            expect(ranges()).toEqual([[1, 2]]);
+
+            // A coordinate rebase rewrites compartment ranges in place and leaves
+            // the embedding rows untouched.
+            db.prepare(
+                "UPDATE compartments SET start_message = 5, end_message = 6 WHERE id = ?",
+            ).run(compartment.id);
+
+            expect(ranges()).toEqual([[5, 6]]);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
     test("coverage stays read-only before the drain renumbers matching one-based rows", async () => {
         const tempDirectory = createTestTempDirFromPath(join(tmpdir(), "chunk-window-renumber-"));
         const databasePath = join(tempDirectory, "store.db");
