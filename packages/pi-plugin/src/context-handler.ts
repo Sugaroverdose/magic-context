@@ -6457,6 +6457,30 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
+	// Fresh caveman compression in the heuristic cleanup above rebuilds text from
+	// its original source, which brings back inline thinking that the replay at the
+	// start of this pass removed. The fresh strip only reaches this pass's cutoff
+	// (and never runs on prefix-bound models), while every later pass replays up to
+	// the persisted watermark. Strip up to that watermark again so this pass serves
+	// the bytes the next deferred pass will replay. This also covers the rollback
+	// above. Not counted as a new edit: it only restores what replay already removed.
+	if (args.reasoningClearing && shouldRunHeuristics && routineCleanupApplied) {
+		try {
+			replayStrippedInlineThinkingPi({
+				db: args.db,
+				sessionId: args.sessionId,
+				messages: workingMessages,
+				messageIdToMaxTag,
+				piMessageStableId: stableIdResolver,
+			});
+		} catch (err) {
+			sessionLog(
+				args.sessionId,
+				`inline thinking re-strip after cleanup failed (continuing): ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+
 	const toolReclaimApplicationOpportunity = isCacheBustingPass;
 	let autoReclaimTargetCount = 0;
 	let autoReclaimDidMutate = false;
