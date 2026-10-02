@@ -656,7 +656,8 @@ export function createEventHandler(deps: EventHandlerDeps) {
                                         inputTokens: detection.reportedInputTokens,
                                         percentage:
                                             provenLimit > 0
-                                                ? (detection.reportedInputTokens / provenLimit) * 100
+                                                ? (detection.reportedInputTokens / provenLimit) *
+                                                  100
                                                 : 100,
                                     },
                                     hasUsageTokens: true,

@@ -239,32 +239,32 @@ describe("raw message provider lifecycle", () => {
         expect(hasRawMessageProvider(sessionId)).toBe(false);
     });
 
-    it.each(["old-first", "new-first"])(
-        "never overwrites or restores a replaced provider (%s cleanup)",
-        (order) => {
-            const sessionId = `provider-replaced-${order}`;
-            const oldCleanup = setRawMessageProvider(sessionId, provider);
-            const newCleanup = setRawMessageProvider(sessionId, {
-                readMessages: () => [],
-                getMessageCount: () => 11,
-            });
-            try {
-                if (order === "old-first") {
-                    oldCleanup();
-                    expect(getRawSessionMessageCount(sessionId)).toBe(11);
-                    newCleanup();
-                } else {
-                    newCleanup();
-                    expect(hasRawMessageProvider(sessionId)).toBe(false);
-                    oldCleanup();
-                }
-                expect(hasRawMessageProvider(sessionId)).toBe(false);
-            } finally {
+    it.each([
+        "old-first",
+        "new-first",
+    ])("never overwrites or restores a replaced provider (%s cleanup)", (order) => {
+        const sessionId = `provider-replaced-${order}`;
+        const oldCleanup = setRawMessageProvider(sessionId, provider);
+        const newCleanup = setRawMessageProvider(sessionId, {
+            readMessages: () => [],
+            getMessageCount: () => 11,
+        });
+        try {
+            if (order === "old-first") {
+                oldCleanup();
+                expect(getRawSessionMessageCount(sessionId)).toBe(11);
                 newCleanup();
+            } else {
+                newCleanup();
+                expect(hasRawMessageProvider(sessionId)).toBe(false);
                 oldCleanup();
             }
-        },
-    );
+            expect(hasRawMessageProvider(sessionId)).toBe(false);
+        } finally {
+            newCleanup();
+            oldCleanup();
+        }
+    });
 
     it("does not let an old scope remove a later registration of the same object", () => {
         const sessionId = "provider-reregistered";
