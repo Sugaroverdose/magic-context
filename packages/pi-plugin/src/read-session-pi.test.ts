@@ -461,4 +461,45 @@ describe("convertEntriesToRawMessagePage", () => {
 
 		expect(paged).toEqual(full);
 	});
+
+	it("keeps tool output on its carrier when a non-chat entry sits between them", () => {
+		const entry = (id: string, message: Record<string, unknown>) => ({
+			type: "message",
+			id,
+			message,
+		});
+		// A `!cmd` bashExecution entry lands between the tool result and the
+		// next chat message: it takes an ordinal of its own, so the folded
+		// tool output is carried one ordinal later than the result entry.
+		const entries = [
+			entry("user-1", { role: "user", content: "start" }),
+			entry("asst-1", {
+				role: "assistant",
+				content: [{ type: "toolCall", id: "call-1", name: "read" }],
+			}),
+			entry("result-1", {
+				role: "toolResult",
+				toolCallId: "call-1",
+				toolName: "read",
+				content: [{ type: "text", text: "TOOL OUTPUT" }],
+			}),
+			entry("bash-1", {
+				role: "bashExecution",
+				command: "ls",
+				output: "a b",
+			}),
+			entry("user-2", { role: "user", content: "finish" }),
+		];
+		const full = convertEntriesToRawMessages(entries);
+		const carrier = full.find((message) => message.id === "user-2");
+		expect(carrier?.parts).toContainEqual(
+			expect.objectContaining({ callID: "call-1" }),
+		);
+
+		for (let after = 0; after < full.length; after++) {
+			expect(
+				convertEntriesToRawMessagePage(entries, after, 1, full.length),
+			).toEqual([full[after]]);
+		}
+	});
 });

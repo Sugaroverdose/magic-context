@@ -360,7 +360,14 @@ export function* iterateEntriesToRawMessageRange(
 		Math.floor(finalWatermark),
 	);
 	let nextOrdinal = 1;
-	let pendingToolParts: unknown[] = [];
+	let pendingToolResults: Array<{ msg: unknown; version: string | number }> =
+		[];
+	const buildToolParts = (
+		results: ReadonlyArray<{ msg: unknown; version: string | number }>,
+	): unknown[] =>
+		results.flatMap(({ msg, version }) =>
+			attachPiPartVersion(synthesizeToolResultParts(msg), version),
+		);
 	let hasPendingToolParts = false;
 	let pendingFirstRealId = "";
 	let pendingFirstRealVersion: string | number = "";
@@ -398,11 +405,11 @@ export function* iterateEntriesToRawMessageRange(
 			if (typeof callId !== "string" || callId.length === 0) continue;
 			const version = rawEntryVersion(entry);
 			hasPendingToolParts = true;
-			if (nextOrdinal > normalizedAfter && nextOrdinal <= normalizedWatermark) {
-				pendingToolParts.push(
-					...attachPiPartVersion(synthesizeToolResultParts(msg), version),
-				);
-			}
+			// Keep the result itself and build its parts only once the carrier's
+			// ordinal is known: a non-chat entry (bashExecution, ...) between the
+			// result and the next chat message takes an ordinal first, so the
+			// result's position says nothing about whether its carrier is in range.
+			pendingToolResults.push({ msg, version });
 			if (pendingFirstRealId === "") {
 				pendingFirstRealId = entry.id;
 				pendingFirstRealVersion = version;
@@ -413,18 +420,18 @@ export function* iterateEntriesToRawMessageRange(
 
 		if (role === "user") {
 			const version = rawEntryVersion(entry);
-			const bufferedToolParts = pendingToolParts;
+			const bufferedToolResults = pendingToolResults;
 			const done = yield* appendMessage(
 				entry.id,
 				"user",
 				version,
 				parsePiEntryTimestamp(entry),
 				() => [
-					...bufferedToolParts,
+					...buildToolParts(bufferedToolResults),
 					...attachPiPartVersion(synthesizeUserParts(msg), version),
 				],
 			);
-			pendingToolParts = [];
+			pendingToolResults = [];
 			hasPendingToolParts = false;
 			pendingFirstRealId = "";
 			pendingFirstRealVersion = "";
@@ -435,7 +442,7 @@ export function* iterateEntriesToRawMessageRange(
 
 		if (role === "assistant") {
 			if (hasPendingToolParts) {
-				const bufferedToolParts = pendingToolParts;
+				const bufferedToolResults = pendingToolResults;
 				const pendingId = pendingFirstRealId;
 				const pendingVersion = pendingFirstRealVersion;
 				const done = yield* appendMessage(
@@ -443,9 +450,9 @@ export function* iterateEntriesToRawMessageRange(
 					"user",
 					pendingVersion,
 					pendingFirstCreatedAt,
-					() => bufferedToolParts,
+					() => buildToolParts(bufferedToolResults),
 				);
-				pendingToolParts = [];
+				pendingToolResults = [];
 				hasPendingToolParts = false;
 				pendingFirstRealId = "";
 				pendingFirstRealVersion = "";
@@ -494,7 +501,7 @@ export function* iterateEntriesToRawMessageRange(
 			"user",
 			pendingFirstRealVersion,
 			pendingFirstCreatedAt,
-			() => pendingToolParts,
+			() => buildToolParts(pendingToolResults),
 		);
 	}
 }
