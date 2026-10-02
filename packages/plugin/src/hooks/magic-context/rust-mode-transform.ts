@@ -2297,8 +2297,16 @@ export function createRustModeTransform(
             }
             replaceMessagesInPlace(output, messages);
             servedFrom = "raw";
+            // The provider now sees the raw input instead of the frozen array, so there is
+            // no frozen representation left to keep byte-identical.
+            state.lkgRepresentationFrozen = false;
+            state.lkgFrozenHealthyPasses = 0;
+            state.lkgFrozenAtInputCount = null;
         };
         const finishPass = (applied: boolean, served = true): void => {
+            // A pass that serves nothing leaves the provider's last-seen array unchanged,
+            // so the proof that the slot holds that array must survive the refusal.
+            if (!served) state.lkgLastServedCaptureSequence = lastServedCaptureSequence;
             const elapsedAt = applied && appliedAt !== undefined ? appliedAt : performance.now();
             const elapsedMs = Math.max(0, elapsedAt - passStartedAt);
             sessionLog(
@@ -2487,7 +2495,12 @@ export function createRustModeTransform(
                     return;
                 }
                 if (deps.compactionOff) {
-                    serveRawFallback(error);
+                    try {
+                        serveRawFallback(error);
+                    } catch (rawFallbackError) {
+                        finishPass(false, false);
+                        throw rawFallbackError;
+                    }
                     finishPass(false);
                     return;
                 }
@@ -4011,6 +4024,9 @@ export function createRustModeTransform(
                 output,
                 sessionMeta.systemPromptTokens,
             );
+            // A replay that cannot serve leaves the freeze alone: either the raw fallback
+            // below serves the raw input and clears it, or the pass refuses and the provider
+            // still holds the frozen bytes the next pass must keep serving.
             if (replayed) {
                 if (!state.lkgRepresentationFrozen) {
                     state.lkgFrozenAtInputCount = inputCount;
@@ -4018,10 +4034,6 @@ export function createRustModeTransform(
                 state.lkgRepresentationFrozen = true;
                 state.lkgFrozenHealthyPasses = 0;
                 state.forceFullWire = true;
-            } else {
-                state.lkgRepresentationFrozen = false;
-                state.lkgFrozenHealthyPasses = 0;
-                state.lkgFrozenAtInputCount = null;
             }
             servedFrom = replayed ? "lkg" : "raw";
             if (decision.toLowerCase() !== "need_full_sync") decision = "error";
