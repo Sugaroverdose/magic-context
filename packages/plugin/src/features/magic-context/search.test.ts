@@ -543,6 +543,62 @@ describe("unifiedSearch", () => {
         ).toEqual({ message_time_ms: null });
     });
 
+    it("matches message text only, never the indexed role column", async () => {
+        rawMessagesBySession.set("ses-role", [
+            {
+                ordinal: 1,
+                id: "role-only",
+                role: "user",
+                parts: [{ type: "text", text: "login keeps failing on staging" }],
+                createdAt: 2_000,
+            },
+            {
+                ordinal: 2,
+                id: "content-match",
+                role: "assistant",
+                parts: [{ type: "text", text: "the users login flow now retries" }],
+                createdAt: 2_000,
+            },
+            {
+                ordinal: 3,
+                id: "live-tail",
+                role: "user",
+                parts: [{ type: "text", text: "login again please" }],
+                createdAt: 2_000,
+            },
+        ]);
+        ensureMessagesIndexed(db, "ses-role", readMessages);
+        const search = async (query: string, extra: Partial<UnifiedSearchOptions> = {}) => {
+            const results = await unifiedSearch(db, "ses-role", "git:test", query, {
+                sources: ["message"],
+                embeddingEnabled: false,
+                limit: 10,
+                measurementDisabled: true,
+                countRetrievals: false,
+                ...extra,
+            });
+            return results.flatMap((result) =>
+                result.source === "message" ? [result.messageId] : [],
+            );
+        };
+        const diagnostics = {
+            suppressedVisibleMemoryIds: [],
+            suppressedLiveMessageMatches: 0,
+            gitCommitUnavailable: null,
+        };
+
+        // Each variant reaches a different prepared statement: plain, ordinal
+        // cutoff, cutoff with the live-tail diagnostic count, and date range.
+        expect(await search("users login")).toEqual(["content-match"]);
+        expect(await search("users login", { maxMessageOrdinal: 2 })).toEqual(["content-match"]);
+        expect(await search("users login", { maxMessageOrdinal: 2, diagnostics })).toEqual([
+            "content-match",
+        ]);
+        expect(diagnostics.suppressedLiveMessageMatches).toBe(0);
+        expect(await search("users login", { from: 1_000, to: 3_000 })).toEqual(["content-match"]);
+        expect(await search("assistant")).toEqual([]);
+    });
+
     it("keeps undated search output byte-identical when both bounds are absent", async () => {
         rawMessagesBySession.set("ses-undated", [
             {

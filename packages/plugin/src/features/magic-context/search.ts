@@ -587,6 +587,16 @@ function getBatchedFtsCountStatement(
     return statement;
 }
 
+/**
+ * Restrict a sanitized message FTS query to the `content` column. The table
+ * also indexes `role`, so a bare query for "user" or "assistant" (or any term
+ * porter-stemming to them, such as "users") would otherwise match every message
+ * of that role. Applied to the bound MATCH value so the SQL text is unchanged.
+ */
+function contentOnlyMessageQuery(ftsQuery: string): string {
+    return ftsQuery.length === 0 ? "" : `content : (${ftsQuery})`;
+}
+
 /** Read all per-probe document frequencies in one SQLite statement. */
 function countSessionFtsMatchesBatch(
     db: Database,
@@ -598,7 +608,7 @@ function countSessionFtsMatchesBatch(
     if (ftsQueries.length === 0) return [];
     const bindings: unknown[] = [];
     for (const query of ftsQueries) {
-        bindings.push(sessionId, query);
+        bindings.push(sessionId, contentOnlyMessageQuery(query));
         if (dateRange !== null) bindings.push(dateRange.from, dateRange.to);
         if (cutoff !== null) bindings.push(cutoff);
     }
@@ -1001,8 +1011,9 @@ function runMessageFtsQuery(
 ): NormalizedMessageRow[] {
     if (ftsQuery.length === 0) return [];
     let rawRows: unknown[];
+    const matchQuery = contentOnlyMessageQuery(ftsQuery);
     if (dateRange !== null) {
-        const bindings: unknown[] = [sessionId, ftsQuery, dateRange.from, dateRange.to];
+        const bindings: unknown[] = [sessionId, matchQuery, dateRange.from, dateRange.to];
         if (cutoff !== null) bindings.push(cutoff);
         bindings.push(fetchLimit);
         rawRows = getMessageSearchStatementWithDateRange(db, cutoff !== null).all(...bindings);
@@ -1012,11 +1023,11 @@ function runMessageFtsQuery(
             cutoff !== null
                 ? getMessageSearchStatementWithCutoff(db).all(
                       sessionId,
-                      ftsQuery,
+                      matchQuery,
                       cutoff,
                       fetchLimit,
                   )
-                : getMessageSearchStatement(db).all(sessionId, ftsQuery, fetchLimit);
+                : getMessageSearchStatement(db).all(sessionId, matchQuery, fetchLimit);
     }
     const rows = rawRows.map((row) => row as MessageSearchRow);
 
@@ -1037,18 +1048,19 @@ function runMessageFtsQueryWithDiagnostics(args: {
     dateRange: InclusiveDateRange | null;
 }): { rows: NormalizedMessageRow[]; suppressedCount: number } {
     if (args.ftsQuery.length === 0) return { rows: [], suppressedCount: 0 };
+    const matchQuery = contentOnlyMessageQuery(args.ftsQuery);
     const rawRows = (
         args.dateRange === null
             ? getMessageSearchDiagnosticStatement(args.db).all(
                   args.sessionId,
-                  args.ftsQuery,
+                  matchQuery,
                   args.cutoff,
                   args.fetchLimit,
                   args.cutoff,
               )
             : getMessageSearchDiagnosticStatementWithDateRange(args.db).all(
                   args.sessionId,
-                  args.ftsQuery,
+                  matchQuery,
                   args.dateRange.from,
                   args.dateRange.to,
                   args.cutoff,
@@ -1125,7 +1137,7 @@ function runMessageFtsQueriesBatch(
     if (ftsQueries.length === 0) return [];
     const bindings: unknown[] = [];
     for (const query of ftsQueries) {
-        bindings.push(sessionId, query);
+        bindings.push(sessionId, contentOnlyMessageQuery(query));
         if (dateRange !== null) bindings.push(dateRange.from, dateRange.to);
         if (cutoff !== null) bindings.push(cutoff);
         bindings.push(fetchLimit);
