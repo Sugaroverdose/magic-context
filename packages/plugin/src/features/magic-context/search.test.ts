@@ -599,6 +599,37 @@ describe("unifiedSearch", () => {
         expect(await search("assistant")).toEqual([]);
     });
 
+    it("treats a NUL byte in the query as a word break instead of throwing", async () => {
+        createPrimer(db, {
+            projectPath: "git:test",
+            question: "How does the nulprobe cache work?",
+            answer: "It stays stable.",
+            totalSupport: 2,
+            lastObservedAt: 1_000,
+            sourceCandidateIds: [],
+        });
+        rawMessagesBySession.set("ses-nul", [
+            {
+                ordinal: 1,
+                id: "nul-hit",
+                role: "assistant",
+                parts: [{ type: "text", text: "nulprobe cache warmed" }],
+            },
+        ]);
+        ensureMessagesIndexed(db, "ses-nul", readMessages);
+
+        const results = await unifiedSearch(db, "ses-nul", "git:test", "nulprobe\0cache", {
+            sources: ["message", "primer"],
+            embeddingEnabled: false,
+            explicitSearch: true,
+            limit: 10,
+            measurementDisabled: true,
+            countRetrievals: false,
+        });
+
+        expect(results.map((result) => result.source).sort()).toEqual(["message", "primer"]);
+    });
+
     it("keeps undated search output byte-identical when both bounds are absent", async () => {
         rawMessagesBySession.set("ses-undated", [
             {

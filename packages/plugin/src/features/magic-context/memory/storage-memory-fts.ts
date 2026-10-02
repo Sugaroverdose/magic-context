@@ -68,7 +68,12 @@ export function relaxedFtsQuery(query: string): string {
 }
 
 export function sanitizeFtsQuery(query: string): string {
-    const tokens = query.split(/\s+/).filter((token) => token.length > 0);
+    // FTS5 rejects a NUL byte inside a quoted string ("unterminated string"),
+    // so treat it as a word break like any other separator.
+    const tokens = query
+        .replaceAll("\0", " ")
+        .split(/\s+/)
+        .filter((token) => token.length > 0);
     if (tokens.length === 0) return "";
 
     return tokens.map((token) => `"${token.replace(/"/g, '""')}"`).join(" ");
