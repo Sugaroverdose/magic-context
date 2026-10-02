@@ -134,7 +134,11 @@ import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
-import { registerRustLkgReplayParticipant } from "./rust-lkg-freeze-registry";
+import {
+    nextRustPassStamp,
+    type RustLkgReplayParticipant,
+    registerRustLkgReplayParticipant,
+} from "./rust-lkg-freeze-registry";
 import { SharedCompartmentBoundaryError } from "./shared-compartment-boundaries";
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
@@ -1580,6 +1584,7 @@ export function createRustModeTransform(
     clearSession: (sessionId: string) => Promise<void>;
     invalidateWireState: (sessionId: string) => void;
     stopHostRunner: () => Promise<void>;
+    dispose: () => void;
     getState: (sessionId: string) => Readonly<RustSessionState>;
     getHeapStats: () => RustWireCacheHeapStats;
 } {
@@ -2052,8 +2057,12 @@ export function createRustModeTransform(
         }
     };
 
-    registerRustLkgReplayParticipant({
-        ownsSession: (sessionId) => states.has(sessionId),
+    // When this adapter last started a pass for each session; the outer wrapper's
+    // replay registry uses it to find the adapter that currently runs a session.
+    const passStampBySession = new Map<string, number>();
+    const replayParticipant: RustLkgReplayParticipant = {
+        lastPassStamp: (sessionId) =>
+            states.has(sessionId) ? passStampBySession.get(sessionId) : undefined,
         enterFreezeFromExternalServe: (sessionId, inputCount) =>
             enterLkgReplayFreeze(ensureState(states, sessionId), inputCount),
         replayFits: (sessionId, messages) => {
@@ -2080,7 +2089,8 @@ export function createRustModeTransform(
                 messages,
                 resolvedProviderID: resolveReplayModel(sessionId, inputMessages)?.providerID,
             }),
-    });
+    };
+    const unregisterReplayParticipant = registerRustLkgReplayParticipant(replayParticipant);
 
     const prepareRustCapture = (
         state: RustSessionState,
@@ -2208,6 +2218,7 @@ export function createRustModeTransform(
             .find((message) => message.info.role === "assistant")?.info.id;
         const timings = emptyRustPassTimings();
         state.passCount += 1;
+        passStampBySession.set(sessionId, nextRustPassStamp());
         const syntheticTurn = observeSyntheticTurn(state, messages);
         const syntheticLoopBlocked = syntheticTurn && state.syntheticTurnCount >= 3;
         if (syntheticLoopBlocked && !state.syntheticLoopBreakerLogged) {
@@ -4263,7 +4274,7 @@ export function createRustModeTransform(
         }
     };
 
-    return {
+    const adapter = {
         run: async (
             sessionId: string,
             messages: MessageLike[],
@@ -4286,6 +4297,7 @@ export function createRustModeTransform(
             const clearLocalState = () => {
                 dropSlot(sessionId, "session-deleted");
                 states.delete(sessionId);
+                passStampBySession.delete(sessionId);
                 heapHolder.wireCaches.delete(sessionId);
                 promptSurfaceGuidanceEpochs?.clear(sessionId);
             };
@@ -4308,6 +4320,14 @@ export function createRustModeTransform(
         invalidateWireState,
         async stopHostRunner(): Promise<void> {
             await (hostRunner ?? undefined)?.stop();
+        },
+        /**
+         * The host disposed the instance that owns this adapter. Stop offering it
+         * to the outer wrapper's replay registry; the registry holds it weakly, so
+         * this only makes the removal immediate instead of waiting for collection.
+         */
+        dispose(): void {
+            unregisterReplayParticipant();
         },
         getState(sessionId: string): Readonly<RustSessionState> {
             return {
@@ -4334,6 +4354,13 @@ export function createRustModeTransform(
             };
         },
     };
+    // The replay registry holds participants weakly. Pin this adapter's participant
+    // to the adapter object, so it lives exactly as long as the adapter does.
+    Object.defineProperty(adapter, "replayParticipant", {
+        value: replayParticipant,
+        enumerable: false,
+    });
+    return adapter;
 }
 
 export async function runRustModeTransform(

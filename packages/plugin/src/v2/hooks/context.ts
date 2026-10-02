@@ -1853,6 +1853,7 @@ export async function registerContext(context: V2Context) {
         async dispose() {
             rpcStopped = true;
             rpcServer.stop();
+            transform?.disposeRust();
             tools?.dispose();
             usageController.abort();
             await usageDone;

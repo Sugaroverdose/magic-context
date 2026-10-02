@@ -1201,6 +1201,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     };
     const hooksWithBackends = hooks as typeof hooks & {
         rustToolBackends?: RustToolBackends;
+        disposeRustAdapter?: () => void;
         getDebugMemoryHolders?: () => {
             taggerCache: ReturnType<NonNullable<Tagger["getHeapStats"]>>;
             wireCache: ReturnType<typeof transform.getRustWireCacheHeapStats>;
@@ -1209,6 +1210,10 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     Object.defineProperties(hooksWithBackends, {
         rustToolBackends: {
             value: rustToolBackends,
+            enumerable: false,
+        },
+        disposeRustAdapter: {
+            value: () => transform.disposeRust(),
             enumerable: false,
         },
         getDebugMemoryHolders: {

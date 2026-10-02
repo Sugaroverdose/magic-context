@@ -41,6 +41,10 @@ import { createDbLkgPersistence } from "./lkg-persist";
 import { getInMemorySlot, registerLkgPersistence, resetLkgSlotsForTest } from "./lkg-slot";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
+import {
+    liveRustLkgReplayParticipantCountForTest,
+    resolveRustLkgReplayParticipant,
+} from "./rust-lkg-freeze-registry";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
 import type { TransformDeps } from "./transform";
@@ -781,5 +785,20 @@ describe("the frozen path validates the array it serves", () => {
         } finally {
             logSpy.mockRestore();
         }
+    });
+});
+
+describe("the replay registry follows the adapter's lifetime", () => {
+    it("a disposed adapter is no longer offered to the wrapper's replay", async () => {
+        const s = frozenSession("registry-dispose");
+        const sid = s.sessionId;
+        await s.runWrapped([user(sid, "m1", "question")], "HARD");
+        expect(resolveRustLkgReplayParticipant(sid)).toBeDefined();
+        const before = liveRustLkgReplayParticipantCountForTest();
+        s.transform.dispose();
+        expect(liveRustLkgReplayParticipantCountForTest()).toBe(before - 1);
+        // No other adapter has run the session, so with several adapters alive in
+        // this test process the wrapper attributes it to none of them.
+        if (before - 1 !== 1) expect(resolveRustLkgReplayParticipant(sid)).toBeUndefined();
     });
 });

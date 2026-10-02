@@ -879,8 +879,19 @@ const server: Plugin = async (ctx) => {
                 } catch {
                     // best-effort
                 }
+                try {
+                    // Stop offering this instance's Rust adapter to the last-known-good
+                    // replay registry, which other instances in this process share.
+                    (
+                        magicContextRuntime.magicContext as {
+                            disposeRustAdapter?: () => void;
+                        } | null
+                    )?.disposeRustAdapter?.();
+                } catch {
+                    // best-effort
+                }
                 log(
-                    "[magic-context] instance disposed — stopped RPC server, dream timer, auto-update",
+                    "[magic-context] instance disposed — stopped RPC server, dream timer, auto-update, Rust replay registration",
                 );
             },
         }),
