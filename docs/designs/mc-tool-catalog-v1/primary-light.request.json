@@ -93,13 +93,15 @@
           {
             "name": "browser_use",
             "capabilities": [
-              "prefrontal-core:browser.use/v1"
+              "browser.use/v1",
+              "cerebellum:browser.use/v1"
             ]
           },
           {
             "name": "computer_use",
             "capabilities": [
-              "prefrontal-core:computer.use/v1"
+              "cerebellum:computer.use/v1",
+              "computer.use/v1"
             ]
           }
         ]

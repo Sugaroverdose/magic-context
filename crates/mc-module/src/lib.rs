@@ -57,6 +57,7 @@ pub mod single_store_reads;
 pub mod single_store_repair;
 mod state_sync_timing;
 mod tail_hygiene;
+mod tool_catalog;
 pub mod transform;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -3693,6 +3694,10 @@ pub struct McHandler {
     scheduler_observations: Mutex<HashMap<String, SchedulerObservation>>,
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
+    /// Route channels whose consumer declared it speaks `tool-provider/v1` at bind
+    /// (`role_versions`). Only those get the role's refusal codes; every other route
+    /// keeps the legacy facade errors byte for byte.
+    tool_provider_v1_channels: Mutex<HashSet<u16>>,
     #[cfg(test)]
     guidance_now_ms: Mutex<Option<i64>>,
     #[cfg(test)]
@@ -4327,6 +4332,7 @@ impl McHandler {
             scheduler_observations: Mutex::new(HashMap::new()),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
+            tool_provider_v1_channels: Mutex::new(HashSet::new()),
             #[cfg(test)]
             guidance_now_ms: Mutex::new(None),
             #[cfg(test)]
@@ -4630,6 +4636,7 @@ impl McHandler {
             factory,
             McModuleConfig {
                 cache_ttl_by_model: std::collections::BTreeMap::new(),
+                catalog: crate::config::CatalogConfigInputs::default(),
                 historian_temperature: None,
                 historian_runner: None,
                 dreamer_runner: None,
@@ -4705,6 +4712,7 @@ impl McHandler {
             scheduler_observations: Mutex::new(HashMap::new()),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
+            tool_provider_v1_channels: Mutex::new(HashSet::new()),
             guidance_now_ms: Mutex::new(None),
             reduction_injection: Mutex::new(HashMap::new()),
             between_transform_and_prepare: Mutex::new(None),
@@ -5170,6 +5178,10 @@ impl McHandler {
         self.threshold_logged_routes
             .lock()
             .expect("threshold log mutex")
+            .remove(&channel);
+        self.tool_provider_v1_channels
+            .lock()
+            .expect("tool-provider channels mutex")
             .remove(&channel);
         DISPATCH_HEALTH.route_gone(channel);
         self.transform_route_channels
@@ -12329,8 +12341,75 @@ impl McHandler {
             "ctx_expand" => self.handle_ctx_expand_facade(channel, &request).await,
             "ctx_reduce" => self.handle_ctx_reduce_facade(channel, &request).await,
             "ctx_note" => self.handle_ctx_note_facade(channel, &request).await,
+            // The tool-provider/v1 role ops. They answer on every route, so a caller
+            // reaches them by name on Magic Context's tool route whether or not it
+            // declared the role at bind.
+            cortexkit_role_tool_provider::ops::TOOL_CATALOG => {
+                self.handle_tool_catalog_value(channel, &request)
+            }
+            cortexkit_role_tool_provider::ops::ROLE_DESCRIBE => {
+                match tool_catalog::role_describe_bytes() {
+                    Ok(bytes) => HandlerOutcome::Response(bytes),
+                    Err(error) => error.into_outcome(),
+                }
+            }
+            // A consumer that declared tool-provider/v1 gets the role's refusal for a
+            // name Magic Context does not serve; every other route keeps the legacy
+            // error code it has always had.
+            _ if self.speaks_tool_provider_v1(channel) => {
+                let body = cortexkit_role_tool_provider::errors::unknown_tool(name);
+                HandlerOutcome::ErrorWithDetail {
+                    code: body.code,
+                    message: body.message,
+                    detail: body.detail.unwrap_or(Value::Null),
+                }
+            }
             _ => unrecognized_request_error(&request),
         }
+    }
+
+    /// `tool.catalog`: the catalog and guidance text for the request's plan item,
+    /// resolved against the configuration of the project the route is bound to.
+    fn handle_tool_catalog_value(&self, channel: u16, request: &Value) -> HandlerOutcome {
+        let Ok(binding) = self.facade_binding(channel) else {
+            return HandlerOutcome::Error {
+                code: "route_unbound".to_string(),
+                message: "tool.catalog on a channel with no route binding".to_string(),
+            };
+        };
+        let config = tool_catalog::CatalogConfig::from_module_config(&binding.config);
+        let arguments = request.get("arguments").unwrap_or(&Value::Null);
+        match tool_catalog::catalog_answer_bytes(arguments, &config) {
+            Ok(bytes) => HandlerOutcome::Response(bytes),
+            Err(error) => error.into_outcome(),
+        }
+    }
+
+    /// Remember whether the route's consumer declared it speaks `tool-provider/v1`.
+    fn record_route_role_versions(
+        &self,
+        channel: u16,
+        role_versions: Option<&BTreeMap<String, String>>,
+    ) {
+        let speaks_v1 = role_versions
+            .and_then(|versions| versions.get(cortexkit_role_tool_provider::ROLE))
+            .is_some_and(|version| version == cortexkit_role_tool_provider::VERSION);
+        let mut channels = self
+            .tool_provider_v1_channels
+            .lock()
+            .expect("tool-provider channels mutex");
+        if speaks_v1 {
+            channels.insert(channel);
+        } else {
+            channels.remove(&channel);
+        }
+    }
+
+    fn speaks_tool_provider_v1(&self, channel: u16) -> bool {
+        self.tool_provider_v1_channels
+            .lock()
+            .expect("tool-provider channels mutex")
+            .contains(&channel)
     }
 
     fn log_missing_facade_command_id(&self, session_id: &str, tool: &str, action: &str) {
@@ -13695,6 +13774,7 @@ impl ModuleHandler for McHandler {
                 history_budget_tokens: memory_render::DEFAULT_HISTORY_BUDGET_TOKENS,
             },
         );
+        self.record_route_role_versions(req.handle.channel, req.role_versions.as_ref());
         subc_client_rs::BindDecision::accept()
     }
 
@@ -18358,7 +18438,10 @@ mod tests {
     mod gate_a1_b0;
     mod gate_a1_b0_baseline_probe;
     mod gate_a2;
+    mod guidance_get_golden;
     mod single_store_drill;
+    mod tool_catalog;
+    mod tool_catalog_conformance;
     // The per-harness default runner, driven through real passes.
     mod default_runner;
 
@@ -21031,6 +21114,7 @@ mod tests {
     fn default_test_config() -> McModuleConfig {
         McModuleConfig {
             cache_ttl_by_model: std::collections::BTreeMap::new(),
+            catalog: crate::config::CatalogConfigInputs::default(),
             historian_temperature: None,
             historian_runner: None,
             dreamer_runner: None,

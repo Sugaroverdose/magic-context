@@ -141,6 +141,27 @@ pub struct McModuleConfig {
     /// Per-model TTL overrides from the object config shape. Resolution uses the
     /// shared exact, bare, dash-stripped, provider-wildcard, then default walk.
     pub cache_ttl_by_model: std::collections::BTreeMap<String, String>,
+    /// Settings only `tool.catalog` reads (`src/tool_catalog.rs`).
+    pub catalog: CatalogConfigInputs,
+}
+
+/// The configuration `tool.catalog` reads that nothing else in the module does.
+/// The plugin reads the same keys for its own prompt surface.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CatalogConfigInputs {
+    /// `prompt_surface.default` (`full` or `light`); unset means full. The user
+    /// or the project tier may set it: it selects among shipped texts and adds none.
+    pub prompt_surface_default: Option<String>,
+    /// `prompt_surface.models`: model key to `full` or `light`. The user or the
+    /// project tier; a project entry replaces the user entry for the same key.
+    pub prompt_surface_models: std::collections::BTreeMap<String, String>,
+    /// `prompt_surface.tool_descriptions`: replacement tool descriptions.
+    /// USER-tier only, because a cloned repository must not be able to write
+    /// model-facing text.
+    pub tool_descriptions: std::collections::BTreeMap<String, String>,
+    /// Whether the dreamer can run: a `dreamer` block is configured in either
+    /// tier and `dreamer.disable` is not true (the plugin's `isDreamerRunnable`).
+    pub dreamer_runnable: bool,
 }
 
 impl Default for McModuleConfig {
@@ -172,6 +193,7 @@ impl Default for McModuleConfig {
             smart_drops: false,
             cache_ttl: "5m".to_string(),
             cache_ttl_by_model: std::collections::BTreeMap::new(),
+            catalog: CatalogConfigInputs::default(),
         }
     }
 }
@@ -723,12 +745,72 @@ fn merge_tiers_with_warnings(
         );
     }
 
+    apply_catalog_config(&mut cfg.catalog, user, project);
+
     cfg.execute_threshold_user_config
         .get_or_insert(ExecuteThresholdConfig::Percentage(
             DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE,
         ));
     cfg.execute_threshold_percentage = cfg.resolve_execute_threshold(None).percentage;
     (cfg, warnings)
+}
+
+/// Read the settings only `tool.catalog` uses. Invalid entries are skipped, so a
+/// typo falls back to the default wording rather than refusing every catalog.
+fn apply_catalog_config(
+    catalog: &mut CatalogConfigInputs,
+    user: Option<&Value>,
+    project: Option<&Value>,
+) {
+    let is_surface = |value: &str| value == "full" || value == "light";
+    for tier in [user, project].into_iter().flatten() {
+        if let Some(default) = tier
+            .pointer("/prompt_surface/default")
+            .and_then(Value::as_str)
+            .filter(|value| is_surface(value))
+        {
+            catalog.prompt_surface_default = Some(default.to_string());
+        }
+        if let Some(models) = tier
+            .pointer("/prompt_surface/models")
+            .and_then(Value::as_object)
+        {
+            for (key, value) in models {
+                if let Some(surface) = value.as_str().filter(|value| is_surface(value)) {
+                    if !key.trim().is_empty() {
+                        catalog
+                            .prompt_surface_models
+                            .insert(key.clone(), surface.to_string());
+                    }
+                }
+            }
+        }
+    }
+    if let Some(descriptions) = user
+        .and_then(|user| user.pointer("/prompt_surface/tool_descriptions"))
+        .and_then(Value::as_object)
+    {
+        for (tool, text) in descriptions {
+            if let Some(text) = text.as_str().filter(|text| !text.trim().is_empty()) {
+                if !tool.trim().is_empty() {
+                    catalog
+                        .tool_descriptions
+                        .insert(tool.clone(), text.to_string());
+                }
+            }
+        }
+    }
+    let configured = [user, project]
+        .into_iter()
+        .flatten()
+        .any(|tier| tier.pointer("/dreamer").is_some_and(Value::is_object));
+    // The project tier's `disable` takes precedence over the user tier's.
+    let disabled = [project, user]
+        .into_iter()
+        .flatten()
+        .find_map(|tier| tier.pointer("/dreamer/disable").and_then(Value::as_bool))
+        .unwrap_or(false);
+    catalog.dreamer_runnable = configured && !disabled;
 }
 
 fn warn_ignored_project_key(value: &Value, pointer: &str, warnings: &mut Vec<String>) {
@@ -1038,6 +1120,61 @@ mod cache_ttl_tests {
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn catalog_settings_follow_the_tiers_the_plugin_allows() {
+        let unconfigured = merge_tiers(None, None).catalog;
+        assert_eq!(unconfigured, CatalogConfigInputs::default());
+        assert!(
+            !unconfigured.dreamer_runnable,
+            "no dreamer block, no dreamer"
+        );
+
+        let user = serde_json::json!({
+            "prompt_surface": {
+                "default": "light",
+                "models": {"anthropic/claude-haiku-4-5": "light", "openai/*": "full", "bad": "tiny"},
+                "tool_descriptions": {"ctx_search": "Search it.", "ctx_note": "  "},
+            },
+            "dreamer": {"runner": "host"},
+        });
+        let project = serde_json::json!({
+            "prompt_surface": {
+                "default": "full",
+                "models": {"openai/*": "light"},
+                "tool_descriptions": {"ctx_search": "repository-controlled text"},
+            },
+            "dreamer": {"disable": true},
+        });
+        let user_only = merge_tiers(Some(&user), None).catalog;
+        assert_eq!(user_only.prompt_surface_default.as_deref(), Some("light"));
+        assert!(user_only.dreamer_runnable);
+        assert_eq!(
+            user_only.tool_descriptions,
+            std::collections::BTreeMap::from([(
+                "ctx_search".to_string(),
+                "Search it.".to_string()
+            )]),
+            "blank descriptions are skipped"
+        );
+
+        let both = merge_tiers(Some(&user), Some(&project)).catalog;
+        // The project tier may pick among shipped wordings, but never write
+        // model-facing text, and its `dreamer.disable` takes precedence.
+        assert_eq!(both.prompt_surface_default.as_deref(), Some("full"));
+        assert_eq!(
+            both.prompt_surface_models,
+            std::collections::BTreeMap::from([
+                (
+                    "anthropic/claude-haiku-4-5".to_string(),
+                    "light".to_string()
+                ),
+                ("openai/*".to_string(), "light".to_string()),
+            ])
+        );
+        assert_eq!(both.tool_descriptions, user_only.tool_descriptions);
+        assert!(!both.dreamer_runnable);
+    }
 
     #[test]
     fn an_unconfigured_runner_is_left_to_the_harness_and_only_the_user_may_set_it() {
