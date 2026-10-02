@@ -1910,6 +1910,7 @@ export async function runDoctor(
     const cacheResult = await clearPluginCache({
         force: options.force,
         latestVersion: pluginNpmLatest,
+        hostFiles: openCodeHostDatabaseFiles([openCodeDbResolution.path]),
     });
     if (cacheResult.action === "cleared") {
         const versionInfo = cacheResult.cached
@@ -1927,6 +1928,18 @@ export async function runDoctor(
         warn(
             `Plugin cache version check unavailable; preserving cached plugin${cacheResult.cached ? ` (cached: ${cacheResult.cached})` : ""}. Use doctor --force to reinstall it.`,
         );
+    } else if (cacheResult.action === "in_use" || cacheResult.action === "in_use_unknown") {
+        const versionInfo = cacheResult.cached
+            ? ` (cached: ${cacheResult.cached}${cacheResult.latest ? `, latest: ${cacheResult.latest}` : ""})`
+            : "";
+        const why =
+            cacheResult.action === "in_use"
+                ? `OpenCode is running (pid ${cacheResult.pids?.join(", ")})`
+                : (cacheResult.reason ?? "could not tell whether OpenCode is running");
+        warn(`Plugin cache${versionInfo} was not cleared: ${why}`);
+        log.info("  Quit OpenCode and rerun doctor to clear it.");
+        for (const path of cacheResult.paths ?? [cacheResult.path]) log.info(`  ${path}`);
+        issues++;
     } else if (cacheResult.action === "error") {
         warn(`Could not clear plugin cache: ${cacheResult.error}`);
         if (cacheResult.clearedPaths && cacheResult.clearedPaths.length > 0) {

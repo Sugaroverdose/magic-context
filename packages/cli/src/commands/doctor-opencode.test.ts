@@ -532,6 +532,9 @@ function createCachedOpenCodePlugin(
     return pluginCachePath;
 }
 
+/** Probe stand-in for a machine where no OpenCode process is running. */
+const noOpenCodeRunning = () => ({ status: "free" as const });
+
 describe("doctor OpenCode plugin cache", () => {
     it("clears stale @latest cache when cached plugin is older than npm latest", async () => {
         const cacheRoot = makeTempDir("mc-opencode-cache-");
@@ -539,7 +542,10 @@ describe("doctor OpenCode plugin cache", () => {
         process.env.XDG_CACHE_HOME = cacheRoot;
         const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.26.0");
 
-        const result = await clearPluginCache({ latestVersion: "0.29.1" });
+        const result = await clearPluginCache(
+            { latestVersion: "0.29.1" },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "cleared",
@@ -556,7 +562,10 @@ describe("doctor OpenCode plugin cache", () => {
         process.env.XDG_CACHE_HOME = cacheRoot;
         const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.29.1");
 
-        const result = await clearPluginCache({ latestVersion: "0.29.1" });
+        const result = await clearPluginCache(
+            { latestVersion: "0.29.1" },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "up_to_date",
@@ -578,7 +587,10 @@ describe("doctor OpenCode plugin cache", () => {
             OPENCODE_PLUGIN_NAME,
         );
 
-        const result = await clearPluginCache({ latestVersion: "0.29.1" });
+        const result = await clearPluginCache(
+            { latestVersion: "0.29.1" },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "cleared",
@@ -597,7 +609,10 @@ describe("doctor OpenCode plugin cache", () => {
         process.env.XDG_CACHE_HOME = cacheRoot;
         const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.29.1");
 
-        const result = await clearPluginCache({ latestVersion: null });
+        const result = await clearPluginCache(
+            { latestVersion: null },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "check_unavailable",
@@ -615,7 +630,10 @@ describe("doctor OpenCode plugin cache", () => {
         process.env.XDG_CACHE_HOME = cacheRoot;
         const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.29.1");
 
-        const result = await clearPluginCache({ force: true, latestVersion: null });
+        const result = await clearPluginCache(
+            { force: true, latestVersion: null },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "cleared",
@@ -644,6 +662,7 @@ describe("doctor OpenCode plugin cache", () => {
         const result = await clearPluginCache(
             { latestVersion: "0.29.1" },
             {
+                probe: noOpenCodeRunning,
                 remove: (path) => {
                     if (path === versionlessCachePath) {
                         throw new Error("EACCES: permission denied");
@@ -664,6 +683,52 @@ describe("doctor OpenCode plugin cache", () => {
         });
         expect(removed).toEqual([latestCachePath]);
         expect(existsSync(latestCachePath)).toBe(false);
+    });
+});
+
+describe("doctor OpenCode 1 plugin cache while OpenCode runs", () => {
+    it("leaves an outdated cache in place while an OpenCode process holds the host database", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.26.0");
+        const hostFiles = ["/host/opencode.db", "/host/opencode.db-wal"];
+        const probed: Array<{ files: string[]; directories: string[] }> = [];
+        const removed: string[] = [];
+
+        const result = await clearPluginCache(
+            { latestVersion: "0.29.1", hostFiles },
+            {
+                probe: (targets) => {
+                    probed.push(targets);
+                    return { status: "in_use", pids: [4242] };
+                },
+                remove: (path) => removed.push(path),
+            },
+        );
+
+        expect(result).toMatchObject({ action: "in_use", pids: [4242], path: pluginCachePath });
+        expect(probed).toEqual([{ files: hostFiles, directories: [pluginCachePath] }]);
+        expect(removed).toEqual([]);
+        expect(existsSync(pluginCachePath)).toBe(true);
+    });
+
+    it("leaves the cache in place when it cannot tell whether OpenCode is running", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.26.0");
+
+        const result = await clearPluginCache(
+            { force: true, latestVersion: null, hostFiles: [] },
+            { probe: () => ({ status: "unknown", reason: "could not run lsof (ENOENT)" }) },
+        );
+
+        expect(result).toMatchObject({
+            action: "in_use_unknown",
+            reason: "could not run lsof (ENOENT)",
+        });
+        expect(existsSync(pluginCachePath)).toBe(true);
     });
 });
 
