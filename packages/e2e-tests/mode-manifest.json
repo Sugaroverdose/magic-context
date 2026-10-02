@@ -1092,6 +1092,22 @@
             ]
         },
         {
+            "path": "tests/opencode2/compaction-off-host-compaction.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: with Magic Context compaction off, the compaction hook stays registered for hidden children but leaves a user session's result unset; the real host must then compact that session itself (completed model-written checkpoint, turn continues to the provider), exactly as with no hook registered; needs the real v2 host's compaction, so it runs only in the dedicated v2 lane",
+            "contract_refs": [
+                "OC2-S1",
+                "ISSUE-602"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/hidden-child-host-compaction.test.ts",
             "tier": "excluded",
             "invocation": {
