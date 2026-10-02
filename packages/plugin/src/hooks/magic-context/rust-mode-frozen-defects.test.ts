@@ -17,23 +17,28 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage-meta";
 import {
+    addMergedReasoningStrippedIds,
     clearEmergencyRecovery,
     getOverflowState,
     recordDetectedContextLimit,
     recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
+    thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
 import {
     __resetToolDefinitionMeasurements,
     recordToolDefinition,
 } from "../../features/magic-context/tool-definition-tokens";
 import { __test as transformDecisionTest } from "../../features/magic-context/transform-decision-log";
+import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
+import { resolveTrustedContextLimit } from "./event-resolvers";
 import { setRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import { createRustModeTransform, type RustModeModuleClient } from "./rust-mode-transform";
+import { StorageBusyRefusalError } from "./storage-busy-refusal";
 import type { TransformDeps } from "./transform";
 import type { MessageLike } from "./transform-operations";
 
@@ -130,12 +135,19 @@ function tagAllUsers(input: MessageLike[]): unknown[] {
     );
 }
 
-type Step = "throw" | string;
+function sqliteBusy(): Error {
+    return Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+}
+
+/** A decision string, "throw" for a module failure, or "throw-busy" for a SQLite busy error. */
+type Step = "throw" | "throw-busy" | string;
 
 /**
  * A Rust session on a prefix-bound model whose module answers each pass from a
- * script (a decision string, or "throw" for a module failure) and renders the
- * input through `moduleOutput`. Captures commit inline.
+ * script and renders the input through `moduleOutput`. Captures commit inline.
+ * `run` calls the adapter directly; `runWrapped` goes through the production
+ * messages-transform wrapper, whose hook can also be told to fail with a SQLite
+ * busy error before the adapter runs.
  */
 function frozenSession(label: string, options: { compactionOff?: boolean } = {}) {
     sessionCounter += 1;
@@ -147,12 +159,15 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
     const script: Step[] = [];
     let moduleOutput: (input: MessageLike[]) => unknown[] = (input) => structuredClone(input);
     let lastInput: MessageLike[] = [];
+    let statusFails = false;
     const moduleClient: RustModeModuleClient = {
         call: async ({ method }) => {
+            if (method === "session.status" && statusFails) throw new Error("no answer");
             if (method !== "transform") return { ok: true };
             pass += 1;
             const step = script.shift() ?? "SOFT+";
             if (step === "throw") throw new Error("daemon unavailable");
+            if (step === "throw-busy") throw sqliteBusy();
             return {
                 decision: step,
                 served_from: "transform",
@@ -205,6 +220,28 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         await transform.run(sessionId, input, output, meta());
         return structuredClone(output.messages);
     };
+    let hookBusy = false;
+    const handler = createMessagesTransformHandler({
+        magicContext: {
+            "experimental.chat.messages.transform": async (_input, output) => {
+                if (hookBusy) {
+                    hookBusy = false;
+                    throw sqliteBusy();
+                }
+                const messages = output.messages as unknown as MessageLike[];
+                await transform.run(sessionId, messages, output, meta());
+            },
+        },
+    });
+    /** One pass through the wrapper. `"hook-busy"` fails the hook before the adapter runs. */
+    const runWrapped = async (input: MessageLike[], step?: Step | "hook-busy") => {
+        if (step === "hook-busy") hookBusy = true;
+        else if (step !== undefined) script.push(step);
+        lastInput = input;
+        const output = { messages: [...input] };
+        await handler({}, output as never);
+        return structuredClone(output.messages as unknown[]);
+    };
     const frozenFields = () => {
         const state = transform.getState(sessionId);
         return {
@@ -220,7 +257,11 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         deps,
         transform,
         run,
+        runWrapped,
         frozenFields,
+        setStatusFails: (value: boolean) => {
+            statusFails = value;
+        },
         setModuleOutput: (value: (input: MessageLike[]) => unknown[]) => {
             moduleOutput = value;
         },
@@ -232,10 +273,13 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
             clearEmergencyRecovery(db, sessionId);
             expect(getOverflowState(db, sessionId).needsEmergencyRecovery).toBe(false);
         },
-        /** Report provider usage at the given share of the trusted hard wall. */
-        setUsagePercent: (percentage: number) => {
+        /**
+         * Report provider usage. The emergency band reads input tokens against the
+         * model's hard wall; the parked-retry pressure bypass reads the percentage.
+         */
+        setUsage: (percentage: number, inputTokens: number) => {
             deps.contextUsageMap.set(sessionId, {
-                usage: { inputTokens: 10_000_000 * (percentage / 100), percentage },
+                usage: { inputTokens, percentage },
                 updatedAt: Date.now(),
                 hasUsageTokens: true,
             });
@@ -296,7 +340,7 @@ describe("a pass that serves nothing leaves the freeze as it was", () => {
         const { conversation } = await freezeWithTwoDefers(s);
         const before = s.frozenFields();
 
-        s.setUsagePercent(97);
+        s.setUsage(97, 10_000_000);
         conversation.push(assistant(sid, "a4"), user(sid, "m5", "turn 5"));
         await expect(s.run([...conversation], "throw")).rejects.toBeInstanceOf(
             EmergencyFailClosedError,
@@ -320,5 +364,165 @@ describe("a pass that serves nothing leaves the freeze as it was", () => {
             lkgFrozenAtInputCount: null,
             lkgFrozenHealthyPasses: 0,
         });
+    });
+});
+
+/**
+ * HARD, one captured defer, then three module failures that cannot replay while
+ * emergency recovery is armed: the session parks without ever freezing.
+ */
+async function parkWithoutReplay(s: ReturnType<typeof frozenSession>) {
+    const sid = s.sessionId;
+    const conversation: MessageLike[] = [user(sid, "m1", "question")];
+    await s.runWrapped([...conversation], "HARD");
+    conversation.push(assistant(sid, "a1"), user(sid, "m2", "turn 2"));
+    await s.runWrapped([...conversation], "SOFT+");
+    s.armEmergency();
+    for (let turn = 3; turn <= 5; turn += 1) {
+        conversation.push(assistant(sid, `a${turn - 1}`), user(sid, `m${turn}`, `turn ${turn}`));
+        await expect(s.runWrapped([...conversation], "throw")).rejects.toBeInstanceOf(
+            EmergencyFailClosedError,
+        );
+    }
+    s.disarmEmergency();
+    expect(s.transform.getState(sid).parked).toBe(true);
+    expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+    return conversation;
+}
+
+describe("every last-known-good serve freezes the adapter", () => {
+    it("a storage-busy wrapper replay freezes the adapter", async () => {
+        const s = frozenSession("wrapper-busy");
+        const sid = s.sessionId;
+        const conversation: MessageLike[] = [user(sid, "m1", "question")];
+        await s.runWrapped([...conversation], "HARD");
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+
+        // The hook fails with a SQLite busy error; the wrapper serves the slot plus
+        // the raw tail.
+        conversation.push(assistant(sid, "a1"), user(sid, "m2", "turn 2"));
+        const replayed = await s.runWrapped([...conversation], "hook-busy");
+        expect(sha(replayed)).toBe(sha(conversation));
+
+        // The module is back and tags everything; the provider holds the replayed
+        // bytes, so the adapter keeps serving them.
+        s.setModuleOutput(tagAllUsers);
+        conversation.push(assistant(sid, "a2"), user(sid, "m3", "turn 3"));
+        const served = await s.runWrapped([...conversation], "SOFT+");
+        expect(sha(served)).toBe(sha(conversation));
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
+    });
+
+    it("a parked replay and a probe-failure replay freeze the adapter", async () => {
+        // Parked shortcut: the first pass after parking replays without asking the module.
+        const parked = frozenSession("parked-shortcut");
+        const parkedConversation = await parkWithoutReplay(parked);
+        const parkedPid = parked.sessionId;
+        parkedConversation.push(assistant(parkedPid, "a5"), user(parkedPid, "m6", "turn 6"));
+        const parkedReplay = await parked.runWrapped([...parkedConversation]);
+        expect(sha(parkedReplay)).toBe(sha(parkedConversation));
+        // Usage at or above the bypass percentage skips the shortcut, so this pass
+        // probes the module, finds it healthy, and asks it to transform.
+        parked.setUsage(92, 1_000);
+        parked.setModuleOutput(tagAllUsers);
+        parkedConversation.push(assistant(parkedPid, "a6"), user(parkedPid, "m7", "turn 7"));
+        const parkedServed = await parked.runWrapped([...parkedConversation], "SOFT+");
+        expect(sha(parkedServed)).toBe(sha(parkedConversation));
+        expect(parked.frozenFields().lkgRepresentationFrozen).toBe(true);
+
+        // Probe failure: the health probe fails and the pass replays instead.
+        const probed = frozenSession("probe-failure");
+        const probedConversation = await parkWithoutReplay(probed);
+        const probedSid = probed.sessionId;
+        probed.setUsage(92, 1_000);
+        probed.setStatusFails(true);
+        probedConversation.push(assistant(probedSid, "a5"), user(probedSid, "m6", "turn 6"));
+        const probedReplay = await probed.runWrapped([...probedConversation]);
+        expect(sha(probedReplay)).toBe(sha(probedConversation));
+        probed.setStatusFails(false);
+        probed.setModuleOutput(tagAllUsers);
+        probedConversation.push(assistant(probedSid, "a6"), user(probedSid, "m7", "turn 7"));
+        const probedServed = await probed.runWrapped([...probedConversation], "SOFT+");
+        expect(sha(probedServed)).toBe(sha(probedConversation));
+        expect(probed.frozenFields().lkgRepresentationFrozen).toBe(true);
+    });
+});
+
+describe("the wrapper admits a replay the way the adapter does", () => {
+    it("the wrapper declines a replay after the adapter's 95% refusal", async () => {
+        const s = frozenSession("wrapper-emergency-band");
+        const sid = s.sessionId;
+        await s.runWrapped([user(sid, "m1", "question")], "HARD");
+        s.setUsage(97, 10_000_000);
+        const conversation = [
+            user(sid, "m1", "question"),
+            assistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+        ];
+        // A busy error inside the emergency band makes the adapter refuse with a
+        // storage-busy refusal; the wrapper must not serve the slot in its place.
+        await expect(s.runWrapped([...conversation], "throw-busy")).rejects.toBeInstanceOf(
+            StorageBusyRefusalError,
+        );
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+    });
+
+    it("the wrapper declines a replay that does not fit", async () => {
+        const s = frozenSession("wrapper-over-limit");
+        const sid = s.sessionId;
+        await s.runWrapped([user(sid, "m1", "question")], "HARD");
+        const limit = resolveTrustedContextLimit(MODEL.providerID, MODEL.modelID, {
+            db: s.db,
+            sessionID: sid,
+        });
+        expect(limit).toBeGreaterThan(0);
+        // A raw tail far past the trusted limit, with emergency recovery not armed.
+        const huge = "lorem ipsum dolor sit amet ".repeat(Math.ceil(((limit ?? 0) * 2) / 5));
+        const conversation = [
+            user(sid, "m1", "question"),
+            assistant(sid, "a1"),
+            user(sid, "m2", huge),
+        ];
+        await expect(s.runWrapped([...conversation], "hook-busy")).rejects.toBeInstanceOf(
+            StorageBusyRefusalError,
+        );
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+    });
+
+    it("wrapper and adapter replays of the same tail are byte-identical", async () => {
+        const s = frozenSession("replay-parity");
+        const sid = s.sessionId;
+        // The HARD strips a1's thinking and persists that strip.
+        await s.runWrapped(
+            [user(sid, "m1", "question"), thinkingAssistant(sid, "a1"), user(sid, "m2", "turn 2")],
+            "HARD",
+        );
+        // a2 arrives raw on the replays; a persisted strip covers it as well.
+        expect(
+            addMergedReasoningStrippedIds(s.db, sid, [thinkingBindingRecoveryFrozenId("a2")]),
+        ).toBe(true);
+        const conversation = [
+            user(sid, "m1", "question"),
+            thinkingAssistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+            thinkingAssistant(sid, "a2"),
+            user(sid, "m3", "turn 3"),
+            thinkingAssistant(sid, "a3"),
+            user(sid, "m4", "turn 4"),
+        ];
+        const adapterReplay = await s.runWrapped(structuredClone(conversation), "throw");
+        const wrapperReplay = await s.runWrapped(structuredClone(conversation), "hook-busy");
+        expect(wrapperReplay.length).toBe(adapterReplay.length);
+        for (const [index, message] of adapterReplay.entries()) {
+            expect(JSON.stringify(wrapperReplay[index])).toBe(JSON.stringify(message));
+        }
+        const replayed = adapterReplay as MessageLike[];
+        const reasoningOf = (id: string) =>
+            replayed
+                .find((message) => message.info.id === id)
+                ?.parts.some((part) => (part as { type?: string }).type === "reasoning");
+        expect(reasoningOf("a1")).toBe(false);
+        expect(reasoningOf("a2")).toBe(false);
+        expect(reasoningOf("a3")).toBe(true);
     });
 });

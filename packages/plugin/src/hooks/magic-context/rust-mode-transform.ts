@@ -16,7 +16,7 @@ import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflo
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
-import type { getOrCreateSessionMeta } from "../../features/magic-context/storage";
+import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import {
     casChannel2NudgeState,
     clearEmergencyRecovery,
@@ -84,6 +84,7 @@ import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { createHistorianHostRunner } from "./historian-host-runner";
 import { saveLkgSlotToDb } from "./lkg-persist";
 import { replayLkg, resolveLkgModelKeys } from "./lkg-replay";
+import { lkgReplayFits } from "./lkg-replay-fit";
 import {
     captureSlot,
     contentSnapshotValue,
@@ -133,6 +134,7 @@ import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
+import { registerRustLkgReplayParticipant } from "./rust-lkg-freeze-registry";
 import { SharedCompartmentBoundaryError } from "./shared-compartment-boundaries";
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
@@ -1057,6 +1059,21 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
     return state;
 }
 
+/**
+ * Enter (or keep) the frozen representation after a last-known-good replay was
+ * served, whoever served it. From here on the provider holds the replayed bytes,
+ * so later healthy passes must keep serving them until a pass installs something
+ * else. The replay appended a raw tail the slot does not hold, so the slot is no
+ * longer provably the last-served array.
+ */
+function enterLkgReplayFreeze(state: RustSessionState, inputCount: number): void {
+    if (state.lkgFrozenAtInputCount === null) state.lkgFrozenAtInputCount = inputCount;
+    state.lkgRepresentationFrozen = true;
+    state.lkgFrozenHealthyPasses = 0;
+    state.forceFullWire = true;
+    state.lkgLastServedCaptureSequence = null;
+}
+
 function getSessionDirectory(
     deps: TransformDeps,
     sessionId: string,
@@ -1915,10 +1932,7 @@ export function createRustModeTransform(
             return false;
         }
         const keys = resolveLkgModelKeys(currentMessages);
-        const replayModel =
-            modelFromMessages(currentMessages) ??
-            deps.liveModelBySession?.get(sessionId) ??
-            hostModelFallback(sessionId);
+        const replayModel = resolveReplayModel(sessionId, currentMessages);
         const replay = replayLkg({
             sessionId,
             messages: currentMessages,
@@ -1939,60 +1953,67 @@ export function createRustModeTransform(
             sessionLog(sessionId, replay.reason);
             return false;
         }
-        const trustedReplayLimit = replayModel
-            ? resolveTrustedContextLimit(replayModel.providerID, replayModel.modelID, {
-                  db: deps.db,
-                  sessionID: sessionId,
-              })
-            : undefined;
-        let detectedReplayLimit = 0;
-        try {
-            detectedReplayLimit = getOverflowState(
-                deps.db,
-                sessionId,
-                keys.modelKey,
-            ).detectedContextLimit;
-        } catch {
-            // A limit read failure cannot admit cached bytes whose size is now unknown.
-            return false;
-        }
-        const replayLimit =
-            trustedReplayLimit ?? (detectedReplayLimit > 0 ? detectedReplayLimit : undefined);
-        if (replayLimit !== undefined && replayLimit > 0) {
-            try {
-                const estimate = estimateFinalWireInputTokens({
-                    messages: replay.messages,
-                    systemPromptTokens,
-                    providerID: replayModel?.providerID,
-                    modelID: replayModel?.modelID,
-                    agentName: deps.getNotificationParams?.(sessionId)?.agent,
-                });
-                if (
-                    !estimate.trusted ||
-                    !Number.isFinite(estimate.tokens) ||
-                    estimate.tokens <= 0 ||
-                    estimate.tokens > replayLimit
-                ) {
-                    sessionLog(
-                        sessionId,
-                        `${!estimate.trusted ? "lkg_fit_untrusted" : "lkg_over_context_limit"} estimated=${estimate.tokens} limit=${replayLimit}`,
-                    );
-                    return false;
-                }
-            } catch {
-                return false;
-            }
-        } else {
+        const fit = lkgReplayFits({
+            db: deps.db,
+            sessionId,
+            messages: replay.messages,
+            model: replayModel,
+            modelKey: keys.modelKey,
+            systemPromptTokens,
+            agentName: deps.getNotificationParams?.(sessionId)?.agent,
+        });
+        if (!fit.fits) {
+            if (fit.detail) sessionLog(sessionId, fit.detail);
             return false;
         }
         replaceMessagesInPlace(output, replay.messages);
-        // This serve adds a raw tail the slot does not hold, so the slot stops being
-        // the last-served array even if this pass captured one before failing.
-        const replayState = states.get(sessionId);
-        if (replayState) replayState.lkgLastServedCaptureSequence = null;
+        // Every provider-visible replay enters the freeze here: the failure ladder,
+        // the parked shortcut and the parked health-probe failure alike.
+        enterLkgReplayFreeze(ensureState(states, sessionId), currentMessages.length);
         sessionLog(sessionId, "lkg_replay_served");
         return true;
     };
+
+    // The model a last-known-good replay is admitted and stripped for. The outer
+    // wrapper's replay goes through the registered participant below, which uses
+    // this same function, so both replays of one tail strip it identically.
+    const resolveReplayModel = (
+        sessionId: string,
+        messages: MessageLike[],
+    ): { providerID: string; modelID: string } | null | undefined =>
+        modelFromMessages(messages) ??
+        deps.liveModelBySession?.get(sessionId) ??
+        hostModelFallback(sessionId);
+
+    registerRustLkgReplayParticipant({
+        ownsSession: (sessionId) => states.has(sessionId),
+        enterFreezeFromExternalServe: (sessionId, inputCount) =>
+            enterLkgReplayFreeze(ensureState(states, sessionId), inputCount),
+        replayFits: (sessionId, messages) => {
+            try {
+                return lkgReplayFits({
+                    db: deps.db,
+                    sessionId,
+                    messages,
+                    model: resolveReplayModel(sessionId, messages),
+                    modelKey: resolveLkgModelKeys(messages).modelKey,
+                    systemPromptTokens: getOrCreateSessionMeta(deps.db, sessionId)
+                        .systemPromptTokens,
+                    agentName: deps.getNotificationParams?.(sessionId)?.agent,
+                }).fits;
+            } catch (error) {
+                sessionLog(sessionId, "lkg wrapper replay fit check failed:", error);
+                return false;
+            }
+        },
+        stripPersistedReasoning: (sessionId, messages, inputMessages) =>
+            replayRustModeBindingMismatchStrips({
+                db: deps.db,
+                sessionId,
+                messages,
+                resolvedProviderID: resolveReplayModel(sessionId, inputMessages)?.providerID,
+            }),
+    });
 
     const prepareRustCapture = (
         state: RustSessionState,
@@ -4024,17 +4045,10 @@ export function createRustModeTransform(
                 output,
                 sessionMeta.systemPromptTokens,
             );
-            // A replay that cannot serve leaves the freeze alone: either the raw fallback
-            // below serves the raw input and clears it, or the pass refuses and the provider
-            // still holds the frozen bytes the next pass must keep serving.
-            if (replayed) {
-                if (!state.lkgRepresentationFrozen) {
-                    state.lkgFrozenAtInputCount = inputCount;
-                }
-                state.lkgRepresentationFrozen = true;
-                state.lkgFrozenHealthyPasses = 0;
-                state.forceFullWire = true;
-            }
+            // A served replay entered the freeze inside replayLastGood. One that cannot
+            // serve leaves the freeze alone: either the raw fallback below serves the raw
+            // input and clears it, or the pass refuses and the provider still holds the
+            // frozen bytes the next pass must keep serving.
             servedFrom = replayed ? "lkg" : "raw";
             if (decision.toLowerCase() !== "need_full_sync") decision = "error";
             materializeReason = moduleFailureCode(error) ?? "none";
