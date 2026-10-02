@@ -131,6 +131,7 @@ import {
 } from "./doctor-opencode-plugin-entry";
 import {
     checkOpenCodeV2PluginCache,
+    compareSemverPrecedence,
     configuredOpenCodeV2DistTag,
     openCodeHostDatabaseFiles,
     reportOpenCodeV2PluginCache,
@@ -569,18 +570,13 @@ export function collectNpmReleaseAgeWarnings(): string[] {
 }
 
 /** Compare semver-like strings. Returns -1 if a<b, 0 if equal, 1 if a>b. */
-function compareVersions(a: string, b: string): number {
-    const pa = a.split(/[.-]/).map((s) => Number.parseInt(s, 10));
-    const pb = b.split(/[.-]/).map((s) => Number.parseInt(s, 10));
-    const len = Math.max(pa.length, pb.length);
-    for (let i = 0; i < len; i++) {
-        const x = pa[i] ?? 0;
-        const y = pb[i] ?? 0;
-        if (Number.isNaN(x) || Number.isNaN(y)) return 0;
-        if (x < y) return -1;
-        if (x > y) return 1;
-    }
-    return 0;
+/**
+ * Semver precedence of the CLI version against npm's: a prerelease ranks
+ * below its release, so a beta CLI is reported as behind the matching
+ * release. Null when either version is not semver.
+ */
+export function compareVersions(a: string, b: string): number | null {
+    return compareSemverPrecedence(a, b);
 }
 
 // ── Issue flow ──────────────────────────────────────────────────────
@@ -1296,9 +1292,12 @@ export async function runDoctor(
         fetchNpmLatest(CLI_PACKAGE_NAME),
         fetchNpmLatest(PLUGIN_NAME),
     ]);
+    const cliComparison = npmLatest ? compareVersions(selfVersion, npmLatest) : null;
     if (!npmLatest) {
         log.info(`Magic Context CLI v${selfVersion}; npm latest check unavailable`);
-    } else if (compareVersions(selfVersion, npmLatest) < 0) {
+    } else if (cliComparison === null) {
+        log.info(`Magic Context CLI v${selfVersion}; cannot compare with npm latest v${npmLatest}`);
+    } else if (cliComparison < 0) {
         warn(`Magic Context CLI v${selfVersion} is older than npm latest v${npmLatest}`);
     } else {
         pass(`Magic Context CLI v${selfVersion} is current (npm latest v${npmLatest})`);

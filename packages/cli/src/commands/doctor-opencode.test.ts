@@ -24,6 +24,7 @@ import {
     checkConfiguredVariantCatalog,
     checkUserMemoriesDreamerCompatibility,
     collectNpmReleaseAgeWarnings,
+    compareVersions,
     describeAutoUpdateStall,
     describeOpenCode2SessionAPIRequirement,
     describeOpenCodeDatabaseDoctorCheck,
@@ -1050,4 +1051,24 @@ it("names the installed OpenCode host and minimum native session API version", (
     expect(describeOpenCode2SessionAPIRequirement("2.0.21")).toBe(
         "OpenCode host 2.0.21; Magic Context requires OpenCode 2.0.22 or newer with session.remove and session.compact.",
     );
+});
+
+describe("doctor CLI version comparison", () => {
+    it("ranks a prerelease below its release and above the previous release", () => {
+        expect(compareVersions("0.45.0-beta.1", "0.45.0")).toBeLessThan(0);
+        expect(compareVersions("0.45.0", "0.45.0-beta.1")).toBeGreaterThan(0);
+        expect(compareVersions("0.45.0-beta.1", "0.45.0-beta.3")).toBeLessThan(0);
+        expect(compareVersions("0.45.0-beta.1", "0.44.4")).toBeGreaterThan(0);
+    });
+
+    it("compares releases by their numeric parts", () => {
+        expect(compareVersions("0.44.4", "0.45.0")).toBeLessThan(0);
+        expect(compareVersions("0.45.0", "0.45.0")).toBe(0);
+        expect(compareVersions("1.0.0", "0.99.99")).toBeGreaterThan(0);
+    });
+
+    it("reports an unparseable version as not comparable instead of equal", () => {
+        expect(compareVersions("0.0.0-dev", "0.45.0")).toBeLessThan(0);
+        expect(compareVersions("not-a-version", "0.45.0")).toBeNull();
+    });
 });

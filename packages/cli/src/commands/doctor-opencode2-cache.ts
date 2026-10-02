@@ -173,18 +173,29 @@ function prereleaseOf(version: string): string {
     return dash === -1 ? "" : withoutBuild.slice(dash + 1);
 }
 
+/**
+ * Semver precedence of two versions: negative when `a` is older, positive
+ * when newer, 0 when equal. Within one core version a prerelease ranks below
+ * the release (0.44.0-beta.1 < 0.44.0-beta.3 < 0.44.0). Null when either is
+ * not a semver version.
+ */
+export function compareSemverPrecedence(a: string, b: string): number | null {
+    const comparison = compareSemverCore(a, b);
+    if (comparison === null || comparison !== 0) return comparison;
+    return comparePrerelease(prereleaseOf(a), prereleaseOf(b));
+}
+
 /** True when the cached install is older than `latest` or unreadable. */
 function isStale(cached: string | undefined, latest: string): boolean {
     if (cached === undefined) return true;
     if (cached === latest) return false;
-    const comparison = compareSemverCore(cached, latest);
+    const comparison = compareSemverPrecedence(cached, latest);
     // Unparseable versions that differ are treated as stale; a newer cached
-    // build (for example a prerelease ahead of `latest`) is left alone.
+    // build (for example a prerelease ahead of `latest`) is left alone. Same
+    // core: prerelease order decides, which matters for a `@beta` or `@next`
+    // slot (0.44.0-beta.1 is older than 0.44.0-beta.3).
     if (comparison === null) return true;
-    if (comparison !== 0) return comparison < 0;
-    // Same core: prerelease order decides, which matters for a `@beta` or
-    // `@next` slot (0.44.0-beta.1 is older than 0.44.0-beta.3).
-    return comparePrerelease(prereleaseOf(cached), prereleaseOf(latest)) < 0;
+    return comparison < 0;
 }
 
 export interface OpenCodeV2SlotRemovalDeps {
