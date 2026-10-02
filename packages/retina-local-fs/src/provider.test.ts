@@ -427,6 +427,56 @@ describe("path fence", () => {
             code: "fenced_path",
         });
     });
+
+    // Users who move CortexKit data to another disk replace the data directory
+    // with a symlink. The watched path is fully resolved, so the fence must
+    // compare it against the resolved CortexKit locations too.
+    test("refuses fenced roots when the cortexkit data directory is a symlink", async () => {
+        const home = await temporaryDirectory("retina-local-fs-home-");
+        const elsewhere = await temporaryDirectory("retina-local-fs-moved-");
+        const realCortexkit = join(elsewhere, "real", "cortexkit");
+        await mkdir(join(home, ".local", "share"), { recursive: true });
+        await mkdir(realCortexkit, { recursive: true });
+        await symlink(realCortexkit, join(home, ".local", "share", "cortexkit"));
+        for (const relativePath of [
+            ["plexus", "store.db"],
+            ["claustrum", "secret.txt"],
+            ["run", "subc-connection.json"],
+            ["magic-context", "context.db"],
+        ]) {
+            await mkdir(join(realCortexkit, relativePath[0] ?? ""), { recursive: true });
+            await writeFile(join(realCortexkit, ...relativePath), "secret");
+            for (const path of [
+                join(home, ".local", "share", "cortexkit", ...relativePath),
+                join(realCortexkit, ...relativePath),
+            ]) {
+                await expect(poll({ kind: "path_exists", path }, null, home)).rejects.toMatchObject(
+                    { code: "fenced_path" },
+                );
+            }
+        }
+
+        // The carve-ins still apply through the symlink.
+        const carveIn = join(realCortexkit, "plexus", "catalog", "provider.json");
+        await mkdir(join(carveIn, ".."), { recursive: true });
+        await writeFile(carveIn, "allowed");
+        const result = await poll({ kind: "path_exists", path: carveIn }, null, home);
+        expect(result.events).toHaveLength(1);
+    });
+
+    test("refuses a fenced root that is itself a symlink to another disk", async () => {
+        const home = await temporaryDirectory("retina-local-fs-home-");
+        const elsewhere = await temporaryDirectory("retina-local-fs-moved-");
+        const realPlexus = join(elsewhere, "plexus-data");
+        await mkdir(realPlexus, { recursive: true });
+        await writeFile(join(realPlexus, "store.db"), "events");
+        await mkdir(join(home, ".local", "share", "cortexkit"), { recursive: true });
+        await symlink(realPlexus, join(home, ".local", "share", "cortexkit", "plexus"));
+
+        await expect(
+            poll({ kind: "path_exists", path: join(realPlexus, "store.db") }, null, home),
+        ).rejects.toMatchObject({ code: "fenced_path" });
+    });
 });
 
 describe("CLI exit discipline", () => {
