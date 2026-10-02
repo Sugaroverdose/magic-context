@@ -13,6 +13,7 @@ import {
 } from "../../features/magic-context/storage-db";
 import { describeStorageUnavailability } from "../../features/magic-context/storage-unavailable-reason";
 import { getErrorMessage } from "../../shared/error-message";
+import { startBootDeadline } from "../../shared/off-thread-migration-clock";
 
 /**
  * The shortest time between two storage open attempts while the context database
@@ -135,19 +136,17 @@ export function createV2StorageGate(options: V2StorageGateOptions = {}): V2Stora
  * Give slow healthy opens time to retain the tools registered during setup.
  * OpenCode serves HTTP while this asynchronous wait is pending. An open
  * still unresolved after fifteen seconds takes the degraded, tool-less route.
+ * Time spent applying schema migrations on the worker thread does not count
+ * towards those fifteen seconds, so a long first-start upgrade keeps its tools.
  */
 export async function probeV2StorageAtBoot(
     storage: V2StorageGate,
+    timeoutMs = 15_000,
 ): Promise<ContextDatabase | undefined> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = startBootDeadline(timeoutMs);
     try {
-        return await Promise.race([
-            storage.probe(),
-            new Promise<undefined>((resolve) => {
-                timer = setTimeout(() => resolve(undefined), 15_000);
-            }),
-        ]);
+        return await Promise.race([storage.probe(), deadline.expired.then(() => undefined)]);
     } finally {
-        clearTimeout(timer);
+        deadline.cancel();
     }
 }

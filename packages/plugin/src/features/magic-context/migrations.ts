@@ -1,3 +1,4 @@
+import { isMainThread } from "node:worker_threads";
 import { extractTiersFromInner } from "../../hooks/magic-context/compartment-parser";
 import { log } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
@@ -3238,6 +3239,32 @@ function isMigrationApplied(db: Database, version: number): boolean {
 }
 
 /**
+ * Whether `runMigrations` would apply anything to this database. Read-only: it
+ * creates no bookkeeping table and takes no write lock, so a startup that has
+ * nothing to migrate can skip the migration worker entirely.
+ */
+export function hasPendingMigrations(db: Database): boolean {
+    const bookkeeping = db
+        .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'schema_migrations'")
+        .get();
+    if (bookkeeping == null) return true;
+    const currentVersion = getCurrentVersion(db);
+    return MIGRATIONS.some(
+        (candidate) =>
+            candidate.version > currentVersion && !isMigrationApplied(db, candidate.version),
+    );
+}
+
+// Counts migration bodies applied on the process's main thread. Startup applies
+// them on a worker thread so the host keeps answering requests; a test reads this
+// to prove a startup open never fell back to running them here.
+let mainThreadMigrationBodies = 0;
+
+export function __getMainThreadMigrationBodyCountForTests(): number {
+    return mainThreadMigrationBodies;
+}
+
+/**
  * Detect the specific case where a sibling process already committed the
  * same `schema_migrations` row we're about to insert. BEGIN IMMEDIATE now
  * prevents this race for supported adapters by serializing before the version
@@ -3346,6 +3373,7 @@ export function runMigrations(db: Database): void {
                         loggedPlan = true;
                     }
 
+                    if (isMainThread) mainThreadMigrationBodies += 1;
                     migration.up(db);
                     db.prepare(
                         "INSERT INTO schema_migrations (version, description, applied_at) VALUES (?, ?, ?)",

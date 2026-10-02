@@ -55,7 +55,13 @@ import {
     LKG_SLOTS_DDL,
     SESSION_REPLAY_DECISIONS_DDL,
 } from "./migration-v94-write-split";
-import { FORK_MIGRATION_VERSION_FLOOR, runMigrations, runMigrationsWithRetry } from "./migrations";
+import { runMigrationsOffThread } from "./migration-worker-client";
+import {
+    FORK_MIGRATION_VERSION_FLOOR,
+    hasPendingMigrations,
+    runMigrations,
+    runMigrationsWithRetry,
+} from "./migrations";
 import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import {
@@ -262,6 +268,17 @@ export function resolveDatabasePath(dbPathOverride?: string): { dbDir: string; d
     // implementation. See its doc comment for the incident history.
     const dbDir = getMagicContextStorageDir();
     return { dbDir, dbPath: join(dbDir, "context.db") };
+}
+
+/**
+ * Whether a second connection opened with this path reaches the same database.
+ * In-memory databases are private to their connection, and URI filenames may
+ * carry connection-specific options, so both keep migrating on their own
+ * connection instead of on a worker.
+ */
+function isFileBackedPath(dbPath: string): boolean {
+    const trimmed = dbPath.trim();
+    return trimmed !== "" && trimmed !== ":memory:" && !trimmed.startsWith("file:");
 }
 
 export function getDatabasePath(db: Database): string | null {
@@ -2617,6 +2634,17 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
     lastSchemaFenceRejection = null;
     lastMigrationOnOpenRefusal = null;
     const existing = databases.get(dbPath);
+    if (!existing && pendingAsyncOpens.has(dbPath)) {
+        // A startup open of this database is still in flight, possibly with a
+        // worker thread migrating it. A second connection opened here would run
+        // the migrations on the main thread, contend with the worker for the write
+        // lock, or read a partly migrated schema. Report storage as unavailable;
+        // the caller retries or degrades as it does for any failed open.
+        log(
+            `[magic-context] storage not ready: ${dbPath} is still being opened or migrated; refusing a second synchronous open`,
+        );
+        return null;
+    }
     if (existing) {
         if (!enforceSchemaFence(existing, dbPath, latestSupportedVersion)) {
             return null;
@@ -2732,6 +2760,21 @@ export async function openDatabaseAsync(
             }
             guardMs = performance.now() - guardStartedAt;
             migrateStartedAt = performance.now();
+            // Apply pending migrations on a worker thread with its own connection
+            // so the host keeps serving requests; see migration-worker.ts. This
+            // connection stays idle meanwhile and is handed out only after the
+            // worker has committed, so no caller can read a half-migrated schema.
+            // With nothing pending, nothing is started and the open costs what it
+            // did before.
+            if (isFileBackedPath(dbPath) && hasPendingMigrations(db)) {
+                await runMigrationsOffThread({
+                    dbPath,
+                    busyTimeoutMs,
+                    sqlitePragmaConfig: { ...sqlitePragmaConfig },
+                });
+            }
+            // Already-current after the worker, so this reaches runMigrations' read-only
+            // fast path. If no worker could start, this applies the migrations here.
             initializeDatabase(db, busyTimeoutMs);
             await runMigrationsWithRetry(db);
             ensureContextStoreUuid(db);

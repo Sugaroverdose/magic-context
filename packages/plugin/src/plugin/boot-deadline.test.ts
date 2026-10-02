@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+    __resetOffThreadMigrationClockForTests,
+    beginOffThreadMigration,
+} from "../shared/off-thread-migration-clock";
+import {
     createBootBudget,
     emitBootEnteringBreadcrumb,
     formatBootPhaseDiagnostics,
@@ -9,6 +13,50 @@ import {
 } from "./boot-deadline";
 
 describe("boot phase deadline", () => {
+    test("a schema migration running off the main thread does not count against the deadline", async () => {
+        const messages: string[] = [];
+        const endMigration = beginOffThreadMigration();
+        try {
+            const result = await runBootPhaseWithDeadline(
+                "hooks",
+                () =>
+                    new Promise<string>((resolve) =>
+                        setTimeout(() => {
+                            endMigration();
+                            resolve("real hooks");
+                        }, 120),
+                    ),
+                20,
+                (message) => messages.push(message),
+            );
+
+            expect(result.status).toBe("completed");
+            expect(messages).toEqual([
+                "[magic-context] boot phase 'hooks' reached its 20ms deadline while a schema migration runs off the main thread; waiting for the migration, which does not count against the deadline",
+            ]);
+        } finally {
+            endMigration();
+            __resetOffThreadMigrationClockForTests();
+        }
+    });
+
+    test("the deadline still fires once the off-thread migration has finished", async () => {
+        const endMigration = beginOffThreadMigration();
+        setTimeout(endMigration, 40);
+        try {
+            const result = await runBootPhaseWithDeadline(
+                "hooks",
+                () => new Promise<never>(() => {}),
+                20,
+                () => {},
+            );
+            expect(result.status).toBe("timed_out");
+        } finally {
+            endMigration();
+            __resetOffThreadMigrationClockForTests();
+        }
+    });
+
     test("plugin hook initialization resolves when the boot dependency never settles", async () => {
         const startedAt = performance.now();
         const messages: string[] = [];
