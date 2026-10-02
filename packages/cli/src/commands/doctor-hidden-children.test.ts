@@ -10,12 +10,24 @@ import {
     cleanupRetiredHiddenChildren,
 } from "./doctor-hidden-children";
 
-function fixture() {
+/**
+ * OpenCode 1's own session tables, as OpenCode 2 leaves them behind after converting an
+ * OpenCode 1 store in place (it copies their rows into `session_v2` and `session_message`).
+ */
+const OPENCODE1_TABLES = `CREATE TABLE session (id TEXT PRIMARY KEY, directory TEXT NOT NULL);
+    CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL REFERENCES session(id) ON DELETE CASCADE, data TEXT NOT NULL);
+    CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT NOT NULL REFERENCES message(id) ON DELETE CASCADE, session_id TEXT NOT NULL, data TEXT NOT NULL);
+    INSERT INTO session (id, directory) VALUES ('v1-session', '/fixture');
+    INSERT INTO message (id, session_id, data) VALUES ('v1-message', 'v1-session', '{}');
+    INSERT INTO part (id, message_id, session_id, data) VALUES ('v1-part', 'v1-message', 'v1-session', '{}');`;
+
+function fixture(options: { upgradedFromOpenCode1?: boolean } = {}) {
     const dir = createTestTempDirFromPath(join(tmpdir(), "mc-doctor-hidden-"));
     const hostDbPath = join(dir, "opencode2.db");
     const contextDbPath = join(dir, "context.db");
     const host = new Database(hostDbPath);
     const context = new Database(contextDbPath);
+    if (options.upgradedFromOpenCode1) host.exec(OPENCODE1_TABLES);
     host.exec(`CREATE TABLE session_v2 (id TEXT PRIMARY KEY, directory TEXT NOT NULL, metadata TEXT);
         CREATE TABLE instruction_entry (session_id TEXT REFERENCES session_v2(id) ON DELETE CASCADE);
         CREATE TABLE instruction_state (session_id TEXT REFERENCES session_v2(id) ON DELETE CASCADE);
@@ -111,6 +123,56 @@ test("doctor only deletes marked sessions listed as retired, with a backup and c
         }
     } finally {
         files.cleanup();
+    }
+});
+
+test("doctor cleans up a store OpenCode 2 converted from OpenCode 1 in place, leaving the old tables alone", async () => {
+    const files = fixture({ upgradedFromOpenCode1: true });
+    try {
+        const result = await cleanupRetiredHiddenChildren({
+            ...files,
+            fix: true,
+            inspectHolders: () => {},
+        });
+        expect(result).toMatchObject({ waiting: 2, deleted: 1 });
+        const host = new Database(files.hostDbPath, { readonly: true });
+        try {
+            expect(
+                (
+                    host.prepare("SELECT id FROM session_v2 ORDER BY id").all() as Array<{
+                        id: string;
+                    }>
+                ).map((row) => row.id),
+            ).toEqual(["listed-user", "unlisted-hidden"]);
+            for (const table of ["session", "message", "part"]) {
+                expect(host.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get()).toEqual({
+                    count: 1,
+                });
+            }
+        } finally {
+            host.close();
+        }
+    } finally {
+        files.cleanup();
+    }
+});
+
+test("doctor still refuses an OpenCode 1 store that has no session_v2 schema", async () => {
+    const dir = createTestTempDirFromPath(join(tmpdir(), "mc-doctor-hidden-v1-"));
+    const hostDbPath = join(dir, "opencode.db");
+    const contextDbPath = join(dir, "context.db");
+    const host = new Database(hostDbPath);
+    host.exec(OPENCODE1_TABLES);
+    host.close();
+    const context = new Database(contextDbPath);
+    context.exec("CREATE TABLE schema_migrations_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)");
+    context.close();
+    try {
+        await expect(
+            cleanupRetiredHiddenChildren({ hostDbPath, contextDbPath, inspectHolders: () => {} }),
+        ).rejects.toThrow("OpenCode store is not the verified OpenCode 2 session_v2 schema");
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
     }
 });
 

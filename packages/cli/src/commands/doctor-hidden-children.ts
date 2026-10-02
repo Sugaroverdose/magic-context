@@ -76,12 +76,12 @@ function assertVerifiedV2Schema(db: Database): void {
         name: string;
     }>;
     const names = new Set(table.map((row) => row.name));
-    if (
-        !names.has("session_v2") ||
-        !names.has("session_message") ||
-        names.has("message") ||
-        names.has("part")
-    ) {
+    // OpenCode 1's `message` and `part` tables are not a reason to refuse: OpenCode 2
+    // converts an OpenCode 1 store in place, copying its sessions into `session_v2`
+    // and `session_message`, and leaves the old tables behind. They reference
+    // OpenCode 1's `session` table, never `session_v2`, so the cascade check below is
+    // unaffected by them and deleting a hidden-run session never reaches them.
+    if (!names.has("session_v2") || !names.has("session_message")) {
         throw new Error("OpenCode store is not the verified OpenCode 2 session_v2 schema");
     }
     const fields = db.prepare("PRAGMA table_info('session_v2')").all() as Array<{

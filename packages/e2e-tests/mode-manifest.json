@@ -1092,6 +1092,38 @@
             ]
         },
         {
+            "path": "tests/opencode2/hidden-child-host-compaction.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane: a hidden child the real host compacts before its first step (started as /ctx-dream map-memories under serve --service) must still run its registered prompt, reach the provider and record progress, instead of being refused as an unregistered prompt; needs the real v2 host's compaction and checkpoint rendering, so it runs only in the dedicated v2 lane",
+            "contract_refs": [
+                "OC2-S1",
+                "ISSUE-602"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/doctor-hidden-children-upgraded-store.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane with the OpenCode 1 arm: a store the real v2 host converted in place from a real 1.x store keeps the old message and part tables, and doctor's retired hidden-child cleanup must still accept it and delete only the retired hidden sessions; needs both real hosts, so it runs only in the dedicated v2 lane",
+            "contract_refs": [
+                "OC2-S1",
+                "ISSUE-602"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/hidden-step-limit.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
