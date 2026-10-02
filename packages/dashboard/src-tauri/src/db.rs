@@ -4203,14 +4203,14 @@ fn get_pi_session_cache_events(
     };
     let mut rows: Vec<RawDbCacheEvent> = detail
         .messages
-        .into_iter()
+        .iter()
         .filter(|message| message.role == "assistant")
         .filter_map(|message| {
-            let usage = message.usage?;
+            let usage = message.usage.as_ref()?;
             let (provider, model) = pi_message_provider_model(&message.raw_json);
-            (usage.total > 0).then_some(RawDbCacheEvent {
+            (usage.total > 0).then(|| RawDbCacheEvent {
                 harness,
-                message_id: message.entry_id,
+                message_id: message.entry_id.clone(),
                 session_id: session_id.to_string(),
                 timestamp: message.timestamp_ms,
                 input_tokens: usage.input as i64,
@@ -4218,7 +4218,7 @@ fn get_pi_session_cache_events(
                 cache_write: usage.cache_write as i64,
                 total_tokens: usage.total as i64,
                 agent: None,
-                finish: message.stop_reason,
+                finish: message.stop_reason.clone(),
                 native_turn_id: None,
                 context_limit: None,
                 provider,
@@ -7083,7 +7083,7 @@ pub fn get_pi_session_detail(
         notes,
         meta,
         token_breakdown,
-        pi_compaction_entries: detail.compaction_entries,
+        pi_compaction_entries: detail.compaction_entries.clone(),
     })
 }
 
