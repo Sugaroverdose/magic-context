@@ -189,8 +189,9 @@ function scheduleFlush(): void {
     }, FLUSH_INTERVAL_MS);
 }
 
-// Set inside a worker thread so its lines reach the main thread's log file:
-// the main thread knows the harness-specific log path and owns the flush timer.
+// Set inside a worker thread so its lines reach the main thread's log file. The
+// log path depends on which host (OpenCode or Pi) the main thread registered,
+// and only the main thread's buffer and flush timer write that file.
 let lineForwarder: ((line: string) => void) | null = null;
 
 /**

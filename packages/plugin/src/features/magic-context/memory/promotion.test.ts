@@ -15,6 +15,8 @@ const mockLog = mock(() => {});
 mock.module("../../../shared/logger", () => ({
     log: mockLog,
     sessionLog: mockLog,
+    setLogLineForwarder: mockLog,
+    writeForwardedLogLine: mockLog,
     getLogFilePath: () => "/tmp/test.log",
 }));
 

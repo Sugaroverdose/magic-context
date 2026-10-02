@@ -22,6 +22,8 @@ mock.module("../../shared/logger", () => ({
     log: mock(() => {}),
     sessionLog: mockSessionLog,
     flushLogger: mock(() => {}),
+    setLogLineForwarder: mock(() => {}),
+    writeForwardedLogLine: mock(() => {}),
     getLogFilePath: () => "/tmp/magic-context-test.log",
     getLoggerDiagnostics: () => ({
         swallowedWriteCount: 0,

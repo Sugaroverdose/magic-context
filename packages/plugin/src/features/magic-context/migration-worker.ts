@@ -6,10 +6,12 @@
  * synchronous, so on the host's main thread that time froze the host: OpenCode
  * stopped answering `/health` and a supervisor could kill it. Here the work runs
  * on its own thread with its own connection, with exactly the code the main
- * thread used to run (`initializeDatabase` then `runMigrationsWithRetry`), so the
- * write lock, BEGIN IMMEDIATE, sibling-conflict handling and fail-closed errors
- * are unchanged. The caller (migration-worker-client.ts) checks the guards before
- * starting this worker and the schema fence after it finishes.
+ * thread used to run (`initializeDatabase` then `runMigrationsWithRetry`). So each
+ * migration still takes SQLite's write lock with BEGIN IMMEDIATE, a version another
+ * process applied first is still skipped, and a failed migration still rolls back
+ * and fails the open. The caller (migration-worker-client.ts) runs the schema fence
+ * and the old-holder guard before starting this worker and the fence again after it
+ * finishes.
  */
 import { parentPort, workerData } from "node:worker_threads";
 import { setLogLineForwarder } from "../../shared/logger";
@@ -33,8 +35,8 @@ async function main(): Promise<void> {
         db = new Database(data.dbPath);
         initializeDatabase(db, data.busyTimeoutMs);
         await runMigrationsWithRetry(db, {
-            // Waiting for another process's write lock is idle time for the boot
-            // deadline, as it was when this ran on the main thread.
+            // Report the wait so the boot deadline keeps counting it: a lock held
+            // by another process is the stuck case the deadline exists to bound.
             sleep: async (delayMs) => {
                 post({ type: "lock-wait", waiting: true });
                 await new Promise<void>((resolve) => setTimeout(resolve, delayMs));

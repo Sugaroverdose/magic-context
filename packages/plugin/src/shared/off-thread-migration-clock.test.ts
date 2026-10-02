@@ -31,7 +31,8 @@ describe("boot deadline that excludes off-thread migration time", () => {
         const endedAt = performance.now();
         end();
         await deadline.expired;
-        // The 40ms budget minus the few milliseconds before the migration began.
+        // Only the few milliseconds before the migration began were counted, so
+        // nearly the whole 40ms budget is still left once it ends.
         expect(performance.now() - endedAt).toBeGreaterThanOrEqual(25);
     });
 
