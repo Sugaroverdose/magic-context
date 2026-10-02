@@ -2,10 +2,15 @@ import { isReservedLedgerControlEntry } from "../../hooks/magic-context/tool-swe
 import { getHarness } from "../../shared/harness";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
+import {
+    decodeMergedReasoningParts,
+    MERGED_REASONING_PARTS_PREFIX,
+} from "./merged-reasoning-decisions";
 import { decodePiContentDecision, encodePiContentDecision } from "./pi-content-decisions";
 import {
     parseStrippedPlaceholderState,
     serializeStrippedPlaceholderState,
+    THINKING_BINDING_RECOVERY_FROZEN_PREFIX,
 } from "./storage-meta-persisted";
 import { getNativeReplayState } from "./storage-native-replay";
 import {
@@ -114,19 +119,35 @@ type RawSessionMetaRow = {
 };
 
 /**
- * Copy the reasoning replay ledger into the clone. Most entries name a source
- * message and are filtered/remapped with the rest of the session, but the
- * ledger also carries session-wide control flags that are not ids at all. Those
- * have nothing to map, and dropping them would silently reset the fork's
- * served-bytes policy back to a pre-adoption default on its first pass, so they
- * are copied through verbatim.
+ * Copy the reasoning replay ledger into the clone. The column holds several
+ * kinds of entry side by side, and each must survive the clone:
+ *
+ * - session-wide control flags, which are not ids at all. Dropping them would
+ *   silently reset the fork's served-bytes policy back to a pre-adoption
+ *   default on its first pass, so they are copied through verbatim;
+ * - Pi content decisions (`pi-content-replay-v1:` records);
+ * - exact merged-reasoning part records (`__merged_reasoning_parts_v1__:`),
+ *   whose assistant id and string part ids are remapped;
+ * - thinking-binding recovery decisions (`binding_mismatch:<message id>`);
+ * - bare assistant message ids, the legacy merged-reasoning form.
+ *
+ * Entries naming a message are filtered and remapped with the rest of the
+ * session. A blob that does not parse yields an empty ledger rather than
+ * aborting the whole clone transaction (and with it every other piece of
+ * inherited state); the merged-reasoning reader treats such a blob as empty
+ * too.
  */
 function clonePiContentDecisions(
     raw: string | null,
     filter: CloneSessionStateFilter,
 ): string | null {
     if (!raw) return null;
-    const entries: unknown = JSON.parse(raw);
+    let entries: unknown;
+    try {
+        entries = JSON.parse(raw);
+    } catch {
+        return null;
+    }
     if (!Array.isArray(entries)) return null;
     const copied: string[] = [];
     for (const entry of entries) {
@@ -136,13 +157,53 @@ function clonePiContentDecisions(
             continue;
         }
         const decision = decodePiContentDecision(entry);
-        if (!decision) continue;
-        const [kind, id] = decision;
-        const root = kind === "reminder-strip" ? id.replace(/:p\d+$/, "") : id;
-        if (!filter.includeMessageId(root)) continue;
-        copied.push(
-            encodePiContentDecision(kind, `${mapMessageId(filter, root)}${id.slice(root.length)}`),
-        );
+        if (decision) {
+            const [kind, id] = decision;
+            const root = kind === "reminder-strip" ? id.replace(/:p\d+$/, "") : id;
+            if (!filter.includeMessageId(root)) continue;
+            copied.push(
+                encodePiContentDecision(
+                    kind,
+                    `${mapMessageId(filter, root)}${id.slice(root.length)}`,
+                ),
+            );
+            continue;
+        }
+        const mergedParts = decodeMergedReasoningParts(entry);
+        if (mergedParts) {
+            const [messageId, parts] = mergedParts;
+            if (!filter.includeMessageId(messageId)) continue;
+            const mappedParts = parts.map((part) =>
+                typeof part === "string" ? (mapMessageId(filter, part) ?? part) : part,
+            );
+            copied.push(
+                `${MERGED_REASONING_PARTS_PREFIX}${JSON.stringify([
+                    mapMessageId(filter, messageId) ?? messageId,
+                    mappedParts,
+                ])}`,
+            );
+            continue;
+        }
+        // Thinking-binding recovery decisions name the message whose reasoning
+        // was stripped after a provider rejected the thinking prefix.
+        if (entry.startsWith(THINKING_BINDING_RECOVERY_FROZEN_PREFIX)) {
+            const messageId = entry.slice(THINKING_BINDING_RECOVERY_FROZEN_PREFIX.length);
+            if (messageId.length === 0 || !filter.includeMessageId(messageId)) continue;
+            copied.push(
+                `${THINKING_BINDING_RECOVERY_FROZEN_PREFIX}${mapMessageId(filter, messageId) ?? messageId}`,
+            );
+            continue;
+        }
+        // Anything else that is not a recognised record prefix is a bare
+        // assistant message id. Unknown versioned records are dropped rather
+        // than guessed at.
+        if (
+            entry.startsWith(MERGED_REASONING_PARTS_PREFIX) ||
+            entry.startsWith("pi-content-replay-")
+        )
+            continue;
+        if (entry.length === 0 || !filter.includeMessageId(entry)) continue;
+        copied.push(mapMessageId(filter, entry) ?? entry);
     }
     return copied.length ? JSON.stringify(copied) : null;
 }

@@ -3,7 +3,9 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { MERGED_REASONING_PARTS_PREFIX } from "./merged-reasoning-decisions";
 import { runMigrations } from "./migrations";
+import { encodePiContentDecision } from "./pi-content-decisions";
 import { type CloneSessionStateFilter, copySessionStateForClone } from "./storage-clone";
 import { initializeDatabase } from "./storage-db";
 import { applyStrippedPlaceholderDelta, getHiddenSeamPlaceholderIds } from "./storage-meta";
@@ -162,5 +164,62 @@ describe("copySessionStateForClone", () => {
             .prepare("SELECT COUNT(*) AS count FROM source_contents WHERE session_id = ?")
             .get(DESTINATION) as { count: number };
         expect(copiedSources.count).toBe(tagCount);
+    });
+
+    it("copies merged-reasoning and binding-recovery entries next to Pi decisions", () => {
+        const db = createDb();
+        insertTag(db, SOURCE, "msg_a:p0", 1);
+        insertTag(db, SOURCE, "msg_gone:p0", 2);
+        seedSessionMeta(db, SOURCE);
+        const ledger = [
+            "msg_a",
+            `${MERGED_REASONING_PARTS_PREFIX}${JSON.stringify(["msg_a", ["prt_1", 2]])}`,
+            "msg_gone",
+            `${MERGED_REASONING_PARTS_PREFIX}${JSON.stringify(["msg_gone", [0]])}`,
+            encodePiContentDecision("reminder-strip", "msg_a:p0"),
+            "binding_mismatch:msg_a",
+            "binding_mismatch:msg_gone",
+        ];
+        db.prepare(
+            "UPDATE session_meta SET merged_reasoning_stripped_ids = ? WHERE session_id = ?",
+        ).run(JSON.stringify(ledger), SOURCE);
+
+        copySessionStateForClone(
+            db,
+            SOURCE,
+            DESTINATION,
+            identityFilter({
+                includeMessageId: (id) => id !== "msg_gone",
+                mapMessageId: (id) => `${id}_clone`,
+            }),
+        );
+
+        const cloned = (
+            db
+                .prepare(
+                    "SELECT merged_reasoning_stripped_ids FROM session_meta WHERE session_id = ?",
+                )
+                .get(DESTINATION) as { merged_reasoning_stripped_ids: string | null }
+        ).merged_reasoning_stripped_ids;
+        expect(JSON.parse(cloned ?? "null")).toEqual([
+            "msg_a_clone",
+            `${MERGED_REASONING_PARTS_PREFIX}${JSON.stringify(["msg_a_clone", ["prt_1_clone", 2]])}`,
+            encodePiContentDecision("reminder-strip", "msg_a_clone:p0"),
+            "binding_mismatch:msg_a_clone",
+        ]);
+    });
+
+    it("clones the rest of the session when the reasoning ledger is corrupt", () => {
+        const db = createDb();
+        insertTag(db, SOURCE, "msg_a:p0", 1);
+        seedSessionMeta(db, SOURCE);
+        db.prepare(
+            "UPDATE session_meta SET merged_reasoning_stripped_ids = ? WHERE session_id = ?",
+        ).run("[not json", SOURCE);
+
+        const result = copySessionStateForClone(db, SOURCE, DESTINATION, identityFilter());
+
+        expect(result.kind).toBe("migrated");
+        expect(result.tagsCopied).toBe(1);
     });
 });
