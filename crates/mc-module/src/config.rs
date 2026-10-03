@@ -369,7 +369,7 @@ impl ConfigCache {
     }
 
     pub fn effective_for_paths(&mut self, user_path: &Path, project_root: &Path) -> McModuleConfig {
-        let project_path = project_root.join(".cortexkit").join("magic-context.jsonc");
+        let project_path = detect_config_file(&project_root.join(".cortexkit"));
         let user = read_tier_cached(&mut self.user, user_path.to_path_buf());
         let project = read_tier_cached(&mut self.project, project_path);
         let (mut effective, mut warnings) =
@@ -433,16 +433,57 @@ pub fn user_configured_runners_at(user_path: &Path) -> ConfiguredRunners {
 }
 
 fn user_config_path() -> PathBuf {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        return PathBuf::from(xdg)
-            .join("cortexkit")
-            .join("magic-context.jsonc");
+    user_config_path_from(std::env::var_os("XDG_CONFIG_HOME"), user_home_dir())
+}
+
+/// The user config file, chosen the way the host chooses it (`configHome()` and
+/// `detectConfigFile` in the plugin): `XDG_CONFIG_HOME` counts only when it is an absolute
+/// path, otherwise `<home>/.config`; in that directory `magic-context.jsonc` wins and
+/// `magic-context.json` is read when only it exists. A relative or empty `XDG_CONFIG_HOME`
+/// would otherwise resolve against whatever directory the module happened to start in,
+/// and the module would read a different file than the host it serves.
+fn user_config_path_from(
+    xdg_config_home: Option<std::ffi::OsString>,
+    home: Option<PathBuf>,
+) -> PathBuf {
+    let config_home = xdg_config_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .unwrap_or_else(|| home.unwrap_or_else(|| PathBuf::from(".")).join(".config"));
+    detect_config_file(&config_home.join("cortexkit"))
+}
+
+/// `magic-context.jsonc` in `directory`, or `magic-context.json` when only that exists,
+/// matching the host's `detectConfigFile`. When neither exists the `.jsonc` path is
+/// returned, which reads as "no file".
+fn detect_config_file(directory: &Path) -> PathBuf {
+    let jsonc = directory.join("magic-context.jsonc");
+    if jsonc.exists() {
+        return jsonc;
     }
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    PathBuf::from(home)
-        .join(".config")
-        .join("cortexkit")
-        .join("magic-context.jsonc")
+    let json = directory.join("magic-context.json");
+    if json.exists() {
+        return json;
+    }
+    jsonc
+}
+
+/// The user's home directory the way Node's `os.homedir()` finds it, which is what the
+/// host uses: a non-empty `HOME` first (on Windows, `USERPROFILE` before it), then the
+/// platform's own answer (the password database, or the Windows profile directory).
+/// `None` only when no home can be found at all; callers must not substitute the current
+/// directory or `/`, which name somewhere unrelated to the user.
+pub(crate) fn user_home_dir() -> Option<PathBuf> {
+    let non_empty = |name: &str| {
+        std::env::var_os(name)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    };
+    #[cfg(windows)]
+    if let Some(profile) = non_empty("USERPROFILE") {
+        return Some(profile);
+    }
+    non_empty("HOME").or_else(|| std::env::home_dir().filter(|home| !home.as_os_str().is_empty()))
 }
 
 fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
@@ -453,10 +494,29 @@ fn read_tier_cached(cache: &mut TierConfig, path: PathBuf) -> Option<Value> {
     cache.path = path.clone();
     cache.mtime = mtime;
     cache.value = match fs::read_to_string(&path) {
-        Ok(raw) => serde_json::from_str(&strip_jsonc(&raw)).ok(),
+        Ok(raw) => parse_config_text(&raw).map_or_else(
+            |error| {
+                // The host reports an unreadable file and uses defaults for it; say so here
+                // too, rather than silently running on defaults the user did not choose.
+                emit_warnings(vec![format!(
+                    "{}: {error}; using defaults for this file",
+                    path.display()
+                )]);
+                None
+            },
+            Some,
+        ),
         Err(_) => None,
     };
     cache.value.clone()
+}
+
+/// Parse one config file's text. A leading UTF-8 byte-order mark is dropped first:
+/// editors on Windows commonly write one, the host strips it before parsing, and
+/// `serde_json` rejects it.
+fn parse_config_text(raw: &str) -> Result<Value, serde_json::Error> {
+    let without_bom = raw.strip_prefix('\u{feff}').unwrap_or(raw);
+    serde_json::from_str(&strip_jsonc(without_bom))
 }
 
 #[cfg(test)]
@@ -1827,5 +1887,115 @@ mod tests {
         filetime::set_file_mtime(&user, newer).unwrap();
         let reloaded = cache.effective_for_paths(&user, &project);
         assert_eq!(reloaded.historian_temperature, Some(0.2));
+    }
+}
+
+#[cfg(test)]
+mod config_file_location_tests {
+    use super::*;
+
+    fn user_tier_temperature(path: &Path) -> Option<f64> {
+        let project = tempfile::tempdir().unwrap();
+        ConfigCache::default()
+            .effective_for_paths(path, project.path())
+            .historian_temperature
+    }
+
+    #[test]
+    fn a_config_with_a_byte_order_mark_is_read_not_replaced_by_defaults() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("magic-context.jsonc");
+        std::fs::write(
+            &path,
+            "\u{feff}{ // user tier\n \"historian\": { \"temperature\": 0.3 } }",
+        )
+        .unwrap();
+        assert_eq!(user_tier_temperature(&path), Some(0.3));
+    }
+
+    #[test]
+    fn a_json_config_is_read_when_no_jsonc_exists_and_jsonc_wins_when_both_do() {
+        let home = tempfile::tempdir().unwrap();
+        let cortexkit = home.path().join(".config").join("cortexkit");
+        std::fs::create_dir_all(&cortexkit).unwrap();
+        let json = cortexkit.join("magic-context.json");
+        std::fs::write(&json, r#"{ "historian": { "temperature": 0.4 } }"#).unwrap();
+        let chosen = user_config_path_from(None, Some(home.path().to_path_buf()));
+        assert_eq!(chosen, json);
+        assert_eq!(user_tier_temperature(&chosen), Some(0.4));
+
+        let jsonc = cortexkit.join("magic-context.jsonc");
+        std::fs::write(&jsonc, r#"{ "historian": { "temperature": 0.5 } }"#).unwrap();
+        assert_eq!(
+            user_config_path_from(None, Some(home.path().to_path_buf())),
+            jsonc
+        );
+
+        // The project tier follows the same rule.
+        let project = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(project.path().join(".cortexkit")).unwrap();
+        std::fs::write(
+            project.path().join(".cortexkit/magic-context.json"),
+            r#"{ "memory": { "enabled": false } }"#,
+        )
+        .unwrap();
+        let effective = ConfigCache::default()
+            .effective_for_paths(&home.path().join("absent.jsonc"), project.path());
+        assert!(!effective.memory_enabled);
+    }
+
+    #[test]
+    fn a_relative_or_empty_xdg_config_home_is_ignored_like_the_host_ignores_it() {
+        let home = PathBuf::from("/home/someone");
+        let expected = home
+            .join(".config")
+            .join("cortexkit")
+            .join("magic-context.jsonc");
+        for xdg in ["", "relative/config", "."] {
+            assert_eq!(
+                user_config_path_from(Some(xdg.into()), Some(home.clone())),
+                expected,
+                "XDG_CONFIG_HOME={xdg:?}"
+            );
+        }
+        assert_eq!(
+            user_config_path_from(Some("/etc/xdg".into()), Some(home)),
+            PathBuf::from("/etc/xdg/cortexkit/magic-context.jsonc")
+        );
+    }
+    /// With `HOME` empty (or unset, as it usually is on Windows) the paths must still be
+    /// under the user's real home, not relative to whatever directory the module started
+    /// in. Runs in a child process so changing the environment cannot race other tests.
+    #[test]
+    fn an_empty_home_falls_back_to_the_platform_home_not_the_current_directory() {
+        const CHILD: &str = "MC_TEST_EMPTY_HOME_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let home = user_home_dir().expect("the platform knows this user's home");
+            assert!(home.is_absolute(), "{home:?}");
+            assert!(user_config_path().is_absolute(), "{:?}", user_config_path());
+            let context_db = crate::host_store::resolve_context_db_path();
+            assert!(context_db.is_absolute(), "{context_db:?}");
+            return;
+        }
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "config::config_file_location_tests::an_empty_home_falls_back_to_the_platform_home_not_the_current_directory",
+                "--test-threads=1",
+            ])
+            .env(CHILD, "1")
+            .env("HOME", "")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("XDG_DATA_HOME")
+            .env_remove("MAGIC_CONTEXT_STORAGE_DIR")
+            .env_remove("MAGIC_CONTEXT_TEST_DATA_DIR")
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            output.status.success() && stdout.contains("1 passed"),
+            "{stdout}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 }
