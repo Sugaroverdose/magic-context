@@ -2792,7 +2792,21 @@ export function createTransform(deps: TransformDeps) {
                     modelID: modelForBudget?.modelID,
                     agentName: notificationParams.agent,
                 });
-                const servedTokens = served.rawTokens ?? served.tokens;
+                // Count the request the way it will really go out: system
+                // prompt, history and this route's measured tool definitions,
+                // unscaled. When the route's tool definitions are not measured
+                // yet, the estimate's figure is an upper envelope (the largest
+                // tool set seen on any route, scaled up), which would refuse
+                // a request that fits and keep the session flagged; leave it
+                // out then, as the entry check does. The system prompt and
+                // history stay in, so a carried session whose host-cut history
+                // shrank while the request is still over the window is still
+                // refused.
+                const servedTokens = served.toolDefinitionsMeasured
+                    ? (served.rawTokens ?? served.tokens)
+                    : Math.max(0, sessionMeta.systemPromptTokens) +
+                      served.messageTokens.conversation +
+                      served.messageTokens.toolCall;
                 if (
                     !Number.isFinite(servedTokens) ||
                     servedTokens > unmanagedOverWindowPass.limit

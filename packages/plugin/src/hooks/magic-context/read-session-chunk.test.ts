@@ -10,6 +10,7 @@ import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { v2NonNarrativeStoredGapRanges } from "./compartment-runner-incremental";
 import { validateHistorianOutput } from "./compartment-runner-validation";
 import {
+    cleanUserText,
     getProtectedTailStartOrdinal,
     getRawSessionMessageCount,
     getRawSessionMessageIdsThrough,
@@ -758,5 +759,44 @@ describe("readSessionChunk", () => {
             expect(chunk.text).not.toContain("second content");
             expect(chunk.hasMore).toBe(true);
         });
+    });
+});
+
+/** Byte-exact shape OpenCode 1.17.8 and older gave a user message sent mid-run. */
+function steeringWrapped(userText: string): string {
+    return `<system-reminder>\nThe user sent the following message:\n${userText}\n\nPlease address this message and continue with your tasks.\n</system-reminder>`;
+}
+
+describe("the historian chunk reader keeps OpenCode's mid-run steering wrapper", () => {
+    // Same cases as the Rust historian chunk reader's test of clean_user_text.
+    it("keeps the wrapper verbatim and strips only reminders around it", () => {
+        const wrapped = steeringWrapped("use staging");
+        expect(cleanUserText(wrapped)).toBe(wrapped);
+        const nested = steeringWrapped("quote <system-reminder>x</system-reminder> then go");
+        expect(cleanUserText(nested)).toBe(nested);
+        const mixed = `${wrapped}\n\n<system-reminder>\nPlan mode is active.\n</system-reminder>`;
+        expect(cleanUserText(mixed)).toBe(wrapped);
+        expect(cleanUserText("<system-reminder>internal</system-reminder>")).toBe("");
+        expect(cleanUserText("<!-- OMO_INTERNAL_INITIATOR -->hello")).toBe("hello");
+    });
+
+    it("reads a steering-wrapped user message as the user's words, not noise", () => {
+        useTempDataHome("read-session-steering-");
+        createOpenCodeDbWithMessages("ses-steering", [
+            {
+                id: "m-1",
+                role: "user",
+                part: {
+                    type: "text",
+                    text: steeringWrapped("Stop and use the staging database instead."),
+                },
+            },
+            { id: "m-2", role: "assistant", part: { type: "text", text: "switching" } },
+        ]);
+
+        const chunk = readSessionChunk("ses-steering", 10_000, 1);
+
+        expect(chunk.text).toContain("[1] U:");
+        expect(chunk.text).toContain("Stop and use the staging database instead.");
     });
 });

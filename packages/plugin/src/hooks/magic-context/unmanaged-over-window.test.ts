@@ -3,6 +3,10 @@
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
+import {
+    __resetToolDefinitionMeasurements,
+    recordToolDefinition,
+} from "../../features/magic-context/tool-definition-tokens";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
@@ -39,6 +43,7 @@ const originalXdgDataHome = process.env.XDG_DATA_HOME;
 
 afterEach(() => {
     resetLkgSlotsForTest();
+    __resetToolDefinitionMeasurements();
     closeDatabase();
     clearModelsDevCache();
     if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
@@ -99,6 +104,23 @@ function historyTokens(messages: Message[]): number {
         agentName: undefined,
     });
     return estimate.messageTokens.conversation + estimate.messageTokens.toolCall;
+}
+
+/** The request's local count as the estimate gives it, tool-definition figure included. */
+function requestTokens(messages: Message[]): number {
+    const estimate = estimateFinalWireInputTokens({
+        messages: messages as never,
+        systemPromptTokens: 0,
+        providerID: PROVIDER,
+        modelID: MODEL,
+        agentName: undefined,
+    });
+    return estimate.rawTokens ?? estimate.tokens;
+}
+
+/** Record a measured tool set of roughly `tokens` tokens for a route. */
+function measureToolSet(providerID: string, modelID: string, tokens: number): void {
+    recordToolDefinition(providerID, modelID, undefined, "big-tool", "word ".repeat(tokens), {});
 }
 
 async function knownWindowTransform(sessionId: string) {
@@ -184,6 +206,41 @@ describe("a first pass with no Magic Context state and a history over the window
         expect(historyTokens(shorter)).toBeGreaterThan(limit);
         expect(historyTokens(shorter)).toBeLessThan(limit * UNMANAGED_OVER_WINDOW_FACTOR);
         await expect(serve(shorter)).rejects.toBeInstanceOf(UnmanagedOverWindowError);
+    }, 30_000);
+
+    it("serves a refused session once its request really fits, though its route's tool definitions are unmeasured", async () => {
+        const sessionId = "ses-unmanaged-over-window-fits-unmeasured-tools";
+        const serve = await knownWindowTransform(sessionId);
+        await expect(serve(history(sessionId, 20, 430))).rejects.toBeInstanceOf(
+            UnmanagedOverWindowError,
+        );
+        // Another route's tool set is the only measurement there is, so this
+        // route's tool-definition figure is an upper envelope built from it.
+        // That envelope alone takes the estimate over the window, while the
+        // history the next pass sends is well inside it.
+        const limit = resolveTrustedContextLimit(PROVIDER, MODEL) ?? 0;
+        measureToolSet("another-provider", "another-model", limit);
+        const reduced = history(sessionId, 4, 40);
+        expect(historyTokens(reduced)).toBeLessThan(limit / 2);
+        expect(requestTokens(reduced)).toBeGreaterThan(limit);
+        const served = await serve(reduced);
+        expect(JSON.stringify(served)).toContain("the newest question");
+    }, 30_000);
+
+    it("keeps refusing while the route's own measured tool definitions take the request over the window", async () => {
+        const sessionId = "ses-unmanaged-over-window-measured-tools";
+        const serve = await knownWindowTransform(sessionId);
+        await expect(serve(history(sessionId, 20, 430))).rejects.toBeInstanceOf(
+            UnmanagedOverWindowError,
+        );
+        // Here the tool definitions are this route's own measurement, so the
+        // full request is what counts.
+        const limit = resolveTrustedContextLimit(PROVIDER, MODEL) ?? 0;
+        measureToolSet(PROVIDER, MODEL, limit);
+        const reduced = history(sessionId, 4, 40);
+        expect(historyTokens(reduced)).toBeLessThan(limit / 2);
+        expect(requestTokens(reduced)).toBeGreaterThan(limit);
+        await expect(serve(reduced)).rejects.toBeInstanceOf(UnmanagedOverWindowError);
     }, 30_000);
 
     it("serves a small first pass as before", async () => {

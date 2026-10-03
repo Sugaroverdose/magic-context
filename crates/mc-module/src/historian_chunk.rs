@@ -1605,12 +1605,26 @@ fn truncate_arg(value: &str) -> String {
     crate::boundary::truncate_utf16(value, 60)
 }
 
+/// Strip system-reminder blocks and OMO markers from user text. OpenCode 1.17.8 and older wrapped
+/// a user message sent mid-run in a reminder whose body is the user's own words; that wrapper is
+/// kept verbatim, as the transform's injection strip keeps it, so the message is not dropped as
+/// noise. Twin of `cleanUserText` in
+/// `packages/plugin/src/hooks/magic-context/read-session-chunk.ts`.
 fn clean_user_text(text: &str) -> String {
-    system_reminder_regex()
-        .replace_all(text, "")
-        .replace(OMO_INTERNAL_INITIATOR_MARKER, "")
-        .trim()
-        .to_string()
+    let strip = |segment: &str| {
+        system_reminder_regex()
+            .replace_all(segment, "")
+            .replace(OMO_INTERNAL_INITIATOR_MARKER, "")
+    };
+    let mut result = String::with_capacity(text.len());
+    let mut cursor = 0;
+    for wrapper in crate::transform::steering_wrapper_regex().find_iter(text) {
+        result.push_str(&strip(&text[cursor..wrapper.start()]));
+        result.push_str(wrapper.as_str());
+        cursor = wrapper.end();
+    }
+    result.push_str(&strip(&text[cursor..]));
+    result.trim().to_string()
 }
 
 fn is_system_directive(text: &str) -> bool {
@@ -1917,6 +1931,58 @@ mod tests {
     ) -> HistorianBuiltChunk {
         let projection = project_messages(messages).unwrap();
         build_historian_chunk(messages, &projection.blocks, offset, budget, eligible_end)
+    }
+
+    /// Byte-exact shape OpenCode 1.17.8 and older gave a user message sent mid-run.
+    fn steering_wrapped(user_text: &str) -> String {
+        format!(
+            "<system-reminder>\nThe user sent the following message:\n{user_text}\n\nPlease address this message and continue with your tasks.\n</system-reminder>"
+        )
+    }
+
+    /// Same cases as the TypeScript chunk reader's test of `cleanUserText`.
+    #[test]
+    fn clean_user_text_keeps_the_steering_wrapper_verbatim() {
+        let wrapped = steering_wrapped("use staging");
+        assert_eq!(clean_user_text(&wrapped), wrapped);
+        let nested = steering_wrapped("quote <system-reminder>x</system-reminder> then go");
+        assert_eq!(clean_user_text(&nested), nested);
+        let mixed =
+            format!("{wrapped}\n\n<system-reminder>\nPlan mode is active.\n</system-reminder>");
+        assert_eq!(clean_user_text(&mixed), wrapped);
+        assert_eq!(
+            clean_user_text("<system-reminder>internal</system-reminder>"),
+            ""
+        );
+        assert_eq!(
+            clean_user_text("<!-- OMO_INTERNAL_INITIATOR -->hello"),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn a_steering_wrapped_user_message_is_read_as_the_users_words_not_noise() {
+        let messages = vec![
+            msg(
+                "u1",
+                1,
+                "user",
+                vec![text(&steering_wrapped(
+                    "Stop and use the staging database instead.",
+                ))],
+            ),
+            msg("a2", 2, "assistant", vec![text("switching")]),
+            msg("u3", 3, "user", vec![text("protected tail")]),
+        ];
+        let built = project_and_build(&messages, 1, 10_000, 3);
+        assert!(built.text.contains("[1] U:"), "{}", built.text);
+        assert!(
+            built
+                .text
+                .contains("Stop and use the staging database instead."),
+            "{}",
+            built.text
+        );
     }
 
     /// Commit detection uses ASCII word boundaries and ASCII case folding, as JavaScript's
