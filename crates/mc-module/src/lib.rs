@@ -8114,9 +8114,12 @@ impl McHandler {
         let durable = durable_report(&report);
         match self.host_runs.deliver(&run_id, report) {
             Ok(()) => respond(json!({ "ok": true, "accepted": true, "publish": "immediate" })),
-            Err(HostReportDeliveryError::AlreadyReported) => respond(json!({
+            Err(
+                refusal @ (HostReportDeliveryError::AlreadyReported
+                | HostReportDeliveryError::Expired),
+            ) => respond(json!({
                 "ok": false,
-                "refusal": HostReportDeliveryError::AlreadyReported.as_wire_str(),
+                "refusal": refusal.as_wire_str(),
             })),
             // The token is re-checked inside `record_historian_report`: between the
             // authorization above and this write the lease can lapse and the run can

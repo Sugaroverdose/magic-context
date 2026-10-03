@@ -28,9 +28,23 @@ pub enum HostRunReport {
     Failed { code: String, message: String },
 }
 
+/// Where one queued run stands, as far as its in-process waiter is concerned.
+#[derive(Debug)]
+enum HostRunSlotState {
+    /// Registered, no report yet.
+    Waiting,
+    /// A report arrived and the waiter has not picked it up yet.
+    Reported(HostRunReport),
+    /// The waiter picked up its report. Later reports for the run are duplicates.
+    Taken,
+    /// The waiter stopped waiting without a report. The firing is being abandoned, so a
+    /// report that arrives now has nobody to publish it.
+    Closed,
+}
+
 #[derive(Debug)]
 struct HostRunSlot {
-    report: Option<HostRunReport>,
+    state: HostRunSlotState,
     ready: Arc<Notify>,
 }
 
@@ -44,6 +58,10 @@ pub enum HostReportDeliveryError {
     /// one terminal report per claim; later duplicates are dropped rather than
     /// re-validated.
     AlreadyReported,
+    /// The firing that queued the run stopped waiting for it (its budget ran out), so
+    /// nothing will publish a report that arrives now. Answering "accepted" would tell
+    /// the claimant its paid completion was kept when it is about to be discarded.
+    Expired,
 }
 
 impl HostReportDeliveryError {
@@ -51,6 +69,8 @@ impl HostReportDeliveryError {
         match self {
             HostReportDeliveryError::NoWaiter => "no_waiter",
             HostReportDeliveryError::AlreadyReported => "already_reported",
+            // The same answer the durable path gives a report for a run past its deadline.
+            HostReportDeliveryError::Expired => "run_expired",
         }
     }
 }
@@ -81,7 +101,7 @@ impl HostRunLedger {
         slots.insert(
             run_id.to_string(),
             HostRunSlot {
-                report: None,
+                state: HostRunSlotState::Waiting,
                 ready: Arc::clone(&ready),
             },
         );
@@ -102,17 +122,40 @@ impl HostRunLedger {
         let Some(slot) = slots.get_mut(run_id) else {
             return Err(HostReportDeliveryError::NoWaiter);
         };
-        if slot.report.is_some() {
-            return Err(HostReportDeliveryError::AlreadyReported);
+        match slot.state {
+            HostRunSlotState::Waiting => {}
+            HostRunSlotState::Reported(_) | HostRunSlotState::Taken => {
+                return Err(HostReportDeliveryError::AlreadyReported);
+            }
+            HostRunSlotState::Closed => return Err(HostReportDeliveryError::Expired),
         }
-        slot.report = Some(report);
+        slot.state = HostRunSlotState::Reported(report);
         slot.ready.notify_waiters();
         Ok(())
     }
 
-    fn take(&self, run_id: &str) -> Option<HostRunReport> {
+    /// Hand the waiter its report, if one has arrived. The slot remembers that the
+    /// report was taken, so a second report for the same claim is refused as a
+    /// duplicate instead of being accepted into a slot nobody reads again.
+    ///
+    /// With `close_if_empty`, a slot with no report is closed in the same critical
+    /// section. The waiter passes it when its budget runs out: closing and checking
+    /// under one lock means a report either lands before the close (and is returned
+    /// here) or after it (and is refused), never accepted and then dropped.
+    fn take(&self, run_id: &str, close_if_empty: bool) -> Option<HostRunReport> {
         let mut slots = self.slots.lock().expect("host run ledger mutex");
-        slots.get_mut(run_id).and_then(|slot| slot.report.take())
+        let slot = slots.get_mut(run_id)?;
+        match std::mem::replace(&mut slot.state, HostRunSlotState::Taken) {
+            HostRunSlotState::Reported(report) => Some(report),
+            HostRunSlotState::Waiting if close_if_empty => {
+                slot.state = HostRunSlotState::Closed;
+                None
+            }
+            other => {
+                slot.state = other;
+                None
+            }
+        }
     }
 
     fn forget(&self, run_id: &str) {
@@ -136,11 +179,11 @@ impl HostRunRegistration {
         let deadline = tokio::time::Instant::now() + budget;
         loop {
             let notified = self.ready.notified();
-            if let Some(report) = self.ledger.take(&self.run_id) {
+            if let Some(report) = self.ledger.take(&self.run_id, false) {
                 return Some(report);
             }
             if tokio::time::timeout_at(deadline, notified).await.is_err() {
-                return self.ledger.take(&self.run_id);
+                return self.ledger.take(&self.run_id, true);
             }
         }
     }
@@ -215,6 +258,44 @@ mod tests {
         assert_eq!(
             ledger.deliver("run-1", output("<late/>")),
             Err(HostReportDeliveryError::NoWaiter)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_report_after_the_waiter_took_one_is_refused_as_a_duplicate() {
+        let ledger = Arc::new(HostRunLedger::new());
+        let registration = ledger.register("run-1");
+        ledger.deliver("run-1", output("<first/>")).unwrap();
+        let report = registration.wait(std::time::Duration::from_secs(5)).await;
+        assert_eq!(report, Some(output("<first/>")));
+        // The registration is still alive (the firing is validating and publishing),
+        // so the slot exists. A second report must not be accepted into it.
+        assert_eq!(
+            ledger.deliver("run-1", output("<second/>")),
+            Err(HostReportDeliveryError::AlreadyReported)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_report_after_the_waiter_gave_up_is_refused_not_accepted_and_dropped() {
+        let ledger = Arc::new(HostRunLedger::new());
+        let registration = ledger.register("run-1");
+        assert_eq!(
+            registration
+                .wait(std::time::Duration::from_millis(10))
+                .await,
+            None
+        );
+        // The firing is now abandoning the run, but its registration has not been
+        // dropped yet. A report arriving in this window was answered "accepted" and
+        // then discarded with the registration.
+        assert_eq!(
+            ledger.deliver("run-1", output("<late/>")),
+            Err(HostReportDeliveryError::Expired)
+        );
+        assert_eq!(
+            HostReportDeliveryError::Expired.as_wire_str(),
+            "run_expired"
         );
     }
 
