@@ -21,6 +21,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { getLastCompartmentEndMessage } from "@magic-context/core/features/magic-context/compartment-storage";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import {
+	hasRawMessageProvider,
 	readSessionChunk,
 	setRawMessageProvider,
 } from "@magic-context/core/hooks/magic-context/read-session-chunk";
@@ -119,12 +120,18 @@ export function createCtxExpandTool(
 			}
 
 			// All raw reads go through the shared provider-aware helpers, so
-			// register Pi's source for the duration of this single call.
-			// setRawMessageProvider returns an unregister fn so we don't leak the
-			// binding into concurrent transform passes.
-			const unregister = setRawMessageProvider(sessionId, {
-				readMessages: () => readPiSessionMessages(ctx),
-			});
+			// they need a Pi source for this session. One is usually registered
+			// already: each transform pass registers its branch snapshot, and a
+			// background historian or recomp holds one for its whole run. Use it
+			// rather than replacing it: a session has one provider slot, and
+			// releasing a replacement empties the slot, which would leave that
+			// background run reading the wrong store. Only when nothing is
+			// registered does this call install a live source of its own.
+			const unregister = hasRawMessageProvider(sessionId)
+				? () => {}
+				: setRawMessageProvider(sessionId, {
+						readMessages: () => readPiSessionMessages(ctx),
+					});
 
 			try {
 				const mode = resolveCtxExpandMode(params, "positive");

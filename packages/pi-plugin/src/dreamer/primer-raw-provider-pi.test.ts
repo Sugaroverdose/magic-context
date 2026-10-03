@@ -183,7 +183,10 @@ test("Pi discovery reads headers only and early stop never parses a huge tail", 
 	expect(provider.readMessagePage(0, 1, 1)[0].parts).toEqual([
 		{ type: "text", text: "hello" },
 	]);
-	expect(() => provider.readMessagePage(1, 1, 2)).toThrow("capacity");
+	// Reading past the first message reaches the 2 MB line. It is not JSON, so
+	// like Pi's own tolerant loader the bounded reader skips it (without
+	// buffering it whole) and there is no second message.
+	expect(provider.readMessagePage(1, 1, 2)).toEqual([]);
 	expect(
 		await createPiPrimerRawProviderFactory({ sessionDir: dir })("missing"),
 	).toBeNull();

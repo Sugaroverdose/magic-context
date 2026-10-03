@@ -32,7 +32,11 @@ import {
 	createTestTempDir,
 } from "@magic-context/core/shared/test-temp-dir";
 
-import { awaitInFlightHistorians } from "./context-handler";
+import {
+	awaitInFlightHistorians,
+	hasPendingMaterialization,
+	signalPiPendingMaterialization,
+} from "./context-handler";
 import { __test as dreamerTest } from "./dreamer";
 import magicContextPiExtension, { __test } from "./index";
 import { awaitInFlightRecomps, spawnPiRecompRun } from "./pi-recomp-runner";
@@ -563,6 +567,60 @@ describe("Pi in-process child guard (#247)", () => {
 			);
 		} finally {
 			clearSession(db, sessionId);
+		}
+	}, 15_000);
+
+	it("keeps the current session's in-memory state when a switch does not happen", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+		const runtime = createCountingPi();
+		const sessionId = "ses-pi-cancelled-switch";
+		const ctx = {
+			sessionManager: { getSessionId: () => sessionId },
+			ui: { setStatus: () => undefined },
+		};
+		await magicContextPiExtension(runtime.pi);
+		signalPiPendingMaterialization(sessionId);
+
+		// Pi emits session_before_switch before it commits: another extension
+		// can cancel it, and opening the target can still fail (missing cwd).
+		// Either way the user stays in this session and nothing else follows.
+		await runtime.emitPiEvent("session_before_switch", {}, ctx);
+
+		expect(hasPendingMaterialization(sessionId)).toBe(true);
+
+		// A switch Pi carries out tears the outgoing session down with
+		// session_shutdown, which drains the same state.
+		await runtime.emitPiEvent("session_shutdown", {}, ctx);
+		expect(hasPendingMaterialization(sessionId)).toBe(false);
+	}, 15_000);
+
+	it("drains the outgoing session once an OMP session_switch confirms it", async () => {
+		isolateXdgEnv();
+		delete process.env[MAGIC_CONTEXT_PI_SUBAGENT_ENV];
+		const runtime = createCountingPi();
+		const outgoing = "ses-omp-switch-outgoing";
+		const incoming = "ses-omp-switch-incoming";
+		let current = outgoing;
+		const ctx = {
+			sessionManager: { getSessionId: () => current },
+			ui: { setStatus: () => undefined },
+		};
+		try {
+			await magicContextPiExtension(runtime.pi);
+			signalPiPendingMaterialization(outgoing);
+			signalPiPendingMaterialization(incoming);
+
+			// OMP keeps one extension runtime across a switch: no
+			// session_shutdown, but a session_switch once it is done.
+			await runtime.emitPiEvent("session_before_switch", {}, ctx);
+			current = incoming;
+			await runtime.emitPiEvent("session_switch", {}, ctx);
+
+			expect(hasPendingMaterialization(outgoing)).toBe(false);
+			expect(hasPendingMaterialization(incoming)).toBe(true);
+		} finally {
+			await runtime.emitPiEvent("session_shutdown", {}, ctx);
 		}
 	}, 15_000);
 

@@ -819,6 +819,42 @@ describe("runPiHistorian", () => {
 		}
 	});
 
+	it("does not retry a request error just because a token count contains 500", async () => {
+		const runner = runnerWithSteps([
+			new Error(
+				"invalid_request_error: prompt is too long: 250000 tokens > 200000 maximum",
+			),
+			successXml("Fallback model recovered Pi history."),
+		]);
+		const { db } = await runHistorianWith({
+			runner,
+			fallbackModels: ["fallback/model"],
+			retryBackoffMs: () => 0,
+		});
+		try {
+			expect(attemptedModels(runner)).toEqual(["test/model", "fallback/model"]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("retries a provider outage whose text merely contains the letters auth", async () => {
+		const runner = runnerWithSteps([
+			new Error("503 upstream author-profile service unavailable"),
+			successXml("Transient retry recovered Pi history."),
+		]);
+		const { db } = await runHistorianWith({
+			runner,
+			fallbackModels: ["fallback/model"],
+			retryBackoffMs: () => 0,
+		});
+		try {
+			expect(attemptedModels(runner)).toEqual(["test/model", "test/model"]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("does not retry or advance fallbacks after an abort signal", async () => {
 		const controller = new AbortController();
 		controller.abort();

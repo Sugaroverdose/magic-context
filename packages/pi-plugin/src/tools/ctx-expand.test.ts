@@ -1,6 +1,12 @@
 import { describe, expect, it } from "bun:test";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
+	getRawSessionMessageCount,
+	hasRawMessageProvider,
+	setRawMessageProvider,
+} from "@magic-context/core/hooks/magic-context/read-session-chunk";
+import { convertEntriesToRawMessages } from "../read-session-pi";
+import {
 	assistantToolCall,
 	createTestDb,
 	fakeContext,
@@ -159,6 +165,41 @@ it("Pi tag recovery pairs the raw invocation and result without returning siblin
 		expect(result).toContain("original output");
 		expect(textOf(await call(99))).toContain("no tag 99 in this session");
 	} finally {
+		db.close();
+	}
+});
+
+it("leaves a background reader's raw-message provider in place", async () => {
+	const db = createTestDb();
+	const sessionId = "ses-pi-expand-shared-provider";
+	const messages = [userMessage("hello", 1), userMessage("again", 2)];
+	const ctx = fakeContext(
+		sessionId,
+		process.cwd(),
+		["entry-0", "entry-1"],
+		messages,
+	);
+	// A background historian or recomp registers its own source and keeps
+	// reading through it after this tool call returns.
+	const background = {
+		readMessages: () => convertEntriesToRawMessages([]),
+		getMessageCount: () => 41,
+	};
+	const unregisterBackground = setRawMessageProvider(sessionId, background);
+	try {
+		const result = await createCtxExpandTool({ db }).execute(
+			"expand",
+			{ start: 1, end: 2 },
+			new AbortController().signal,
+			undefined,
+			ctx as never,
+		);
+		expect(result.content).toHaveLength(1);
+
+		expect(hasRawMessageProvider(sessionId)).toBe(true);
+		expect(getRawSessionMessageCount(sessionId)).toBe(41);
+	} finally {
+		unregisterBackground();
 		db.close();
 	}
 });

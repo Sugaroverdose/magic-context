@@ -682,6 +682,13 @@ executor; Pi routes through `runPiDreamForProject` → the registered project's
 uses. The dashboard cannot trigger a run on either harness (DB-only, no live
 channel) — it reflects `task_schedule_state` read-only.
 
+Interactive Pi runs `/ctx-dream` detached, for the same reason as recomp (§11b):
+the command handler is the user's turn, so awaiting the run froze the REPL for
+its whole length. The handler returns after the start message; the outcome
+arrives as a later `[ctx-status]` message, and the owner-tracked manual run is
+aborted and drained by `session_shutdown`. Without a UI (print mode) the command
+is the whole invocation, so it still waits for the run.
+
 ---
 
 ## 19b. Processed-image stripping uses harness-specific image shapes
