@@ -11365,28 +11365,16 @@ impl McStore {
             ModuleStateSyncTxnOutcome::Committed(result) => {
                 // A host may rewrite a context.db row while the store.db cache
                 // transaction runs. cached_context_boundaries hashes each original
-                // row and excludes entries whose shared row has changed, so a rewrite
-                // during this transaction shows up as a missing entry here. The sync has
-                // committed by now and its shadow_seq step cannot be undone, so it is
-                // reported as the success it is: an error would leave the host on the old
-                // sequence and refuse every retry as an authority-seq mismatch. The stale
-                // coordinates are excluded from every read, the same state a rewrite
-                // landing just after a successful sync leaves, and the next sync that
-                // carries coordinates for the rewritten row replaces them.
-                if !resolved_boundaries.is_empty() {
-                    match self.cached_context_boundaries(request.session_id) {
-                        Ok(valid) if valid.len() == resolved_boundaries.len() => {}
-                        Ok(valid) => tracing::warn!(
-                            "mc-store: context boundary snapshot changed during state sync for session {}: {} of {} host coordinates still match",
-                            request.session_id,
-                            valid.len(),
-                            resolved_boundaries.len()
-                        ),
-                        Err(error) => tracing::warn!(
-                            "mc-store: could not recheck context boundaries after state sync for session {}: {error}",
-                            request.session_id
-                        ),
-                    }
+                // row and excludes entries whose shared row has changed; requiring
+                // every new entry here catches a rewrite during this transaction.
+                if !resolved_boundaries.is_empty()
+                    && self.cached_context_boundaries(request.session_id)?.len()
+                        != resolved_boundaries.len()
+                {
+                    return Err(ModuleStateSyncError::InvalidSeedBoundary {
+                        declared: request.seed_boundary_id.unwrap_or("").to_string(),
+                        detail: "context boundary snapshot changed during state sync".into(),
+                    });
                 }
                 Ok(result)
             }

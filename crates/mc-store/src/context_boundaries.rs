@@ -853,26 +853,24 @@ mod tests {
     }
 
     #[test]
-    fn a_state_sync_that_committed_reports_success_even_when_a_row_moved_under_it() {
+    fn a_row_rewritten_during_state_sync_is_reported_as_an_invalid_seed_boundary() {
         let dir = tempfile::tempdir().unwrap();
         let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
         seed(&store);
         install_snapshot_race(&store, dir.path());
-        // The host rewrites the compartment while the store.db transaction runs. The
-        // sync still commits (its shadow_seq step is durable), so it must not report a
-        // failure: the host would keep its old sequence and every retry would then be
-        // refused as an authority-seq mismatch.
+        // The error is the host's cue to recover: its pass fails, and on the next
+        // one the stale sequence draws an authority-seq mismatch, which makes the
+        // host adopt the durable sequence and re-seed every boundary coordinate,
+        // the rewritten row's included. Reporting success instead would ack
+        // watermarks captured before the rewrite and skip that re-seed.
         let outcome = store.apply_authority_state_sync(request(&[boundary()], 0));
-        let committed_seq = store.load("raw").unwrap().meta.shadow_seq;
-        assert_eq!(committed_seq, 1, "the sync's store.db half committed");
-        let result = outcome.expect("a committed sync reports success");
-        assert_eq!(result.shadow_seq, committed_seq);
-        // The coordinates the rewrite invalidated are not served.
-        assert!(store.cached_context_boundaries("raw").unwrap().is_empty());
-        // The host's next sync carries the sequence it was told, and lands.
-        let mut next = request(&[], result.shadow_seq);
-        next.seed_boundary_id = None;
-        store.apply_authority_state_sync(next).unwrap();
+        assert!(
+            matches!(
+                outcome,
+                Err(crate::ModuleStateSyncError::InvalidSeedBoundary { .. })
+            ),
+            "{outcome:?}"
+        );
     }
 
     #[test]
