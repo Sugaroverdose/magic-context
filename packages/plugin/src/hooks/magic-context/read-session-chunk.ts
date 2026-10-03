@@ -4,7 +4,7 @@ import {
 } from "../../features/magic-context/storage-tags";
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import type { Database } from "../../shared/sqlite";
-import { removeSystemReminders } from "../../shared/system-directive";
+import { isSystemDirective } from "../../shared/system-directive";
 import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";
 import {
     getMessageTimesFromOpenCodeDb,
@@ -45,6 +45,7 @@ import {
     readRawSessionTailFromDb,
 } from "./read-session-raw";
 import { buildToolArcs } from "./read-session-true-raw-tokens";
+import { stripOutsideSteeringWrappers } from "./system-injection-stripper";
 import { isFilePart, isTextPart } from "./tag-part-guards";
 import { extractToolCallObservation } from "./tool-drop-target";
 
@@ -273,9 +274,38 @@ export function withRawMessageProvider<T>(
     return result;
 }
 
-/** Strip system-reminder blocks and OMO markers from user text for chunk compaction. */
+const SYSTEM_REMINDER_BLOCK_REGEX = /<system-reminder>[\s\S]*?<\/system-reminder>/gi;
+
+/**
+ * Strip system-reminder blocks and OMO markers from user text for chunk
+ * compaction. OpenCode 1.17.8 and older wrapped a user message sent mid-run in a
+ * reminder whose body is the user's own words; that wrapper is kept verbatim,
+ * as stripSystemInjection keeps it, so the message is not dropped as noise.
+ */
 export function cleanUserText(text: string): string {
-    return removeSystemReminders(text).replace(OMO_INTERNAL_INITIATOR_MARKER, "").trim();
+    return stripOutsideSteeringWrappers(text, (segment) =>
+        segment.replace(SYSTEM_REMINDER_BLOCK_REGEX, "").replace(OMO_INTERNAL_INITIATOR_MARKER, ""),
+    ).trim();
+}
+
+/**
+ * The chunk reader's noise gate. It matches hasMeaningfulUserText but cleans
+ * text with cleanUserText, so a steering-wrapped user message counts as the
+ * user's words. The shared predicate is left as is because it also decides
+ * protected-tail boundaries on the transform path.
+ */
+function hasMeaningfulChunkUserText(parts: unknown[]): boolean {
+    for (const part of parts) {
+        if (part === null || typeof part !== "object") continue;
+        const candidate = part as Record<string, unknown>;
+        if (candidate.type !== "text" || typeof candidate.text !== "string") continue;
+        if (candidate.ignored === true) continue;
+        const cleaned = cleanUserText(candidate.text);
+        if (!cleaned) continue;
+        if (isSystemDirective(cleaned)) continue;
+        return true;
+    }
+    return false;
 }
 
 export interface SessionChunk {
@@ -1204,7 +1234,7 @@ export function readSessionChunk(
         // completions, internal initiator markers, system directives). These carry
         // zero signal for compartment summaries — unless they contain tool results
         // with extractable descriptions.
-        if (msg.role === "user" && !hasMeaningfulUserText(msg.parts)) {
+        if (msg.role === "user" && !hasMeaningfulChunkUserText(msg.parts)) {
             const tcSummaries = extractToolCallSummaries(msg.parts);
             if (tcSummaries.length === 0) {
                 recordFilteredNoise(meta);

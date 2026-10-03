@@ -51,6 +51,27 @@ export function stripSystemInjection(text: string): string | null {
     return changed ? result.trim() : null;
 }
 
+/**
+ * Apply `strip` to the text outside each steering wrapper (see
+ * STEERING_WRAPPER_REGEX) and keep every wrapper verbatim. Text with no wrapper
+ * is passed to `strip` whole. Readers that drop reminder blocks (the historian
+ * chunk reader) use it so a mid-run user message is not lost as noise.
+ */
+export function stripOutsideSteeringWrappers(
+    text: string,
+    strip: (segment: string) => string,
+): string {
+    STEERING_WRAPPER_REGEX.lastIndex = 0;
+    let result = "";
+    let cursor = 0;
+    for (const match of text.matchAll(STEERING_WRAPPER_REGEX)) {
+        result += strip(text.slice(cursor, match.index));
+        result += match[0];
+        cursor = match.index + match[0].length;
+    }
+    return result + strip(text.slice(cursor));
+}
+
 function stripInjectedRegions(text: string): string | null {
     let hasInjection = false;
     for (const marker of SYSTEM_INJECTION_MARKERS) {

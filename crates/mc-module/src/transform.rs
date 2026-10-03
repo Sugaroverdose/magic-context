@@ -12608,8 +12608,9 @@ fn directive_block_end(text: &str, body_start: usize) -> usize {
 /// words, so it is never an injection: stripping it would empty the block and drop the user's
 /// instruction for good. The trailer anchors the match, so a reminder the user's text itself
 /// contains stays inside the preserved block. Twin of `STEERING_WRAPPER_REGEX` in
-/// `packages/plugin/src/hooks/magic-context/system-injection-stripper.ts`.
-fn steering_wrapper_regex() -> &'static regex::Regex {
+/// `packages/plugin/src/hooks/magic-context/system-injection-stripper.ts`. The historian chunk
+/// reader uses it too, so a wrapped user message is not read as noise.
+pub(crate) fn steering_wrapper_regex() -> &'static regex::Regex {
     static STEERING_WRAPPER: OnceLock<regex::Regex> = OnceLock::new();
     STEERING_WRAPPER.get_or_init(|| {
         regex::Regex::new(
