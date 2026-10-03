@@ -1426,9 +1426,14 @@ function foldDuplicateIntoSurvivor(
      * duplicate, which lets a bulk fold skip the per-tag queue lookup.
      */
     duplicateMayHaveQueuedOps = true,
+    /**
+     * False when the duplicate's content is now only a fragment of the
+     * survivor's, so its executed drop must not hide the survivor.
+     */
+    propagateDroppedStatus = true,
 ): void {
     mergeSizeAndTokenColumnsIntoSurvivor(db, sessionId, survivor, duplicate);
-    applyDroppedStatusIfNeeded(db, sessionId, survivor, duplicate);
+    if (propagateDroppedStatus) applyDroppedStatusIfNeeded(db, sessionId, survivor, duplicate);
     if (duplicateMayHaveQueuedOps) {
         retargetPendingOps(db, sessionId, duplicate.tagNumber, survivor.tagNumber);
     }
@@ -1544,6 +1549,11 @@ function readQueuedTagNumbers(
  * after the merge that same operation would remove the whole joined text, which
  * is a larger deletion than the one they asked for. Those queue entries are
  * removed and reported to the caller instead.
+ *
+ * An executed drop follows the same rule: a folded tag's `dropped` status is
+ * not copied onto the surviving tag, because the survivor now stands for the
+ * whole joined text. When every fragment was dropped the survivor is one of
+ * them and is already `dropped`, so the joined text stays hidden.
  */
 export function foldShrunkPartTags(
     db: Database,
@@ -1607,6 +1617,7 @@ export function foldShrunkPartTags(
                 survivor,
                 orphan,
                 queuedTags.any.has(orphan.tagNumber),
+                false,
             );
             result.foldedTagNumbers.push(orphan.tagNumber);
         }

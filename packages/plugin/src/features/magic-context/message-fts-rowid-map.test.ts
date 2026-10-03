@@ -15,8 +15,10 @@ import {
     backfillMessageFtsRowidMapBatch,
     getMessageFtsRowidMapBackfillProgress,
 } from "./message-fts-rowid-map";
+import { clearIndexedMessages } from "./message-index";
 import { runMigrations } from "./migrations";
 import { initializeDatabase } from "./storage-db";
+import { deleteSessionScopedRows } from "./storage-session-tables";
 
 const tempDirectories: string[] = [];
 
@@ -152,6 +154,48 @@ describe("message FTS rowid map", () => {
                     /^SCAN (?:message_history_fts|fts) VIRTUAL TABLE INDEX 0:$/.test(detail),
                 ),
             ).toBe(false);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+});
+
+describe("full session clears before the rowid-map backfill finishes", () => {
+    function countFtsRows(db: Database, sessionId: string): number {
+        const row = db
+            .prepare("SELECT COUNT(*) AS count FROM message_history_fts WHERE session_id = ?")
+            .get(sessionId) as { count: number };
+        return row.count;
+    }
+
+    test("clearing a session's index removes its legacy unmapped rows", () => {
+        const db = createDb();
+        try {
+            insertLegacyFtsRows(db, 120, "legacy");
+            insertLegacyFtsRows(db, 3, "other");
+            // One batch maps the first 100 rows; the rest stay unmapped legacy rows.
+            expect(backfillMessageFtsRowidMapBatch(db, 100).completed).toBe(false);
+
+            clearIndexedMessages(db, "legacy");
+
+            expect(countFtsRows(db, "legacy")).toBe(0);
+            expect(countFtsRows(db, "other")).toBe(3);
+        } finally {
+            closeQuietly(db);
+        }
+    });
+
+    test("deleting a session removes its legacy unmapped rows", () => {
+        const db = createDb();
+        try {
+            insertLegacyFtsRows(db, 120, "legacy");
+            insertLegacyFtsRows(db, 3, "other");
+            expect(backfillMessageFtsRowidMapBatch(db, 100).completed).toBe(false);
+
+            deleteSessionScopedRows(db, ["legacy"]);
+
+            expect(countFtsRows(db, "legacy")).toBe(0);
+            expect(countFtsRows(db, "other")).toBe(3);
         } finally {
             closeQuietly(db);
         }

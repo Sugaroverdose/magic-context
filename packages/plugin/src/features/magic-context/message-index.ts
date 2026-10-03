@@ -17,6 +17,7 @@ import { removeSystemReminders } from "../../shared/system-directive";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import { clearCompressionDepth } from "./compression-depth-storage";
 import {
+    deleteUnmappedMessageFtsRows,
     messageFtsOrdinalRangeIsMapped,
     recordIndexedMessageTime,
     recordMessageFtsRowid,
@@ -510,6 +511,7 @@ export function deleteIndexedMessage(db: Database, sessionId: string, messageId:
  */
 export function clearIndexedMessagesInTransaction(db: Database, sessionId: string): void {
     getDeleteFtsStatement(db).run(sessionId);
+    deleteUnmappedMessageFtsRows(db, [sessionId]);
     getDeleteFtsMapStatement(db).run(sessionId);
     getDeleteMessageSourceStatement(db).run(sessionId);
     getDeleteIndexStatement(db).run(sessionId);

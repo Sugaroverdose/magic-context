@@ -2675,13 +2675,14 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         return existing;
     }
 
+    let db: Database | undefined;
     try {
         if (!explicitDbPath) {
             migrateLegacyStorageIfNeeded(dbPath, dbDir);
         }
         ensureSecureStorageDir(dbDir);
 
-        const db = new Database(dbPath);
+        db = new Database(dbPath);
         installBootBusyTimeout(db, dbPath, busyTimeoutMs, options?.onBootBusyTimeout);
         if (!enforceSchemaFence(db, dbPath, latestSupportedVersion)) {
             closeQuietly(db);
@@ -2696,6 +2697,9 @@ export function openDatabase(dbPathOrOptions?: string | OpenDatabaseOptions): Da
         ensureContextStoreUuid(db);
         return finishDatabaseOpen(db, dbPath, explicitDbPath, latestSupportedVersion);
     } catch (error) {
+        // The connection is not cached until the open succeeds, so nothing else
+        // would ever close it.
+        if (db) closeQuietly(db);
         const detail = getErrorMessage(error);
         log(`[magic-context] storage fatal: failed to open ${dbPath}: ${detail}`);
         // No silent in-memory fallback — see comment above. Caller must

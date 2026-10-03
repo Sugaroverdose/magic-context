@@ -184,6 +184,8 @@ export interface ProtectedTailDrainReservation {
     sessionId: string;
     runId: string;
     tokens: number;
+    /** Start of the drain window the tokens were charged to. */
+    windowStartedAt: number;
 }
 
 export interface ProtectedTailDrainBudgetState {
@@ -953,7 +955,12 @@ export function reserveProtectedTailDrainTokens(args: {
                 ok: true,
                 reservedTokens: reserved,
                 overQuotaBypass: bypass,
-                reservation: { sessionId: args.sessionId, runId: args.runId, tokens: reserved },
+                reservation: {
+                    sessionId: args.sessionId,
+                    runId: args.runId,
+                    tokens: reserved,
+                    windowStartedAt: activeWindowStartedAt,
+                },
                 budgetState: budgetState(meta.protectedTailDrainTokens + reserved),
             };
         })
@@ -994,6 +1001,13 @@ export function clearHistorianDrainFailure(db: Database, sessionId: string): voi
     }).immediate();
 }
 
+/**
+ * Give back the tokens of a run that did not spend them. The refund applies
+ * only while the window the tokens were charged to is still the current one:
+ * once the window has rolled over its counter already started again from zero,
+ * and subtracting the old reservation would hand a later run budget it never
+ * had.
+ */
 export function rollbackProtectedTailDrainReservation(
     db: Database,
     reservation: ProtectedTailDrainReservation | null,
@@ -1004,8 +1018,8 @@ export function rollbackProtectedTailDrainReservation(
         db.prepare(
             `UPDATE session_meta
              SET protected_tail_drain_tokens = MAX(0, COALESCE(protected_tail_drain_tokens, 0) - ?)
-             WHERE session_id = ?`,
-        ).run(reservation.tokens, reservation.sessionId);
+             WHERE session_id = ? AND protected_tail_drain_window_started_at = ?`,
+        ).run(reservation.tokens, reservation.sessionId, reservation.windowStartedAt);
     }).immediate();
 }
 
@@ -2355,12 +2369,14 @@ export function retireDeferredClearedCompactionMarkerState(db: Database, session
  */
 export const MAX_STRIPPED_PLACEHOLDER_IDS = 4096;
 
-interface StrippedPlaceholderState {
+export interface StrippedPlaceholderState {
     ids: string[];
     hiddenSeamIds: string[];
 }
 
-function parseStrippedPlaceholderState(raw: string | null | undefined): StrippedPlaceholderState {
+export function parseStrippedPlaceholderState(
+    raw: string | null | undefined,
+): StrippedPlaceholderState {
     if (!raw || raw.length === 0) return { ids: [], hiddenSeamIds: [] };
     try {
         const parsed = JSON.parse(raw) as unknown;
@@ -2401,7 +2417,7 @@ function parseStrippedBlob(raw: string | null | undefined): string[] {
     }
 }
 
-function serializeStrippedPlaceholderState(state: StrippedPlaceholderState): string {
+export function serializeStrippedPlaceholderState(state: StrippedPlaceholderState): string {
     if (state.ids.length === 0) return "";
     if (state.hiddenSeamIds.length === 0) return JSON.stringify(state.ids);
     return JSON.stringify(state);
