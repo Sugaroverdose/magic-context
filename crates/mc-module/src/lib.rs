@@ -2422,6 +2422,24 @@ struct FacadeScope {
     route_project_root: String,
     conversation_key: String,
     memory_enabled: bool,
+    /// Why memory is paused for this route, when its project identity is unavailable.
+    memory_paused: Option<String>,
+}
+
+/// The project a route's history is keyed by. See [`McHandler::route_project`].
+struct RouteProject {
+    key: String,
+    /// The reason memory features are paused, when the route has no project identity.
+    memory_paused: Option<String>,
+}
+
+impl RouteProject {
+    fn resolved(key: String) -> Self {
+        Self {
+            key,
+            memory_paused: None,
+        }
+    }
 }
 
 impl From<ModuleCompartmentWire> for StoredCompartment {
@@ -3679,6 +3697,10 @@ pub struct McHandler {
     runner_choices: Arc<Mutex<runner_choices::RunnerChoiceLog>>,
     /// Project identities of route roots whose session the host has not recorded.
     project_identities: Arc<project_identity::ProjectIdentityResolver>,
+    /// Route roots inside a git checkout whose identity git could not give, with the
+    /// reason. Their history keeps being served, but every memory feature is paused until
+    /// a later request resolves the identity (see [`McHandler::route_project`]).
+    memory_paused_routes: Arc<Mutex<HashMap<PathBuf, String>>>,
     /// Tests bind routes to paths that do not exist and key their rows by that path, so
     /// the resolver is used only when a test asks for it.
     #[cfg(test)]
@@ -4317,6 +4339,7 @@ impl McHandler {
             host_runs: Arc::new(HostRunLedger::new()),
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
             project_identities: Arc::new(project_identity::ProjectIdentityResolver::new()),
+            memory_paused_routes: Arc::default(),
             #[cfg(test)]
             resolve_project_identity_for_test: AtomicBool::new(false),
             #[cfg(test)]
@@ -4698,6 +4721,7 @@ impl McHandler {
             host_runs: Arc::new(HostRunLedger::new()),
             runner_choices: Arc::new(Mutex::new(runner_choices::RunnerChoiceLog::default())),
             project_identities: Arc::new(project_identity::ProjectIdentityResolver::new()),
+            memory_paused_routes: Arc::default(),
             #[cfg(test)]
             resolve_project_identity_for_test: AtomicBool::new(false),
             fixed_config: Some(config),
@@ -5396,13 +5420,43 @@ impl McHandler {
     /// host recorded for the session, or else the identity of the route root computed the
     /// way the host computes it. A root with no computable identity refuses by name rather
     /// than reading under a key nobody writes.
+    ///
+    /// This is the strict form for memory features (memory writes, classification,
+    /// dreamer runs): a route whose identity git cannot currently give refuses with
+    /// `git_identity_unavailable`. Paths that serve history use [`Self::route_project`].
     fn route_project_identity(
         &self,
         store: &McStore,
         binding: &SessionBinding,
     ) -> Result<String, HandlerOutcome> {
+        let route = self.route_project(store, binding)?;
+        match route.memory_paused {
+            None => Ok(route.key),
+            Some(reason) => Err(HandlerOutcome::Error {
+                code: "git_identity_unavailable".to_string(),
+                message: reason,
+            }),
+        }
+    }
+
+    /// The project key a route's history is served under, and whether its memory is
+    /// paused.
+    ///
+    /// When git fails inside the route's checkout and no earlier `git:` identity is known,
+    /// the project has no identity the host would agree on. Keying it by its directory
+    /// hash would file its memories in a pool no host reads, so instead the route keeps
+    /// its transform (compaction, m0/m1 history) under a key that names no project, with
+    /// every memory feature paused: no memory block, no memory search, no fact promotion,
+    /// no memory writes and no dreamer runs. The reason is logged once per route root, and
+    /// each request resolves again, so the route recovers as soon as git does. A home or
+    /// unreadable directory still refuses outright.
+    fn route_project(
+        &self,
+        store: &McStore,
+        binding: &SessionBinding,
+    ) -> Result<RouteProject, HandlerOutcome> {
         match store.session_project_identity(&binding.session) {
-            Ok(Some(identity)) => return Ok(identity),
+            Ok(Some(identity)) => return Ok(RouteProject::resolved(identity)),
             Ok(None) => {}
             Err(error) => {
                 return Err(HandlerOutcome::Error {
@@ -5417,27 +5471,73 @@ impl McHandler {
             .load(Ordering::Relaxed)
         {
             let root = binding.project_root.to_string_lossy().to_string();
-            return Ok(store.route_identity_for_test(&root).unwrap_or(root));
+            return Ok(RouteProject::resolved(
+                store.route_identity_for_test(&root).unwrap_or(root),
+            ));
         }
-        self.project_identities
-            .resolve(&binding.project_root)
-            .map_err(|error| HandlerOutcome::Error {
+        let outcome = self.project_identities.resolve(&binding.project_root);
+        let mut paused = self
+            .memory_paused_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        match outcome {
+            Ok(identity) => {
+                if paused.remove(&binding.project_root).is_some() {
+                    tracing::info!(
+                        "mc-module: project identity for {} resolved to {identity}; memory features resumed",
+                        binding.project_root.display()
+                    );
+                }
+                Ok(RouteProject::resolved(identity))
+            }
+            Err(error @ project_identity::ProjectIdentityError::GitUnavailable { .. }) => {
+                let reason = error.to_string();
+                if paused
+                    .insert(binding.project_root.clone(), reason.clone())
+                    .is_none()
+                {
+                    tracing::warn!("mc-module: memory features paused: {reason}");
+                }
+                Ok(RouteProject {
+                    key: project_identity::unavailable_project_key(&binding.project_root),
+                    memory_paused: Some(reason),
+                })
+            }
+            Err(error) => Err(HandlerOutcome::Error {
                 code: error.code().to_string(),
                 message: error.to_string(),
-            })
+            }),
+        }
     }
 
     fn effective_config(&self, project_root: &Path) -> McModuleConfig {
         #[cfg(test)]
         if let Some(config) = &self.fixed_config {
-            return config.clone();
+            let mut config = config.clone();
+            self.pause_memory_if_unresolved(project_root, &mut config);
+            return config;
         }
-        let config = self
+        let mut config = self
             .config
             .lock()
             .expect("config mutex")
             .effective_for_project(project_root);
+        self.pause_memory_if_unresolved(project_root, &mut config);
         config
+    }
+
+    /// Turn memory off in `config` while the route root's identity is unavailable, so the
+    /// historian paths that read the configuration neither promote facts nor search
+    /// memories into a project nobody can find again.
+    fn pause_memory_if_unresolved(&self, project_root: &Path, config: &mut McModuleConfig) {
+        if self
+            .memory_paused_routes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .contains_key(project_root)
+        {
+            config.memory_enabled = false;
+        }
     }
 
     /// Resolve the historian runner for a firing, record it for the status and
@@ -7903,7 +8003,8 @@ impl McHandler {
         binding: &SessionBinding,
         store: &McStore,
     ) -> Result<String, HandlerOutcome> {
-        self.route_project_identity(store, binding)
+        // The same key the transform queued the run under, also while memory is paused.
+        self.route_project(store, binding).map(|route| route.key)
     }
 
     /// `historian.pending {session_id?}` — runs waiting for a claimant.
@@ -8690,8 +8791,9 @@ impl McHandler {
             Some(store) => Arc::clone(store),
             None => return self.store_refusal(),
         };
-        let project_path = match self.route_project_identity(&store, &binding) {
-            Ok(project) => project,
+        // A wrapup compacts history, so it runs with memory paused rather than refusing.
+        let project_path = match self.route_project(&store, &binding) {
+            Ok(route) => route.key,
             Err(outcome) => return outcome,
         };
         if let Some(command_id) = command_id {
@@ -9977,10 +10079,17 @@ impl McHandler {
         // Resolve the route root to the identity memories and notes are keyed by before any
         // store read. Keep the filesystem directory only for project documents and
         // configuration below.
-        let project_path = match self.route_project_identity(&store, &binding) {
-            Ok(project) => project,
+        let route = match self.route_project(&store, &binding) {
+            Ok(route) => route,
             Err(outcome) => return outcome,
         };
+        let memory_paused = route.memory_paused.is_some();
+        let mut binding = binding;
+        if memory_paused {
+            // No identity: serve the history, with every memory feature off for this pass.
+            binding.config.memory_enabled = false;
+        }
+        let project_path = route.key;
         let note_project_path = project_path.clone();
         // A compartment write an earlier pass left half-done (its context.db half pending)
         // lands before this pass reads the session. A failure leaves it for the next pass.
@@ -9992,7 +10101,9 @@ impl McHandler {
         }
         match serializer_profile {
             Some(SerializerProfile::OpencodeAiSdk) => {
-                if let Some((data_url, content_hash)) = host_mural_artifact(parsed.mural.as_ref()) {
+                if let Some((data_url, content_hash)) =
+                    host_mural_artifact(parsed.mural.as_ref()).filter(|_| !memory_paused)
+                {
                     if let Err(error) = store.upsert_project_mural_artifact(
                         &project_path,
                         data_url.as_bytes(),
@@ -12512,10 +12623,14 @@ impl McHandler {
 
         // The project is resolved only once the session is proven, so an unproven caller is
         // told that before anything about projects or the store.
-        let memory_project_path = match self.store.get() {
-            Some(store) => self.route_project_identity(store, &binding)?,
+        // History tools (ctx_reduce, ctx_expand) keep working while the route's identity is
+        // unavailable; memory tools read `memory_paused` and refuse by name.
+        let route = match self.store.get() {
+            Some(store) => self.route_project(store, &binding)?,
             None => return Err(self.facade_store_refusal()),
         };
+        let memory_paused = route.memory_paused;
+        let memory_project_path = route.key;
         if requested_project.is_some_and(|requested| requested != memory_project_path) {
             tracing::warn!(
                 "mc-module: {authority_domain} route {route_project_root} project mismatch: expected {memory_project_path}, received {}",
@@ -12531,7 +12646,8 @@ impl McHandler {
             memory_project_path,
             route_project_root,
             conversation_key,
-            memory_enabled: binding.config.memory_enabled,
+            memory_enabled: binding.config.memory_enabled && memory_paused.is_none(),
+            memory_paused,
         })
     }
 
@@ -12689,6 +12805,11 @@ impl McHandler {
             Ok(scope) => scope,
             Err(outcome) => return outcome,
         };
+        if let Some(reason) = &facade_scope.memory_paused {
+            return tool_error_result(format!(
+                "Error: memory is paused for this project (git_identity_unavailable): {reason}"
+            ));
+        }
         if !facade_scope.memory_enabled {
             return tool_error_result("Error: memory is disabled for this project.".to_string());
         }
@@ -29461,6 +29582,75 @@ mod tests {
         let output = truncate_expand_output("x".repeat(CTX_EXPAND_BYTE_BUDGET * 2));
         assert!(output.len() <= CTX_EXPAND_BYTE_BUDGET + 64);
         assert!(output.contains("~15,000-token ctx_expand budget"));
+    }
+
+    /// A Claude Code route inside a checkout git cannot read keeps its transform, but its
+    /// memory is paused: nothing from the directory-hash pool the old fallback used is
+    /// rendered, and memory writes refuse with a named reason. Another route on a plain
+    /// directory, as the control, does render that pool.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_route_whose_git_identity_is_unavailable_serves_history_with_memory_paused() {
+        let paused_route = |broken_git: bool| async move {
+            let resolver = FakeSessionResolver::with(&[("ses", FakeResolve::Hit("ses".into()))]);
+            let (handler, store, dir, project) = handler_with_store_and_resolver(
+                Arc::new(ProducerState::default()),
+                default_test_config(),
+                resolver,
+            );
+            if broken_git {
+                std::fs::write(project.join(".git"), "gitdir: /nonexistent/for/this/test\n")
+                    .unwrap();
+            }
+            handler
+                .resolve_project_identity_for_test
+                .store(true, Ordering::Relaxed);
+            let directory_pool = project_identity::directory_fallback(&project);
+            store
+                .seed_memory(
+                    1,
+                    &directory_pool,
+                    "CONSTRAINTS",
+                    "pooled directory fact",
+                    50,
+                )
+                .unwrap();
+            let response = call_transform_request(
+                &handler,
+                request(vec![ck("paused-route", 1, "hello there")]),
+            )
+            .await;
+            (handler, store, dir, response)
+        };
+
+        let (_control, _control_store, _control_dir, control) = paused_route(false).await;
+        assert_eq!(control["status"], "ok");
+        assert!(
+            control.to_string().contains("pooled directory fact"),
+            "control: a plain directory renders its own pool"
+        );
+
+        let (handler, store, _dir, response) = paused_route(true).await;
+        assert_eq!(
+            response["status"], "ok",
+            "the transform still serves: {response}"
+        );
+        assert!(
+            !response.to_string().contains("pooled directory fact"),
+            "a checkout git cannot read must not be served the directory-hash pool"
+        );
+
+        let write = call_facade(
+            &handler,
+            "ctx_memory",
+            json!({ "action": "write", "category": "CONSTRAINTS", "content": "new fact" }),
+        )
+        .await;
+        let text = tool_text(write);
+        assert!(
+            text.contains("git_identity_unavailable"),
+            "memory writes refuse by name: {text}"
+        );
+        drop(store);
     }
 
     #[tokio::test(flavor = "current_thread")]

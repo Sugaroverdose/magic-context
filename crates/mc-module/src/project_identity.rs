@@ -13,6 +13,13 @@
 //! directory it cannot read at all (a path that no longer exists), this refuses. A route
 //! keyed on an identity nobody else computes would read an empty memory set and say
 //! nothing, so the caller gets an error naming the directory instead.
+//!
+//! Inside a checkout, only a repository with no commits yet gets a `dir:` identity. When
+//! git itself fails (no git binary, a timeout, an ownership refusal, broken metadata) the
+//! last `git:` identity known for the directory or an ancestor within the same repository
+//! is reused, and otherwise resolution fails with `git_identity_unavailable`, as the host
+//! pauses memory features in that case. A `dir:` answer there would key memories under an
+//! identity no host computes for that checkout.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -35,6 +42,9 @@ pub enum ProjectIdentityError {
     HomeDirectory { directory: String },
     /// The directory cannot be read as a directory (missing, not a directory, no access).
     Unreadable { directory: String, reason: String },
+    /// The directory is inside a git checkout, git could not report its root commit for a
+    /// reason other than "no commits yet", and no earlier identity for it is known.
+    GitUnavailable { directory: String },
 }
 
 impl ProjectIdentityError {
@@ -43,6 +53,8 @@ impl ProjectIdentityError {
         match self {
             Self::HomeDirectory { .. } => "project_identity_home_directory",
             Self::Unreadable { .. } => "project_identity_unreadable",
+            // The host's own error class for the same condition.
+            Self::GitUnavailable { .. } => "git_identity_unavailable",
         }
     }
 }
@@ -57,6 +69,10 @@ impl std::fmt::Display for ProjectIdentityError {
             Self::Unreadable { directory, reason } => {
                 write!(f, "cannot read project directory {directory}: {reason}")
             }
+            Self::GitUnavailable { directory } => write!(
+                f,
+                "git identity resolution for {directory} is temporarily unavailable; memory features are paused until git access recovers"
+            ),
         }
     }
 }
@@ -130,19 +146,17 @@ fn git_root_directory(canonical: &Path) -> Option<PathBuf> {
     }
 }
 
-/// The root-commit hash of the checkout at `canonical`, or `None` when git cannot give one
-/// (no commits, no git binary, a timeout, ownership refusal). With several roots (merged
-/// unrelated histories) the lexicographically smallest is taken, as the host does, so the
-/// answer does not depend on git's traversal order.
-fn git_root_commit(canonical: &Path) -> Option<String> {
+/// Run git in `cwd` with the probe's locale and timeout. `None` when git cannot be
+/// started, cannot be waited on, or runs past [`GIT_TIMEOUT`].
+fn run_git(cwd: &Path, args: &[&str]) -> Option<std::process::Output> {
     let mut child = Command::new("git")
-        .args(["rev-list", "--max-parents=0", "HEAD"])
-        .current_dir(canonical)
+        .args(args)
+        .current_dir(cwd)
         .env("LC_ALL", "C")
         .env("LANG", "C")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .ok()?;
     let started = Instant::now();
@@ -158,7 +172,15 @@ fn git_root_commit(canonical: &Path) -> Option<String> {
             Err(_) => return None,
         }
     }
-    let output = child.wait_with_output().ok()?;
+    child.wait_with_output().ok()
+}
+
+/// The root-commit hash of the checkout at `canonical`, or `None` when git cannot give one
+/// (no commits, no git binary, a timeout, ownership refusal). With several roots (merged
+/// unrelated histories) the lexicographically smallest is taken, as the host does, so the
+/// answer does not depend on git's traversal order.
+fn git_root_commit(canonical: &Path) -> Option<String> {
+    let output = run_git(canonical, &["rev-list", "--max-parents=0", "HEAD"])?;
     if !output.status.success() {
         return None;
     }
@@ -175,9 +197,140 @@ fn git_root_commit(canonical: &Path) -> Option<String> {
         .min()
 }
 
+/// Whether `canonical` is a readable repository whose HEAD has no commit yet, the one git
+/// failure the host answers with a `dir:` identity. The host's test (`hasUnbornHead`):
+/// `git rev-parse --git-dir` succeeds, and `git rev-parse --verify --quiet HEAD` exits 1
+/// with nothing on stderr. Any other failure (no git, a timeout, an ownership refusal,
+/// broken metadata) is not "no commits".
+fn has_unborn_head(canonical: &Path) -> bool {
+    if !run_git(canonical, &["rev-parse", "--git-dir"])
+        .is_some_and(|output| output.status.success())
+    {
+        return false;
+    }
+    run_git(canonical, &["rev-parse", "--verify", "--quiet", "HEAD"])
+        .is_some_and(|output| output.status.code() == Some(1) && output.stderr.is_empty())
+}
+
+/// The host's `projectDirectoryKey`: the spelling a directory is filed under in the
+/// remembered-identity sidecars. A Windows-shaped path (drive letter or UNC) has its
+/// separators unified, its long-path prefix dropped, `.` and `..` folded, its trailing
+/// separator removed and its case lowered; any other path is resolved like Node's
+/// `path.resolve`.
+fn project_directory_key(directory: &Path) -> String {
+    let raw = directory.to_string_lossy();
+    let slashed = raw.replace('\\', "/");
+    let slashed = if slashed.len() >= 8 && slashed[..8].eq_ignore_ascii_case("//?/UNC/") {
+        format!("//{}", &slashed[8..])
+    } else if let Some(rest) = slashed.strip_prefix("//?/") {
+        rest.to_string()
+    } else {
+        slashed
+    };
+    let bytes = slashed.as_bytes();
+    let drive =
+        bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'/';
+    if drive || slashed.starts_with("//") {
+        let (prefix, rest) = if drive {
+            (slashed[..3].to_string(), &slashed[3..])
+        } else {
+            ("//".to_string(), &slashed[2..])
+        };
+        let mut parts: Vec<&str> = Vec::new();
+        for part in rest.split('/') {
+            match part {
+                "" | "." => {}
+                ".." => {
+                    parts.pop();
+                }
+                other => parts.push(other),
+            }
+        }
+        let joined = format!("{prefix}{}", parts.join("/"));
+        return joined.trim_end_matches('/').to_lowercase();
+    }
+    node_path_resolve(directory).to_string_lossy().into_owned()
+}
+
+/// The `git:` identity the host remembered for exactly `directory`, if any. The host
+/// writes one of these sidecars (`project-identities/<sha256 of the key>.json` in its
+/// storage directory) after every successful git probe, so a directory whose git metadata
+/// later disappears (a removed linked worktree) keeps its repository's memory pool.
+fn read_remembered_git_identity(sidecar_dir: &Path, directory: &Path) -> Option<String> {
+    use sha2::{Digest, Sha256};
+    let key = project_directory_key(directory);
+    let file = sidecar_dir.join(format!("{:x}.json", Sha256::digest(key.as_bytes())));
+    let record: serde_json::Value = serde_json::from_slice(&std::fs::read(file).ok()?).ok()?;
+    if record.get("directory").and_then(serde_json::Value::as_str) != Some(key.as_str()) {
+        return None;
+    }
+    let identity = record.get("identity").and_then(serde_json::Value::as_str)?;
+    let hash = identity.strip_prefix("git:")?;
+    ((7..=64).contains(&hash.len())
+        && hash
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte)))
+    .then(|| identity.to_string())
+}
+
+/// Record `identity` as the one last resolved through git for exactly `directory`, in the
+/// host's sidecar format, so a later process that cannot run git (or finds the checkout
+/// gone) reuses it instead of starting a new pool. Written to a temporary file and renamed
+/// so a reader never sees half a record. Best effort: a read-only storage directory must
+/// not turn a successful probe into a failure.
+fn remember_git_identity(sidecar_dir: &Path, directory: &Path, identity: &str) {
+    use sha2::{Digest, Sha256};
+    let key = project_directory_key(directory);
+    let destination = sidecar_dir.join(format!("{:x}.json", Sha256::digest(key.as_bytes())));
+    if read_remembered_git_identity(sidecar_dir, directory).as_deref() == Some(identity) {
+        return;
+    }
+    let record = serde_json::json!({ "directory": key, "identity": identity }).to_string();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_nanos());
+    let temporary = destination.with_extension(format!("{}.{nanos}.tmp", std::process::id()));
+    let written = std::fs::create_dir_all(sidecar_dir)
+        .and_then(|()| {
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+            let mut file = options.open(&temporary)?;
+            std::io::Write::write_all(&mut file, record.as_bytes())
+        })
+        .and_then(|()| std::fs::rename(&temporary, &destination));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+}
+
+/// Where the host keeps its remembered-identity sidecars: `project-identities/` beside the
+/// `context.db` both processes resolve. Unit tests read and write none, so a test can
+/// never touch the real storage directory.
+fn default_sidecar_dir() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    crate::host_store::resolve_context_db_path()
+        .parent()
+        .map(|storage| storage.join("project-identities"))
+}
+
+/// The key a route's history is filed under while its project identity is unavailable.
+/// It names no project (no host computes it), so nothing project-scoped is shared under
+/// it; it is stable per directory so the route's queued historian runs stay findable.
+pub fn unavailable_project_key(directory: &Path) -> String {
+    let directory_identity = directory_fallback(directory);
+    format!(
+        "unresolved:{}",
+        directory_identity.trim_start_matches("dir:")
+    )
+}
+
 #[derive(Clone)]
 struct Cached {
-    identity: String,
+    outcome: Result<String, ProjectIdentityError>,
     /// `None` for a `git:` identity, which never changes.
     revalidate_at: Option<Instant>,
 }
@@ -189,11 +342,58 @@ pub struct ProjectIdentityResolver {
     /// The last `git:` identity seen per resolved path, reused when a later git probe
     /// fails transiently so one checkout does not flap between two identities.
     last_git: Mutex<HashMap<PathBuf, String>>,
+    /// The host's remembered-identity sidecar directory. `None` reads no sidecars.
+    sidecar_dir: Option<PathBuf>,
 }
 
 impl ProjectIdentityResolver {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            sidecar_dir: default_sidecar_dir(),
+            ..Self::default()
+        }
+    }
+
+    /// A resolver reading the host's remembered identities from `sidecar_dir`.
+    #[cfg(test)]
+    fn with_sidecar_dir(sidecar_dir: PathBuf) -> Self {
+        Self {
+            sidecar_dir: Some(sidecar_dir),
+            ..Self::default()
+        }
+    }
+
+    fn remembered(&self, directory: &Path) -> Option<String> {
+        read_remembered_git_identity(self.sidecar_dir.as_deref()?, directory)
+    }
+
+    /// The `git:` identity last known for `canonical` or an ancestor in the same
+    /// repository, from this process or the host's sidecars. The walk stops at the first
+    /// directory holding its own `.git`: a nested repository is a different project, and
+    /// borrowing the outer repository's identity would put its memories in the wrong pool.
+    fn nearest_known_git_identity(&self, canonical: &Path) -> Option<String> {
+        let walk = |start: &Path| {
+            let last = self
+                .last_git
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let mut current = Some(start);
+            while let Some(path) = current {
+                if let Some(identity) = last.get(path).cloned().or_else(|| self.remembered(path)) {
+                    return Some(identity);
+                }
+                if path.join(".git").exists() {
+                    return None;
+                }
+                current = path.parent();
+            }
+            None
+        };
+        walk(canonical).or_else(|| {
+            let real = realpath(canonical)?;
+            (real != canonical).then(|| walk(&real)).flatten()
+        })
     }
 
     /// The identity of `directory`, as the host's `resolveProjectIdentityForSession`
@@ -207,40 +407,60 @@ impl ProjectIdentityResolver {
             .get(&resolved)
             .cloned()
         {
-            if cached
+            let fresh = cached
                 .revalidate_at
-                .is_none_or(|revalidate_at| Instant::now() < revalidate_at)
-            {
-                return Ok(cached.identity);
+                .is_none_or(|revalidate_at| Instant::now() < revalidate_at);
+            // A `dir:` answer is only good while no repository has appeared around the
+            // directory; the host re-resolves it as soon as one has, so the first commit
+            // moves the project to its `git:` identity without waiting out the window.
+            let stale_directory = cached
+                .outcome
+                .as_ref()
+                .is_ok_and(|identity| identity.starts_with("dir:"))
+                && git_root_directory(&resolved).is_some();
+            if fresh && !stale_directory {
+                return cached.outcome;
             }
         }
-        let identity = self.resolve_uncached(&resolved)?;
-        let revalidate_at =
-            (!identity.starts_with("git:")).then(|| Instant::now() + DIRECTORY_REVALIDATE_AFTER);
-        self.cache
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                resolved,
-                Cached {
-                    identity: identity.clone(),
-                    revalidate_at,
-                },
-            );
-        Ok(identity)
+        let outcome = self.resolve_uncached(&resolved);
+        // A refusal for a missing or home directory is not remembered: it costs no git
+        // probe to repeat. A git failure is, so a broken or slow git is probed again only
+        // after the same window the host waits before retrying.
+        let remembered = match &outcome {
+            Ok(_) | Err(ProjectIdentityError::GitUnavailable { .. }) => true,
+            Err(_) => false,
+        };
+        if remembered {
+            let revalidate_at = (!outcome
+                .as_ref()
+                .is_ok_and(|identity| identity.starts_with("git:")))
+            .then(|| Instant::now() + DIRECTORY_REVALIDATE_AFTER);
+            self.cache
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(
+                    resolved,
+                    Cached {
+                        outcome: outcome.clone(),
+                        revalidate_at,
+                    },
+                );
+        }
+        outcome
     }
 
     fn resolve_uncached(&self, resolved: &Path) -> Result<String, ProjectIdentityError> {
         let display = resolved.display().to_string();
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/"));
-        let canonical_home = realpath(&home).unwrap_or(home);
         let canonical_directory = realpath(resolved).unwrap_or_else(|| resolved.to_path_buf());
-        let inherits_home =
-            git_root_directory(&canonical_directory).is_some_and(|root| root == canonical_home);
-        if canonical_directory == canonical_home || inherits_home {
-            return Err(ProjectIdentityError::HomeDirectory { directory: display });
+        // With no home directory at all there is nothing to refuse; `/` or the current
+        // directory would wrongly refuse (or wrongly allow) an unrelated directory.
+        if let Some(home) = crate::config::user_home_dir() {
+            let canonical_home = realpath(&home).unwrap_or(home);
+            let inherits_home =
+                git_root_directory(&canonical_directory).is_some_and(|root| root == canonical_home);
+            if canonical_directory == canonical_home || inherits_home {
+                return Err(ProjectIdentityError::HomeDirectory { directory: display });
+            }
         }
         match std::fs::metadata(resolved) {
             Ok(metadata) if metadata.is_dir() => {}
@@ -258,35 +478,45 @@ impl ProjectIdentityResolver {
             }
         }
         if git_root_directory(resolved).is_none() {
+            // No checkout here (any more). A directory the host once resolved through git
+            // keeps that identity, as the host keeps it; only this exact path's record
+            // counts, so a plain folder never borrows an ancestor repository's pool.
+            return Ok(self
+                .remembered(resolved)
+                .unwrap_or_else(|| directory_fallback(resolved)));
+        }
+        if let Some(root) = git_root_commit(resolved) {
+            let identity = format!("git:{root}");
+            self.last_git
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .insert(resolved.to_path_buf(), identity.clone());
+            // Remember it across restarts, as the host does, for this path and for the
+            // checkout root it belongs to.
+            if let Some(sidecar_dir) = self.sidecar_dir.as_deref() {
+                remember_git_identity(sidecar_dir, resolved, &identity);
+                if let Some(root) = git_root_directory(resolved).filter(|root| root != resolved) {
+                    remember_git_identity(sidecar_dir, &root, &identity);
+                }
+            }
+            return Ok(identity);
+        }
+        if has_unborn_head(resolved) {
+            // A repository with no commits yet has no root commit to name it by. The
+            // directory hash stands in until the first commit, which the cache check above
+            // picks up. This repository is its own project even when it sits inside
+            // another checkout, so no outer identity is consulted.
             return Ok(directory_fallback(resolved));
         }
-        match git_root_commit(resolved) {
-            Some(root) => {
-                let identity = format!("git:{root}");
-                self.last_git
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .insert(resolved.to_path_buf(), identity.clone());
-                Ok(identity)
+        // git failed for another reason: missing, timed out, refused the repository's
+        // ownership, or found its metadata broken. Reuse the identity last known for this
+        // repository, and otherwise refuse as the host does; a `dir:` identity here would
+        // file memories under a key no host uses for this checkout.
+        self.nearest_known_git_identity(resolved).ok_or_else(|| {
+            ProjectIdentityError::GitUnavailable {
+                directory: resolved.display().to_string(),
             }
-            None => {
-                // No root commit: an empty repository, a missing git binary, a timeout or
-                // an ownership refusal. The host reuses the last identity it saw for this
-                // path or an ancestor, and otherwise falls back to the directory hash.
-                let last = self
-                    .last_git
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-                let mut current = Some(resolved);
-                while let Some(path) = current {
-                    if let Some(identity) = last.get(path) {
-                        return Ok(identity.clone());
-                    }
-                    current = path.parent();
-                }
-                Ok(directory_fallback(resolved))
-            }
-        }
+        })
     }
 }
 
@@ -400,5 +630,157 @@ mod tests {
             resolver.resolve(&gone),
             Err(ProjectIdentityError::Unreadable { .. })
         ));
+    }
+    fn committed_repo(path: &Path) {
+        std::fs::create_dir_all(path).unwrap();
+        git(path, &["init", "-q", "-b", "main"]);
+        std::fs::write(path.join("README"), "golden\n").unwrap();
+        git(path, &["add", "README"]);
+        git(path, &["commit", "-q", "-m", "golden root"]);
+    }
+
+    /// A nested repository with no commits yet is its own project. Resolving the outer
+    /// checkout first used to leave its identity behind for the nested one to borrow.
+    #[test]
+    fn a_new_nested_repository_does_not_take_the_outer_repositorys_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("outer");
+        committed_repo(&outer);
+        let nested = outer.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        git(&nested, &["init", "-q", "-b", "main"]);
+
+        let resolver = ProjectIdentityResolver::default();
+        assert_eq!(
+            resolver.resolve(&outer).unwrap(),
+            format!("git:{GOLDEN_ROOT_COMMIT}")
+        );
+        let nested_identity = resolver.resolve(&nested).unwrap();
+        assert_eq!(nested_identity, directory_fallback(&nested));
+        // The answer must not depend on what this process resolved before.
+        assert_eq!(
+            ProjectIdentityResolver::default().resolve(&nested).unwrap(),
+            nested_identity
+        );
+    }
+
+    /// A checkout git cannot read is not a plain directory: the host pauses memory there
+    /// rather than inventing a `dir:` identity, and so does the module.
+    #[test]
+    fn a_checkout_git_cannot_read_is_refused_not_given_a_directory_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let broken = dir.path().join("broken");
+        std::fs::create_dir_all(&broken).unwrap();
+        std::fs::write(broken.join(".git"), "gitdir: /nonexistent/for/this/test\n").unwrap();
+        let error = ProjectIdentityResolver::default()
+            .resolve(&broken)
+            .unwrap_err();
+        assert!(
+            matches!(error, ProjectIdentityError::GitUnavailable { .. }),
+            "{error:?}"
+        );
+        assert_eq!(error.code(), "git_identity_unavailable");
+    }
+
+    /// A broken nested checkout inside a known repository is still a different project:
+    /// the outer identity is not borrowed across the nested `.git`.
+    #[test]
+    fn a_broken_nested_checkout_does_not_borrow_the_outer_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let outer = dir.path().join("outer");
+        committed_repo(&outer);
+        let nested = outer.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join(".git"), "gitdir: /nonexistent/for/this/test\n").unwrap();
+        let resolver = ProjectIdentityResolver::default();
+        resolver.resolve(&outer).unwrap();
+        assert!(matches!(
+            resolver.resolve(&nested),
+            Err(ProjectIdentityError::GitUnavailable { .. })
+        ));
+    }
+
+    /// When git fails for a directory inside a repository this process already resolved,
+    /// the repository's identity is reused so its memory pool does not split.
+    #[test]
+    fn a_git_failure_inside_a_known_repository_reuses_its_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        committed_repo(&repo);
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let resolver = ProjectIdentityResolver::default();
+        let expected = format!("git:{GOLDEN_ROOT_COMMIT}");
+        assert_eq!(resolver.resolve(&repo).unwrap(), expected);
+        std::fs::write(repo.join(".git").join("HEAD"), "garbage\n").unwrap();
+        assert_eq!(resolver.resolve(&repo.join("sub")).unwrap(), expected);
+    }
+
+    /// A folder whose git metadata is gone (a removed linked worktree) keeps the identity
+    /// the host remembered for that exact path.
+    #[test]
+    fn a_directory_without_git_reads_the_hosts_remembered_identity_for_that_path() {
+        use sha2::{Digest, Sha256};
+        let dir = tempfile::tempdir().unwrap();
+        let sidecars = dir.path().join("project-identities");
+        std::fs::create_dir_all(&sidecars).unwrap();
+        let folder = dir.path().join("former-worktree");
+        std::fs::create_dir_all(folder.join("child")).unwrap();
+        let key = project_directory_key(&folder);
+        std::fs::write(
+            sidecars.join(format!("{:x}.json", Sha256::digest(key.as_bytes()))),
+            serde_json::json!({ "directory": key, "identity": "git:abcdef1234567" }).to_string(),
+        )
+        .unwrap();
+        let resolver = ProjectIdentityResolver::with_sidecar_dir(sidecars);
+        assert_eq!(resolver.resolve(&folder).unwrap(), "git:abcdef1234567");
+        // Only the exact path's record counts.
+        let child = folder.join("child");
+        assert_eq!(
+            resolver.resolve(&child).unwrap(),
+            directory_fallback(&child)
+        );
+    }
+
+    /// A successful probe is remembered in the host's sidecar format, so a later process
+    /// whose git fails reuses the identity instead of pausing or splitting the pool.
+    #[test]
+    fn a_resolved_checkout_is_remembered_for_the_next_process() {
+        let dir = tempfile::tempdir().unwrap();
+        let sidecars = dir.path().join("project-identities");
+        let repo = dir.path().join("repo");
+        committed_repo(&repo);
+        std::fs::create_dir_all(repo.join("sub")).unwrap();
+        let expected = format!("git:{GOLDEN_ROOT_COMMIT}");
+        let first = ProjectIdentityResolver::with_sidecar_dir(sidecars.clone());
+        assert_eq!(first.resolve(&repo.join("sub")).unwrap(), expected);
+        assert_eq!(
+            read_remembered_git_identity(&sidecars, &repo.join("sub")).as_deref(),
+            Some(expected.as_str())
+        );
+        // A fresh process whose git now fails still finds the identity.
+        std::fs::write(repo.join(".git").join("HEAD"), "garbage\n").unwrap();
+        let second = ProjectIdentityResolver::with_sidecar_dir(sidecars);
+        assert_eq!(second.resolve(&repo.join("sub")).unwrap(), expected);
+    }
+
+    #[test]
+    fn directory_keys_follow_the_hosts_spelling_rules() {
+        assert_eq!(project_directory_key(Path::new("/work/api/")), "/work/api");
+        assert_eq!(
+            project_directory_key(Path::new("/work/./x/../api")),
+            "/work/api"
+        );
+        assert_eq!(
+            project_directory_key(Path::new("C:\\Users\\Me\\Repo\\")),
+            "c:/users/me/repo"
+        );
+        assert_eq!(
+            project_directory_key(Path::new("\\\\?\\C:\\Repo")),
+            "c:/repo"
+        );
+        assert_eq!(
+            project_directory_key(Path::new("\\\\?\\UNC\\Server\\Share\\x")),
+            "//server/share/x"
+        );
     }
 }
