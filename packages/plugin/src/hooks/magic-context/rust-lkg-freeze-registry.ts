@@ -16,8 +16,17 @@ export interface RustLkgReplayParticipant {
     lastPassStamp(sessionId: string): number | undefined;
     /** Enter or keep the freeze after an LKG replay served outside the adapter. */
     enterFreezeFromExternalServe(sessionId: string, inputCount: number): void;
-    /** The adapter's own context-fit admission for an LKG replay of `messages`. */
-    replayFits(sessionId: string, messages: MessageLike[]): boolean;
+    /**
+     * The adapter's own context-fit admission for an LKG replay of `messages`,
+     * with the model resolved from the pass's `inputMessages` as the adapter does.
+     */
+    replayFits(sessionId: string, messages: MessageLike[], inputMessages: MessageLike[]): boolean;
+    /**
+     * True when the adapter would fail closed for this session right now (usage in
+     * its emergency band, or a proven provider overflow), where it admits no LKG
+     * replay. True as well when that cannot be determined.
+     */
+    emergencyFailClosed(sessionId: string, inputMessages: MessageLike[]): boolean;
     /**
      * Remove from a replayed array the thinking blocks this session has already
      * stopped sending (the ids saved in its binding-mismatch set), exactly as the
@@ -103,12 +112,16 @@ export function liveRustLkgReplayParticipantCountForTest(): number {
 }
 
 /**
- * Record that the wrapper just served the LKG slot for this session. Synchronous,
- * so the adapter's next pass sees the freeze with no pending signal in between.
- * A no-op in TypeScript mode.
+ * Record that the wrapper just served the LKG slot for this session on
+ * `participant` (the wrapper's Rust adapter). Synchronous, so the adapter's next
+ * pass sees the freeze with no pending signal in between. A no-op without an
+ * adapter (TypeScript mode).
  */
-export function noteExternalLkgReplay(sessionId: string, inputCount: number): void {
-    const participant = resolveRustLkgReplayParticipant(sessionId);
+export function noteExternalLkgReplay(
+    participant: RustLkgReplayParticipant | undefined,
+    sessionId: string,
+    inputCount: number,
+): void {
     if (!participant) return;
     participant.enterFreezeFromExternalServe(sessionId, inputCount);
     sessionLog(sessionId, "lkg_external_replay_froze_rust_adapter");

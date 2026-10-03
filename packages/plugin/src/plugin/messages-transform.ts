@@ -19,6 +19,7 @@ import { dropSlot, getSlot, noteEntry } from "../hooks/magic-context/lkg-slot";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import {
     noteExternalLkgReplay,
+    type RustLkgReplayParticipant,
     resolveRustLkgReplayParticipant,
     rustAdapterHasRunSession,
 } from "../hooks/magic-context/rust-lkg-freeze-registry";
@@ -269,7 +270,17 @@ export function createMessagesTransformHandler(args: {
     onLkgReplay?: () => void;
     internalChildSessions?: Set<string>;
     tryReopenStorage?: () => boolean | Promise<boolean>;
+    /**
+     * The Rust adapter of this wrapper's own plugin instance, or null when the
+     * instance runs in TypeScript mode. When omitted, the process-wide replay
+     * registry picks the adapter (the one that most recently ran the session).
+     */
+    rustReplayParticipant?: () => RustLkgReplayParticipant | null | undefined;
 }): (input: Record<string, never>, output: MessagesTransformOutput) => Promise<MessageWithParts[]> {
+    const resolveRust = (sessionId: string): RustLkgReplayParticipant | undefined =>
+        args.rustReplayParticipant
+            ? (args.rustReplayParticipant() ?? undefined)
+            : resolveRustLkgReplayParticipant(sessionId);
     const run = async (input: Record<string, never>, output: MessagesTransformOutput) => {
         const sessionId = resolveSessionId(output);
         const agent = resolveAgentNameFromMessages(output.messages);
@@ -416,10 +427,11 @@ export function createMessagesTransformHandler(args: {
                     // In Rust mode the adapter tracks whether the session is serving a frozen
                     // replay, and it only replays when the replay fits the context limit.
                     // A replay served here must update that tracking and pass the same check.
-                    const rust = resolveRustLkgReplayParticipant(sessionId);
+                    const rust = resolveRust(sessionId);
                     if (
-                        error instanceof StorageBusyRefusalError &&
-                        error.stage === "rust-mode-emergency"
+                        (error instanceof StorageBusyRefusalError &&
+                            error.stage === "rust-mode-emergency") ||
+                        rust?.emergencyFailClosed(sessionId, output.messages as MessageLike[])
                     ) {
                         // The adapter refused while failing closed (usage at or above 95%
                         // of the model's limit, or a proven provider overflow); there it
@@ -458,7 +470,11 @@ export function createMessagesTransformHandler(args: {
                                           resolvedProviderID: keys.providerKey ?? undefined,
                                       }),
                         });
-                        if (replay.ok && rust && !rust.replayFits(sessionId, replay.messages)) {
+                        if (
+                            replay.ok &&
+                            rust &&
+                            !rust.replayFits(sessionId, replay.messages, inputMessages)
+                        ) {
                             replayBlocked = true;
                             sessionLog(sessionId, "lkg_replay_does_not_fit");
                         } else if (replay.ok) {
@@ -470,7 +486,7 @@ export function createMessagesTransformHandler(args: {
                             // The provider has now cached the replayed bytes. Tell a Rust
                             // adapter, so its next successful pass keeps serving them instead
                             // of switching to module output, which would bust that cache.
-                            noteExternalLkgReplay(sessionId, inputCount);
+                            noteExternalLkgReplay(rust, sessionId, inputCount);
                             sessionLog(sessionId, "lkg_replay_served");
                             return output.messages;
                         } else {
@@ -509,7 +525,9 @@ export function createMessagesTransformHandler(args: {
                 !args.compactionOff &&
                 !isTransient &&
                 sessionId &&
-                rustAdapterHasRunSession(sessionId)
+                (args.rustReplayParticipant
+                    ? resolveRust(sessionId) !== undefined
+                    : rustAdapterHasRunSession(sessionId))
             ) {
                 // A Rust-mode session whose pass failed and whose last-known-good replay
                 // could not serve. Passing the input through unchanged would send the

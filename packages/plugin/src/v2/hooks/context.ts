@@ -1534,6 +1534,7 @@ export async function registerContext(context: V2Context) {
                 compactionOff,
                 propagateUnexpectedErrors: true,
                 onLkgReplay: restoreLkgSystem,
+                rustReplayParticipant: () => transform?.getRustReplayParticipant() ?? null,
             })(
                 {},
                 mapped as unknown as Parameters<
@@ -1594,6 +1595,8 @@ export async function registerContext(context: V2Context) {
                     try {
                         await createMessagesTransformHandler({
                             onLkgReplay: restoreLkgSystem,
+                            rustReplayParticipant: () =>
+                                transform?.getRustReplayParticipant() ?? null,
                             magicContext: {
                                 "experimental.chat.messages.transform": async () => {
                                     throw error;

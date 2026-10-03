@@ -3102,6 +3102,10 @@ export function createTransform(deps: TransformDeps) {
         disposeRust(): void {
             rustModeTransform?.dispose();
         },
+        /** This instance's Rust adapter, for its own messages-transform wrapper; null in TypeScript mode. */
+        getRustReplayParticipant() {
+            return rustModeTransform?.replayParticipant ?? null;
+        },
         getRustWireCacheHeapStats() {
             return (
                 rustModeTransform?.getHeapStats() ?? {

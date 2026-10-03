@@ -249,6 +249,17 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
                 await transform.run(sessionId, messages, output, meta());
             },
         },
+        // As in production: the wrapper replays through its own instance's adapter.
+        rustReplayParticipant: () => transform.replayParticipant,
+    });
+    /** A wrapper of a TypeScript-mode instance in the same process (no Rust adapter). */
+    const typescriptHandler = createMessagesTransformHandler({
+        magicContext: {
+            "experimental.chat.messages.transform": async () => {
+                throw sqliteBusy();
+            },
+        },
+        rustReplayParticipant: () => null,
     });
     /**
      * One pass through the wrapper. `"hook-busy"` fails the hook with a SQLite busy
@@ -290,6 +301,21 @@ function frozenSession(label: string, options: { compactionOff?: boolean } = {})
         },
         run,
         runWrapped,
+        /** One pass through a TypeScript-mode instance's wrapper whose hook is busy. */
+        runTypescriptWrapperBusy: async (input: MessageLike[]) => {
+            const output = { messages: [...input] };
+            await typescriptHandler({}, output as never);
+            return structuredClone(output.messages as unknown[]);
+        },
+        /**
+         * An in-process rebuild that has not disposed the old adapter yet: a fresh
+         * adapter on the same stores, with the old one still registered.
+         */
+        rebuildWithoutDispose: () => {
+            const old = transform;
+            transform = makeAdapter();
+            return old;
+        },
         frozenFields,
         setStatusFails: (value: boolean) => {
             statusFails = value;
@@ -498,6 +524,24 @@ describe("the wrapper admits a replay the way the adapter does", () => {
         // A busy error inside the emergency band makes the adapter refuse with a
         // storage-busy refusal; the wrapper must not serve the slot in its place.
         await expect(s.runWrapped([...conversation], "throw-busy")).rejects.toBeInstanceOf(
+            StorageBusyRefusalError,
+        );
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+    });
+
+    it("the wrapper declines a replay in the emergency band when the busy error comes from outside the adapter", async () => {
+        const s = frozenSession("wrapper-emergency-band-hook");
+        const sid = s.sessionId;
+        await s.runWrapped([user(sid, "m1", "question")], "HARD");
+        s.setUsage(97, 10_000_000);
+        const conversation = [
+            user(sid, "m1", "question"),
+            assistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+        ];
+        // The hook fails before the adapter runs, so no refusal carries the
+        // adapter's emergency stage; the wrapper must still ask the adapter.
+        await expect(s.runWrapped([...conversation], "hook-busy")).rejects.toBeInstanceOf(
             StorageBusyRefusalError,
         );
         expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
@@ -850,6 +894,34 @@ describe("the frozen path validates the array it serves", () => {
         } finally {
             logSpy.mockRestore();
         }
+    });
+});
+
+describe("a wrapper replays through its own instance's adapter", () => {
+    it("after a rebuild that has not disposed the old adapter, the replay freezes the new one", async () => {
+        const s = frozenSession("wrapper-bound-rebuild");
+        const sid = s.sessionId;
+        const conversation: MessageLike[] = [user(sid, "m1", "question")];
+        await s.runWrapped([...conversation], "HARD");
+        // The old adapter has run the session and is still registered; the new one
+        // has not run it yet, so the process-wide registry would pick the old one.
+        const old = s.rebuildWithoutDispose();
+        conversation.push(assistant(sid, "a1"), user(sid, "m2", "turn 2"));
+        await s.runWrapped([...conversation], "hook-busy");
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(true);
+        expect(old.getState(sid).lkgRepresentationFrozen).toBe(false);
+    });
+
+    it("a TypeScript-mode instance's replay does not freeze a Rust adapter", async () => {
+        const s = frozenSession("wrapper-bound-typescript");
+        const sid = s.sessionId;
+        const conversation: MessageLike[] = [user(sid, "m1", "question")];
+        await s.runWrapped([...conversation], "HARD");
+        conversation.push(assistant(sid, "a1"), user(sid, "m2", "turn 2"));
+        // The only registered Rust adapter has run this session, yet the wrapper of
+        // a TypeScript-mode instance serves its replay without attributing it.
+        await s.runTypescriptWrapperBusy([...conversation]);
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
     });
 });
 

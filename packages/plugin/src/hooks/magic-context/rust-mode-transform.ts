@@ -85,7 +85,13 @@ import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { createHistorianHostRunner } from "./historian-host-runner";
 import { saveLkgSlotToDb } from "./lkg-persist";
 import { coldStartRawServedIndex, replayLkg, resolveLkgModelKeys } from "./lkg-replay";
-import { lkgReplayFits } from "./lkg-replay-fit";
+import {
+    lkgReplayFits,
+    lkgReplayLimit,
+    measureLkgReplay,
+    RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
+    rawFallbackSerializedBytes,
+} from "./lkg-replay-fit";
 import {
     captureSlot,
     contentSnapshotValue,
@@ -250,34 +256,6 @@ async function resolveCombinedTodowriteVerdict(
         }
     }
     return !permissionDenied;
-}
-const RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN = 4;
-
-/**
- * Serialize the raw array message-by-message with a running byte sum, aborting
- * as soon as the sum proves the prompt is over the context limit. A refusal
- * then costs a fraction of the full serialization and never runs the
- * tokenizer; when the sum stays under the budget the total matches a
- * whole-array serialization up to array punctuation.
- */
-function rawFallbackSerializedBytes(
-    messages: readonly MessageLike[],
-    abortAboveBytes: number,
-): { bytes: number; aborted: boolean } | null {
-    let bytes = 0;
-    try {
-        for (const message of messages) {
-            const serialized = JSON.stringify(message);
-            if (typeof serialized !== "string") return null;
-            // +1 accounts for the separator between array entries.
-            bytes += Buffer.byteLength(serialized) + 1;
-            if (bytes > abortAboveBytes) return { bytes, aborted: true };
-        }
-    } catch {
-        // Serialization is itself required before these messages can reach a provider.
-        return null;
-    }
-    return { bytes: bytes + 1, aborted: false };
 }
 
 export interface RustModeModuleClient extends ModuleStateSyncClient {
@@ -1182,6 +1160,53 @@ function transformGeometryForWire(
     };
 }
 
+/**
+ * Whether a Rust-mode pass for this session must fail closed: usage at or above
+ * `RUST_EMERGENCY_WALL_PCT` of a trusted hard wall, or a provider overflow that
+ * is proven (in this process, or persisted with provider proof). A pass that
+ * fails closed admits no last-known-good replay. `providerProvenEmergency` is the
+ * narrower case where the band is reached and the overflow is provider-proven.
+ */
+function rustEmergencyFailClosed(args: {
+    sessionId: string;
+    usage: ContextUsage;
+    geometry: TransformGeometryWire | undefined;
+    trustedContextLimit: number | undefined;
+    overflowState: ReturnType<typeof getOverflowState> | undefined;
+    modelKey: string | null;
+}): { emergencyFailClosed: boolean; providerProvenEmergency: boolean } {
+    const { sessionId, overflowState } = args;
+    const hasTrustedEmergencyWall = args.geometry
+        ? args.geometry.usable_hard > 0
+        : args.trustedContextLimit !== undefined && args.trustedContextLimit > 0;
+    const hardWallPercentage = hardWallUsagePercentage(args.usage, args.geometry);
+    const providerOverflowProven = isProviderOverflowFailClosedProven(sessionId);
+    let emergencyFailClosed =
+        providerOverflowProven ||
+        (hardWallPercentage >= RUST_EMERGENCY_WALL_PCT && hasTrustedEmergencyWall);
+    let providerProvenEmergency = false;
+    if (overflowState) {
+        const detectedLimitMatchesModel =
+            overflowState.detectedContextLimitModelKey === null ||
+            canonicalModelIdentity(overflowState.detectedContextLimitModelKey) ===
+                canonicalModelIdentity(args.modelKey ?? "");
+        const hasProviderProof =
+            (overflowState.detectedContextLimit > 0 && detectedLimitMatchesModel) ||
+            // An unknown persisted arm alone is not proof. A second provider rejection
+            // while that arm is durable records the process-local reconfirmation.
+            isProviderOverflowReconfirmed(sessionId);
+        const persistedProviderEmergency =
+            overflowState.needsEmergencyRecovery &&
+            overflowState.emergencyRecoveryOrigin === "provider_overflow" &&
+            hasProviderProof;
+        emergencyFailClosed ||= persistedProviderEmergency;
+        providerProvenEmergency =
+            hardWallPercentage >= RUST_EMERGENCY_WALL_PCT &&
+            (providerOverflowProven || persistedProviderEmergency);
+    }
+    return { emergencyFailClosed, providerProvenEmergency };
+}
+
 function hardWallUsagePercentage(
     usage: ContextUsage,
     geometry: TransformGeometryWire | undefined,
@@ -1588,6 +1613,7 @@ export function createRustModeTransform(
     dispose: () => void;
     getState: (sessionId: string) => Readonly<RustSessionState>;
     getHeapStats: () => RustWireCacheHeapStats;
+    replayParticipant: RustLkgReplayParticipant;
 } {
     const states = new Map<string, RustSessionState>();
     const clock = options.clockForTests ?? { setTimeout, clearTimeout, now: Date.now };
@@ -1995,6 +2021,7 @@ export function createRustModeTransform(
             modelKey: keys.modelKey,
             systemPromptTokens,
             agentName: deps.getNotificationParams?.(sessionId)?.agent,
+            estimator: rawFallbackEstimator,
         });
         if (!fit.fits) {
             if (fit.detail) sessionLog(sessionId, fit.detail);
@@ -2063,21 +2090,51 @@ export function createRustModeTransform(
             states.has(sessionId) ? passStampBySession.get(sessionId) : undefined,
         enterFreezeFromExternalServe: (sessionId, inputCount) =>
             enterLkgReplayFreeze(ensureState(states, sessionId), inputCount),
-        replayFits: (sessionId, messages) => {
+        replayFits: (sessionId, messages, inputMessages) => {
             try {
-                return lkgReplayFits({
+                const fit = lkgReplayFits({
                     db: deps.db,
                     sessionId,
                     messages,
-                    model: resolveReplayModel(sessionId, messages),
-                    modelKey: resolveLkgModelKeys(messages).modelKey,
+                    model: resolveReplayModel(sessionId, inputMessages),
+                    modelKey: resolveLkgModelKeys(inputMessages).modelKey,
                     systemPromptTokens: getOrCreateSessionMeta(deps.db, sessionId)
                         .systemPromptTokens,
                     agentName: deps.getNotificationParams?.(sessionId)?.agent,
-                }).fits;
+                    estimator: rawFallbackEstimator,
+                });
+                if (!fit.fits && fit.detail) sessionLog(sessionId, fit.detail);
+                return fit.fits;
             } catch (error) {
                 sessionLog(sessionId, "lkg wrapper replay fit check failed:", error);
                 return false;
+            }
+        },
+        emergencyFailClosed: (sessionId, inputMessages) => {
+            try {
+                const model = resolveReplayModel(sessionId, inputMessages) ?? undefined;
+                const modelKey = model
+                    ? canonicalModelIdentity(resolveModelKey(model.providerID, model.modelID) ?? "")
+                    : null;
+                const limits = { db: deps.db, sessionID: sessionId };
+                return rustEmergencyFailClosed({
+                    sessionId,
+                    usage: loadContextUsage(deps.contextUsageMap, deps.db, sessionId),
+                    geometry: transformGeometryForWire(
+                        model
+                            ? resolveContextWindowGeometry(model.providerID, model.modelID, limits)
+                            : undefined,
+                    ),
+                    trustedContextLimit: model
+                        ? resolveTrustedContextLimit(model.providerID, model.modelID, limits)
+                        : undefined,
+                    overflowState: getOverflowState(deps.db, sessionId, modelKey),
+                    modelKey,
+                }).emergencyFailClosed;
+            } catch (error) {
+                // Unknown pressure must not admit cached bytes.
+                sessionLog(sessionId, "lkg wrapper replay emergency check failed:", error);
+                return true;
             }
         },
         stripPersistedReasoning: (sessionId, messages, inputMessages) =>
@@ -2305,33 +2362,14 @@ export function createRustModeTransform(
             preflightError ??= error;
         }
         const transformGeometry = transformGeometryForWire(resolvedWindowGeometry);
-        const hasTrustedEmergencyWall = transformGeometry
-            ? transformGeometry.usable_hard > 0
-            : resolvedContextLimit !== undefined && resolvedContextLimit > 0;
-        const hardWallPercentage = hardWallUsagePercentage(passUsageSnapshot, transformGeometry);
-        const providerOverflowProven = isProviderOverflowFailClosedProven(sessionId);
-        emergencyFailClosed =
-            providerOverflowProven ||
-            (hardWallPercentage >= RUST_EMERGENCY_WALL_PCT && hasTrustedEmergencyWall);
-        if (overflowState) {
-            const detectedLimitMatchesModel =
-                overflowState.detectedContextLimitModelKey === null ||
-                canonicalModelIdentity(overflowState.detectedContextLimitModelKey) ===
-                    canonicalModelIdentity(modelKey ?? "");
-            const hasProviderProof =
-                (overflowState.detectedContextLimit > 0 && detectedLimitMatchesModel) ||
-                // An unknown persisted arm alone is not proof. A second provider rejection
-                // while that arm is durable records the process-local reconfirmation.
-                isProviderOverflowReconfirmed(sessionId);
-            const persistedProviderEmergency =
-                overflowState.needsEmergencyRecovery &&
-                overflowState.emergencyRecoveryOrigin === "provider_overflow" &&
-                hasProviderProof;
-            emergencyFailClosed ||= persistedProviderEmergency;
-            providerProvenEmergency =
-                hardWallPercentage >= RUST_EMERGENCY_WALL_PCT &&
-                (providerOverflowProven || persistedProviderEmergency);
-        }
+        ({ emergencyFailClosed, providerProvenEmergency } = rustEmergencyFailClosed({
+            sessionId,
+            usage: passUsageSnapshot,
+            geometry: transformGeometry,
+            trustedContextLimit: resolvedContextLimit,
+            overflowState,
+            modelKey,
+        }));
         const serveRawFallback = (cause?: unknown): void => {
             servedFrom = "refused";
             if (!deps.compactionOff && isTransientSqliteError(cause)) {
@@ -2400,41 +2438,21 @@ export function createRustModeTransform(
             state.lkgFrozenHealthyPasses = 0;
             state.lkgFrozenAtInputCount = null;
         };
-        /**
-         * Where `candidate` stands against `limit`. Over when either the four-bytes-per-
-         * token proxy or a trusted token estimate exceeds the limit; under only when the
-         * proxy is under and a trusted estimate is at or under it; unproven when the
-         * estimate is untrusted or unavailable and the proxy does not prove it over.
-         */
-        const measureAgainstLimit = (candidate: readonly unknown[], limit: number): FrozenFit => {
-            const proxy = rawFallbackSerializedBytes(
-                candidate as MessageLike[],
-                limit * RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
-            );
-            if (proxy === null) return "unproven";
-            if (
-                proxy.aborted ||
-                Math.ceil(proxy.bytes / RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN) > limit
-            ) {
-                return "over";
-            }
-            let estimate: ReturnType<typeof estimateFinalWireInputTokens>;
-            try {
-                estimate = rawFallbackEstimator({
-                    messages: candidate as MessageLike[],
-                    systemPromptTokens: sessionMeta.systemPromptTokens,
-                    providerID: model?.providerID,
-                    modelID: model?.modelID,
-                    agentName: deps.getNotificationParams?.(sessionId)?.agent,
-                });
-            } catch {
-                return "unproven";
-            }
-            if (!estimate.trusted || !Number.isFinite(estimate.tokens) || estimate.tokens <= 0) {
-                return "unproven";
-            }
-            return estimate.tokens > limit ? "over" : "under";
-        };
+        // The measurement every last-known-good replay is admitted with (see
+        // `measureLkgReplay`), here with this pass's model and estimator.
+        const measureAgainstLimit = (candidate: readonly unknown[], limit: number): FrozenFit =>
+            measureLkgReplay({
+                messages: candidate as MessageLike[],
+                limit,
+                estimate: () =>
+                    rawFallbackEstimator({
+                        messages: candidate as MessageLike[],
+                        systemPromptTokens: sessionMeta.systemPromptTokens,
+                        providerID: model?.providerID,
+                        modelID: model?.modelID,
+                        agentName: deps.getNotificationParams?.(sessionId)?.agent,
+                    }),
+            }).fit;
         /**
          * Admission for a healthy pass that would serve the frozen replay `candidate`
          * instead of `moduleOutput`. Returns a release reason when the frozen bytes no
@@ -2473,13 +2491,19 @@ export function createRustModeTransform(
                     sessionLog(sessionId, "frozen_emergency_limit_unknown");
                 }
             }
-            const limit =
-                transformGeometry?.usable_hard ??
-                resolvedContextLimit ??
-                (overflowState && overflowState.detectedContextLimit > 0
-                    ? overflowState.detectedContextLimit
-                    : undefined);
-            if (limit === undefined || limit <= 0) {
+            // The same limit the failure and wrapper replays are admitted against.
+            let limit: number | undefined;
+            try {
+                limit = lkgReplayLimit({
+                    db: deps.db,
+                    sessionId,
+                    model,
+                    modelKey: resolveLkgModelKeys(messages).modelKey,
+                });
+            } catch {
+                limit = undefined;
+            }
+            if (limit === undefined) {
                 sessionLog(sessionId, "frozen_fit_unproven limit=unknown");
                 return null;
             }
@@ -4377,13 +4401,11 @@ export function createRustModeTransform(
                 sessions,
             };
         },
+        // What the outer messages-transform wrapper of this adapter's own instance
+        // uses to replay and freeze. Holding it here also keeps the replay registry's
+        // weak reference alive exactly as long as the adapter is.
+        replayParticipant,
     };
-    // The replay registry holds participants weakly. Pin this adapter's participant
-    // to the adapter object, so it lives exactly as long as the adapter does.
-    Object.defineProperty(adapter, "replayParticipant", {
-        value: replayParticipant,
-        enumerable: false,
-    });
     return adapter;
 }
 
