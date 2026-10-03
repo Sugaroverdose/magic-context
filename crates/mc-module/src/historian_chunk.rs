@@ -1739,12 +1739,15 @@ fn system_reminder_regex() -> &'static Regex {
 
 fn commit_hash_extract_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)`?\b([0-9a-f]{7,12})\b`?").unwrap())
+    // ASCII word boundaries and ASCII case folding, as in the TypeScript twin
+    // (shared/commit-detection.ts): JavaScript's `\b` and `/i` without the `u` flag.
+    RE.get_or_init(|| Regex::new(r"(?i-u)`?\b([0-9a-f]{7,12})\b`?").unwrap())
 }
 
 fn commit_verb_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\b(?:commit(?:ted|ting|s)?|cherry-?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))\b").unwrap())
+    // ASCII boundaries and case folding, as in the TypeScript twin.
+    RE.get_or_init(|| Regex::new(r"(?i-u)\b(?:commit(?:ted|ting|s)?|cherry-?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))\b").unwrap())
 }
 
 fn empty_parens_regex() -> &'static Regex {
@@ -1900,6 +1903,19 @@ mod tests {
     ) -> HistorianBuiltChunk {
         let projection = project_messages(messages).unwrap();
         build_historian_chunk(messages, &projection.blocks, offset, budget, eligible_end)
+    }
+
+    /// Commit detection uses ASCII word boundaries and ASCII case folding, as JavaScript's
+    /// non-Unicode `\b` and `/i` do in the TypeScript twin.
+    #[test]
+    fn commit_detection_uses_ascii_boundaries_like_typescript() {
+        assert_eq!(
+            extract_commit_hashes("committed \u{e9}1a2b3c4d"),
+            vec!["1a2b3c4d".to_string()]
+        );
+        assert!(!commit_verb_regex().is_match("reba\u{17f}ed 1a2b3c4d"));
+        assert!(!commit_verb_regex().is_match("cherry-pic\u{212a} 1a2b3c4d"));
+        assert!(commit_verb_regex().is_match("Rebased 1a2b3c4d"));
     }
 
     #[test]

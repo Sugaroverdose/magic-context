@@ -12467,7 +12467,8 @@ fn is_dropped_placeholder_text(text: &str) -> bool {
     !trimmed.is_empty()
         && MARKER_ONLY
             .get_or_init(|| {
-                regex::Regex::new(r"^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\])\s*)+$")
+                // ASCII digits, as JavaScript's `\d`: `§٣§` is not a tag.
+                regex::Regex::new(r"^(?:(?:§[0-9]+§|\[dropped(?: §[0-9]+§)?\]|\[cleared\])\s*)+$")
                     .unwrap()
             })
             .is_match(trimmed)
