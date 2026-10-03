@@ -46,7 +46,7 @@ function runCheck(fixture: string, options: { fix?: boolean; devPath?: string } 
     const changed = checkPluginDuplicates(
         config,
         "opencode.jsonc",
-        { fix: options.fix },
+        { fix: options.fix, configDir: dir },
         {
             warn: (m) => warns.push(m),
             pass: (m) => passes.push(m),

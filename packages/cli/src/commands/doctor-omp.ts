@@ -1,8 +1,7 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join, resolve } from "node:path";
-import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
     formatDreamerTickFailure,
     getDreamerTickFailure,
@@ -82,6 +81,8 @@ interface DoctorDeps {
 export interface RunOmpDoctorOptions {
     force?: boolean;
     issue?: boolean;
+    /** With `issue`, write the report here without prompting (relative to `cwd`). */
+    report?: string;
     cwd?: string;
     prompts?: PromptIO;
     deps?: Partial<DoctorDeps>;
@@ -345,10 +346,11 @@ async function runHealthChecks(options: {
 
 function writeDefaultConfig(path: string): void {
     mkdirSync(dirname(path), { recursive: true });
+    // Only the editor schema reference: writing every schema default explicitly
+    // would pin those values, so later default changes would never take effect.
     const config = {
         $schema:
             "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
-        ...MagicContextConfigSchema.parse({}),
     };
     writeFileAtomic(path, `${stringifyJsonc(config, null, 2)}\n`);
 }
@@ -403,6 +405,20 @@ function timestamp(date: Date): string {
         .replace(/\.\d{3}Z$/, "Z");
 }
 
+function ompIssueBody(description: string, report: HealthReport): string {
+    return [
+        "## Description",
+        sanitizeDiagnosticText(description),
+        "",
+        "## OMP diagnostics",
+        `- Magic Context CLI: ${selfVersion()}`,
+        ...report.results.map(
+            (result) =>
+                `- ${result.status.toUpperCase()}: ${sanitizeDiagnosticText(result.message)}`,
+        ),
+    ].join("\n");
+}
+
 function runGhCommandWithDeps(deps: DoctorDeps, args: string[]): GhCommandResult {
     if (args[0] === "issue") {
         const result = deps.spawnSync("gh", args, {
@@ -438,7 +454,22 @@ async function runIssueFlow(options: {
     cwd: string;
     prompts: PromptIO;
     deps: DoctorDeps;
+    reportPath?: string;
 }): Promise<number> {
+    if (options.reportPath) {
+        // Scripted runs (CI, bug templates) need a report without prompts.
+        const report = await runHealthChecks({ ...options, quiet: true });
+        const path = isAbsolute(options.reportPath)
+            ? options.reportPath
+            : join(options.cwd, options.reportPath);
+        writeFileAtomic(
+            path,
+            `${ompIssueBody("Generated non-interactively by `doctor --issue --report`.", report)}\n`,
+        );
+        options.prompts.log.success(`Sanitized report written to ${path}`);
+        return 0;
+    }
+
     const title = await options.prompts.text("Issue title", {
         placeholder: "Short summary of the OMP problem",
         validate: (value) => (value.trim() ? undefined : "Title is required"),
@@ -448,19 +479,8 @@ async function runIssueFlow(options: {
         validate: (value) => (value.trim() ? undefined : "Description is required"),
     });
     const report = await runHealthChecks({ ...options, quiet: true });
-    const body = [
-        "## Description",
-        sanitizeDiagnosticText(description),
-        "",
-        "## OMP diagnostics",
-        `- Magic Context CLI: ${selfVersion()}`,
-        ...report.results.map(
-            (result) =>
-                `- ${result.status.toUpperCase()}: ${sanitizeDiagnosticText(result.message)}`,
-        ),
-    ].join("\n");
     const path = join(options.cwd, `magic-context-omp-issue-${timestamp(options.deps.now())}.md`);
-    writeFileAtomic(path, `${body}\n`);
+    writeFileAtomic(path, `${ompIssueBody(description, report)}\n`);
     options.prompts.log.success(`Sanitized report written to ${path}`);
     if (await options.prompts.confirm("Submit this issue on GitHub now?", false)) {
         const result = submitGithubIssue(`[omp] ${title}`, path, (args) =>
@@ -488,7 +508,7 @@ export async function runDoctor(options: RunOmpDoctorOptions = {}): Promise<numb
     const cwd = options.cwd ?? process.cwd();
     const migrationWarnings = migrateConfigLocationsForCli(cwd, prompts.log);
     const migrationRefused = hasUserConfigLocationMigrationRefusal(migrationWarnings);
-    if (options.issue) return runIssueFlow({ cwd, prompts, deps });
+    if (options.issue) return runIssueFlow({ cwd, prompts, deps, reportPath: options.report });
 
     prompts.intro("Magic Context for Oh My Pi (OMP) Doctor");
     const first = await runHealthChecks({ cwd, prompts, deps });

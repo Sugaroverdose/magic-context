@@ -61,13 +61,19 @@ export interface PluginEntryCheckReporter {
 export function checkOpenCodePluginEntry(
     config: Record<string, unknown>,
     configName: string,
-    options: { force?: boolean; registrationKey: OpenCodePluginConfigKey },
+    options: {
+        force?: boolean;
+        registrationKey: OpenCodePluginConfigKey;
+        /** Directory of the config file, which relative checkout paths resolve against. */
+        configDir: string;
+    },
     report: PluginEntryCheckReporter,
 ): boolean {
     const allEntries = readPluginEntries(config);
     const found = allEntries.find(
         ({ entry }) =>
-            matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) || isDevPathPluginEntry(entry),
+            matchesPluginEntry(entry, OPENCODE_PLUGIN_NAME) ||
+            isDevPathPluginEntry(entry, options.configDir),
     );
 
     if (!found) {
@@ -87,7 +93,7 @@ export function checkOpenCodePluginEntry(
         report.pass(`Plugin registered in ${configName}`);
         return false;
     }
-    if (isDevPathPluginEntry(found.entry)) {
+    if (isDevPathPluginEntry(found.entry, options.configDir)) {
         report.pass(`Plugin registered in ${configName} (dev path: ${specifier})`);
         return false;
     }

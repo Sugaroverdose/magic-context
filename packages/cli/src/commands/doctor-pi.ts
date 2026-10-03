@@ -9,7 +9,6 @@ import {
     stripUnsafeProjectConfigFields,
 } from "@magic-context/core/config/project-security";
 import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
-import { MagicContextConfigSchema } from "@magic-context/core/config/schema/magic-context";
 import { substituteConfigVariables } from "@magic-context/core/config/variable";
 import {
     formatDreamerTickFailure,
@@ -1103,10 +1102,11 @@ async function runHealthChecks(options: {
 
 function writeDefaultMagicContextConfig(path: string): void {
     mkdirSync(dirname(path), { recursive: true });
+    // Only the editor schema reference: writing every schema default explicitly
+    // would pin those values, so later default changes would never take effect.
     const config = {
         $schema:
             "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
-        ...MagicContextConfigSchema.parse({}),
     };
     writeFileAtomic(path, `${stringifyJsonc(config, null, 2)}\n`);
 }

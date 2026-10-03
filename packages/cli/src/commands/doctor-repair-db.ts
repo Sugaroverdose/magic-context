@@ -18,6 +18,7 @@ import {
     getPersistedSchemaVersion,
     initializeDatabase,
     inspectRpcServerDiscovery,
+    LATEST_SUPPORTED_VERSION,
 } from "@magic-context/core/features/magic-context/storage-db";
 import { getMagicContextStorageDir } from "@magic-context/core/shared/data-path";
 import {
@@ -26,8 +27,13 @@ import {
 } from "@magic-context/core/shared/rpc-utils";
 import { Database, type Database as DatabaseType } from "@magic-context/core/shared/sqlite";
 
+import { CLI_SCHEMA_FLOOR_VERSION } from "../lib/database-access";
 import { type PromptIO, promptIO } from "../lib/prompts";
-import { probeHostProcessesUsing } from "./doctor-opencode2-cache";
+import {
+    type CachedPluginFence,
+    listCachedOpenCodePluginFences,
+} from "./doctor-cached-plugin-fence";
+import { OPENCODE_V2_PLUGIN_UPDATE_HINT, probeHostProcessesUsing } from "./doctor-opencode2-cache";
 import { PRUNE_DISCOVERY_COMMAND } from "./doctor-prune-discovery";
 import { canonicalStoragePath, processReferencesStorage } from "./doctor-storage-holders";
 
@@ -55,6 +61,8 @@ interface RepairDbDeps {
     now: () => Date;
     sqliteExecutable: string;
     inspectHolders: (storageDir: string) => DatabaseHolderInspection;
+    /** Cached Magic Context plugin copies and the schema each one accepts. */
+    listPluginFences: () => CachedPluginFence[];
 }
 
 export interface RunRepairDbOptions {
@@ -167,6 +175,7 @@ const DEFAULT_DEPS: RepairDbDeps = {
     now: () => new Date(),
     sqliteExecutable: defaultSqliteExecutable(),
     inspectHolders: defaultInspectHolders,
+    listPluginFences: () => listCachedOpenCodePluginFences(),
 };
 
 function timestamp(date: Date): string {
@@ -353,7 +362,46 @@ function runRecoverShell(
     }
 }
 
-function migrateAndCheckRecoveredDatabase(path: string): SalvageResult {
+/**
+ * Warning printed before repair-db migrates a salvaged database that is older
+ * than this CLI. Salvage must finish (the database is otherwise unusable), so
+ * it still migrates to this CLI's schema, but every other CLI write refuses to
+ * outrun the plugin: a plugin built for an older schema refuses the repaired
+ * database until it is updated. Empty when the database is already current.
+ */
+export function schemaMigrationWarning(
+    schemaVersionBefore: number,
+    fences: CachedPluginFence[],
+): string[] {
+    if (schemaVersionBefore >= CLI_SCHEMA_FLOOR_VERSION) return [];
+    const lines = [
+        `Schema migration ahead: the salvaged database is at schema v${schemaVersionBefore}; this CLI migrates it from v${schemaVersionBefore} to v${LATEST_SUPPORTED_VERSION}. An older Magic Context plugin refuses a database newer than it supports, so update the plugin before restarting OpenCode, Pi or OMP.`,
+    ];
+    for (const fence of fences) {
+        if (fence.supportedVersion === null || fence.supportedVersion >= LATEST_SUPPORTED_VERSION) {
+            continue;
+        }
+        const label =
+            fence.host === "opencode1"
+                ? "OpenCode 1"
+                : fence.spec && fence.spec !== "latest"
+                  ? `OpenCode 2 (@${fence.spec})`
+                  : "OpenCode 2";
+        lines.push(
+            `${label} has Magic Context ${fence.version ?? "(unknown version)"} cached, which supports only schema v${fence.supportedVersion}; it will refuse the repaired database until updated (${fence.directory}).`,
+            fence.host === "opencode1"
+                ? "  To update: quit OpenCode 1, then run `npx @cortexkit/magic-context@latest doctor --force` (or delete that directory); OpenCode 1 installs the current release on its next start."
+                : `  To update, ${OPENCODE_V2_PLUGIN_UPDATE_HINT}.`,
+        );
+    }
+    return lines;
+}
+
+export function migrateAndCheckRecoveredDatabase(
+    path: string,
+    /** Called with the salvaged schema version before any migration runs. */
+    beforeMigrate?: (schemaVersionBefore: number) => void,
+): SalvageResult {
     let db: DatabaseType | null = null;
     try {
         db = new Database(path);
@@ -370,6 +418,7 @@ function migrateAndCheckRecoveredDatabase(path: string): SalvageResult {
         }
 
         const schemaVersionBefore = getPersistedSchemaVersion(db);
+        beforeMigrate?.(schemaVersionBefore);
         initializeDatabase(db);
         runMigrations(db);
         ensureContextStoreUuid(db);
@@ -608,7 +657,16 @@ export async function runRepairDb(options: RunRepairDbOptions = {}): Promise<Rep
     }
     let salvageResult: SalvageResult;
     if (salvage.ok) {
-        salvageResult = migrateAndCheckRecoveredDatabase(recoveredPath);
+        salvageResult = migrateAndCheckRecoveredDatabase(recoveredPath, (before) => {
+            if (before >= CLI_SCHEMA_FLOOR_VERSION) return;
+            let fences: CachedPluginFence[] = [];
+            try {
+                fences = deps.listPluginFences();
+            } catch {
+                // An unreadable plugin cache only loses the per-copy detail.
+            }
+            for (const line of schemaMigrationWarning(before, fences)) prompts.log.warn(line);
+        });
     } else {
         salvageResult = salvage;
     }

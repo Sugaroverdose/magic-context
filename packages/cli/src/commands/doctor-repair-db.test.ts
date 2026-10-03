@@ -29,7 +29,13 @@ import { writeTestExecutable } from "@magic-context/core/shared/test-fake-execut
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 
 import type { PromptIO, PromptSpinner, SelectOption } from "../lib/prompts";
-import { defaultSqliteExecutable, REPAIR_DB_EXIT, runRepairDb } from "./doctor-repair-db";
+import {
+    defaultSqliteExecutable,
+    migrateAndCheckRecoveredDatabase,
+    REPAIR_DB_EXIT,
+    runRepairDb,
+    schemaMigrationWarning,
+} from "./doctor-repair-db";
 
 setDefaultTimeout(60_000);
 
@@ -510,5 +516,58 @@ describe("doctor repair-db", () => {
         expect(output).toContain(`Refusing to repair the live database: ${dbPath}`);
         expect(output).toContain(`OpenCode server (PID ${process.pid})`);
         expect(output).toContain("Backup: not created");
+    });
+});
+
+describe("doctor repair-db schema migration warning", () => {
+    const behindCopy = {
+        host: "opencode1" as const,
+        directory: "/cache/opencode/packages/@cortexkit/opencode-magic-context@latest",
+        version: "0.40.0",
+        supportedVersion: LATEST_SUPPORTED_VERSION - 1,
+    };
+    const currentCopy = {
+        host: "opencode2" as const,
+        directory: "/cache/opencode/npm/@cortexkit/opencode-magic-context@latest",
+        spec: "latest",
+        version: "0.44.4",
+        supportedVersion: LATEST_SUPPORTED_VERSION,
+    };
+
+    it("warns when the salvaged database is below this CLI's schema floor", () => {
+        const lines = schemaMigrationWarning(LATEST_SUPPORTED_VERSION - 1, [
+            behindCopy,
+            currentCopy,
+        ]);
+        const text = lines.join("\n");
+        expect(text).toContain(`v${LATEST_SUPPORTED_VERSION - 1} to v${LATEST_SUPPORTED_VERSION}`);
+        // Names the cached copy that will refuse the database, with how to update it.
+        expect(text).toContain("OpenCode 1 has Magic Context 0.40.0 cached");
+        expect(text).toContain(behindCopy.directory);
+        expect(text).toContain("doctor --force");
+        // A copy that already supports the new schema is not flagged.
+        expect(text).not.toContain("0.44.4");
+    });
+
+    it("still warns, without naming a plugin, when no cached plugin is found", () => {
+        const text = schemaMigrationWarning(LATEST_SUPPORTED_VERSION - 3, []).join("\n");
+        expect(text).toContain(`v${LATEST_SUPPORTED_VERSION - 3} to v${LATEST_SUPPORTED_VERSION}`);
+        expect(text).toContain("older Magic Context plugin");
+    });
+
+    it("says nothing when the salvaged database is already current", () => {
+        expect(schemaMigrationWarning(LATEST_SUPPORTED_VERSION, [behindCopy])).toEqual([]);
+    });
+
+    it("reports the salvaged version before migrating it", () => {
+        const storageDir = tempStorage();
+        const dbPath = join(storageDir, "context.db");
+        seedCurrentDatabase(dbPath);
+        const seen: number[] = [];
+
+        const result = migrateAndCheckRecoveredDatabase(dbPath, (before) => seen.push(before));
+
+        expect(result.ok).toBe(true);
+        expect(seen).toEqual([LATEST_SUPPORTED_VERSION]);
     });
 });

@@ -24,6 +24,7 @@ import {
     checkConfiguredVariantCatalog,
     checkUserMemoriesDreamerCompatibility,
     collectNpmReleaseAgeWarnings,
+    compareVersions,
     describeAutoUpdateStall,
     describeOpenCode2SessionAPIRequirement,
     describeOpenCodeDatabaseDoctorCheck,
@@ -532,6 +533,9 @@ function createCachedOpenCodePlugin(
     return pluginCachePath;
 }
 
+/** Probe stand-in for a machine where no OpenCode process is running. */
+const noOpenCodeRunning = () => ({ status: "free" as const });
+
 describe("doctor OpenCode plugin cache", () => {
     it("clears stale @latest cache when cached plugin is older than npm latest", async () => {
         const cacheRoot = makeTempDir("mc-opencode-cache-");
@@ -539,7 +543,10 @@ describe("doctor OpenCode plugin cache", () => {
         process.env.XDG_CACHE_HOME = cacheRoot;
         const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.26.0");
 
-        const result = await clearPluginCache({ latestVersion: "0.29.1" });
+        const result = await clearPluginCache(
+            { latestVersion: "0.29.1" },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "cleared",
@@ -556,7 +563,10 @@ describe("doctor OpenCode plugin cache", () => {
         process.env.XDG_CACHE_HOME = cacheRoot;
         const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.29.1");
 
-        const result = await clearPluginCache({ latestVersion: "0.29.1" });
+        const result = await clearPluginCache(
+            { latestVersion: "0.29.1" },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "up_to_date",
@@ -578,7 +588,10 @@ describe("doctor OpenCode plugin cache", () => {
             OPENCODE_PLUGIN_NAME,
         );
 
-        const result = await clearPluginCache({ latestVersion: "0.29.1" });
+        const result = await clearPluginCache(
+            { latestVersion: "0.29.1" },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "cleared",
@@ -597,7 +610,10 @@ describe("doctor OpenCode plugin cache", () => {
         process.env.XDG_CACHE_HOME = cacheRoot;
         const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.29.1");
 
-        const result = await clearPluginCache({ latestVersion: null });
+        const result = await clearPluginCache(
+            { latestVersion: null },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "check_unavailable",
@@ -615,7 +631,10 @@ describe("doctor OpenCode plugin cache", () => {
         process.env.XDG_CACHE_HOME = cacheRoot;
         const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.29.1");
 
-        const result = await clearPluginCache({ force: true, latestVersion: null });
+        const result = await clearPluginCache(
+            { force: true, latestVersion: null },
+            { probe: noOpenCodeRunning },
+        );
 
         expect(result).toMatchObject({
             action: "cleared",
@@ -644,6 +663,7 @@ describe("doctor OpenCode plugin cache", () => {
         const result = await clearPluginCache(
             { latestVersion: "0.29.1" },
             {
+                probe: noOpenCodeRunning,
                 remove: (path) => {
                     if (path === versionlessCachePath) {
                         throw new Error("EACCES: permission denied");
@@ -664,6 +684,52 @@ describe("doctor OpenCode plugin cache", () => {
         });
         expect(removed).toEqual([latestCachePath]);
         expect(existsSync(latestCachePath)).toBe(false);
+    });
+});
+
+describe("doctor OpenCode 1 plugin cache while OpenCode runs", () => {
+    it("leaves an outdated cache in place while an OpenCode process holds the host database", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.26.0");
+        const hostFiles = ["/host/opencode.db", "/host/opencode.db-wal"];
+        const probed: Array<{ files: string[]; directories: string[] }> = [];
+        const removed: string[] = [];
+
+        const result = await clearPluginCache(
+            { latestVersion: "0.29.1", hostFiles },
+            {
+                probe: (targets) => {
+                    probed.push(targets);
+                    return { status: "in_use", pids: [4242] };
+                },
+                remove: (path) => removed.push(path),
+            },
+        );
+
+        expect(result).toMatchObject({ action: "in_use", pids: [4242], path: pluginCachePath });
+        expect(probed).toEqual([{ files: hostFiles, directories: [pluginCachePath] }]);
+        expect(removed).toEqual([]);
+        expect(existsSync(pluginCachePath)).toBe(true);
+    });
+
+    it("leaves the cache in place when it cannot tell whether OpenCode is running", async () => {
+        const cacheRoot = makeTempDir("mc-opencode-cache-");
+        originalXdgCacheHome = process.env.XDG_CACHE_HOME;
+        process.env.XDG_CACHE_HOME = cacheRoot;
+        const pluginCachePath = createCachedOpenCodePlugin(cacheRoot, "0.26.0");
+
+        const result = await clearPluginCache(
+            { force: true, latestVersion: null, hostFiles: [] },
+            { probe: () => ({ status: "unknown", reason: "could not run lsof (ENOENT)" }) },
+        );
+
+        expect(result).toMatchObject({
+            action: "in_use_unknown",
+            reason: "could not run lsof (ENOENT)",
+        });
+        expect(existsSync(pluginCachePath)).toBe(true);
     });
 });
 
@@ -985,4 +1051,24 @@ it("names the installed OpenCode host and minimum native session API version", (
     expect(describeOpenCode2SessionAPIRequirement("2.0.21")).toBe(
         "OpenCode host 2.0.21; Magic Context requires OpenCode 2.0.22 or newer with session.remove and session.compact.",
     );
+});
+
+describe("doctor CLI version comparison", () => {
+    it("ranks a prerelease below its release and above the previous release", () => {
+        expect(compareVersions("0.45.0-beta.1", "0.45.0")).toBeLessThan(0);
+        expect(compareVersions("0.45.0", "0.45.0-beta.1")).toBeGreaterThan(0);
+        expect(compareVersions("0.45.0-beta.1", "0.45.0-beta.3")).toBeLessThan(0);
+        expect(compareVersions("0.45.0-beta.1", "0.44.4")).toBeGreaterThan(0);
+    });
+
+    it("compares releases by their numeric parts", () => {
+        expect(compareVersions("0.44.4", "0.45.0")).toBeLessThan(0);
+        expect(compareVersions("0.45.0", "0.45.0")).toBe(0);
+        expect(compareVersions("1.0.0", "0.99.99")).toBeGreaterThan(0);
+    });
+
+    it("reports an unparseable version as not comparable instead of equal", () => {
+        expect(compareVersions("0.0.0-dev", "0.45.0")).toBeLessThan(0);
+        expect(compareVersions("not-a-version", "0.45.0")).toBeNull();
+    });
 });

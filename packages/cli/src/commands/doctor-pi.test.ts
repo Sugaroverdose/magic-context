@@ -616,7 +616,16 @@ describe("Pi doctor", () => {
             packages?: string[];
         };
         expect(settings.packages).toContain("npm:@cortexkit/pi-magic-context");
-        expect(existsSync(join(root, ".config", "cortexkit", "magic-context.jsonc"))).toBe(true);
+        // Only $schema is written: explicit copies of every schema default would
+        // pin them, so later default changes would never reach this user.
+        expect(
+            parseJsonc(
+                readFileSync(join(root, ".config", "cortexkit", "magic-context.jsonc"), "utf-8"),
+            ),
+        ).toEqual({
+            $schema:
+                "https://raw.githubusercontent.com/cortexkit/magic-context/master/assets/magic-context.schema.json",
+        });
         const output = prompts.messages.join("\n");
         expect(output).toContain("FAIL npm:@cortexkit/pi-magic-context is missing from packages[]");
         expect(output).toContain("Added npm:@cortexkit/pi-magic-context");

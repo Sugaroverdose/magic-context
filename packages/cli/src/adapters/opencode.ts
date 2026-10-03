@@ -1,6 +1,7 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { dirname, isAbsolute, parse as parsePath, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { removeJsoncArrayEntries } from "@magic-context/core/shared/jsonc-edit";
 import {
     type OpenCodeHostGeneration,
     openCodeHostGenerationFromVersion,
@@ -14,6 +15,7 @@ import {
     removeOpenCodeV2PluginCacheSlot,
 } from "../commands/doctor-opencode2-cache";
 import { writeFileAtomic } from "../lib/atomic-write";
+import { readJsoncTextForEdit } from "../lib/jsonc-config";
 import { detectOpenCode } from "../lib/opencode-detect";
 import { getOpenCodeVersion } from "../lib/opencode-helpers";
 import {
@@ -156,7 +158,9 @@ export class OpenCodeAdapter implements HarnessAdapter {
             // so an entry under either is a live registration.
             const entries = readPluginEntries(cfg);
             const existing = entries.find(({ entry }) => matchesPluginEntry(entry, PLUGIN_NAME));
-            const existingDev = entries.find(({ entry }) => isDevPathPluginEntry(entry));
+            const existingDev = entries.find(({ entry }) =>
+                isDevPathPluginEntry(entry, dirname(target)),
+            );
 
             // Local dev-path entries are recognized so we don't double-add
             // an @latest entry on top, but they are NEVER replaced by setup.
@@ -241,13 +245,18 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     configPath: target,
                 };
             }
+            // Edit the text rather than re-serializing the parsed config, so
+            // comments inside the plugin arrays survive the removal.
+            const document = readJsoncTextForEdit(target);
+            let text = document.text;
             let removed = false;
             for (const key of ["plugin", "plugins"] as const) {
-                const list = cfg[key];
-                if (!Array.isArray(list)) continue;
-                const kept = list.filter((e) => !matchesPluginEntry(e, PLUGIN_NAME));
-                if (kept.length !== list.length) {
-                    cfg[key] = kept;
+                if (!Array.isArray(cfg[key])) continue;
+                const result = removeJsoncArrayEntries(text, [key], (entry) =>
+                    matchesPluginEntry(entry, PLUGIN_NAME),
+                );
+                if (result.removed) {
+                    text = result.text;
                     removed = true;
                 }
             }
@@ -259,7 +268,7 @@ export class OpenCodeAdapter implements HarnessAdapter {
                     configPath: target,
                 };
             }
-            writeFileAtomic(target, `${stringifyJsonc(cfg, null, 4)}\n`);
+            writeFileAtomic(target, document.bom + text);
             return {
                 ok: true,
                 action: "updated",
@@ -426,10 +435,11 @@ export function isLocalPathPluginEntry(entry: unknown): boolean {
 
 /**
  * Match a local plugin entry only when its nearest package.json identifies the
- * OpenCode Magic Context package. A basename substring is not sufficient: paths
+ * OpenCode Magic Context package. `configDir` is the directory of the config
+ * file the entry came from. A basename substring is not sufficient: paths
  * such as `magic-context-theme` must not suppress the real plugin registration.
  */
-export function isDevPathPluginEntry(entry: unknown): boolean {
+export function isDevPathPluginEntry(entry: unknown, configDir: string): boolean {
     const candidate = pluginEntryPackage(entry);
     if (!candidate || !isLocalPathPluginEntry(entry)) return false;
 
@@ -438,7 +448,10 @@ export function isDevPathPluginEntry(entry: unknown): boolean {
         if (candidate.startsWith("file://")) {
             localPath = fileURLToPath(candidate);
         } else {
-            localPath = resolve(candidate);
+            // OpenCode resolves a relative entry against the directory of the
+            // config file that declares it, so the CLI's working directory
+            // must play no part (otherwise setup adds a second registration).
+            localPath = resolve(configDir, candidate);
         }
 
         if (statSync(localPath).isFile()) localPath = dirname(localPath);

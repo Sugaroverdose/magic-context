@@ -2,7 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { loadPluginConfig } from "@magic-context/core/config";
 import { isCompactionEnabled } from "@magic-context/core/config/agent-disable";
 import { loadRawConfigFile } from "@magic-context/core/config/raw-loader";
@@ -67,7 +67,7 @@ import {
     UnsupportedSchemaVersionError,
 } from "../lib/database-access";
 import { formatDatabaseRepairGuidance } from "../lib/database-repair-guidance";
-import { collectDiagnostics } from "../lib/diagnostics-opencode";
+import { collectDiagnostics, type DiagnosticReport } from "../lib/diagnostics-opencode";
 import {
     checkLocalEmbeddingRuntime,
     formatLocalEmbeddingRuntimeDoctorWarning,
@@ -131,6 +131,7 @@ import {
 } from "./doctor-opencode-plugin-entry";
 import {
     checkOpenCodeV2PluginCache,
+    compareSemverPrecedence,
     configuredOpenCodeV2DistTag,
     openCodeHostDatabaseFiles,
     reportOpenCodeV2PluginCache,
@@ -569,18 +570,13 @@ export function collectNpmReleaseAgeWarnings(): string[] {
 }
 
 /** Compare semver-like strings. Returns -1 if a<b, 0 if equal, 1 if a>b. */
-function compareVersions(a: string, b: string): number {
-    const pa = a.split(/[.-]/).map((s) => Number.parseInt(s, 10));
-    const pb = b.split(/[.-]/).map((s) => Number.parseInt(s, 10));
-    const len = Math.max(pa.length, pb.length);
-    for (let i = 0; i < len; i++) {
-        const x = pa[i] ?? 0;
-        const y = pb[i] ?? 0;
-        if (Number.isNaN(x) || Number.isNaN(y)) return 0;
-        if (x < y) return -1;
-        if (x > y) return 1;
-    }
-    return 0;
+/**
+ * Semver precedence of the CLI version against npm's: a prerelease ranks
+ * below its release, so a beta CLI is reported as behind the matching
+ * release. Null when either version is not semver.
+ */
+export function compareVersions(a: string, b: string): number | null {
+    return compareSemverPrecedence(a, b);
 }
 
 // ── Issue flow ──────────────────────────────────────────────────────
@@ -605,7 +601,33 @@ function openBrowser(url: string): void {
     }
 }
 
-async function runIssueFlow(): Promise<number> {
+export async function runIssueFlow(
+    options: { reportPath?: string } = {},
+    deps: { collectDiagnostics: () => Promise<DiagnosticReport> } = { collectDiagnostics },
+): Promise<number> {
+    if (options.reportPath) {
+        // Scripted runs (CI, bug templates) need a report without prompts.
+        try {
+            const report = await deps.collectDiagnostics();
+            const bundled = await bundleIssueReport(
+                report,
+                "Generated non-interactively by `doctor --issue --report`.",
+                "Magic Context diagnostic report",
+                null,
+                { outputPath: resolve(process.cwd(), options.reportPath) },
+            );
+            log.info(
+                bundled.fullPath
+                    ? `Report written to ${bundled.path}; full bundle at ${bundled.fullPath}`
+                    : `Report written to ${bundled.path}`,
+            );
+            return 0;
+        } catch (error) {
+            log.error(error instanceof Error ? error.message : String(error));
+            return 1;
+        }
+    }
+
     intro("Magic Context Issue Report");
 
     const title = await text("Issue title", {
@@ -621,7 +643,7 @@ async function runIssueFlow(): Promise<number> {
     s.start("Collecting diagnostics");
 
     try {
-        const report = await collectDiagnostics();
+        const report = await deps.collectDiagnostics();
         s.stop("Diagnostics collected");
 
         // Ask the user which session this issue relates to. Only show the
@@ -985,12 +1007,18 @@ export function describeOpenCode2SessionAPIRequirement(hostVersion: string): str
 }
 
 export async function runDoctor(
-    options: { force?: boolean; fix?: boolean; issue?: boolean } & V22BackfillCommandArgs = {},
+    options: {
+        force?: boolean;
+        fix?: boolean;
+        issue?: boolean;
+        /** With `issue`, write the report here without prompting. */
+        report?: string;
+    } & V22BackfillCommandArgs = {},
 ): Promise<number> {
     migrateConfigLocationsForCli(process.cwd(), log);
 
     if (options.issue) {
-        return runIssueFlow();
+        return runIssueFlow({ reportPath: options.report });
     }
 
     let v22Db: ReturnType<typeof openExistingContextDatabase> = null;
@@ -1264,9 +1292,12 @@ export async function runDoctor(
         fetchNpmLatest(CLI_PACKAGE_NAME),
         fetchNpmLatest(PLUGIN_NAME),
     ]);
+    const cliComparison = npmLatest ? compareVersions(selfVersion, npmLatest) : null;
     if (!npmLatest) {
         log.info(`Magic Context CLI v${selfVersion}; npm latest check unavailable`);
-    } else if (compareVersions(selfVersion, npmLatest) < 0) {
+    } else if (cliComparison === null) {
+        log.info(`Magic Context CLI v${selfVersion}; cannot compare with npm latest v${npmLatest}`);
+    } else if (cliComparison < 0) {
         warn(`Magic Context CLI v${selfVersion} is older than npm latest v${npmLatest}`);
     } else {
         pass(`Magic Context CLI v${selfVersion} is current (npm latest v${npmLatest})`);
@@ -1569,17 +1600,24 @@ export async function runDoctor(
             const config = parse(raw) as Record<string, unknown>;
             const configName =
                 paths.opencodeConfigFormat === "jsonc" ? "opencode.jsonc" : "opencode.json";
+            // Relative checkout paths resolve against the config file's directory.
+            const configDir = dirname(paths.opencodeConfig);
             // Duplicates first, so the single-entry checks below see the
             // deduplicated config when --fix removed the extra entries.
             if (
-                checkPluginDuplicates(config, configName, options, {
-                    warn,
-                    pass: (message) => {
-                        pass(message);
-                        fixed++;
+                checkPluginDuplicates(
+                    config,
+                    configName,
+                    { fix: options.fix, configDir },
+                    {
+                        warn,
+                        pass: (message) => {
+                            pass(message);
+                            fixed++;
+                        },
+                        info: (message) => log.info(message),
                     },
-                    info: (message) => log.info(message),
-                })
+                )
             ) {
                 writeFileAtomic(paths.opencodeConfig, `${stringify(config, null, 2)}\n`);
             }
@@ -1592,7 +1630,7 @@ export async function runDoctor(
                     ({ entry }) =>
                         isLocalPathPluginEntry(entry) &&
                         String(entry).includes("magic-context") &&
-                        !isDevPathPluginEntry(entry),
+                        !isDevPathPluginEntry(entry, configDir),
                 )
             ) {
                 warn(
@@ -1605,7 +1643,11 @@ export async function runDoctor(
                 checkOpenCodePluginEntry(
                     config,
                     configName,
-                    { force: options.force, registrationKey: pluginConfigKeyFor(hostGeneration) },
+                    {
+                        force: options.force,
+                        registrationKey: pluginConfigKeyFor(hostGeneration),
+                        configDir,
+                    },
                     {
                         pass,
                         warn,
@@ -1695,19 +1737,21 @@ export async function runDoctor(
             try {
                 const tuiRaw = readFileSync(paths.tuiConfig, "utf-8");
                 const tuiConfig = parse(tuiRaw) as Record<string, unknown>;
+                const tuiConfigDir = dirname(paths.tuiConfig);
                 const tuiRawPlugins: unknown[] = Array.isArray(tuiConfig?.plugin)
                     ? tuiConfig.plugin
                     : [];
                 const tuiIdx = tuiRawPlugins.findIndex(
                     (entry) =>
-                        matchesPluginEntry(entry, PLUGIN_NAME) || isDevPathPluginEntry(entry),
+                        matchesPluginEntry(entry, PLUGIN_NAME) ||
+                        isDevPathPluginEntry(entry, tuiConfigDir),
                 );
                 if (
                     tuiRawPlugins.some(
                         (entry) =>
                             isLocalPathPluginEntry(entry) &&
                             String(entry).includes("magic-context") &&
-                            !isDevPathPluginEntry(entry),
+                            !isDevPathPluginEntry(entry, tuiConfigDir),
                     )
                 ) {
                     warn(
@@ -1717,7 +1761,7 @@ export async function runDoctor(
                 if (tuiIdx >= 0) {
                     const tuiEntry = tuiRawPlugins[tuiIdx];
                     const tuiEntryStr = pluginEntryPackage(tuiEntry) ?? "";
-                    if (isDevPathPluginEntry(tuiEntry)) {
+                    if (isDevPathPluginEntry(tuiEntry, tuiConfigDir)) {
                         pass(`TUI sidebar plugin configured (dev path: ${tuiEntryStr})`);
                     } else {
                         const tuiPinned = isPinnedOpenCodePluginSpecifier(tuiEntryStr);
@@ -1910,6 +1954,7 @@ export async function runDoctor(
     const cacheResult = await clearPluginCache({
         force: options.force,
         latestVersion: pluginNpmLatest,
+        hostFiles: openCodeHostDatabaseFiles([openCodeDbResolution.path]),
     });
     if (cacheResult.action === "cleared") {
         const versionInfo = cacheResult.cached
@@ -1927,6 +1972,18 @@ export async function runDoctor(
         warn(
             `Plugin cache version check unavailable; preserving cached plugin${cacheResult.cached ? ` (cached: ${cacheResult.cached})` : ""}. Use doctor --force to reinstall it.`,
         );
+    } else if (cacheResult.action === "in_use" || cacheResult.action === "in_use_unknown") {
+        const versionInfo = cacheResult.cached
+            ? ` (cached: ${cacheResult.cached}${cacheResult.latest ? `, latest: ${cacheResult.latest}` : ""})`
+            : "";
+        const why =
+            cacheResult.action === "in_use"
+                ? `OpenCode is running (pid ${cacheResult.pids?.join(", ")})`
+                : (cacheResult.reason ?? "could not tell whether OpenCode is running");
+        warn(`Plugin cache${versionInfo} was not cleared: ${why}`);
+        log.info("  Quit OpenCode and rerun doctor to clear it.");
+        for (const path of cacheResult.paths ?? [cacheResult.path]) log.info(`  ${path}`);
+        issues++;
     } else if (cacheResult.action === "error") {
         warn(`Could not clear plugin cache: ${cacheResult.error}`);
         if (cacheResult.clearedPaths && cacheResult.clearedPaths.length > 0) {

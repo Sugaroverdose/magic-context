@@ -57,7 +57,12 @@ export async function runSetup(argv: string[]): Promise<number> {
             continue;
         }
         if (!dryRun) {
-            ensureDocsProposalGitignore(process.cwd());
+            const ignore = ensureDocsProposalGitignore(process.cwd());
+            if (ignore.status === "added") {
+                log.info(`Added .cortexkit/magic-context/ to ${ignore.path}`);
+            } else if (ignore.status === "failed") {
+                log.warn(`Could not update ${ignore.path}: ${ignore.error}`);
+            }
             printNextSteps(adapter);
         }
     }

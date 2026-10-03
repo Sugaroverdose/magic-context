@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
     initializeDatabase,
     runMigrations,
@@ -9,6 +11,7 @@ import {
 import { SubcModuleTransport } from "@magic-context/core/hooks/magic-context/module-transport";
 import { Database } from "@magic-context/core/shared/sqlite";
 import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
+import { promptIO } from "../lib/prompts";
 
 import {
     applyMigrateSession,
@@ -666,5 +669,235 @@ describe("applyMigrateSession — memory actions", () => {
             .prepare("SELECT project_path FROM session_projects WHERE session_id = ?")
             .get(SID) as { project_path: string };
         expect(ownership.project_path).toBe(FROM);
+    });
+});
+
+describe("runMigrateSessionCli under Node", () => {
+    // npx runs the published bundle on Node, where node:sqlite has no
+    // serialize(): the pre-write snapshots go through the backup API instead.
+    // Bun-only tests never reach that path, so this runs the real command in a
+    // Node bundle against throwaway databases.
+    it("backs up both databases and re-homes the session with node:sqlite", () => {
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-migrate-session-node-"));
+        try {
+            const source = join(root, "source");
+            const target = join(root, "target");
+            const dataDir = join(root, "data");
+            const storeDir = join(dataDir, "cortexkit", "magic-context");
+            const opencodeDbPath = join(root, "opencode.db");
+            const contextDbPath = join(storeDir, "context.db");
+            for (const dir of [source, target, join(root, "config"), storeDir]) {
+                mkdirSync(dir, { recursive: true });
+            }
+
+            const opencodeDb = new Database(opencodeDbPath);
+            opencodeDb.exec(`
+                PRAGMA journal_mode=WAL;
+                CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    directory TEXT,
+                    path TEXT,
+                    workspace_id TEXT,
+                    title TEXT
+                );
+                CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL);
+                INSERT INTO project (id, worktree) VALUES ('global', '/');
+            `);
+            opencodeDb
+                .prepare("INSERT INTO session (id, project_id, directory) VALUES (?, 'global', ?)")
+                .run(SID, source);
+            opencodeDb.close();
+            const contextDb = new Database(contextDbPath);
+            initializeDatabase(contextDb);
+            runMigrations(contextDb);
+            contextDb.close();
+
+            const entry = join(root, "entry.ts");
+            const bundle = join(root, "entry.mjs");
+            const command = fileURLToPath(new URL("./migrate-session.ts", import.meta.url));
+            const prompts = fileURLToPath(new URL("../lib/prompts.ts", import.meta.url));
+            const transport = fileURLToPath(
+                new URL(
+                    "../../../plugin/src/hooks/magic-context/module-transport.ts",
+                    import.meta.url,
+                ),
+            );
+            writeFileSync(
+                entry,
+                `
+                import { SubcModuleTransport } from ${JSON.stringify(transport)};
+                import { promptIO } from ${JSON.stringify(prompts)};
+                import { runMigrateSessionCli } from ${JSON.stringify(command)};
+                if (typeof globalThis.Bun !== "undefined") throw new Error("Node test must not expose Bun");
+                // No subc module runs here; report the session as unknown to it.
+                SubcModuleTransport.prototype.call = async () => ({ row_version: null });
+                promptIO.confirm = async () => true;
+                const code = await runMigrateSessionCli([
+                    "--session", ${JSON.stringify(SID)},
+                    "--to", ${JSON.stringify(target)},
+                    "--memories", "leave",
+                    "--yes",
+                ]);
+                console.log("RESULT " + JSON.stringify({ code }));
+            `,
+            );
+            const build = spawnSync(
+                process.execPath,
+                [
+                    "build",
+                    entry,
+                    "--target",
+                    "node",
+                    "--format",
+                    "esm",
+                    "--external",
+                    "node:sqlite",
+                    "--outfile",
+                    bundle,
+                ],
+                { encoding: "utf8", windowsHide: true },
+            );
+            expect(build.status, build.stderr).toBe(0);
+            const run = spawnSync("node", [bundle], {
+                encoding: "utf8",
+                windowsHide: true,
+                timeout: 120_000,
+                env: {
+                    ...process.env,
+                    XDG_CONFIG_HOME: join(root, "config"),
+                    XDG_DATA_HOME: dataDir,
+                    MAGIC_CONTEXT_TEST_DATA_DIR: dataDir,
+                    OPENCODE_DB: opencodeDbPath,
+                },
+            });
+            const resultLine = run.stdout.split("\n").find((line) => line.startsWith("RESULT "));
+            expect(resultLine, `${run.stdout}\n${run.stderr}`).toBeDefined();
+            expect(
+                JSON.parse(resultLine?.slice("RESULT ".length) ?? "{}"),
+                `${run.stdout}\n${run.stderr}`,
+            ).toEqual({ code: 0 });
+
+            const backupOf = (dir: string, name: string): string => {
+                const found = readdirSync(dir).filter((file) => file.startsWith(`${name}.bak-`));
+                expect(found).toHaveLength(1);
+                return join(dir, found[0] ?? "");
+            };
+            // A WAL-mode snapshot needs a writable connection to create its -shm file.
+            const opencodeBackup = new Database(backupOf(root, "opencode.db"));
+            try {
+                // The snapshot predates the move, so it still holds the old directory.
+                expect(
+                    opencodeBackup.prepare("SELECT directory FROM session WHERE id = ?").get(SID),
+                ).toEqual({ directory: source });
+            } finally {
+                opencodeBackup.close();
+            }
+            const contextBackup = new Database(backupOf(storeDir, "context.db"));
+            try {
+                expect(
+                    contextBackup
+                        .prepare(
+                            "SELECT COUNT(*) AS count FROM sqlite_master WHERE name = 'memories'",
+                        )
+                        .get(),
+                ).toEqual({ count: 1 });
+            } finally {
+                contextBackup.close();
+            }
+            const moved = new Database(opencodeDbPath, { readonly: true });
+            try {
+                expect(
+                    moved.prepare("SELECT directory FROM session WHERE id = ?").get(SID),
+                ).toEqual({ directory: realpathSync(target) });
+            } finally {
+                moved.close();
+            }
+        } finally {
+            rmSync(root, { recursive: true, force: true });
+        }
+    }, 180_000);
+});
+
+describe("runMigrateSessionCli --yes", () => {
+    it("skips the 'OpenCode stopped?' confirmation and re-homes the session", async () => {
+        const root = createTestTempDirFromPath(join(tmpdir(), "mc-migrate-session-yes-"));
+        const source = join(root, "source");
+        const target = join(root, "target");
+        const dataDir = join(root, "data");
+        const storeDir = join(dataDir, "cortexkit", "magic-context");
+        const opencodeDbPath = join(root, "opencode.db");
+        const saved = {
+            XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME,
+            XDG_DATA_HOME: process.env.XDG_DATA_HOME,
+            MAGIC_CONTEXT_TEST_DATA_DIR: process.env.MAGIC_CONTEXT_TEST_DATA_DIR,
+            OPENCODE_DB: process.env.OPENCODE_DB,
+        };
+        const callSpy = spyOn(SubcModuleTransport.prototype, "call").mockResolvedValue({
+            row_version: null,
+        });
+        const confirmSpy = spyOn(promptIO, "confirm").mockImplementation(async (message) => {
+            throw new Error(`--yes must not prompt: ${message}`);
+        });
+        try {
+            for (const dir of [source, target, join(root, "config"), storeDir]) {
+                mkdirSync(dir, { recursive: true });
+            }
+            process.env.XDG_CONFIG_HOME = join(root, "config");
+            process.env.XDG_DATA_HOME = dataDir;
+            process.env.MAGIC_CONTEXT_TEST_DATA_DIR = dataDir;
+            process.env.OPENCODE_DB = opencodeDbPath;
+
+            const opencodeDb = new Database(opencodeDbPath);
+            opencodeDb.exec(`
+                CREATE TABLE session (
+                    id TEXT PRIMARY KEY,
+                    project_id TEXT,
+                    directory TEXT,
+                    path TEXT,
+                    workspace_id TEXT,
+                    title TEXT
+                );
+                CREATE TABLE project (id TEXT PRIMARY KEY, worktree TEXT NOT NULL);
+                INSERT INTO project (id, worktree) VALUES ('global', '/');
+            `);
+            opencodeDb
+                .prepare("INSERT INTO session (id, project_id, directory) VALUES (?, 'global', ?)")
+                .run(SID, source);
+            opencodeDb.close();
+            const contextDb = new Database(join(storeDir, "context.db"));
+            initializeDatabase(contextDb);
+            runMigrations(contextDb);
+            contextDb.close();
+
+            expect(
+                await runMigrateSessionCli([
+                    "--session",
+                    SID,
+                    "--to",
+                    target,
+                    "--memories",
+                    "leave",
+                    "--yes",
+                ]),
+            ).toBe(0);
+            expect(confirmSpy).not.toHaveBeenCalled();
+            const moved = new Database(opencodeDbPath, { readonly: true });
+            try {
+                expect(
+                    moved.prepare("SELECT directory FROM session WHERE id = ?").get(SID),
+                ).toEqual({ directory: realpathSync(target) });
+            } finally {
+                moved.close();
+            }
+        } finally {
+            callSpy.mockRestore();
+            confirmSpy.mockRestore();
+            for (const [key, value] of Object.entries(saved)) {
+                if (value === undefined) delete process.env[key];
+                else process.env[key] = value;
+            }
+            rmSync(root, { recursive: true, force: true });
+        }
     });
 });
