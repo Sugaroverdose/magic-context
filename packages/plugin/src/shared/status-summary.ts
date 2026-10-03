@@ -36,6 +36,7 @@ export interface UserStatusSummary {
     dreamerRunner?: RunnerStatus;
     warnings: UserFacingFailureKey[];
     hiddenVariantWarnings?: string[];
+    dreamerSkipped?: readonly string[];
 }
 
 /**
@@ -127,6 +128,7 @@ export function statusSummaryFromDetail(detail: StatusDetail): UserStatusSummary
         compactionMarker: detail.compactionMarker,
         warnings: statusWarningsFromDetail(detail),
         hiddenVariantWarnings: detail.hiddenVariantWarnings ?? [],
+        dreamerSkipped: detail.dreamerSkipped,
     };
 }
 
@@ -218,6 +220,7 @@ export function renderUserStatusSummary(
     if (summary.dreamerRunner) {
         values.push(["Dreamer runner", runnerText(summary.dreamerRunner)]);
     }
+    for (const skipped of summary.dreamerSkipped ?? []) values.push(["Dreamer skipped", skipped]);
     if (summary.historianRefusal) {
         values.push([
             "Historian refusal",

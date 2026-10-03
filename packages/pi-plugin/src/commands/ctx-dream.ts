@@ -146,6 +146,8 @@ export function registerCtxDreamCommand(
 					}
 					if (result.skippedNoWork.length > 0)
 						lines.push(`Skipped (no work): ${result.skippedNoWork.join(", ")}`);
+					if (result.skipped?.length)
+						lines.push(`Skipped: ${result.skipped.join("; ")}`);
 					if (result.deferredBusy.length > 0)
 						lines.push(
 							// "Busy" means the task's DOMAIN lease is held — usually

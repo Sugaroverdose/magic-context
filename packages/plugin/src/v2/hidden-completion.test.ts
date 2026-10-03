@@ -4,6 +4,10 @@ import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../hooks/magic-context/compartment-runner-types";
+import {
+    getPromptFailureDetail,
+    promptSyncWithValidatedOutputRetry,
+} from "../shared/model-suggestion-retry";
 import { Database } from "../shared/sqlite";
 import {
     createV2HiddenCompletionExecutor,
@@ -37,6 +41,56 @@ const dreamerRun: HiddenRunIdentity = {
     agent: HIDDEN_DREAMER_AGENT,
     kind: "dreamer-task",
 };
+
+test("host unknown terminal error retains the hook's typed local refusal", async () => {
+    const f = await setup();
+    const handle = await f.executor.open(dreamerRun);
+    f.setReadableSessionError({ type: "unknown", message: "host serialized hook failure" });
+    f.host.prompt = async (input) => {
+        try {
+            f.hook.apply({
+                sessionID: input.sessionID,
+                model: { providerID: "mock", id: "cheap" },
+                agent: "dreamer",
+                system: [],
+                tools: {},
+                options: {},
+                messages: [
+                    {
+                        role: "user",
+                        content: [
+                            { type: "text", text: "extra instruction before marker" },
+                            { type: "text", text: input.text },
+                        ],
+                    },
+                ],
+            });
+        } catch {
+            f.rows.appendIdle(input.sessionID, "failed");
+        }
+    };
+    let caught: unknown;
+    try {
+        await promptSyncWithValidatedOutputRetry(undefined, request(), {
+            transport: (args) => f.executor.attempt(handle, args),
+            fetchOutput: async () => "unreachable",
+            validateOutput: (value) => value,
+        });
+    } catch (error) {
+        caught = error;
+    }
+    expect(caught).toBeInstanceOf(HiddenCompletionRefusal);
+    expect((caught as HiddenCompletionRefusal).code).toBe("hidden_prompt_unrecognized");
+    expect((caught as Error).message).toContain("Refusing an unregistered prompt");
+    expect(getPromptFailureDetail(caught)?.failureClass).toBe("local_refusal");
+    await f.executor.close(handle, {
+        promptSettled: false,
+        privacySensitive: false,
+        context: "test",
+        log() {},
+    });
+    f.db.close();
+});
 
 const request = (
     modelID = "cheap",

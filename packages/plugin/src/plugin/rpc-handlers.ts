@@ -14,6 +14,7 @@ import type { MagicContextConfig } from "../config/schema/magic-context";
 import {
     getFailingDreamTasks,
     getMostRecentTaskRunAt,
+    getSkippedDreamTasks,
 } from "../features/magic-context/dreamer/storage-task-schedule";
 import { getDreamTaskBacklogs } from "../features/magic-context/dreamer/task-gates";
 import {
@@ -498,6 +499,7 @@ export function buildSidebarSnapshot(
         let lastDreamerRunAt: number | null = null;
         let dreamerBacklog: DreamTaskBacklogMap | undefined;
         let dreamerFailures: DreamTaskFailureState[] | undefined;
+        let dreamerSkipped: string[] | undefined;
         const dreamerProgress = projectIdentity
             ? (liveSessionState?.dreamerProgressByProject?.get(projectIdentity) ?? null)
             : null;
@@ -517,6 +519,7 @@ export function buildSidebarSnapshot(
                 // A scheduled task can fail on every slot for weeks. Without this the
                 // only in-session trace is a backlog count that never falls.
                 dreamerFailures = getFailingDreamTasks(db, projectIdentity);
+                dreamerSkipped = getSkippedDreamTasks(db, projectIdentity);
             } catch {
                 // task_schedule_state may not exist on a pre-V2 DB
             }
@@ -681,6 +684,7 @@ export function buildSidebarSnapshot(
             dreamerBacklog,
             dreamerProgress,
             ...(dreamerFailures === undefined ? {} : { dreamerFailures }),
+            ...(dreamerSkipped === undefined ? {} : { dreamerSkipped }),
             compartmentTokens: calibrated.compartmentTokens,
             factTokens: calibrated.factTokens,
             memoryTokens: calibrated.memoryTokens,

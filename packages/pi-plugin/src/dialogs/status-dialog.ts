@@ -16,6 +16,7 @@ import { getCompartments } from "@magic-context/core/features/magic-context/comp
 import {
 	getFailingDreamTasks,
 	getMostRecentTaskRunAt,
+	getSkippedDreamTasks,
 } from "@magic-context/core/features/magic-context/dreamer/storage-task-schedule";
 import { getDreamTaskBacklogs } from "@magic-context/core/features/magic-context/dreamer/task-gates";
 import {
@@ -196,6 +197,7 @@ export interface StatusDialogDetail {
 		backlog: ReturnType<typeof getDreamTaskBacklogs>;
 		/** Tasks whose last scheduled run failed; empty when all of them are healthy. */
 		failures: DreamTaskFailureState[];
+		skipped?: string[];
 		/**
 		 * The stage that stopped the last maintenance pass, or null when the pass
 		 * completed. Not a per-task failure: this is the whole pass never reaching
@@ -380,6 +382,7 @@ export function formatPiStatusSummary(s: StatusDialogDetail): string {
 			noteCount: s.sessionNoteCount + s.readySmartNoteCount,
 			embedding: s.embedding,
 			warnings: piStatusWarnings(s),
+			dreamerSkipped: s.dreamer.skipped,
 		},
 		"plain",
 	);
@@ -403,6 +406,7 @@ export function statusViewSourceFromPiDetail(
 		// Pi carries "no expiry" as an infinite remaining time rather than a flag.
 		cacheNeverExpires: s.cacheRemainingMs === Number.POSITIVE_INFINITY,
 		lastDreamerRunAt: s.dreamer.lastRunAt,
+		dreamerSkipped: s.dreamer.skipped,
 		dreamerTickFailure: s.dreamer.tickFailure,
 		warnings: piStatusWarnings(s),
 	};
@@ -961,6 +965,10 @@ export function buildPiStatusDetail(
 			),
 			failures: safeRead(
 				() => getFailingDreamTasks(deps.db, deps.projectIdentity),
+				[],
+			),
+			skipped: safeRead(
+				() => getSkippedDreamTasks(deps.db, deps.projectIdentity),
 				[],
 			),
 			// Recorded by the process-wide maintenance timer, so it is read from

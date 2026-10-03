@@ -4,7 +4,10 @@ import type { DreamerConfig, MagicContextConfig } from "../../config/schema/magi
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { MagicContextBuiltinCommandName } from "../../features/builtin-commands/commands";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
-import { getFailingDreamTasks } from "../../features/magic-context/dreamer/storage-task-schedule";
+import {
+    getFailingDreamTasks,
+    getSkippedDreamTasks,
+} from "../../features/magic-context/dreamer/storage-task-schedule";
 import { getDreamTaskBacklogs } from "../../features/magic-context/dreamer/task-gates";
 import {
     CANONICAL_DREAM_TASKS,
@@ -350,6 +353,15 @@ function readFailingDreamTasksSafely(db: Database, projectPath: string): DreamTa
         return getFailingDreamTasks(db, projectPath);
     } catch {
         // Same reason as the backlog read: status must survive an older/empty database.
+        return [];
+    }
+}
+
+function readSkippedDreamTasksSafely(db: Database, projectPath: string): string[] {
+    try {
+        return getSkippedDreamTasks(db, projectPath);
+    } catch {
+        // Status must remain available before the task schedule tables exist.
         return [];
     }
 }
@@ -751,6 +763,10 @@ export function createMagicContextCommandHandler(deps: {
                                           CANONICAL_DREAM_TASKS,
                                       ),
                                       progress: deps.getDreamerProgress?.() ?? null,
+                                      skipped: readSkippedDreamTasksSafely(
+                                          deps.db,
+                                          deps.dreamer.projectPath,
+                                      ),
                                       failures: readFailingDreamTasksSafely(
                                           deps.db,
                                           deps.dreamer.projectPath,

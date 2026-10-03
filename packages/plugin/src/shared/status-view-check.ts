@@ -311,6 +311,7 @@ export function checkStatusViewSource(candidate: unknown):
         cacheNeverExpires: optional.read("cacheNeverExpires", isBoolean),
         lastDreamerRunAt: optional.read("lastDreamerRunAt", isNullableNumber),
         dreamerUnsupportedTasks: optional.readArray("dreamerUnsupportedTasks", isString),
+        dreamerSkipped: optional.readArray("dreamerSkipped", isString),
         dreamerTickFailure: optional.read(
             "dreamerTickFailure",
             (value): value is NonNullable<StatusViewSource["dreamerTickFailure"]> | null =>

@@ -281,7 +281,7 @@ function isProviderFailure(error: unknown): boolean {
 async function awaitAssistantRow(
     openReader: () => HiddenChildRows & { close?: () => void },
     readSessionError: () => Promise<unknown>,
-    stepLimit: () => HiddenAgentStepLimit | undefined,
+    localFailure: () => Error | undefined,
     childID: string,
     afterSeq: number,
     deadline: number,
@@ -294,8 +294,8 @@ async function awaitAssistantRow(
         }));
         const newAssistant = assistant && assistant.seq > afterSeq ? assistant : undefined;
         const newIdle = idle && idle.seq > afterSeq ? idle : undefined;
-        const capped = stepLimit();
-        if (capped) throw capped;
+        const refused = localFailure();
+        if (refused) throw refused;
         if (newIdle && (!newAssistant || newIdle.seq > newAssistant.seq)) {
             const outcome = newIdle.data.outcome;
             if (outcome === "failed" || outcome === "interrupted") {
@@ -673,7 +673,7 @@ export async function createV2HiddenCompletionExecutor(
                                 return undefined;
                             }
                         },
-                        () => attempt.stepLimit,
+                        () => attempt.refusal ?? attempt.stepLimit,
                         run.child.id,
                         baseline,
                         deadline,
@@ -735,7 +735,8 @@ export async function createV2HiddenCompletionExecutor(
                 // Recorded for `keep_subagents` retention: this child now holds a settled run.
                 if (!run.child.ever_settled) run.child = lifecycle.markEverSettled(run.child);
             } catch (caught) {
-                const error = attempt.budgetExceeded ?? attempt.stepLimit ?? caught;
+                const error =
+                    attempt.budgetExceeded ?? attempt.stepLimit ?? attempt.refusal ?? caught;
                 run.failed = true;
                 if (!(error instanceof HiddenProviderError)) {
                     run.unsettledFailure = true;

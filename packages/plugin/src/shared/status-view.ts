@@ -146,6 +146,7 @@ export interface StatusViewSource {
      * backlog that silently never falls.
      */
     readonly dreamerUnsupportedTasks?: readonly string[];
+    readonly dreamerSkipped?: readonly string[];
     /**
      * Set when the last background maintenance pass stopped before finishing.
      * Shown so "the dreamer has nothing to do" and "the dreamer never got to
@@ -503,11 +504,17 @@ function historyRows(source: StatusViewSource, now: number): StatusRow[] {
     return rows;
 }
 
-/** One row naming every Dreamer task this host cannot run, or nothing when it runs them all. */
+/** Availability rows for unsupported tasks and explicitly disabled/unavailable runs. */
 function dreamerUnsupportedRows(source: StatusViewSource): StatusRow[] {
     const unsupported = source.dreamerUnsupportedTasks ?? [];
-    if (unsupported.length === 0) return [];
+    const skipped: StatusRow[] = (source.dreamerSkipped ?? []).map((value) => ({
+        label: "Dreamer skipped",
+        value,
+        tone: "muted",
+    }));
+    if (unsupported.length === 0) return skipped;
     return [
+        ...skipped,
         {
             label: "Dreamer unavailable",
             value: `${unsupported.join(", ")} (${userFacingFailureCode("dream_task_needs_tool_loop")})`,

@@ -91,6 +91,7 @@ for (const projectMemoryEnabled of [false, true]) {
             executor: { capabilities: { tools: false } } as never,
             projectIdentity: () => projectIdentity,
             projectMemoryEnabled,
+            openReader: () => ({ rootSessionActivity: () => new Map(), close() {} }),
         });
         try {
             await handled;

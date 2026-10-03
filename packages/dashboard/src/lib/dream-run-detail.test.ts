@@ -14,6 +14,11 @@ const task = (overrides: Partial<DreamRunTask> = {}): DreamRunTask => ({
 });
 
 describe("getDreamRunTaskDetail", () => {
+  test("renders a disabled task as skipped with its reason, not successful output", () => {
+    expect(
+      getDreamRunTaskDetail(task({ status: "skipped", skipReason: "mural is not enabled" }), 0),
+    ).toEqual({ text: "Skipped: mural is not enabled", tone: "neutral" });
+  });
   test("renders new progress neutrally", () => {
     expect(getDreamRunTaskDetail(task({ progress: "verified 33, 0 remain" }), 0)).toEqual({
       text: "verified 33, 0 remain",
