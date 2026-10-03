@@ -17253,14 +17253,39 @@ fn sql_like_pattern(query: &str) -> String {
 
 /// Compute the ctx_memory normalized hash used for duplicate detection. This mirrors the
 /// plugin path: lowercase, collapse whitespace runs to one space, trim, then MD5 hex.
+/// "Whitespace" is what the plugin's JavaScript `\s` matches, not Rust's definition, so
+/// both runtimes give the same hash and `UNIQUE(project_path, category, normalized_hash)`
+/// dedups across them.
 pub fn compute_normalized_memory_hash(content: &str) -> String {
     let normalized = content
         .to_lowercase()
-        .split_whitespace()
+        .split(is_js_whitespace)
+        .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
     let digest = md5::compute(normalized.as_bytes());
     format!("{digest:032x}")
+}
+
+/// Whether JavaScript's `\s` matches `ch`: ECMAScript WhiteSpace (tab, vertical tab, form
+/// feed, U+FEFF and the Zs space separators) plus LineTerminator (line feed, carriage
+/// return, U+2028, U+2029). It differs from `char::is_whitespace` in two code points:
+/// U+FEFF counts here and U+0085 does not.
+fn is_js_whitespace(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0009}'..='\u{000D}'
+            | '\u{0020}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
+    )
 }
 
 /// The lowercase hex MD5 of `input`'s UTF-8 bytes. The host's `dir:` project identity is
@@ -17358,6 +17383,31 @@ mod tests {
         let source = include_str!("lib.rs");
         let production = source.split_once("#[cfg(test)]\nmod tests {").unwrap().0;
         assert!(!production.contains(concat!("eprint", "ln!")));
+    }
+
+    #[test]
+    fn memory_hash_matches_the_plugin_for_whitespace_the_two_runtimes_classify_differently() {
+        // Expected digests come from the plugin's computeNormalizedHash (lowercase, JS `\s+`
+        // runs to one space, trim, MD5). JS `\s` counts U+FEFF as whitespace and U+0085 as
+        // not; Rust's char::is_whitespace is the reverse for those two.
+        for (content, expected) in [
+            ("Keep\u{0085}THIS", "598888c3f5dcd629ee062d2649d83911"),
+            (
+                "\u{FEFF}Keep\u{FEFF}  this\u{FEFF}",
+                "cdc26c0a460560cc319f09c6fd89172f",
+            ),
+            (
+                " Mixed\t\u{00A0}\u{2028}Case \u{3000} Words\u{000B}\u{000C}",
+                "71975feca6aa4a9408a61e912dc987f1",
+            ),
+            ("plain text", "31bc5c2b8fd4f20cd747347b7504a385"),
+        ] {
+            assert_eq!(
+                compute_normalized_memory_hash(content),
+                expected,
+                "hash of {content:?}"
+            );
+        }
     }
 
     // Adversarial gate over the claim-lane migration and the single-store marker
