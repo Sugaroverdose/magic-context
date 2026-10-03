@@ -612,7 +612,9 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         }
         drainReservation = reserve.reservation;
 
-        const chunk = readSessionChunk(sessionId, chunkTokens, offset, eligibleEndOrdinal);
+        const chunk = readSessionChunk(sessionId, chunkTokens, offset, eligibleEndOrdinal, {
+            expandTools: deps.historianExpandTools,
+        });
         const forceKeepLastCompartmentForChunk =
             deps.forceKeepLastCompartment === true && !chunk.hasMore;
         telemetry.chunkStartOrdinal = chunk.startIndex;

@@ -117,6 +117,7 @@ interface RunCompartmentPhaseArgs {
     experimentalTemporalAwareness?: boolean;
     /** When true, run a second editor pass after historian to clean U: lines. */
     historianTwoPass?: boolean;
+    historianExpandTools?: Record<string, string | false>;
     /** Cross-session memory feature gate (`memory.enabled`). Issue #44. */
     memoryEnabled?: boolean;
     /** Auto-promotion gate (`memory.auto_promote`). Issue #44. */
@@ -416,6 +417,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 getNotificationParams: args.getNotificationParams,
                 experimentalUserMemories: args.experimentalUserMemories,
                 historianTwoPass: args.historianTwoPass,
+                historianExpandTools: args.historianExpandTools,
                 memoryEnabled: args.memoryEnabled,
                 autoPromote: args.autoPromote,
                 onCompartmentStatePublished: args.onCompartmentStatePublished,
@@ -468,6 +470,7 @@ async function runCompartmentPhaseImpl(args: RunCompartmentPhaseArgs): Promise<{
                 getNotificationParams: args.getNotificationParams,
                 experimentalUserMemories: args.experimentalUserMemories,
                 historianTwoPass: args.historianTwoPass,
+                historianExpandTools: args.historianExpandTools,
                 memoryEnabled: args.memoryEnabled,
                 autoPromote: args.autoPromote,
                 onCompartmentStatePublished: args.onCompartmentStatePublished,

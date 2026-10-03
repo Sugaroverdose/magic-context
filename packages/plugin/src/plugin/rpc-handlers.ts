@@ -1650,6 +1650,7 @@ export function registerRpcHandlers(
             fallbackModels: historianModel.fallbacks,
             userMemoriesEnabled: userMemoryCollectionEnabled(runConfig.dreamer),
             historianTwoPass: runConfig.historian?.two_pass === true,
+            historianExpandTools: runConfig.historian?.expand_tools,
             getNotificationParams: (sessionId) =>
                 getLiveNotificationParams(
                     sessionId,

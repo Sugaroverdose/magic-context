@@ -443,6 +443,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 promptFit.chunkTokens,
                 offset,
                 protectedTailStart,
+                { expandTools: deps.historianExpandTools },
             );
             if (!chunk.text || chunk.messageCount === 0 || chunk.endIndex < offset) {
                 // Remaining messages before the protected tail are too few or all noise.
@@ -547,6 +548,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                         reducedBudget,
                         offset,
                         protectedTailStart,
+                        { expandTools: deps.historianExpandTools },
                     );
                     if (smallerChunk.messageCount > 0 && smallerChunk.endIndex < chunk.endIndex) {
                         await sendStatusNotification(

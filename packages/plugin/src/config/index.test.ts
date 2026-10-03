@@ -472,6 +472,47 @@ describe("loadPluginConfig — secret redaction", () => {
         expect(w).toBeDefined();
     });
 
+    it("prunes an invalid expansion template without losing valid siblings", () => {
+        const result = loadWithUserConfig(
+            JSON.stringify({
+                historian: {
+                    expand_tools: {
+                        ask: "${input.x.nope()}",
+                        peer_send: false,
+                        read: "Read ${input.path}",
+                    },
+                },
+            }),
+        );
+        expect(result.historian?.expand_tools?.ask).toBeUndefined();
+        expect(result.historian?.expand_tools?.peer_send).toBe(false);
+        expect(result.historian?.expand_tools?.read).toBe("Read ${input.path}");
+        expect(result.configWarnings?.join("\n")).toContain("historian.expand_tools.ask");
+    });
+
+    it("allows project expansion overrides without changing historian model authority", () => {
+        const result = loadWithUserAndProjectConfig(
+            JSON.stringify({
+                historian: {
+                    opencode: { model: "trusted/historian" },
+                    expand_tools: { ask: "Question ${input.question}", peer_send: false },
+                },
+            }),
+            JSON.stringify({
+                historian: {
+                    opencode: { model: "untrusted/historian" },
+                    expand_tools: { ask: false, board: '${input.ops.each("${op}")}' },
+                },
+            }),
+        );
+        expect(result.historian?.expand_tools).toEqual({
+            ask: false,
+            peer_send: false,
+            board: '${input.ops.each("${op}")}',
+        });
+        expect(result.historian?.opencode?.model).toBe("trusted/historian");
+    });
+
     it("prunes only cross-harness qualifier leaves and names their full paths", () => {
         const result = loadWithUserConfig(
             JSON.stringify({

@@ -495,6 +495,7 @@ export interface TransformDeps {
         maxOutputTokens?: number;
         timeoutMs: number;
         twoPass: boolean;
+        expandTools?: Record<string, string | false>;
         autoPromote: boolean;
         userMemoriesEnabled: boolean;
         commitClusterTrigger?: { enabled: boolean; min_clusters: number };
@@ -554,6 +555,7 @@ export interface TransformDeps {
     /** When true, run a second editor pass after historian to clean U: lines.
      *  Enables the historian-editor agent. Controlled by `historian.two_pass` config. */
     historianTwoPass?: boolean;
+    historianExpandTools?: Record<string, string | false>;
     liveModelBySession?: LiveModelBySession;
     /**
      * Process-scoped cache of resolved session.directory values. When provided,
@@ -1761,6 +1763,7 @@ export function createTransform(deps: TransformDeps) {
                     historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
                 experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
                 historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
+                historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,
                 // Issue #44: gate historian-driven memory promotion so users
                 // who disable the feature actually see no memories created.
                 memoryEnabled: deps.memoryConfig?.enabled,
@@ -2381,6 +2384,7 @@ export function createTransform(deps: TransformDeps) {
                 historianRun?.userMemoriesEnabled ?? deps.experimentalUserMemories,
             experimentalTemporalAwareness: deps.experimentalTemporalAwareness,
             historianTwoPass: historianRun?.twoPass ?? deps.historianTwoPass,
+            historianExpandTools: historianRun?.expandTools ?? deps.historianExpandTools,
             // Issue #44: forward memory gating so the normal historian path
             // (not just the recovery path above) honors memory.enabled and
             // memory.auto_promote.

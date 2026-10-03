@@ -1133,6 +1133,7 @@ export interface PiHistorianOptions {
 	 *  clean low-signal U: lines and cross-compartment duplicates. Mirrors
 	 *  OpenCode's `historian.two_pass` config. */
 	twoPass?: boolean;
+	expandTools?: Record<string, string | false>;
 	/** Pi only: explicit thinking level for historian/compressor subagent
 	 *  invocations (passed as --thinking <level>). When unset, Pi's own
 	 *  default resolution applies. See `historian.thinking_level` in config. */
@@ -4476,6 +4477,7 @@ function spawnPiHistorianRun(args: {
 				temperature: historian.temperature,
 				maxOutputTokens: historian.maxOutputTokens,
 				twoPass: historian.twoPass,
+				expandTools: historian.expandTools,
 				thinkingLevel: historian.thinkingLevel,
 				memoryEnabled: historian.memoryEnabled,
 				allowHomeProject: historian.allowHomeProject,

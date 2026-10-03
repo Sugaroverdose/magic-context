@@ -242,6 +242,7 @@ async function runOneWrapupIteration(args: {
         fallbackModelId: ctx.fallbackModelId,
         language: ctx.language,
         historianTwoPass: ctx.historianTwoPass,
+        historianExpandTools: ctx.historianExpandTools,
         memoryEnabled: ctx.memoryEnabled,
         autoPromote: ctx.autoPromote,
         // User-memory collection is forwarded on the same gate as every other

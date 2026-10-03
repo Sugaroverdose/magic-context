@@ -51,6 +51,7 @@ Keys listed below apply from the next historian or dreamer run (or dream-timer t
 - `dreamer.tasks.review-user-memories.schedule`
 - `dreamer.tasks.verify-broad.schedule`
 - `dreamer.tasks.verify.schedule`
+- `historian.expand_tools`
 - `historian.maxTokens`
 - `historian.omp.fallback_models`
 - `historian.omp.model`

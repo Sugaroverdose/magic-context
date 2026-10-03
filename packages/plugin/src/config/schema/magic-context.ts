@@ -7,6 +7,7 @@ import type {
     DreamTaskName,
 } from "../../features/magic-context/dreamer/task-registry";
 import { isValidPromptSurfaceModelKey } from "../../shared/prompt-surface";
+import { toolTemplateError } from "../../shared/historian-tool-template";
 import { AgentOverrideConfigSchema } from "./agent-overrides";
 
 export const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE = 65;
@@ -663,6 +664,21 @@ export type DreamerConfig = z.infer<typeof DreamerConfigSchema>;
  * the strict opencode, pi, and omp blocks; two_pass and disallowed_tools stay here.
  */
 export const HistorianConfigSchema = AgentMetadataSchema.extend({
+    expand_tools: z
+        .record(
+            z.string(),
+            z.union([
+                z.string().superRefine((value, ctx) => {
+                    const error = toolTemplateError(value);
+                    if (error) ctx.addIssue({ code: "custom", message: error });
+                }),
+                z.literal(false),
+            ]),
+        )
+        .optional()
+        .describe(
+            'Readable historian tool expansions, keyed by exact host tool name. Templates override built-in defaults; false disables an expansion. Supports ${input.path}, ${output.path}, bare ${output}, array [N], [*].field, .each("${field}"), .join("separator"), .count and final .truncate(N). Missing fields are empty; placeholders default to 300 characters, lists to 10 elements, expansions to 1000 characters. Valid in user and project config; affects historian/recomp and verbose ctx_expand only, never the wire or default ctx_expand transcript.',
+        ),
     opencode: OpenCodeHarnessBlockSchema.optional(),
     pi: PiHarnessBlockSchema.optional(),
     omp: OmpHarnessBlockSchema.optional(),
@@ -1567,6 +1583,7 @@ export const LIVE_RELOAD_CONFIG_PATHS = [
     "historian.omp.fallback_models",
     "historian.omp.thinking_level",
     "historian.two_pass",
+    "historian.expand_tools",
     "historian.maxTokens",
     "historian_timeout_ms",
     "commit_cluster_trigger.enabled",

@@ -420,6 +420,7 @@ export async function executePartialRecompInternal(
                 promptFit.chunkTokens,
                 offset,
                 snapEnd + 1, // exclusive upper bound — readSessionChunk stops before this ordinal
+                { expandTools: deps.historianExpandTools },
             );
             if (!chunk.text || chunk.messageCount === 0 || chunk.endIndex < offset) {
                 return `## Magic Recomp — Failed\n\nRecomp stopped because raw history ${offset}-${snapEnd} could not be turned into a valid historian chunk. Partial recomp preserved original state (staging kept for retry).`;
@@ -495,6 +496,7 @@ export async function executePartialRecompInternal(
                         reducedBudget,
                         offset,
                         snapEnd + 1,
+                        { expandTools: deps.historianExpandTools },
                     );
                     if (smallerChunk.messageCount > 0 && smallerChunk.endIndex < chunk.endIndex) {
                         await sendStatusNotification(

@@ -68,6 +68,7 @@ export interface ManagedRecompContext {
     userMemoriesEnabled: boolean;
     /** Two-pass historian (editor cleanup) — config `historian.two_pass`. */
     historianTwoPass?: boolean;
+    historianExpandTools?: Record<string, string | false>;
     getNotificationParams: (sessionId: string) => NotificationParams;
     ensureProjectRegistered?: (directory: string, db: Database) => Promise<void>;
 }
@@ -206,6 +207,7 @@ export function buildRecompDeps(
         fallbackModelId:
             ctx.fallbackModelId ?? resolveLiveModelKey(ctx.liveSessionState, sessionId),
         historianTwoPass: ctx.historianTwoPass,
+        historianExpandTools: ctx.historianExpandTools,
         ensureProjectRegistered: ctx.ensureProjectRegistered,
         getNotificationParams: () => ctx.getNotificationParams(sessionId),
         onCompartmentStatePublished: (sid: string) => {

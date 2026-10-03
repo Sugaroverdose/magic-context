@@ -91,6 +91,7 @@ function err(text: string) {
 
 export interface CtxExpandToolDeps {
 	db: ContextDatabase;
+	expandTools?: Record<string, string | false>;
 }
 
 export function createCtxExpandTool(
@@ -169,6 +170,7 @@ export function createCtxExpandTool(
 						start,
 						effectiveEnd,
 						CTX_EXPAND_TOKEN_BUDGET,
+						deps.expandTools,
 					);
 					if (!v.text) {
 						return ok(
@@ -194,6 +196,7 @@ export function createCtxExpandTool(
 					CTX_EXPAND_TOKEN_BUDGET,
 					start,
 					effectiveEnd + 1, // readSessionChunk uses exclusive end
+					{ expand: false },
 				);
 
 				if (!chunk.text || chunk.messageCount === 0) {

@@ -150,7 +150,7 @@ export function createToolRegistry(args: {
                       ),
                   rustToolBackends,
               })),
-        ...createCtxExpandTools({ db }),
+        ...createCtxExpandTools({ db, expandTools: pluginConfig.historian?.expand_tools }),
         ...createCtxNoteTools({
             db,
             dreamerEnabled: isDreamerRunnable(pluginConfig),

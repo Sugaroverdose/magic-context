@@ -21,7 +21,7 @@ describe("mode manifest validator", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
         // removed. Moving a file between excluded and ts-only changes the invocation
         // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(161);
+        expect(validation.files.length).toBe(162);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -32,11 +32,11 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(50);
+        expect(ts).toHaveLength(51);
         expect(rust).toHaveLength(56);
         expect(rust).toContain("tests/subagent-behavior.test.ts");
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(3);
-        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(36);
+        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(37);
         expect(filesForMode(validation, "ts", "pi")).toHaveLength(27);
         expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(31);
         // These OpenCode 2 files are ts-only with hosts ["opencode2"], so only the

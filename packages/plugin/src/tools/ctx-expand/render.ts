@@ -30,6 +30,8 @@ import {
 } from "../../hooks/magic-context/read-session-chunk";
 import { estimateTokens } from "../../hooks/magic-context/read-session-formatting";
 import type { RawMessage } from "../../hooks/magic-context/read-session-raw";
+import { expandToolPart } from "../../shared/historian-tool-expansions";
+import type { ToolExpansionMap } from "../../shared/historian-tool-template";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -154,8 +156,10 @@ function reasoningOf(part: Record<string, unknown>): string | null {
 }
 
 /** One per-part PREVIEW line for the verbose range view (bounded). */
-function renderPartPreview(part: unknown): string | null {
+function renderPartPreview(part: unknown, expandTools?: ToolExpansionMap): string | null {
     if (!isRecord(part)) return null;
+    const expansion = expandToolPart(part, expandTools);
+    if (expansion !== null) return `    • tool ${part.tool}: ${expansion}`;
     const text = textOf(part);
     if (text !== null) {
         const t = truncate(text, 200);
@@ -269,6 +273,7 @@ export function renderVerboseRange(
     start: number,
     end: number,
     tokenBudget: number,
+    expandTools?: ToolExpansionMap,
 ): VerboseRangeResult {
     const out: string[] = [];
     let usedTokens = 0;
@@ -279,7 +284,9 @@ export function renderVerboseRange(
     // over a long session never loads every message and tool output at once.
     visitRawSessionMessages(sessionId, start, end, (msg: RawMessage) => {
         const header = `[${msg.ordinal}] ${verboseRoleLabel(msg)}`;
-        const partLines = msg.parts.map(renderPartPreview).filter((l): l is string => l !== null);
+        const partLines = msg.parts
+            .map((part) => renderPartPreview(part, expandTools))
+            .filter((l): l is string => l !== null);
         const block = partLines.length > 0 ? `${header}\n${partLines.join("\n")}` : header;
 
         const blockTokens = estimateTokens(block);

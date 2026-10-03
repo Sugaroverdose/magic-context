@@ -321,6 +321,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             timeoutMs: config.historian_timeout_ms ?? DEFAULT_HISTORIAN_TIMEOUT_MS,
             toastDurationMs: config.toast_duration_ms,
             twoPass: config.historian?.two_pass === true,
+            expandTools: config.historian?.expand_tools,
             autoPromote: config.memory?.auto_promote ?? true,
             userMemoriesEnabled: userMemoryCollectionEnabled(config.dreamer),
             commitClusterTrigger: config.commit_cluster_trigger,
@@ -494,6 +495,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
                 return model ? `${model.providerID}/${model.modelID}` : undefined;
             })(),
             historianTwoPass: historianRun.twoPass,
+            historianExpandTools: historianRun.expandTools,
             // Option C privacy gate: behavioral observation candidates are collected
             // during historian runs only when the user has SCHEDULED the
             // review-user-memories task (schedule != ""). Replaces the v1
@@ -791,6 +793,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         experimentalTemporalAwareness: deps.config.temporal_awareness === true,
         muralEnabled: deps.config.mural?.enabled === true,
         historianTwoPass: deps.config.historian?.two_pass === true,
+        historianExpandTools: deps.config.historian?.expand_tools,
         historianRunner: deps.config.historian?.runner,
         historianHostRunnerEnabled: deps.config.historian?.host_runner?.enabled,
         liveModelBySession,

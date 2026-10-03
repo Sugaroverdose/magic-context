@@ -3,6 +3,8 @@ import {
     pickNearestPriorOwner,
 } from "../../features/magic-context/storage-tags";
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
+import { expandToolPart } from "../../shared/historian-tool-expansions";
+import type { ToolExpansionMap } from "../../shared/historian-tool-template";
 import type { Database } from "../../shared/sqlite";
 import { isSystemDirective } from "../../shared/system-directive";
 import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";
@@ -1091,6 +1093,7 @@ export function readSessionChunk(
     tokenBudget: number,
     offset: number = 1,
     eligibleEndOrdinal?: number,
+    options: { expandTools?: ToolExpansionMap; expand?: boolean } = {},
 ): SessionChunk {
     // When a tail-only slice is primed, its length is not the absolute count.
     // Otherwise use the provider's SQL count and read only the chunk's eligible range.
@@ -1108,6 +1111,41 @@ export function readSessionChunk(
         Math.max(1, startOrdinal - 1),
         finalOrdinal,
     );
+    // Pi keeps invocations and results in different messages. Attach only the
+    // historian preview to the invocation; never alter the stored/raw parts.
+    const expandedParts = new Map<unknown, string | null>();
+    const expandedResults = new Set<unknown>();
+    if (options.expand !== false) {
+        const calls = new Map<string, Record<string, unknown>>();
+        for (const message of messages)
+            for (const part of message.parts) {
+                if (!part || typeof part !== "object") continue;
+                const p = part as Record<string, unknown>;
+                if (p.type !== "tool") continue;
+                const state = p.state as Record<string, unknown> | undefined;
+                if (state?.input !== undefined && typeof p.callID === "string")
+                    calls.set(p.callID, p);
+                expandedParts.set(part, expandToolPart(part, options.expandTools));
+                if (
+                    state?.input === undefined &&
+                    state?.output !== undefined &&
+                    typeof p.callID === "string"
+                ) {
+                    const call = calls.get(p.callID);
+                    if (call) {
+                        const expansion = expandToolPart(
+                            { ...call, state: { ...(call.state as object), output: state.output } },
+                            options.expandTools,
+                        );
+                        if (expansion !== null) {
+                            expandedParts.set(call, expansion);
+                            expandedResults.add(part);
+                        }
+                        calls.delete(p.callID);
+                    }
+                }
+            }
+    }
     const completedToolArcs = buildToolArcs(messages).flatMap((arc) =>
         arc.resOrdinal === null ? [] : [{ start: arc.invOrdinal, end: arc.resOrdinal }],
     );
@@ -1245,7 +1283,11 @@ export function readSessionChunk(
         // zero signal for compartment summaries — unless they contain tool results
         // with extractable descriptions.
         if (msg.role === "user" && !hasMeaningfulChunkUserText(msg.parts)) {
-            const tcSummaries = extractToolCallSummaries(msg.parts);
+            const tcSummaries = msg.parts.flatMap((part) => {
+                if (expandedResults.has(part)) return [];
+                const expansion = expandedParts.get(part) ?? null;
+                return expansion === null ? extractToolCallSummaries([part]) : [`TC: ${expansion}`];
+            });
             if (tcSummaries.length === 0) {
                 recordFilteredNoise(meta);
                 continue;
@@ -1297,8 +1339,26 @@ export function readSessionChunk(
 
         // For messages with no text content, extract tool-call descriptions as
         // lightweight summaries so historian sees what actions were taken.
-        const toolSummaries = textParts.length === 0 ? extractToolCallSummaries(msg.parts) : [];
-        const allParts = [...textParts, ...toolSummaries];
+        const allParts =
+            options.expand === false
+                ? [
+                      ...textParts,
+                      ...(textParts.length === 0 ? extractToolCallSummaries(msg.parts) : []),
+                  ]
+                : msg.parts.flatMap((part) => {
+                      if (expandedResults.has(part)) return [];
+                      const expansion = expandedParts.get(part) ?? null;
+                      if (expansion !== null) return [`TC: ${expansion}`];
+                      const texts = extractTexts([part])
+                          .map((t) => (msg.role === "user" ? cleanUserText(t) : t))
+                          .map(normalizeText)
+                          .filter(Boolean);
+                      return texts.length
+                          ? texts
+                          : textParts.length === 0
+                            ? extractToolCallSummaries([part])
+                            : [];
+                  });
 
         const compacted = compactTextForSummary(allParts.join(" / "), msg.role);
         const text = compacted.text;
