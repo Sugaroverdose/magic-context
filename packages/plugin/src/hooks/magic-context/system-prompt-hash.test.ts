@@ -143,6 +143,74 @@ function buildHandler(opts?: {
 }
 
 describe("system-prompt-hash drain semantics (Oracle review 2026-04-26 Finding A1)", () => {
+    it("a cold handler adopts a midnight date change on the idle-expired request", async () => {
+        useTempDataHome("sph-cold-midnight-");
+        const sessionId = "ses-cold-midnight";
+        resolveCtxReduceAvailabilityFromMessages(sessionId, [
+            { info: { id: "u", role: "user" }, parts: [{ type: "text", text: "hello" }] },
+        ] as never);
+        const first = buildHandler();
+        await first.handler(
+            { sessionID: sessionId },
+            { system: ["Base\nToday's date: Fri Oct 02 2026"] },
+        );
+        const oldHash = getOrCreateSessionMeta(openDatabase(), sessionId).systemPromptHash;
+        updateSessionMeta(openDatabase(), sessionId, {
+            cacheTtl: "1h",
+            lastResponseTime: Date.now() - 16.5 * 3_600_000,
+        });
+        // Desktop can dispose and recreate a plugin instance without restarting
+        // the host. The hash survives that lifecycle; the sticky-date map does not.
+        first.clearSession(sessionId);
+        const pendingMaterializationSessions = new Set<string>();
+        const cold = buildHandler({ pendingMaterializationSessions });
+        const output = { system: ["Base\nToday's date: Sat Oct 03 2026"] };
+        await cold.handler({ sessionID: sessionId }, output);
+        const meta = getOrCreateSessionMeta(openDatabase(), sessionId);
+        expect(output.system.join("\n")).toContain("Today's date: Sat Oct 03 2026");
+        expect(meta.systemPromptHash).not.toBe(oldHash);
+        expect(meta.cachedM0SystemHash).toBe(meta.systemPromptHash);
+        expect(pendingMaterializationSessions.has(sessionId)).toBe(false);
+        clearCtxReduceAvailability(sessionId);
+    });
+    for (const expired of [true, false]) {
+        it(`${expired ? "adopts" : "flushes"} a late system change on an ${expired ? "expired" : "warm"} request`, async () => {
+            useTempDataHome("sph-idle-adopt-");
+            const sessionId = `ses-idle-adopt-${expired}`;
+            resolveCtxReduceAvailabilityFromMessages(sessionId, [
+                { info: { id: "u", role: "user" }, parts: [{ type: "text", text: "hello" }] },
+            ] as never);
+            const historyRefreshSessions = new Set<string>();
+            const systemPromptRefreshSessions = new Set<string>();
+            const pendingMaterializationSessions = new Set<string>();
+            const { handler } = buildHandler({
+                historyRefreshSessions,
+                systemPromptRefreshSessions,
+                pendingMaterializationSessions,
+            });
+            const db = openDatabase();
+            getOrCreateSessionMeta(db, sessionId);
+            updateSessionMeta(db, sessionId, {
+                systemPromptHash: "old-system-hash",
+                cachedM0SystemHash: "old-system-hash",
+                cacheTtl: "1h",
+                lastResponseTime: Date.now() - (expired ? 16.5 * 3_600_000 : 1_000),
+            });
+            await handler(
+                { sessionID: sessionId },
+                { system: ["New stable system content\nToday's date: Sat Oct 03 2026"] },
+            );
+            const meta = getOrCreateSessionMeta(db, sessionId);
+            expect(meta.systemPromptHash).not.toBe("old-system-hash");
+            expect(meta.cachedM0SystemHash).toBe(
+                expired ? meta.systemPromptHash : "old-system-hash",
+            );
+            expect(historyRefreshSessions.has(sessionId)).toBe(!expired);
+            expect(systemPromptRefreshSessions.has(sessionId)).toBe(!expired);
+            expect(pendingMaterializationSessions.has(sessionId)).toBe(!expired);
+            clearCtxReduceAvailability(sessionId);
+        });
+    }
     it("drains pre-existing systemPromptRefresh flag set by /ctx-flush", async () => {
         useTempDataHome("sph-drain-existing-");
         const sessionId = "ses-existing-flag";

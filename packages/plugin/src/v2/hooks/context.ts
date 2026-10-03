@@ -1027,7 +1027,15 @@ export async function registerContext(context: V2Context) {
                     rowModel: latest?.data.model,
                     draftModel: { providerID: draft.model.providerID, id: draft.model.id },
                     tokens: latest?.data.tokens,
-                    completed: latest?.data.time?.completed,
+                    // Completion is authoritative. Legacy finish-only rows use a
+                    // stable stored message time, never the time of this reread.
+                    completed:
+                        latest?.data.time?.completed ??
+                        (latest?.data.finish
+                            ? (latest.data.time?.streamed ?? latest.data.time?.created)
+                            : undefined),
+                    finish: latest?.data.finish,
+                    error: latest?.data.error,
                     limitFor,
                 });
                 if (reading) {

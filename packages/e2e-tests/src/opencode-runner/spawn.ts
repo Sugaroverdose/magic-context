@@ -701,6 +701,9 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
             if (key === "SUBC_LAUNCH_NONCE") continue;
             childEnv[key] = value;
         }
+        // OpenCode also scans ~/.opencode outside the XDG config tree. Keep that
+        // lookup in the fixture, not in the operator's home directory.
+        childEnv.HOME = dirname(env.dataDir);
         childEnv.OPENCODE_CONFIG_DIR = env.configDir;
         childEnv.XDG_CONFIG_HOME = env.configDir;
         childEnv.XDG_DATA_HOME = env.dataDir;

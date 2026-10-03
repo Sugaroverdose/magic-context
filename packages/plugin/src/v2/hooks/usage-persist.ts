@@ -5,6 +5,10 @@ import {
 } from "../../features/magic-context/storage";
 import type { TransformDeps } from "../../hooks/magic-context/transform";
 import { sessionLog } from "../../shared/logger";
+import {
+    isSuccessfulProviderCompletion,
+    providerResponseFailed,
+} from "../../shared/provider-response-completion";
 import { type UsageReading, usageReadingMatchesDraft } from "./usage-reading";
 
 export interface PersistV2UsageReadingArgs {
@@ -53,9 +57,21 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
 
     const draftModelKey = `${draftModel.providerID}/${draftModel.id}`;
     const readingMatchesDraft = usageReadingMatchesDraft(reading, draftModel);
-    // last_response_time is the idle clock for the provider cache. A reply with
-    // no tokens (a request the provider refused) refreshed no cache, so it does
-    // not move the clock; the same rule OpenCode 1 and Pi apply.
+    // A non-failed completion refreshes the provider cache even without usage.
+    // Preserve the last real pressure reading instead of fabricating zero usage.
+    const completion = {
+        completedAt: reading.completed,
+        finish: reading.finish,
+        error: reading.error,
+    };
+    const served =
+        !providerResponseFailed(completion) &&
+        (reading.inputTokens > 0 || isSuccessfulProviderCompletion(completion));
+    const responseTime = served && reading.completed;
+    if (reading.inputTokens <= 0 || !Number.isFinite(reading.limit) || reading.limit <= 0) {
+        if (responseTime) updateSessionMeta(db, sessionID, { lastResponseTime: responseTime });
+        return;
+    }
     const percentage = (reading.inputTokens / reading.limit) * 100;
     const updates: Parameters<typeof updateSessionMeta>[2] = {
         lastContextPercentage: percentage,
@@ -63,8 +79,7 @@ export function persistV2UsageReading(args: PersistV2UsageReadingArgs): void {
         lastUsageContextLimit: reading.limit,
         lastObservedModelKey: reading.modelKey ?? draftModelKey,
     };
-    if (reading.completed !== undefined && reading.inputTokens > 0)
-        updates.lastResponseTime = reading.completed;
+    if (responseTime) updates.lastResponseTime = responseTime;
     updateSessionMeta(db, sessionID, updates);
     sessionLog(
         sessionID,

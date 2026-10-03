@@ -1187,6 +1187,85 @@ describe("createEventHandler", () => {
         expect(getOrCreateSessionMeta(openDatabase(), "ses-idle").lastResponseTime).toBe(5_000);
     });
 
+    it("expires once after switching to usage-less completed replies, but not on shells or failures", async () => {
+        useTempDataHome("context-event-no-usage-completion-");
+        const deps = createDeps(new Map());
+        const handler = createEventHandler(deps);
+        const sessionID = "ses-no-usage-switch";
+        const now = Date.now();
+        const previous = now - 2 * 3_600_000;
+        const emit = (info: Record<string, unknown>) =>
+            handler({
+                event: {
+                    type: "message.updated",
+                    properties: {
+                        info: {
+                            role: "assistant",
+                            sessionID,
+                            providerID: "test-provider",
+                            modelID: "usage-less",
+                            ...info,
+                        },
+                    },
+                },
+            });
+        await emit({
+            id: "msg_01",
+            modelID: "usage-bearing",
+            finish: "stop",
+            time: { completed: previous },
+            tokens: { input: 1_000 },
+        });
+        // Age the persisted response clock, as a resumed session's idle gap would.
+        updateSessionMeta(deps.db, sessionID, { cacheTtl: "1h", lastResponseTime: previous });
+        deps.contextUsageMap.clear();
+        for (const info of [
+            { id: "msg_02", tokens: { input: 0 }, time: { created: now } },
+            {
+                id: "msg_03",
+                finish: "error",
+                time: { completed: now },
+                error: { name: "APIError" },
+            },
+            {
+                id: "msg_04",
+                finish: "stop",
+                time: { completed: now },
+                error: { name: "MessageAbortedError" },
+            },
+        ])
+            await emit(info);
+        const scheduler = createScheduler({ executeThresholdPercentage: 90 });
+        const usage = { inputTokens: 1_000, percentage: 1 };
+        expect(getOrCreateSessionMeta(deps.db, sessionID).lastResponseTime).toBe(previous);
+        expect(
+            scheduler.shouldExecute(getOrCreateSessionMeta(deps.db, sessionID), usage, now),
+        ).toBe("execute");
+        await emit({ id: "msg_05", finish: "stop", time: { completed: now } });
+        expect(getOrCreateSessionMeta(deps.db, sessionID).lastResponseTime).toBe(now);
+        expect(getOrCreateSessionMeta(deps.db, sessionID).lastInputTokens).toBe(1_000);
+        expect(
+            scheduler.shouldExecute(getOrCreateSessionMeta(deps.db, sessionID), usage, now + 1_000),
+        ).toBe("defer");
+        await emit({
+            id: "msg_06",
+            finish: "stop",
+            time: { completed: now + 2_000 },
+            tokens: { input: 0 },
+        });
+        expect(
+            scheduler.shouldExecute(getOrCreateSessionMeta(deps.db, sessionID), usage, now + 3_000),
+        ).toBe("defer");
+        await emit({
+            id: "msg_01",
+            modelID: "usage-bearing",
+            finish: "stop",
+            time: { completed: previous },
+            tokens: { input: 1_000 },
+        });
+        expect(getOrCreateSessionMeta(deps.db, sessionID).lastResponseTime).toBe(now + 2_000);
+    });
+
     it("ignores tokenless assistant updates when no prior usage exists", async () => {
         useTempDataHome("context-event-no-finish-");
         const handler = createEventHandler(createDeps(new Map()));

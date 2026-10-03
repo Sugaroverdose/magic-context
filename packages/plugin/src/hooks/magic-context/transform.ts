@@ -11,7 +11,7 @@ import {
 import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflow-detection";
 import { getProtectionWindowForSession } from "../../features/magic-context/protection-window";
 import type { Scheduler } from "../../features/magic-context/scheduler";
-import { parseCacheTtl } from "../../features/magic-context/scheduler";
+import { computeHardCacheExpired } from "../../features/magic-context/scheduler";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
 import { sessionDecisionCalibration } from "../../features/magic-context/session-decision-calibration";
 import {
@@ -298,36 +298,7 @@ export function __getMessageTokensCacheForTest(
     return getMessageTokensCache(sessionId);
 }
 
-/**
- * Compute whether the provider cache expired due to idle time.
- * Extracted so callers that don't run the full transform pipeline can still
- * evaluate the TTL idle window with the same parseCacheTtl semantics.
- *
- * Returns false when cacheTtl is "never" (Infinity) because any finite
- * elapsed time is < Infinity.
- *
- * @param onInvalid Optional callback invoked when cacheTtl fails to parse;
- *        the 5m fallback is applied AFTER the callback returns.
- */
-export function computeHardCacheExpired(
-    cacheTtl: string,
-    lastResponseTime: number,
-    now: number,
-    onInvalid?: (error: unknown) => void,
-): boolean {
-    let ttlMs: number;
-    try {
-        ttlMs = parseCacheTtl(cacheTtl);
-    } catch (error) {
-        onInvalid?.(error);
-        ttlMs = 5 * 60 * 1000;
-    }
-    // Strict > matches the Rust scheduler's predicate exactly: at elapsed == ttl
-    // both sides DEFER (one more pass at the boundary is safe; a premature HARD
-    // fold is a paid cache rebuild). Keep the comparators identical — the Rust
-    // doc comment asserts this parity and an audit caught them disagreeing.
-    return lastResponseTime > 0 && now - lastResponseTime > ttlMs;
-}
+export { computeHardCacheExpired } from "../../features/magic-context/scheduler";
 
 /**
  * Extract the provider/model from the last assistant message in the array.
@@ -2443,9 +2414,9 @@ export function createTransform(deps: TransformDeps) {
         // provider-side cache eviction, such as a model switch or system-block
         // change, plus the TTL idle window. The tool-set fingerprint is observed
         // alongside them but never folds m[0] because its process-global scope
-        // would create false-positive folds across sessions. Because system.transform
-        // runs after messages.transform, systemHash is the persisted last-turn hash,
-        // so system changes are detected on the next pass.
+        // would create false-positive folds across sessions. When system.transform
+        // follows messages.transform, systemHash is the persisted last-turn hash;
+        // a warm system change is then detected on the next pass.
         const hardModel = deps.liveModelBySession?.get(sessionId);
         const hardModelKey = hardModel ? `${hardModel.providerID}/${hardModel.modelID}` : "";
         const hardToolSetHash = deps.getToolSetHash?.(sessionId) ?? "";
@@ -3014,14 +2985,17 @@ export function createTransform(deps: TransformDeps) {
             );
         }
 
-        if (postTransformResult.bustedThisPass) {
+        // An idle-expired retry can replay a fold prepared by an aborted attempt.
+        // The provider still rebuilds the whole prefix, so record the expiry on
+        // the retry's own assistant even when this pass changed no message bytes.
+        if (postTransformResult.bustedThisPass || hardCacheExpired) {
             recordPendingTransformDecision(sessionId, {
                 tsMs: Date.now(),
                 decision: schedulerDecision,
                 materialized: postTransformResult.materialized,
                 materializeReason: normalizeMaterializeReason(
                     "opencode",
-                    postTransformResult.materializeReason,
+                    postTransformResult.materializeReason ?? (hardCacheExpired ? "ttl_idle" : null),
                     postTransformResult.materialized,
                 ),
                 systemHashPrev: postTransformResult.systemHashPrev,

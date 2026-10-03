@@ -304,6 +304,20 @@ function cloneMessages(messages: MessageLike[]): MessageLike[] {
 }
 
 describe("postprocess replay snapshot", () => {
+    it("preparing an execute request does not refresh the provider response clock", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-prepared-not-served";
+        getOrCreateSessionMeta(db, sessionId);
+        updateSessionMeta(db, sessionId, { lastResponseTime: 1_000, cacheTtl: "1h" });
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, [], {
+                schedulerDecision: "execute",
+                schedulerDeferReason: null,
+            }),
+        );
+        expect(getOrCreateSessionMeta(db, sessionId).lastResponseTime).toBe(1_000);
+    });
     it("serves byte-identical passes from one cached row and reloads after a database write", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);

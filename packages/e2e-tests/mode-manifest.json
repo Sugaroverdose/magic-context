@@ -3,6 +3,15 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and the Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh. The tag release workflow also runs the Rust invocation; both Rust lanes require public sibling path dependencies (../commons and ../subconscious).",
     "entries": [
         {
+            "path": "tests/idle-ttl-restart.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "TypeScript idle clock and late OpenCode 1 system-hook regression, including abort/resend and opt-in 240k tool loops; Pi/OMP and native OpenCode 2 cover shared idle behavior (v2 lacks the v1 decision-row binding); Rust has a separate module identity/fold path and is not claimed by this regression",
+            "contract_refs": ["S2-MIGRATION"],
+            "hosts": ["opencode", "pi", "omp", "opencode2"],
+            "behavior": true
+        },
+        {
             "path": "tests/opencode2/retrospective.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
