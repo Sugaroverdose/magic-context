@@ -84,7 +84,12 @@ import {
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { createHistorianHostRunner } from "./historian-host-runner";
 import { saveLkgSlotToDb } from "./lkg-persist";
-import { coldStartRawServedIndex, replayLkg, resolveLkgModelKeys } from "./lkg-replay";
+import {
+    coldStartRawServedIndex,
+    coldStartUncapturedReplay,
+    replayLkg,
+    resolveLkgModelKeys,
+} from "./lkg-replay";
 import {
     lkgReplayFits,
     lkgReplayLimit,
@@ -2051,31 +2056,59 @@ export function createRustModeTransform(
      * process left a freeze behind. A frozen healthy pass captures the raw bytes it
      * served, so a durable slot ending in messages exactly as the host sent them,
      * one of which the module now renders differently, shows the provider last saw
-     * the frozen representation (see `coldStartRawServedIndex`). Returns the slot's
-     * messages and the first raw-served index, or null. Uses the module output from
-     * before postprocess, which has side effects a pass that ends in a frozen serve
-     * must not run.
+     * the frozen representation (see `coldStartRawServedIndex`): the result is
+     * `frozen_slot`, with the slot's messages, the first raw-served slot index and
+     * the raw-input index where the raw run begins.
+     *
+     * Otherwise, a previous process may have ended right after a last-known-good
+     * replay it never captured (see `coldStartUncapturedReplay`): the result is
+     * `uncaptured_replay`, with the array that replay most likely served, so the
+     * thinking strip can remove thinking produced against bytes the module now
+     * renders differently.
+     *
+     * Null when neither applies. Uses the module output from before postprocess,
+     * which has side effects a pass that ends in a frozen serve must not run.
      */
     const detectColdStartFrozenSlot = (
         sessionId: string,
         rawInput: MessageLike[],
         moduleOutput: readonly unknown[],
         providerID: string | undefined,
-    ): { slotMessages: unknown[]; index: number } | null => {
+    ):
+        | { kind: "frozen_slot"; slotMessages: unknown[]; index: number; rawRunStart: number }
+        | { kind: "uncaptured_replay"; lastServed: unknown[]; rawUserIndex: number }
+        | null => {
         try {
             const slotMessages = parseLastServedSnapshot(getSlot(sessionId)?.jsonPrefix);
             if (!slotMessages) return null;
-            const index = coldStartRawServedIndex({
+            const key = rustModeServedKeyAfterPersistedStrips({
+                db: deps.db,
+                sessionId,
+                resolvedProviderID: providerID,
+            });
+            const frozen = coldStartRawServedIndex({ slotMessages, rawInput, moduleOutput, key });
+            if (frozen) return { kind: "frozen_slot", slotMessages, ...frozen };
+            const uncaptured = coldStartUncapturedReplay({
                 slotMessages,
                 rawInput,
                 moduleOutput,
-                key: rustModeServedKeyAfterPersistedStrips({
-                    db: deps.db,
-                    sessionId,
-                    resolvedProviderID: providerID,
-                }),
+                key,
             });
-            return index === null ? null : { slotMessages, index };
+            if (!uncaptured) return null;
+            // The uncaptured replay removed the session's persisted thinking strips from
+            // the raw tail before serving it; do the same here so the comparison matches.
+            const lastServed = structuredClone(uncaptured.lastServed) as MessageLike[];
+            replayRustModeBindingMismatchStrips({
+                db: deps.db,
+                sessionId,
+                messages: lastServed,
+                resolvedProviderID: providerID,
+            });
+            return {
+                kind: "uncaptured_replay",
+                lastServed,
+                rawUserIndex: uncaptured.rawUserIndex,
+            };
         } catch (error) {
             sessionLog(sessionId, "lkg cold-start freeze check failed (ignored):", error);
             return null;
@@ -3760,10 +3793,25 @@ export function createRustModeTransform(
                                   model?.providerID,
                               )
                             : null;
-                    if (coldStart && !cacheBustingPass) {
+                    if (coldStart?.kind === "uncaptured_replay") {
+                        // The module now renders differently a message the previous
+                        // process's uncaptured replay served raw. Nothing proves the
+                        // reconstructed array is exact, so it is unproven: the strip
+                        // starts at its first change or at its end.
+                        coldStartLastServed = { messages: coldStart.lastServed, proven: false };
+                        sessionLog(
+                            sessionId,
+                            `lkg_cold_start_uncaptured_replay raw_user_index=${coldStart.rawUserIndex}`,
+                        );
+                    } else if (coldStart && !cacheBustingPass) {
                         state.lkgRepresentationFrozen = true;
                         state.forceFullWire = true;
-                        state.lkgFrozenAtInputCount = inputCount;
+                        // Count raw tail growth from the first message the freeze served
+                        // raw, not from this pass, so a restart does not reset the budget
+                        // that ends a freeze. That start can sit a message or two before
+                        // the original freeze's input count, which only ends it sooner.
+                        state.lkgFrozenAtInputCount =
+                            coldStart.rawRunStart >= 0 ? coldStart.rawRunStart : inputCount;
                         sessionLog(
                             sessionId,
                             `lkg_cold_start_frozen_slot_resumed raw_served_index=${coldStart.index}`,

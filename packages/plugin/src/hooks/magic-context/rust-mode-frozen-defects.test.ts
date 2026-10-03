@@ -727,7 +727,80 @@ describe("a restart resumes a freeze the durable slot proves", () => {
         expect(textOf(served, "m2")).toBe("§3§ turn 2");
         expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
     });
+
+    it("a restart right after an uncaptured failure replay strips the thinking produced against its raw tail", async () => {
+        const s = frozenSession("restart-after-failure-thinking");
+        const sid = s.sessionId;
+        s.setModuleOutput(tagAllUsers);
+        await s.run([user(sid, "m1", "question")], "HARD");
+        const conversation: MessageLike[] = [
+            user(sid, "m1", "question"),
+            assistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+        ];
+        // The failure replay serves m2 untagged and captures nothing; the model's
+        // signed answer a2 is bound to that untagged m2.
+        const replayed = await s.run([...conversation], "throw");
+        expect(textOf(replayed, "m2")).toBe("turn 2");
+        conversation.push(thinkingAssistant(sid, "a2"), user(sid, "m3", "turn 3"));
+
+        s.restart();
+        const served = await s.run([...conversation], "SOFT+");
+        // The module retags m2, changing the prefix a2's thinking was produced
+        // against, so a2's thinking must not be sent behind it.
+        expect(textOf(served, "m2")).toBe("§3§ turn 2");
+        expect(hasReasoningOn(served, "a2")).toBe(false);
+        // The strip is persisted, so the next pass serves the same bytes.
+        conversation.push(assistant(sid, "a3"), user(sid, "m4", "turn 4"));
+        const next = await s.run([...conversation], "SOFT+");
+        expect(sha(next.slice(0, served.length))).toBe(sha(served));
+    });
+
+    it("a restart of a healthy session keeps the newest assistant's thinking", async () => {
+        const s = frozenSession("restart-healthy-thinking");
+        const sid = s.sessionId;
+        // Like the Rust overlay, the module tags assistant text as well as user text,
+        // so the newest assistant itself renders differently from the host's copy.
+        s.setModuleOutput((input) =>
+            (tagAllUsers(input) as MessageLike[]).map((message) =>
+                message.info.role === "assistant"
+                    ? {
+                          ...message,
+                          parts: message.parts.map((part) => {
+                              const record = part as { type?: string; text?: string };
+                              return record.type === "text" && typeof record.text === "string"
+                                  ? { ...record, text: `§a§ ${record.text}` }
+                                  : part;
+                          }),
+                      }
+                    : message,
+            ),
+        );
+        await s.run([user(sid, "m1", "question")], "HARD");
+        const conversation: MessageLike[] = [
+            user(sid, "m1", "question"),
+            assistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+        ];
+        const defer = await s.run([...conversation], "SOFT+");
+
+        // Every healthy pass captured, so the only messages after the slot are the
+        // answer to the last served array and the new user turn.
+        s.restart();
+        conversation.push(thinkingAssistant(sid, "a2"), user(sid, "m3", "turn 3"));
+        const served = await s.run([...conversation], "SOFT+");
+        expect(sha(served.slice(0, defer.length))).toBe(sha(defer));
+        expect(hasReasoningOn(served, "a2")).toBe(true);
+        expect(s.frozenFields().lkgRepresentationFrozen).toBe(false);
+    });
 });
+
+function hasReasoningOn(messages: readonly unknown[], id: string): boolean {
+    const message = messages.find((entry) => (entry as MessageLike).info.id === id) as
+        | MessageLike
+        | undefined;
+    return message?.parts.some((part) => (part as { type?: string }).type === "reasoning") ?? false;
+}
 
 describe("a healthy frozen pass is admitted like any other replay", () => {
     // Eight megabytes of text: over any context limit by the four-bytes-per-token
