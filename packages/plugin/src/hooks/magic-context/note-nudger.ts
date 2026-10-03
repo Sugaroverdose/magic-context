@@ -36,16 +36,38 @@ export type NoteNudgeTrigger = "historian_complete" | "commit_detected" | "todos
 
 const NOTE_NUDGE_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
 
-// In-memory delivery timestamp per session. Doesn't need to survive restart —
-// if the app restarts, cooldown resets, which is acceptable.
+// In-memory delivery timestamp per session. Deliberately not persisted: after
+// a restart the cooldown resets, which can at worst re-surface the nudge once
+// early. Entries are useless once the cooldown has passed, so they are pruned
+// then; without that the map kept one entry for every session that ever got a
+// nudge for the life of the process.
 const lastDeliveredAt = new Map<string, number>();
 
-function getPersistedNoteNudgeDeliveredAt(_db: unknown, sessionId: string): number {
-    return lastDeliveredAt.get(sessionId) ?? 0;
+function isCoolingDown(deliveredAt: number, now: number): boolean {
+    return now - deliveredAt < NOTE_NUDGE_COOLDOWN_MS;
+}
+
+function getNoteNudgeDeliveredAt(sessionId: string): number {
+    const deliveredAt = lastDeliveredAt.get(sessionId);
+    if (deliveredAt === undefined) return 0;
+    if (!isCoolingDown(deliveredAt, Date.now())) {
+        lastDeliveredAt.delete(sessionId);
+        return 0;
+    }
+    return deliveredAt;
 }
 
 export function recordNoteNudgeDeliveryTime(sessionId: string): void {
-    lastDeliveredAt.set(sessionId, Date.now());
+    const now = Date.now();
+    for (const [otherSessionId, deliveredAt] of lastDeliveredAt) {
+        if (!isCoolingDown(deliveredAt, now)) lastDeliveredAt.delete(otherSessionId);
+    }
+    lastDeliveredAt.set(sessionId, now);
+}
+
+/** Number of sessions holding a cooldown entry; for tests. */
+export function getNoteNudgeCooldownCountForTest(): number {
+    return lastDeliveredAt.size;
 }
 
 /**
@@ -118,8 +140,8 @@ export function peekNoteNudgeText(
     // in quick succession during active work.
     // Check unconditionally — a new trigger clears sticky fields, so gating on
     // stickyText presence would let triggers bypass the cooldown window.
-    const deliveredAt = getPersistedNoteNudgeDeliveredAt(db, sessionId);
-    if (deliveredAt > 0 && Date.now() - deliveredAt < NOTE_NUDGE_COOLDOWN_MS) {
+    const deliveredAt = getNoteNudgeDeliveredAt(sessionId);
+    if (deliveredAt > 0) {
         sessionLog(
             sessionId,
             `note-nudge: suppressing — last delivered ${Math.round((Date.now() - deliveredAt) / 1000)}s ago (cooldown ${NOTE_NUDGE_COOLDOWN_MS / 60000}m)`,

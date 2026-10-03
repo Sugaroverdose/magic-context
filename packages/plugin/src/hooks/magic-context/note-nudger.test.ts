@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, setSystemTime } from "bun:test";
 import {
     appendNoteNudgeAnchor,
     getNoteNudgeAnchors,
@@ -12,11 +12,13 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     clearNoteNudgeState,
     clearNoteNudgeTriggerOnly,
+    getNoteNudgeCooldownCountForTest,
     getNoteNudgeText,
     getStickyNoteNudge,
     markNoteNudgeDelivered,
     onNoteTrigger,
     peekNoteNudgeText,
+    recordNoteNudgeDeliveryTime,
     resetNoteNudgeCooldownOnly,
 } from "./note-nudger";
 
@@ -337,5 +339,26 @@ describe("note-nudger", () => {
             { messageId: "m1", text: "one" },
             { messageId: "m2", text: "two" },
         ]);
+    });
+
+    it("drops cooldown entries once their window has passed instead of keeping one per session forever", () => {
+        // Far ahead of the real clock, so entries other tests left behind count as expired.
+        const start = new Date("2100-01-01T00:00:00Z").getTime();
+        try {
+            setSystemTime(start);
+            for (let index = 0; index < 50; index += 1) {
+                recordNoteNudgeDeliveryTime(`ses-cooldown-prune-${index}`);
+            }
+            expect(getNoteNudgeCooldownCountForTest()).toBeGreaterThanOrEqual(50);
+
+            // Sixteen minutes later every earlier window has closed, so the next
+            // delivery leaves only its own entry behind.
+            setSystemTime(start + 16 * 60 * 1000);
+            recordNoteNudgeDeliveryTime("ses-cooldown-prune-late");
+            expect(getNoteNudgeCooldownCountForTest()).toBe(1);
+        } finally {
+            setSystemTime();
+            resetNoteNudgeCooldownOnly("ses-cooldown-prune-late");
+        }
     });
 });
