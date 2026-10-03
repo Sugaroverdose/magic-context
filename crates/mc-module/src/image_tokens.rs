@@ -14,16 +14,28 @@ const IMAGE_TOKEN_DIVISOR: u64 = 750;
 pub(crate) const IMAGE_FALLBACK_TOKENS: i64 = 1_200;
 /// The provider's maximum for a single image.
 const IMAGE_TOKEN_CAP: i64 = 4_500;
-/// Base64 characters decoded to find the dimensions: enough for the PNG, GIF and WebP headers
-/// and the usual JPEG frame-marker offsets.
+/// Base64 characters decoded to find the dimensions: enough for the PNG, GIF and WebP headers.
+/// JPEG reads further on demand, because an EXIF block before the frame header can run to
+/// 64 KiB.
 const PREVIEW_BASE64_CHARS: usize = 512;
+const PREVIEW_BYTES: usize = PREVIEW_BASE64_CHARS / 4 * 3;
+/// Later JPEG read windows: 4,096 base64 characters, 3,072 decoded bytes each.
+const WINDOW_BASE64_CHARS: usize = 4_096;
+const WINDOW_BYTES: usize = WINDOW_BASE64_CHARS / 4 * 3;
+/// How far into the decoded JPEG the frame header is searched for. Each APPn segment is at
+/// most 64 KiB, and EXIF, XMP and ICC blocks rarely add up to more.
+const JPEG_SCAN_LIMIT_BYTES: usize = 256 * 1024;
 
 fn decode_base64_preview(payload: &str) -> Option<Vec<u8>> {
-    // Only a short prefix is decoded, so size the buffer for that prefix, not the payload.
-    let mut output = Vec::with_capacity(PREVIEW_BASE64_CHARS * 3 / 4);
+    decode_base64_chars(&payload.as_bytes()[..payload.len().min(PREVIEW_BASE64_CHARS)])
+}
+
+fn decode_base64_chars(chars: &[u8]) -> Option<Vec<u8>> {
+    // Only a short window is decoded, so size the buffer for that window, not the payload.
+    let mut output = Vec::with_capacity(chars.len() * 3 / 4);
     let mut quartet = [0u8; 4];
     let mut filled = 0usize;
-    for byte in payload.bytes().take(PREVIEW_BASE64_CHARS) {
+    for &byte in chars {
         let value = match byte {
             b'A'..=b'Z' => byte - b'A',
             b'a'..=b'z' => byte - b'a' + 26,
@@ -51,6 +63,82 @@ fn decode_base64_preview(payload: &str) -> Option<Vec<u8>> {
     Some(output)
 }
 
+/// Random access into a base64 payload without decoding all of it. The first window is the
+/// preview the caller already decoded; later windows are decoded only when a read lands in
+/// them. `None` past the end or for an undecodable window, which ends the JPEG scan and
+/// falls back to the fixed estimate. Mirrors `createBase64ByteReader` in the plugin.
+struct Base64ByteReader<'a> {
+    payload: &'a [u8],
+    preview: &'a [u8],
+    windows: std::collections::HashMap<usize, Option<Vec<u8>>>,
+}
+
+impl<'a> Base64ByteReader<'a> {
+    fn new(payload: &'a str, preview: &'a [u8]) -> Self {
+        Self {
+            payload: payload.as_bytes(),
+            preview,
+            windows: std::collections::HashMap::new(),
+        }
+    }
+
+    fn byte_at(&mut self, offset: usize) -> Option<u8> {
+        if offset < PREVIEW_BYTES {
+            return self.preview.get(offset).copied();
+        }
+        let index = (offset - PREVIEW_BYTES) / WINDOW_BYTES;
+        let payload = self.payload;
+        let window = self.windows.entry(index).or_insert_with(|| {
+            let start = PREVIEW_BASE64_CHARS + index * WINDOW_BASE64_CHARS;
+            if start >= payload.len() {
+                return None;
+            }
+            let end = (start + WINDOW_BASE64_CHARS).min(payload.len());
+            decode_base64_chars(&payload[start..end])
+        });
+        window
+            .as_ref()?
+            .get(offset - PREVIEW_BYTES - index * WINDOW_BYTES)
+            .copied()
+    }
+}
+
+/// JPEG frame size: walks the segments before the frame header (APP0 JFIF, APP1 EXIF, ...)
+/// by their declared length, so only the bytes at segment starts are decoded.
+fn jpeg_dimensions(reader: &mut Base64ByteReader<'_>) -> Option<(u64, u64)> {
+    if reader.byte_at(0)? != 0xff || reader.byte_at(1)? != 0xd8 {
+        return None;
+    }
+    reader.byte_at(3)?;
+    let mut index = 2usize;
+    while index < JPEG_SCAN_LIMIT_BYTES && reader.byte_at(index + 8).is_some() {
+        if reader.byte_at(index)? != 0xff {
+            index += 1;
+            continue;
+        }
+        let marker = reader.byte_at(index + 1)?;
+        let is_sof = matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf);
+        if is_sof {
+            let height =
+                u16::from_be_bytes([reader.byte_at(index + 5)?, reader.byte_at(index + 6)?]) as u64;
+            let width =
+                u16::from_be_bytes([reader.byte_at(index + 7)?, reader.byte_at(index + 8)?]) as u64;
+            return (width > 0 && height > 0).then_some((width, height));
+        }
+        if matches!(marker, 0xd8 | 0xd9 | 0x01) {
+            index += 2;
+            continue;
+        }
+        let segment_len =
+            u16::from_be_bytes([reader.byte_at(index + 2)?, reader.byte_at(index + 3)?]) as usize;
+        if segment_len < 2 {
+            return None;
+        }
+        index = index.saturating_add(2 + segment_len);
+    }
+    None
+}
+
 fn image_dimensions(header: &str, bytes: &[u8]) -> Option<(u64, u64)> {
     if header.contains("image/png")
         && bytes.len() >= 24
@@ -64,33 +152,6 @@ fn image_dimensions(header: &str, bytes: &[u8]) -> Option<(u64, u64)> {
         let width = u16::from_le_bytes(bytes[6..8].try_into().ok()?) as u64;
         let height = u16::from_le_bytes(bytes[8..10].try_into().ok()?) as u64;
         return (width > 0 && height > 0).then_some((width, height));
-    }
-    if (header.contains("image/jpeg") || header.contains("image/jpg"))
-        && bytes.starts_with(&[0xff, 0xd8])
-    {
-        let mut index = 2usize;
-        while index + 8 < bytes.len() {
-            if bytes[index] != 0xff {
-                index += 1;
-                continue;
-            }
-            let marker = bytes[index + 1];
-            let is_sof = matches!(marker, 0xc0..=0xc3 | 0xc5..=0xc7 | 0xc9..=0xcb | 0xcd..=0xcf);
-            if is_sof {
-                let height = u16::from_be_bytes([bytes[index + 5], bytes[index + 6]]) as u64;
-                let width = u16::from_be_bytes([bytes[index + 7], bytes[index + 8]]) as u64;
-                return (width > 0 && height > 0).then_some((width, height));
-            }
-            if matches!(marker, 0xd8 | 0xd9 | 0x01) {
-                index += 2;
-                continue;
-            }
-            let segment_len = u16::from_be_bytes([bytes[index + 2], bytes[index + 3]]) as usize;
-            if segment_len < 2 {
-                return None;
-            }
-            index = index.saturating_add(2 + segment_len);
-        }
     }
     if header.contains("image/webp")
         && bytes.len() >= 30
@@ -140,7 +201,12 @@ pub(crate) fn estimate_image_tokens_from_parts(header: &str, payload: &str) -> i
     let Some(bytes) = decode_base64_preview(payload) else {
         return IMAGE_FALLBACK_TOKENS;
     };
-    let Some((width, height)) = image_dimensions(header, &bytes) else {
+    let dimensions = if header.contains("image/jpeg") || header.contains("image/jpg") {
+        jpeg_dimensions(&mut Base64ByteReader::new(payload, &bytes))
+    } else {
+        image_dimensions(header, &bytes)
+    };
+    let Some((width, height)) = dimensions else {
         return IMAGE_FALLBACK_TOKENS;
     };
     let pixels = width.saturating_mul(height);

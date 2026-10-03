@@ -90,4 +90,43 @@ describe("tagMessages steady replay cost", () => {
             closeQuietly(db);
         }
     });
+
+    test("reads partial compartment ends once per pass, not once per text or file setContent", () => {
+        const db = new Database(":memory:");
+        try {
+            initializeDatabase(db);
+            runMigrations(db);
+            const sessionId = "ses-partial-ends-once";
+            const count = 40;
+            // msg-1 ends a compartment at block 0, so its later blocks stay raw.
+            db.prepare(
+                "INSERT INTO compartments(session_id, sequence, start_message, end_message, start_message_id, end_message_id, end_block_index, title, content, created_at) VALUES (?, 1, 0, 1, 'msg-0', 'msg-1', 0, 'partial', 'covers the first block', 1)",
+            ).run(sessionId);
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const messages = buildMessages(sessionId, count);
+            messages[1]?.parts.push({ type: "text", text: "uncovered suffix" });
+            const realPrepare = db.prepare.bind(db);
+            let compartmentReads = 0;
+            db.prepare = ((sql: string) => {
+                if (/FROM compartments/.test(sql)) compartmentReads += 1;
+                return realPrepare(sql);
+            }) as typeof db.prepare;
+            const { targets } = tagMessages(sessionId, messages, tagger, db);
+            let textTargets = 0;
+            let refused = 0;
+            for (const target of targets.values()) {
+                if (!target.getContent) continue;
+                textTargets += 1;
+                if (!target.setContent("[dropped]")) refused += 1;
+            }
+            expect(textTargets).toBeGreaterThan(count);
+            // Only the uncovered suffix of msg-1 is refused by the partial-end guard.
+            expect(refused).toBe(1);
+            // One read covers every target in the pass (the tool targets share it).
+            expect(compartmentReads).toBe(1);
+        } finally {
+            closeQuietly(db);
+        }
+    });
 });

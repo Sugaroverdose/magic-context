@@ -48,7 +48,13 @@ const MALFORMED_TAG_PREFIX_REGEX = /^(?:§\d+">§(?:\d+§)?\s*)+/;
 //     (`§42important` → `important`) or a sentence period; whitespace is excluded
 //     so content after a space survives (`§42 files` → ` files`).
 const DANGLING_TAG_GLOBAL_REGEX = /\u00a7\d+(?!\.\d)[^\s\u00a7\w.]?/g;
-const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\.\d)[^\s\u00a7\w.]?\s*)+/;
+// The leading variant runs on every text part the transform tags, user text and
+// tool output included, and its result is saved as the part's source content.
+// So it is stricter than the global one: the improvised closer is REQUIRED and
+// must end the token (whitespace or end of text follows it). Ordinary section
+// references (`§5 of the contract`, `§5(a)`, `§12-14`) keep their bytes; only the
+// observed cargo-cult shapes (`§103012$ text`, `§11865ҩ text`) are removed.
+const DANGLING_TAG_PREFIX_REGEX = /^(?:\u00a7\d+(?!\.\d)[^\s\u00a7\w.](?=\s|$)\s*)+/;
 
 /** Well-formed `§N§` pairs anywhere (persistence cargo-cult cleanup). */
 const COMPLETE_TAG_PAIR_GLOBAL_REGEX = /\u00a7\d+\u00a7/g;
