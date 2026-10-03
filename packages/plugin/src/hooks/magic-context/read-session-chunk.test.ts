@@ -19,6 +19,7 @@ import {
     readRawSessionMessageRange,
     readRawSessionMessages,
     readSessionChunk,
+    setBoundedRawMessageProvider,
     setRawMessageProvider,
     withRawMessageProvider,
     withRawSessionMessageCache,
@@ -280,6 +281,21 @@ describe("raw message provider lifecycle", () => {
             latestCleanup();
             replacementCleanup();
             oldCleanup();
+        }
+        expect(hasRawMessageProvider(sessionId)).toBe(false);
+    });
+
+    it("shares one registration when the same bounded provider is registered twice", () => {
+        const sessionId = "bounded-provider-shared";
+        const { readMessages: _full, ...bounded } = provider;
+        const outerCleanup = setBoundedRawMessageProvider(sessionId, bounded);
+        const innerCleanup = setBoundedRawMessageProvider(sessionId, bounded);
+        try {
+            innerCleanup();
+            expect(getRawSessionMessageCount(sessionId)).toBe(7);
+        } finally {
+            innerCleanup();
+            outerCleanup();
         }
         expect(hasRawMessageProvider(sessionId)).toBe(false);
     });

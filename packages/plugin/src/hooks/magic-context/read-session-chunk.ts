@@ -222,18 +222,28 @@ export function setRawMessageProvider(sessionId: string, provider: RawMessagePro
     };
 }
 
+// One wrapper per bounded provider, so registering the same provider twice
+// reaches setRawMessageProvider with the same object and shares its lifetime
+// instead of replacing it.
+const boundedProviderWrappers = new WeakMap<BoundedRawMessageProvider, RawMessageProvider>();
+
 export function setBoundedRawMessageProvider(
     sessionId: string,
     provider: BoundedRawMessageProvider,
 ): () => void {
-    return setRawMessageProvider(sessionId, {
-        ...provider,
-        readMessages: () => {
-            throw new Error(
-                "Bounded raw-message providers cannot read complete history; full reads are reserved for store-generation conversion",
-            );
-        },
-    });
+    let wrapper = boundedProviderWrappers.get(provider);
+    if (!wrapper) {
+        wrapper = {
+            ...provider,
+            readMessages: () => {
+                throw new Error(
+                    "Bounded raw-message providers cannot read complete history; full reads are reserved for store-generation conversion",
+                );
+            },
+        };
+        boundedProviderWrappers.set(provider, wrapper);
+    }
+    return setRawMessageProvider(sessionId, wrapper);
 }
 
 /**
