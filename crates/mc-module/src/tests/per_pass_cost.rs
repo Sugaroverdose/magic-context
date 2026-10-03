@@ -189,7 +189,7 @@ fn output_bytes(response: &Value) -> Vec<u8> {
 fn median(values: &mut [f64]) -> f64 {
     values.sort_by(f64::total_cmp);
     let n = values.len();
-    if n % 2 == 0 {
+    if n.is_multiple_of(2) {
         (values[n / 2 - 1] + values[n / 2]) / 2.0
     } else {
         values[n / 2]
@@ -199,10 +199,9 @@ fn median(values: &mut [f64]) -> f64 {
 #[tokio::test(flavor = "current_thread")]
 #[ignore = "copy-only release profile; see docs/reports/ckmc-per-pass-cost.md"]
 async fn copied_sessions_per_pass_cost() {
-    assert!(
-        !cfg!(debug_assertions),
-        "use --release for meaningful timings"
-    );
+    if cfg!(debug_assertions) {
+        panic!("use --release for meaningful timings");
+    }
     let temp = std::env::temp_dir().canonicalize().unwrap();
     let root = temp.join("magic-context/ckmc-perf").canonicalize().unwrap();
     assert!(

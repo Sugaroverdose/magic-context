@@ -5,7 +5,7 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use cpu_time::ThreadTime;
 use serde::Serialize;
@@ -28,10 +28,14 @@ pub(crate) fn end_pass() -> BTreeMap<&'static str, Cost> {
     COSTS.with(|costs| costs.borrow_mut().take().expect("profiling pass active"))
 }
 
+// `ThreadTime` is deliberately !Send, and spans live across awaits in the
+// transform handler, so a span keeps the thread clock's reading as a plain
+// `Duration`. The profiling test runs on a current-thread runtime, so start and
+// end are read on the same thread.
 pub(crate) struct Span {
     name: &'static str,
     wall: Instant,
-    cpu: ThreadTime,
+    cpu_start: Duration,
 }
 
 pub(crate) fn start(name: &'static str) -> Option<Span> {
@@ -39,7 +43,7 @@ pub(crate) fn start(name: &'static str) -> Option<Span> {
         costs.borrow().as_ref().map(|_| Span {
             name,
             wall: Instant::now(),
-            cpu: ThreadTime::now(),
+            cpu_start: ThreadTime::now().as_duration(),
         })
     })
 }
@@ -50,7 +54,11 @@ pub(crate) fn finish(span: Option<Span>) {
 
 impl Drop for Span {
     fn drop(&mut self) {
-        let cpu_ms = self.cpu.elapsed().as_secs_f64() * 1_000.0;
+        let cpu_ms = ThreadTime::now()
+            .as_duration()
+            .saturating_sub(self.cpu_start)
+            .as_secs_f64()
+            * 1_000.0;
         let wall_ms = self.wall.elapsed().as_secs_f64() * 1_000.0;
         COSTS.with(|costs| {
             if let Some(costs) = costs.borrow_mut().as_mut() {
