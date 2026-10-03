@@ -467,12 +467,31 @@ impl McStore {
         session_id: &str,
         write: &PendingContextWrite,
     ) -> Result<Vec<PromotedRef>, McStoreError> {
+        // The same binary recorded the row from this value, so it serializes to the
+        // stored text.
+        let recorded =
+            serde_json::to_string(write).map_err(|error| McStoreError::Serde(error.to_string()))?;
+        self.complete_recorded_context_write(session_id, write, &recorded)
+    }
+
+    /// Apply `write`, then delete its pending row only if the row still holds `recorded`,
+    /// the text it was stored as. Between the apply and the delete another writer can
+    /// resume this row and record a newer write for the session; deleting by session
+    /// alone would drop that newer write, and if its own `context.db` half then failed,
+    /// nothing would be left to resume it.
+    fn complete_recorded_context_write(
+        &self,
+        session_id: &str,
+        write: &PendingContextWrite,
+        recorded: &str,
+    ) -> Result<Vec<PromotedRef>, McStoreError> {
         let promoted =
             self.context_write(HISTORY_TABLES, |tx| apply_pending_tx(tx, session_id, write))?;
         self.inner.with_conn_fenced(|tx| {
             tx.execute(
-                "DELETE FROM mc_single_store_pending_publish WHERE session_id = ?1",
-                params![session_id],
+                "DELETE FROM mc_single_store_pending_publish
+                  WHERE session_id = ?1 AND publish_json = ?2",
+                params![session_id, recorded],
             )?;
             Ok(())
         })?;
@@ -495,7 +514,9 @@ impl McStore {
         };
         let write: PendingContextWrite =
             serde_json::from_str(&json).map_err(|error| McStoreError::Serde(error.to_string()))?;
-        self.complete_pending_context_write(session_id, &write)?;
+        // The stored text, not a re-serialization: a row an older binary wrote may not
+        // round-trip byte for byte, and then it would never be deleted.
+        self.complete_recorded_context_write(session_id, &write, &json)?;
         Ok(true)
     }
 
@@ -704,5 +725,45 @@ mod tests {
         assert!(store.resume_pending_context_write("ses").unwrap());
         assert_eq!(counts(&store), [1, 1, 1, 1, 1]);
         assert!(!store.has_pending_context_write("ses").unwrap());
+    }
+
+    #[test]
+    fn a_late_completion_does_not_delete_the_pending_write_another_writer_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let descriptor = cortexkit_store_types::StorageDescriptor {
+            module_id: "magic-context-test".to_string(),
+            storage_namespace: crate::single_store_schema::STORE_NAMESPACE.to_string(),
+            isolation: cortexkit_store_types::Isolation::Module,
+            backend: cortexkit_store_types::StorageBackend::Sqlite {
+                path: dir.path().join("store.db").to_string_lossy().into_owned(),
+            },
+        };
+        let store = McStore::open_for_test(&descriptor).unwrap();
+
+        // Writer A records its fold. Before A gets to its own completion, writer B resumes
+        // A's row (applying and deleting it) and records a newer write of its own.
+        let first = fold();
+        record(&store, &first);
+        assert!(store.resume_pending_context_write("ses").unwrap());
+        let second = PendingContextWrite::TruncateAfter {
+            keep_through_seq: 0,
+            now_ms: 20,
+        };
+        record(&store, &second);
+
+        // A's completion now runs. It may only remove the row it recorded, so B's write
+        // stays pending until B (or a resume) applies it.
+        store.complete_pending_context_write("ses", &first).unwrap();
+        let stored: String = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT publish_json FROM mc_single_store_pending_publish WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(stored, serde_json::to_string(&second).unwrap());
     }
 }
