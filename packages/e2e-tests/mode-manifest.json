@@ -2132,6 +2132,21 @@
             ]
         },
         {
+            "path": "tests/rust-frozen-restart-review-drill.test.ts",
+            "tier": "rust-only",
+            "invocation": {
+                "ts": false,
+                "rust": true
+            },
+            "rationale": "Rust-mode frozen replay across a host restart (slice A review drills): a restart during a freeze keeps serving frozen bytes, an emergency-band refusal sends no provider request, and a restart right after an uncaptured outage replay strips the thinking produced against the raw tail instead of sending it behind retagged bytes",
+            "contract_refs": [
+                "RUST-E2E"
+            ],
+            "hosts": [
+                "opencode"
+            ]
+        },
+        {
             "path": "tests/rust-steady-state-byte-identity.test.ts",
             "tier": "rust-only",
             "invocation": {
