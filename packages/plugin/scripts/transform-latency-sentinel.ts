@@ -210,8 +210,8 @@ const seconds = (ms: number | null) => `${((ms ?? 0) / 1000).toFixed(1)} s`;
 const KIND_LABEL: Record<Kind, string> = { p90: "slow p90", single: "slow pass", timeout: "timeout", park: "park", refusal: "refused turn", module_climb: "module time climbing", busy_refusal: "storage-busy refusal", busy_replay: "busy-storage replay", long_lock: "long lock holder" };
 
 /** Only a park or a refused turn needs to interrupt; latency alone is reported at medium urgency. */
-export function alertUrgency(alerts: LatencyAlert[]): "high" | "medium" {
-    return alerts.some((alert) => alert.kind === "park" || alert.kind === "refusal") ? "high" : "medium";
+export function alertUrgency(alerts: LatencyAlert[]): "high" | "normal" {
+    return alerts.some((alert) => alert.kind === "park" || alert.kind === "refusal") ? "high" : "normal";
 }
 
 export function formatAlerts(alerts: LatencyAlert[]): string {
@@ -242,7 +242,7 @@ export function formatAlerts(alerts: LatencyAlert[]): string {
     return `Magic Context transform latency since ${from} (load now ${load}):\n${lines.join("\n")}`;
 }
 
-async function deliver(options: LatencyOptions, content: string, id: string, urgency: "high" | "medium"): Promise<void> {
+async function deliver(options: LatencyOptions, content: string, id: string, urgency: "high" | "normal"): Promise<void> {
     if (options.wake) return options.wake(content, id);
     const client = await SubcClient.connect({ connectionFile: options.connectionFile, handshakeTimeoutMs: 2_000 });
     try {
