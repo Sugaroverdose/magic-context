@@ -13626,6 +13626,21 @@ impl McStore {
                     compartment.end_message,
                 ));
             }
+            // The meta is settled and encoded before the first write: an outcome returned
+            // from this closure commits the transaction, so a refusal after a write would
+            // leave that write (and a pending context.db half) behind.
+            meta.publication_floor_ordinal = Some(
+                meta.publication_floor_ordinal
+                    .unwrap_or(1)
+                    .max(request.publication_floor_ordinal.max(1)),
+            );
+            let next = current as u64 + 1;
+            meta.historian = idle_historian_after_success(&meta.historian);
+            meta.historian.complete_latest_fire(current_time_ms(), next);
+            let meta_json = match encode_published_meta(&meta) {
+                Ok(json) => json,
+                Err(e) => return Ok(PublishTxnOutcome::Serde(e)),
+            };
             if request.chunk_transcript.is_some() || request.raw_chunk_messages.is_some() {
                 insert_chunk_transcripts_tx(
                     tx,
@@ -13638,18 +13653,6 @@ impl McStore {
             }
             single_store_schema::write_compartment_dates(tx, session_id, &numbered)?;
             context_writes::record_pending_context_write_tx(tx, session_id, &write)?;
-            meta.publication_floor_ordinal = Some(
-                meta.publication_floor_ordinal
-                    .unwrap_or(1)
-                    .max(request.publication_floor_ordinal.max(1)),
-            );
-            let next = current as u64 + 1;
-            meta.historian = idle_historian_after_success(&meta.historian);
-            meta.historian.complete_latest_fire(current_time_ms(), next);
-            let meta_json = match serde_json::to_string(&meta) {
-                Ok(json) => json,
-                Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
-            };
             tx.execute(
                 "UPDATE mc_cache_state SET row_version = ?2, meta = ?3
                  WHERE session_id = ?1 AND row_version = ?4",
@@ -16730,6 +16733,22 @@ fn write_cache_state_tx(
         last_activity_at,
     )?;
     Ok(written.base_after)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Makes the next historian publish on this thread fail to encode its meta, standing in
+    /// for a serializer error that real meta cannot currently produce.
+    static FAIL_PUBLISH_META_ENCODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The small-row meta JSON a historian publish stores.
+fn encode_published_meta(meta: &ModuleMeta) -> Result<String, String> {
+    #[cfg(test)]
+    if FAIL_PUBLISH_META_ENCODE.with(|flag| flag.replace(false)) {
+        return Err("injected meta encode failure".to_string());
+    }
+    serde_json::to_string(meta).map_err(|error| error.to_string())
 }
 
 /// Carry the row-state digest across a `row_version` step that did not touch the rows it
@@ -24489,6 +24508,39 @@ mod tests {
             at(&store),
             "abandon"
         );
+    }
+
+    #[test]
+    fn a_publish_whose_meta_fails_to_encode_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::default(), &publishing_meta())
+            .unwrap();
+        let before = store.load("ses").unwrap().row_version;
+
+        FAIL_PUBLISH_META_ENCODE.with(|flag| flag.set(true));
+        assert!(matches!(
+            publish_once(&store, "ses"),
+            Err(HistorianPublishError::Serde(_))
+        ));
+
+        // A publish that reports failure must leave no half behind: no pending context.db
+        // write for a later resume to land, and no compartment dates in store.db.
+        assert!(!store.has_pending_context_write("ses").unwrap());
+        let dates: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM mc_compartment_dates WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(dates, 0);
+        assert_eq!(store.load("ses").unwrap().row_version, before);
+        assert!(store.load_compartments("ses").unwrap().is_empty());
     }
 }
 
