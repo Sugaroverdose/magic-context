@@ -53,6 +53,26 @@ describe("dangling-open tag cleanup (§N + improvised closer, no closing §)", (
             "99 files, 2024 roadmap",
         );
     });
+
+    it("strips a leading §N + improvised closer via stripTagPrefix for both production shapes", () => {
+        expect(stripTagPrefix(`${SECTION}11865${CYRILLIC_HA} done`)).toBe("done");
+        expect(stripTagPrefix(`${SECTION}103012$`)).toBe("");
+    });
+
+    it("keeps a leading section reference in transform-tagged text", () => {
+        // User text and tool output go through stripTagPrefix too, and the result
+        // becomes the part's saved source content, so a real reference must survive.
+        for (const text of [
+            `${SECTION}5 of the contract`,
+            `${SECTION}5(a) applies here`,
+            `${SECTION}12-14 are repealed`,
+            `${SECTION}5`,
+        ]) {
+            expect(stripTagPrefix(text)).toBe(text);
+            expect(prependTag(9, text)).toBe(`${SECTION}9${SECTION} ${text}`);
+            expect(prependTag(9, prependTag(9, text))).toBe(`${SECTION}9${SECTION} ${text}`);
+        }
+    });
 });
 
 describe("stripTagPrefix (transform §N§ notation only)", () => {
