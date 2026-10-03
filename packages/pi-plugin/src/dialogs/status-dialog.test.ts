@@ -457,7 +457,7 @@ Warning: History compression could not finish this turn. It will retry automatic
 						) => unknown,
 					) {
 						const component = factory(
-							{ requestRender() {} },
+							{ terminal: { rows: 100 }, requestRender() {} },
 							{
 								fg: (_name: string, text: string) => text,
 								bold: (text: string) => text,
@@ -522,7 +522,7 @@ Warning: History compression could not finish this turn. It will retry automatic
 				ui: {
 					async custom(factory: unknown) {
 						const makeComponent = factory as (
-							tui: { requestRender: () => void },
+							tui: { terminal: { rows: number }; requestRender: () => void },
 							theme: {
 								fg: (_name: string, text: string) => string;
 								bold: (text: string) => string;
@@ -531,7 +531,7 @@ Warning: History compression could not finish this turn. It will retry automatic
 							done: (value: undefined) => void,
 						) => { render: (width: number) => string[]; dispose?: () => void };
 						const component = makeComponent(
-							{ requestRender: () => undefined },
+							{ terminal: { rows: 100 }, requestRender: () => undefined },
 							{ fg: (_name, text) => text, bold: (text) => text },
 							undefined,
 							() => undefined,
@@ -575,7 +575,7 @@ Warning: History compression could not finish this turn. It will retry automatic
 				ui: {
 					async custom(factory: unknown) {
 						const makeComponent = factory as (
-							tui: { requestRender: () => void },
+							tui: { terminal: { rows: number }; requestRender: () => void },
 							theme: {
 								fg: (_name: string, text: string) => string;
 								bold: (text: string) => string;
@@ -584,7 +584,7 @@ Warning: History compression could not finish this turn. It will retry automatic
 							done: (value: undefined) => void,
 						) => { render: (width: number) => string[]; dispose?: () => void };
 						const component = makeComponent(
-							{ requestRender: () => undefined },
+							{ terminal: { rows: 100 }, requestRender: () => undefined },
 							{ fg: (_name, text) => text, bold: (text) => text },
 							undefined,
 							() => undefined,
@@ -800,7 +800,7 @@ Warning: History compression could not finish this turn. It will retry automatic
 				ui: {
 					async custom(factory: unknown) {
 						const makeComponent = factory as (
-							tui: { requestRender: () => void },
+							tui: { terminal: { rows: number }; requestRender: () => void },
 							theme: {
 								fg: (_name: string, text: string) => string;
 								bold: (text: string) => string;
@@ -809,7 +809,7 @@ Warning: History compression could not finish this turn. It will retry automatic
 							done: (value: undefined) => void,
 						) => { render: (width: number) => string[]; dispose?: () => void };
 						const component = makeComponent(
-							{ requestRender: () => undefined },
+							{ terminal: { rows: 100 }, requestRender: () => undefined },
 							{ fg: (_name, text) => text, bold: (text) => text },
 							undefined,
 							() => undefined,
