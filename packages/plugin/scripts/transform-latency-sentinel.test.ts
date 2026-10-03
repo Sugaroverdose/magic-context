@@ -75,6 +75,15 @@ test("peer roster name takes precedence over project binding", async () => {
     const result = await runLatencySentinel({ files: [path], stateFile: join(root, "state.json"), db: join(root, "context.db"), peerDb: join(root, "peers.db"), connectionFile: "", send: false, now: () => BASE + 100_000, load: () => [0, 0, 0], stdout: () => {}, stderr: () => {} });
     expect(result.alerts[0]?.name).toBe("CEREB");
 });
+test("a roster without the legacy peers table still names sessions from agent rows", async () => {
+    writeFileSync(path, line("ses_slow", 0, 13000));
+    const roster = new Database(join(root, "peers.db"));
+    roster.exec("CREATE TABLE agent(name TEXT, residence_address_json TEXT, terminal_reason TEXT)");
+    roster.query("INSERT INTO agent VALUES (?, ?, NULL)").run("SUBC", JSON.stringify({ session: "ses_slow" }));
+    roster.close(false);
+    const result = await runLatencySentinel({ files: [path], stateFile: join(root, "state.json"), db: join(root, "missing.db"), peerDb: join(root, "peers.db"), connectionFile: "", send: false, now: () => BASE + 100_000, load: () => [0, 0, 0], stdout: () => {}, stderr: () => {} });
+    expect(result.alerts[0]?.name).toBe("SUBC");
+});
 test("LKG declines count by session and UTC hour, appear on refusals, and summary does not advance the cursor", async () => {
     const decline = (id: string, at: string, reason: string) => `[${at}] [magic-context][${id}] ${reason}\n`;
     const refusal = (id: string, at: string) => `[${at}] [magic-context][${id}] raw_fallback_over_context_limit\n`;

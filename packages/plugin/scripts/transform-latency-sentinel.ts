@@ -190,9 +190,12 @@ function names(dbPath: string, peerDbPath: string | undefined, alerts: LatencyAl
         try {
             db.exec("PRAGMA busy_timeout = 3000");
             const agent = db.query("SELECT name FROM agent WHERE json_extract(residence_address_json, '$.session') = ? AND terminal_reason IS NULL LIMIT 1");
-            const peer = db.query("SELECT name FROM peers WHERE session_id = ? ORDER BY added_at DESC LIMIT 1");
+            // Prefrontal's store no longer has the legacy `peers` table; preparing a query on it
+            // threw and stopped every run before any alert went out. Use it only where it exists.
+            const hasPeers = db.query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'peers'").get() !== null;
+            const peer = hasPeers ? db.query("SELECT name FROM peers WHERE session_id = ? ORDER BY added_at DESC LIMIT 1") : null;
             for (const alert of alerts) {
-                const row = (agent.get(alert.sessionId) ?? peer.get(alert.sessionId)) as { name: string } | null;
+                const row = (agent.get(alert.sessionId) ?? peer?.get(alert.sessionId) ?? null) as { name: string } | null;
                 if (row?.name) alert.name = row.name;
             }
         } finally { db.close(false); }
