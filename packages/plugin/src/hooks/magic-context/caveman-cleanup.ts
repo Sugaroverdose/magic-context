@@ -165,10 +165,12 @@ export function applyCavemanCleanup(
             const level = DEPTH_TO_LEVEL[targetDepth];
             if (!level) continue;
 
+            // Sessions keep the original ASCII rules here; switching them to the
+            // current rules has to land on a pass that already rebuilds the cache.
             // Compress from the ORIGINAL, never from an already-cavemaned
             // intermediate. Idempotent: compressing the same original at the
             // same level always produces the same output.
-            const compressed = cavemanCompress(originalText, level);
+            const compressed = cavemanCompress(originalText, level, "ascii-v1");
             if (compressed.length === 0) continue;
 
             const target = targets.get(tag.tagNumber);
@@ -261,7 +263,8 @@ export function replayCavemanCompression(
         const level = DEPTH_TO_LEVEL[tag.cavemanDepth];
         if (!level) continue;
 
-        const compressed = cavemanCompress(originalText, level);
+        // The original ASCII rules: the bytes earlier passes served.
+        const compressed = cavemanCompress(originalText, level, "ascii-v1");
         if (compressed.length === 0) continue;
 
         const target = targets.get(tag.tagNumber);
