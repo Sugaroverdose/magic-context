@@ -69,7 +69,9 @@ pub fn canonical_root(path: impl AsRef<Path>) -> PathBuf {
 
 /// Canonical foreign-memory visibility predicate used by module SQL consumers.
 /// The plugin mirrors this literal to keep cache visibility and workspace policy aligned.
-pub const FOREIGN_VISIBLE_SQL: &str = "status IN ('active','permanent') AND (expires_at IS NULL OR expires_at > :now_ms) AND shareable = 1 AND scope IN ('project','ecosystem','universe') AND category IN (SELECT value FROM json_each(:share_categories)) AND project_path IN (SELECT project_path FROM mc_workspace_members WHERE workspace_id = :workspace_id) AND project_path <> :reader_project";
+/// It reads `context.db`, where `memories` and `workspace_members` live; the store.db
+/// mirror `mc_workspace_members` it once named was dropped with the move to one store.
+pub const FOREIGN_VISIBLE_SQL: &str = "status IN ('active','permanent') AND (expires_at IS NULL OR expires_at > :now_ms) AND shareable = 1 AND scope IN ('project','ecosystem','universe') AND category IN (SELECT value FROM json_each(:share_categories)) AND project_path IN (SELECT project_path FROM workspace_members WHERE workspace_id = :workspace_id) AND project_path <> :reader_project";
 
 /// Internal mutation category used to carry foreign-visibility transitions across state sync.
 pub const MEMORY_VISIBILITY_MUTATION_CATEGORY: &str = "__mc_visibility__";
@@ -6227,7 +6229,8 @@ enum PublishTxnOutcome {
 }
 
 enum AppendCompartmentsTxnOutcome {
-    Appended,
+    /// The rows landed from `first_sequence` on, as the append transaction assigned them.
+    Appended { first_sequence: i64 },
     Overlap {
         existing_sequence: i64,
         incoming_start_message: i64,
@@ -6295,6 +6298,14 @@ struct ValidatedSeedBoundary {
 fn split_flat_block_id(id: &str) -> Option<(&str, u64)> {
     let (mid, index) = id.rsplit_once('#')?;
     if mid.is_empty() || mid.contains('#') {
+        return None;
+    }
+    // Only the spelling an index formats to: decimal digits with no sign and no leading
+    // zero. `m#05` would otherwise parse as block 5, whose id is rebuilt as `m#5`.
+    let canonical = !index.is_empty()
+        && index.bytes().all(|byte| byte.is_ascii_digit())
+        && (index == "0" || !index.starts_with('0'));
+    if !canonical {
         return None;
     }
     Some((mid, index.parse().ok()?))
@@ -11354,16 +11365,28 @@ impl McStore {
             ModuleStateSyncTxnOutcome::Committed(result) => {
                 // A host may rewrite a context.db row while the store.db cache
                 // transaction runs. cached_context_boundaries hashes each original
-                // row and excludes entries whose shared row has changed; requiring
-                // every new entry here catches a rewrite during this transaction.
-                if !resolved_boundaries.is_empty()
-                    && self.cached_context_boundaries(request.session_id)?.len()
-                        != resolved_boundaries.len()
-                {
-                    return Err(ModuleStateSyncError::InvalidSeedBoundary {
-                        declared: request.seed_boundary_id.unwrap_or("").to_string(),
-                        detail: "context boundary snapshot changed during state sync".into(),
-                    });
+                // row and excludes entries whose shared row has changed, so a rewrite
+                // during this transaction shows up as a missing entry here. The sync has
+                // committed by now and its shadow_seq step cannot be undone, so it is
+                // reported as the success it is: an error would leave the host on the old
+                // sequence and refuse every retry as an authority-seq mismatch. The stale
+                // coordinates are excluded from every read, the same state a rewrite
+                // landing just after a successful sync leaves, and the next sync that
+                // carries coordinates for the rewritten row replaces them.
+                if !resolved_boundaries.is_empty() {
+                    match self.cached_context_boundaries(request.session_id) {
+                        Ok(valid) if valid.len() == resolved_boundaries.len() => {}
+                        Ok(valid) => tracing::warn!(
+                            "mc-store: context boundary snapshot changed during state sync for session {}: {} of {} host coordinates still match",
+                            request.session_id,
+                            valid.len(),
+                            resolved_boundaries.len()
+                        ),
+                        Err(error) => tracing::warn!(
+                            "mc-store: could not recheck context boundaries after state sync for session {}: {error}",
+                            request.session_id
+                        ),
+                    }
                 }
                 Ok(result)
             }
@@ -12696,6 +12719,7 @@ impl McStore {
                  WHERE session_id = ?1 AND row_version = ?4",
                 params![session_id, next as i64, meta_json, current],
             )?;
+            advance_row_state_digest_tx(tx, session_id, current, next as i64)?;
 
             Ok(TruncateTxnOutcome::Committed(TruncateOutcome {
                 revert_epoch: next_epoch,
@@ -12727,9 +12751,8 @@ impl McStore {
         compartments: &[StoredCompartment],
     ) -> Result<(), McStoreError> {
         self.resume_pending_context_write(session_id)?;
-        let first_sequence = self.max_compartment_seq(session_id)? + 1;
         match self.append_compartments_now(session_id, compartments)? {
-            AppendCompartmentsTxnOutcome::Appended => {
+            AppendCompartmentsTxnOutcome::Appended { first_sequence } => {
                 self.record_appended_dates(session_id, first_sequence, compartments)
             }
             AppendCompartmentsTxnOutcome::Overlap {
@@ -12798,7 +12821,7 @@ impl McStore {
             }
             Ok(matches!(
                 append_compartments_tx(tx, session_id, std::slice::from_ref(marker))?,
-                AppendCompartmentsTxnOutcome::Appended
+                AppendCompartmentsTxnOutcome::Appended { .. }
             )
             .then_some(max_sequence + 1))
         })?;
@@ -13347,6 +13370,7 @@ impl McStore {
                  WHERE session_id = ?1 AND row_version = ?4",
                 params![session_id, next as i64, meta_json, current],
             )?;
+            advance_row_state_digest_tx(tx, session_id, current, next as i64)?;
             Ok(AbandonHistorianTxnOutcome::Committed(next))
         })?;
 
@@ -13403,6 +13427,7 @@ impl McStore {
                 "UPDATE mc_cache_state SET row_version = ?2, meta = ?3 WHERE session_id = ?1 AND row_version = ?4",
                 params![session_id, next as i64, meta_json, current],
             )?;
+            advance_row_state_digest_tx(tx, session_id, current, next as i64)?;
             Ok(AbandonHistorianTxnOutcome::Committed(next))
         })?;
         match outcome {
@@ -13611,6 +13636,21 @@ impl McStore {
                     compartment.end_message,
                 ));
             }
+            // The meta is settled and encoded before the first write: an outcome returned
+            // from this closure commits the transaction, so a refusal after a write would
+            // leave that write (and a pending context.db half) behind.
+            meta.publication_floor_ordinal = Some(
+                meta.publication_floor_ordinal
+                    .unwrap_or(1)
+                    .max(request.publication_floor_ordinal.max(1)),
+            );
+            let next = current as u64 + 1;
+            meta.historian = idle_historian_after_success(&meta.historian);
+            meta.historian.complete_latest_fire(current_time_ms(), next);
+            let meta_json = match encode_published_meta(&meta) {
+                Ok(json) => json,
+                Err(e) => return Ok(PublishTxnOutcome::Serde(e)),
+            };
             if request.chunk_transcript.is_some() || request.raw_chunk_messages.is_some() {
                 insert_chunk_transcripts_tx(
                     tx,
@@ -13623,23 +13663,12 @@ impl McStore {
             }
             single_store_schema::write_compartment_dates(tx, session_id, &numbered)?;
             context_writes::record_pending_context_write_tx(tx, session_id, &write)?;
-            meta.publication_floor_ordinal = Some(
-                meta.publication_floor_ordinal
-                    .unwrap_or(1)
-                    .max(request.publication_floor_ordinal.max(1)),
-            );
-            let next = current as u64 + 1;
-            meta.historian = idle_historian_after_success(&meta.historian);
-            meta.historian.complete_latest_fire(current_time_ms(), next);
-            let meta_json = match serde_json::to_string(&meta) {
-                Ok(json) => json,
-                Err(e) => return Ok(PublishTxnOutcome::Serde(e.to_string())),
-            };
             tx.execute(
                 "UPDATE mc_cache_state SET row_version = ?2, meta = ?3
                  WHERE session_id = ?1 AND row_version = ?4",
                 params![session_id, next as i64, meta_json, current],
             )?;
+            advance_row_state_digest_tx(tx, session_id, current, next as i64)?;
 
             Ok(PublishTxnOutcome::Committed(HistorianPublishResult {
                 row_version: next,
@@ -15816,11 +15845,12 @@ fn append_compartments_tx(
     session_id: &str,
     compartments: &[StoredCompartment],
 ) -> rusqlite::Result<AppendCompartmentsTxnOutcome> {
-    if compartments.is_empty() {
-        return Ok(AppendCompartmentsTxnOutcome::Appended);
-    }
-
     let next_sequence = next_compartment_sequence_tx(tx, session_id)?;
+    if compartments.is_empty() {
+        return Ok(AppendCompartmentsTxnOutcome::Appended {
+            first_sequence: next_sequence,
+        });
+    }
     let harness = session_harness_tx(tx, session_id)?;
     let mut statement = tx.prepare(
         "SELECT sequence, start_message, end_message
@@ -15866,7 +15896,9 @@ fn append_compartments_tx(
             &harness,
         )?;
     }
-    Ok(AppendCompartmentsTxnOutcome::Appended)
+    Ok(AppendCompartmentsTxnOutcome::Appended {
+        first_sequence: next_sequence,
+    })
 }
 
 fn next_compartment_sequence_tx(
@@ -16716,6 +16748,22 @@ fn write_cache_state_tx(
     Ok(written.base_after)
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Makes the next historian publish on this thread fail to encode its meta, standing in
+    /// for a serializer error that real meta cannot currently produce.
+    static FAIL_PUBLISH_META_ENCODE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The small-row meta JSON a historian publish stores.
+fn encode_published_meta(meta: &ModuleMeta) -> Result<String, String> {
+    #[cfg(test)]
+    if FAIL_PUBLISH_META_ENCODE.with(|flag| flag.replace(false)) {
+        return Err("injected meta encode failure".to_string());
+    }
+    serde_json::to_string(meta).map_err(|error| error.to_string())
+}
+
 /// Carry the row-state digest across a `row_version` step that did not touch the rows it
 /// covers, so the next transform commit can still trust it and skip walking every row.
 /// Only advances a digest that described the version being replaced.
@@ -17253,14 +17301,39 @@ fn sql_like_pattern(query: &str) -> String {
 
 /// Compute the ctx_memory normalized hash used for duplicate detection. This mirrors the
 /// plugin path: lowercase, collapse whitespace runs to one space, trim, then MD5 hex.
+/// "Whitespace" is what the plugin's JavaScript `\s` matches, not Rust's definition, so
+/// both runtimes give the same hash and `UNIQUE(project_path, category, normalized_hash)`
+/// dedups across them.
 pub fn compute_normalized_memory_hash(content: &str) -> String {
     let normalized = content
         .to_lowercase()
-        .split_whitespace()
+        .split(is_js_whitespace)
+        .filter(|word| !word.is_empty())
         .collect::<Vec<_>>()
         .join(" ");
     let digest = md5::compute(normalized.as_bytes());
     format!("{digest:032x}")
+}
+
+/// Whether JavaScript's `\s` matches `ch`: ECMAScript WhiteSpace (tab, vertical tab, form
+/// feed, U+FEFF and the Zs space separators) plus LineTerminator (line feed, carriage
+/// return, U+2028, U+2029). It differs from `char::is_whitespace` in two code points:
+/// U+FEFF counts here and U+0085 does not.
+fn is_js_whitespace(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{0009}'..='\u{000D}'
+            | '\u{0020}'
+            | '\u{00A0}'
+            | '\u{1680}'
+            | '\u{2000}'..='\u{200A}'
+            | '\u{2028}'
+            | '\u{2029}'
+            | '\u{202F}'
+            | '\u{205F}'
+            | '\u{3000}'
+            | '\u{FEFF}'
+    )
 }
 
 /// The lowercase hex MD5 of `input`'s UTF-8 bytes. The host's `dir:` project identity is
@@ -17358,6 +17431,31 @@ mod tests {
         let source = include_str!("lib.rs");
         let production = source.split_once("#[cfg(test)]\nmod tests {").unwrap().0;
         assert!(!production.contains(concat!("eprint", "ln!")));
+    }
+
+    #[test]
+    fn memory_hash_matches_the_plugin_for_whitespace_the_two_runtimes_classify_differently() {
+        // Expected digests come from the plugin's computeNormalizedHash (lowercase, JS `\s+`
+        // runs to one space, trim, MD5). JS `\s` counts U+FEFF as whitespace and U+0085 as
+        // not; Rust's char::is_whitespace is the reverse for those two.
+        for (content, expected) in [
+            ("Keep\u{0085}THIS", "598888c3f5dcd629ee062d2649d83911"),
+            (
+                "\u{FEFF}Keep\u{FEFF}  this\u{FEFF}",
+                "cdc26c0a460560cc319f09c6fd89172f",
+            ),
+            (
+                " Mixed\t\u{00A0}\u{2028}Case \u{3000} Words\u{000B}\u{000C}",
+                "71975feca6aa4a9408a61e912dc987f1",
+            ),
+            ("plain text", "31bc5c2b8fd4f20cd747347b7504a385"),
+        ] {
+            assert_eq!(
+                compute_normalized_memory_hash(content),
+                expected,
+                "hash of {content:?}"
+            );
+        }
     }
 
     // Adversarial gate over the claim-lane migration and the single-store marker
@@ -24324,6 +24422,279 @@ mod tests {
             store.load("ses").unwrap().meta.historian.state,
             HistorianPhase::Publishing
         );
+    }
+
+    fn row_state_digest_version(store: &McStore, session_id: &str) -> Option<i64> {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT row_version FROM mc_cache_state_digest WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .optional()
+            })
+            .unwrap()
+    }
+
+    fn publish_once(
+        store: &McStore,
+        session_id: &str,
+    ) -> Result<HistorianPublishResult, HistorianPublishError> {
+        let expected = store.load(session_id).unwrap().row_version;
+        store.publish_historian_chunk(HistorianPublishRequest {
+            harness: None,
+            session_id,
+            expected_row_version: expected,
+            expected_revert_epoch: 0,
+            predicate: &publish_predicate(),
+            project_path: "git:proj",
+            compartments: &[publish_compartment()],
+            facts: &[],
+            promote_facts: false,
+            events: &[],
+            primer_candidates: &[],
+            user_memory_candidates: &[],
+            publication_floor_ordinal: 21,
+            chunk_transcript: None,
+            raw_chunk_messages: None,
+        })
+    }
+
+    #[test]
+    fn meta_only_version_steps_carry_the_row_state_digest_forward() {
+        // None of these writers touches the block-identity or served-fingerprint rows, so
+        // the digest that described them before the step still describes them after it.
+        // Left behind, it makes the next transform commit re-read and re-compare every row.
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        let at = |store: &McStore| store.load("ses").unwrap().row_version.map(|v| v as i64);
+        store
+            .commit("ses", None, &CoreState::default(), &publishing_meta())
+            .unwrap();
+        assert_eq!(row_state_digest_version(&store, "ses"), at(&store));
+
+        store
+            .record_historian_publish_failure_if_matching("ses", &publish_predicate())
+            .unwrap()
+            .expect("the predicate matches");
+        assert_eq!(
+            row_state_digest_version(&store, "ses"),
+            at(&store),
+            "publish-failure count"
+        );
+
+        publish_once(&store, "ses").unwrap();
+        assert_eq!(
+            row_state_digest_version(&store, "ses"),
+            at(&store),
+            "publish"
+        );
+
+        let loaded = store.load("ses").unwrap();
+        store
+            .truncate_compartments_for_revert("ses", 0, loaded.row_version)
+            .unwrap();
+        assert_eq!(
+            row_state_digest_version(&store, "ses"),
+            at(&store),
+            "revert re-cut"
+        );
+
+        let loaded = store.load("ses").unwrap();
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &publishing_meta())
+            .unwrap();
+        store
+            .abandon_historian_run_if_matching_with_publish_failure(
+                "ses",
+                &publish_predicate(),
+                None,
+                Some("abandoned"),
+                true,
+            )
+            .unwrap()
+            .expect("the predicate matches");
+        assert_eq!(
+            row_state_digest_version(&store, "ses"),
+            at(&store),
+            "abandon"
+        );
+    }
+
+    #[test]
+    fn a_publish_whose_meta_fails_to_encode_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        store
+            .commit("ses", None, &CoreState::default(), &publishing_meta())
+            .unwrap();
+        let before = store.load("ses").unwrap().row_version;
+
+        FAIL_PUBLISH_META_ENCODE.with(|flag| flag.set(true));
+        assert!(matches!(
+            publish_once(&store, "ses"),
+            Err(HistorianPublishError::Serde(_))
+        ));
+
+        // A publish that reports failure must leave no half behind: no pending context.db
+        // write for a later resume to land, and no compartment dates in store.db.
+        assert!(!store.has_pending_context_write("ses").unwrap());
+        let dates: i64 = store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT COUNT(*) FROM mc_compartment_dates WHERE session_id = 'ses'",
+                    [],
+                    |row| row.get(0),
+                )
+            })
+            .unwrap();
+        assert_eq!(dates, 0);
+        assert_eq!(store.load("ses").unwrap().row_version, before);
+        assert!(store.load_compartments("ses").unwrap().is_empty());
+    }
+
+    /// A `context.db` that lets another writer append a compartment just before the
+    /// store's next write transaction starts.
+    struct AppendBeforeNextWrite {
+        inner: SqliteContextDomain,
+        writer: std::sync::Mutex<rusqlite::Connection>,
+        fired: std::sync::atomic::AtomicBool,
+    }
+
+    impl ContextDomain for AppendBeforeNextWrite {
+        fn read(
+            &self,
+            read: &mut dyn FnMut(&rusqlite::Connection) -> rusqlite::Result<()>,
+        ) -> Result<(), McStoreError> {
+            self.inner.read(read)
+        }
+
+        fn write(
+            &self,
+            tables: &[&str],
+            write: &mut dyn FnMut(&rusqlite::Transaction<'_>) -> rusqlite::Result<()>,
+        ) -> Result<(), McStoreError> {
+            if !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.writer
+                    .lock()
+                    .unwrap()
+                    .execute_batch(
+                        "INSERT INTO compartments(session_id, sequence, start_message, end_message,
+                                                  start_message_id, end_message_id, title, content,
+                                                  created_at)
+                         VALUES ('ses', 1, 1, 2, 'm1', 'm2', 'raced', 'raced body', 1)",
+                    )
+                    .unwrap();
+            }
+            self.inner.write(tables, write)
+        }
+    }
+
+    #[test]
+    fn appended_dates_follow_the_sequence_the_append_transaction_assigned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        let context_path = dir.path().join("context.db");
+        store.install_context_domain(Arc::new(AppendBeforeNextWrite {
+            inner: SqliteContextDomain::open(&context_path).unwrap(),
+            writer: std::sync::Mutex::new(rusqlite::Connection::open(&context_path).unwrap()),
+            fired: std::sync::atomic::AtomicBool::new(false),
+        }));
+
+        let appended = StoredCompartment {
+            sequence: 99,
+            start_message: 5,
+            end_message: 8,
+            start_message_id: "m5".into(),
+            end_message_id: "m8".into(),
+            start_date: Some("2026-01-01".into()),
+            end_date: Some("2026-01-02".into()),
+            title: "appended".into(),
+            content: "appended body".into(),
+            ..Default::default()
+        };
+        store.append_compartments("ses", &[appended]).unwrap();
+
+        // Another writer took sequence 1 between the tail read and the append, so the
+        // append landed at 2. Its dates belong to 2, not to the other writer's row.
+        let rows = store.load_compartments("ses").unwrap();
+        let landed = rows.iter().find(|row| row.title == "appended").unwrap();
+        assert_eq!(landed.sequence, 2);
+        let dates: Vec<(i64, String)> = store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT sequence, end_message_id FROM mc_compartment_dates
+                      WHERE session_id = 'ses' ORDER BY sequence",
+                )?;
+                let rows = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(dates, vec![(2, "m8".to_string())]);
+    }
+
+    #[test]
+    fn flat_block_ids_parse_only_in_their_canonical_spelling() {
+        // `{mid}#{index}` is written with a plain decimal index. Any other spelling of the
+        // same index would parse to a block whose rebuilt id is a different string.
+        assert_eq!(split_flat_block_id("m#0"), Some(("m", 0)));
+        assert_eq!(split_flat_block_id("msg_1#12"), Some(("msg_1", 12)));
+        for id in ["m#05", "m#+5", "m#00", "m#", "m# 5", "#5", "m#-1", "a#b#1"] {
+            assert_eq!(split_flat_block_id(id), None, "{id:?}");
+        }
+    }
+
+    #[test]
+    fn foreign_visible_predicate_runs_against_the_context_memories_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        let visible = store
+            .with_context_conn_for_test(|conn| {
+                let insert = |project: &str, category: &str, content: &str, shareable: i64| {
+                    conn.execute(
+                        "INSERT INTO memories(project_path, category, content, normalized_hash,
+                                              scope, shareable, first_seen_at, created_at,
+                                              updated_at, last_seen_at)
+                         VALUES (?1, ?2, ?3, ?3, 'project', ?4, 1, 1, 1, 1)",
+                        params![project, category, content, shareable],
+                    )
+                };
+                insert("git:reader", "CONSTRAINTS", "own row", 1)?;
+                insert("git:member", "CONSTRAINTS", "shared row", 1)?;
+                insert("git:member", "CONSTRAINTS", "private row", 0)?;
+                insert("git:member", "WORKFLOW", "unshared category", 1)?;
+                insert("git:outsider", "CONSTRAINTS", "not a member", 1)?;
+                conn.execute_batch(
+                    "INSERT INTO workspaces(id, name, created_at, updated_at) VALUES (7, 'ws', 0, 0);
+                     INSERT INTO workspace_members(workspace_id, project_path, display_name,
+                                                   display_path, added_at)
+                     VALUES (7, 'git:reader', 'reader', 'reader', 0),
+                            (7, 'git:member', 'member', 'member', 0);",
+                )?;
+                let mut statement = conn.prepare(&format!(
+                    "SELECT content FROM memories WHERE {FOREIGN_VISIBLE_SQL} ORDER BY id"
+                ))?;
+                let rows = statement
+                    .query_map(
+                        rusqlite::named_params! {
+                            ":now_ms": 10_i64,
+                            ":share_categories": "[\"CONSTRAINTS\"]",
+                            ":workspace_id": 7_i64,
+                            ":reader_project": "git:reader",
+                        },
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(visible, vec!["shared row".to_string()]);
     }
 }
 
