@@ -1,4 +1,5 @@
 import type { Database } from "../../../shared/sqlite";
+import { unescapeXml } from "../../../shared/xml-unescape";
 import { V2_MEMORY_CATEGORIES } from "../memory/constants";
 import { computeNormalizedHash } from "../memory/normalize-hash";
 import { getMemoryByHash, insertMemory } from "../memory/storage-memory";
@@ -210,13 +211,4 @@ function parseAttributes(raw: string): Record<string, string> {
         attrs[match[1]] = unescapeXml(match[2] ?? "");
     }
     return attrs;
-}
-
-function unescapeXml(value: string): string {
-    return value
-        .replace(/&amp;/g, "&")
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">")
-        .replace(/&quot;/g, '"')
-        .replace(/&apos;/g, "'");
 }
