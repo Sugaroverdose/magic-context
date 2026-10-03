@@ -95,7 +95,6 @@ import {
     lkgReplayLimit,
     measureLkgReplay,
     RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
-    rawFallbackSerializedBytes,
 } from "./lkg-replay-fit";
 import {
     captureSlot,
@@ -2408,51 +2407,50 @@ export function createRustModeTransform(
             if (!deps.compactionOff && isTransientSqliteError(cause)) {
                 throw new StorageBusyRefusalError(cause, "rust-mode-transform");
             }
-            const contextLimit =
-                transformGeometry?.usable_hard ??
-                resolvedContextLimit ??
-                (overflowState && overflowState.detectedContextLimit > 0
-                    ? overflowState.detectedContextLimit
-                    : undefined);
+            // The raw full history is admitted exactly like a last-known-good replay:
+            // against the trusted limit, never the larger usable hard limit (some
+            // providers enforce their declared prompt limit), measured on what the
+            // request carries, and only when a trusted estimate is under the limit.
+            let contextLimit: number | undefined;
+            try {
+                contextLimit = lkgReplayLimit({
+                    db: deps.db,
+                    sessionId,
+                    model,
+                    modelKey: resolveLkgModelKeys(messages).modelKey,
+                });
+            } catch {
+                contextLimit = undefined;
+            }
             if (contextLimit !== undefined) {
-                // The local tokenizer is telemetry-grade and can materially undercount a new
-                // provider tokenizer. Four serialized bytes per context token is an independent,
-                // conservative risk budget for a raw full-history fallback.
-                const proxyBudgetBytes = contextLimit * RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN;
-                // Byte proxy first: once the running serialized sum crosses the budget,
-                // the refusal is proven and the tokenizer pass — seconds on giant
-                // histories — is skipped entirely on the failure path.
-                const proxy = rawFallbackSerializedBytes(messages, proxyBudgetBytes);
-                const proxyTokens =
-                    proxy === null
-                        ? contextLimit + 1
-                        : Math.ceil(proxy.bytes / RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN);
-                let estimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
-                let estimatorRan = false;
-                if (proxy !== null && !proxy.aborted) {
-                    try {
-                        estimate = rawFallbackEstimator({
+                // The wire byte proxy runs first: once its running sum crosses the
+                // budget the refusal is proven and the tokenizer pass, seconds on giant
+                // histories, is skipped on the failure path.
+                const measure = measureLkgReplay({
+                    messages,
+                    limit: contextLimit,
+                    estimate: () =>
+                        rawFallbackEstimator({
                             messages,
                             systemPromptTokens: sessionMeta.systemPromptTokens,
                             providerID: model?.providerID,
                             modelID: model?.modelID,
                             agentName: deps.getNotificationParams?.(sessionId)?.agent,
-                        });
-                        estimatorRan = true;
-                    } catch {
-                        // The byte proxy above remains available when tokenization does not.
-                    }
-                }
-                const refusalTokens =
-                    estimate?.trusted && Number.isFinite(estimate.tokens) && estimate.tokens > 0
-                        ? Math.max(estimate.tokens, proxyTokens)
-                        : Number.POSITIVE_INFINITY;
-                if (refusalTokens > contextLimit) {
+                        }),
+                });
+                if (measure.fit !== "under") {
+                    const proxyTokens = measure.proxy
+                        ? Math.ceil(measure.proxy.bytes / RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN)
+                        : null;
+                    const refusalTokens =
+                        measure.trusted && measure.tokens !== null && measure.tokens > 0
+                            ? Math.max(measure.tokens, proxyTokens ?? 0)
+                            : Number.POSITIVE_INFINITY;
                     sessionLog(
                         sessionId,
-                        `raw_fallback_over_context_limit estimated=${estimate?.tokens ?? (estimatorRan ? "unavailable" : "skipped")} trusted=${estimate?.trusted ?? false} ` +
-                            `proxy_bytes=${proxy?.bytes ?? "unavailable"} proxy_tokens=${proxyTokens} limit=${contextLimit}` +
-                            (proxy?.aborted === true ? " early_abort=true" : ""),
+                        `raw_fallback_over_context_limit estimated=${measure.tokens ?? (measure.estimatorRan ? "unavailable" : "skipped")} trusted=${measure.trusted} ` +
+                            `proxy_bytes=${measure.proxy?.bytes ?? "unavailable"} proxy_tokens=${proxyTokens ?? "unavailable"} limit=${contextLimit}` +
+                            (measure.proxy?.aborted === true ? " early_abort=true" : ""),
                     );
                     throw new RawFallbackContextLimitError(refusalTokens, contextLimit, { cause });
                 }

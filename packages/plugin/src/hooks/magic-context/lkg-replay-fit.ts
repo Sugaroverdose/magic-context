@@ -6,38 +6,11 @@ import type { MessageLike } from "./transform-operations";
 
 /**
  * The local tokenizer is telemetry-grade and can materially undercount a new
- * provider tokenizer. Four serialized bytes per context token is an independent,
- * conservative risk budget for sending an array the transform did not just build.
+ * provider tokenizer. Four bytes of request content per context token is an
+ * independent, conservative risk budget for sending an array the transform did
+ * not just build (a last-known-good replay or the raw full-history fallback).
  */
 export const RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN = 4;
-
-/**
- * Serialize the array message-by-message with a running byte sum, aborting as
- * soon as the sum proves the array is over the budget. A refusal then costs a
- * fraction of the full serialization and never runs the tokenizer; when the sum
- * stays under the budget the total matches a whole-array serialization up to
- * array punctuation.
- */
-export function rawFallbackSerializedBytes(
-    messages: readonly MessageLike[],
-    abortAboveBytes: number,
-): { bytes: number; aborted: boolean } | null {
-    let bytes = 0;
-    try {
-        for (const message of messages) {
-            const serialized = JSON.stringify(message);
-            if (typeof serialized !== "string") return null;
-            // +1 accounts for the separator between array entries.
-            bytes += Buffer.byteLength(serialized) + 1;
-            if (bytes > abortAboveBytes) return { bytes, aborted: true };
-        }
-    } catch {
-        // Serialization is itself required before these messages can reach a provider.
-        return null;
-    }
-    return { bytes: bytes + 1, aborted: false };
-}
-
 type ReplayModel = { providerID: string; modelID: string } | null | undefined;
 
 /**
@@ -67,11 +40,20 @@ export function lkgReplayLimit(args: {
     return detected > 0 ? detected : undefined;
 }
 
-/** Where a replay candidate stands against a limit. */
-export type LkgReplayMeasure =
+/**
+ * Where a replay candidate stands against a limit, with what the measurement saw:
+ * the wire byte proxy (null when it could not be computed), whether the token
+ * estimator ran, and whether its estimate was trusted.
+ */
+export type LkgReplayMeasure = (
     | { fit: "under"; tokens: number }
     | { fit: "over"; tokens: number | null; proxyTokens: number | null }
-    | { fit: "unproven"; tokens: number | null };
+    | { fit: "unproven"; tokens: number | null }
+) & {
+    proxy: { bytes: number; aborted: boolean } | null;
+    estimatorRan: boolean;
+    trusted: boolean;
+};
 
 /**
  * Measure `messages` against `limit`. Over when the four-bytes-per-token proxy or
@@ -95,26 +77,29 @@ export function measureLkgReplay(args: {
         args.limit * RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
         RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
     );
-    if (proxy === null) return { fit: "unproven", tokens: null };
+    const skipped = { proxy, estimatorRan: false, trusted: false };
+    if (proxy === null) return { fit: "unproven", tokens: null, ...skipped };
     const proxyTokens = Math.ceil(proxy.bytes / RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN);
     if (proxy.aborted || proxyTokens > args.limit) {
-        return { fit: "over", tokens: null, proxyTokens };
+        return { fit: "over", tokens: null, proxyTokens, ...skipped };
     }
     let estimate: ReturnType<typeof estimateFinalWireInputTokens>;
     try {
         estimate = args.estimate();
     } catch {
-        return { fit: "unproven", tokens: null };
+        return { fit: "unproven", tokens: null, ...skipped };
     }
+    const seen = { proxy, estimatorRan: true, trusted: estimate.trusted };
     if (!estimate.trusted || !Number.isFinite(estimate.tokens) || estimate.tokens <= 0) {
         return {
             fit: "unproven",
             tokens: Number.isFinite(estimate.tokens) ? estimate.tokens : null,
+            ...seen,
         };
     }
     return estimate.tokens > args.limit
-        ? { fit: "over", tokens: estimate.tokens, proxyTokens }
-        : { fit: "under", tokens: estimate.tokens };
+        ? { fit: "over", tokens: estimate.tokens, proxyTokens, ...seen }
+        : { fit: "under", tokens: estimate.tokens, ...seen };
 }
 
 export type LkgReplayFit =
