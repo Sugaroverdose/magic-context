@@ -475,6 +475,18 @@ the full p1 narrative
 describe("parseCompartmentOutput — body text and attribute robustness", () => {
     const tiers = (p1: string) => `<p1>${p1}</p1>\n<p2>short</p2>\n<p3>shorter</p3>\n<p4/>`;
 
+    it("keeps a compartment whose title contains a raw '>'", () => {
+        const parsed = parseCompartmentOutput(`<output><compartments>
+<compartment start="1" end="2" title="Migrate store -> SQLite" episode_type="feature" importance="50">
+${tiers("moved storage")}
+</compartment>
+</compartments><meta><unprocessed_from>3</unprocessed_from></meta></output>`);
+        expect(parsed.compartments).toHaveLength(1);
+        expect(parsed.compartments[0].title).toBe("Migrate store -> SQLite");
+        expect(parsed.compartments[0].episodeType).toBe("feature");
+        expect(parsed.compartments[0].importance).toBe(50);
+    });
+
     it("decodes each XML entity exactly once", () => {
         const parsed = parseCompartmentOutput(`<output><compartments>
 <compartment start="1" end="2" title="A &amp;lt; B">

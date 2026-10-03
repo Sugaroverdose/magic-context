@@ -1214,9 +1214,15 @@ fn output_tag_regex() -> &'static Regex {
     RE.get_or_init(|| Regex::new(r"(?is)</?output(?:\s[^>]*)?>").unwrap())
 }
 
+/// Matches the TypeScript `COMPARTMENT_REGEX`: quoted attribute values are
+/// consumed whole, so a raw `>` inside one (a title like "Migrate store -> SQLite")
+/// does not end the open tag. A value may not span a line, so a stray unbalanced
+/// quote cannot swallow the body.
 fn compartment_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r#"(?s)<compartment\s+([^>]*?)\s*>(.*?)</compartment>"#).unwrap())
+    RE.get_or_init(|| {
+        Regex::new(r#"(?s)<compartment\s+((?:[^>"]|"[^"\n]*")*?)\s*>(.*?)</compartment>"#).unwrap()
+    })
 }
 
 fn attr_start_regex() -> &'static Regex {

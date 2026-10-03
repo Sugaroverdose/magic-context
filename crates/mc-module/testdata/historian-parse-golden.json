@@ -175,5 +175,44 @@
         }
       ]
     }
+  },
+  {
+    "label": "raw > inside a quoted attribute value keeps the compartment",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"Migrate store -> SQLite\" episode_type=\"a>b\" importance=\"70\">\n<p1>moved storage</p1>\n<p2>moved storage short</p2>\n<p3>moved storage shorter</p3>\n<p4/>\n</compartment>\n<compartment\n  start=\"3\"\n  end=\"4\"\n  title=\"Multi-line attrs => fine\">\n<p1>next</p1>\n<p2>next short</p2>\n<p3>next shorter</p3>\n<p4/>\n</compartment>\n<compartment start=\"5\" end=\"6\" title=\"unbalanced>\n<p1>skipped: the quote never closes on its line</p1>\n<p2>skipped: the quote never closes on its line short</p2>\n<p3>skipped: the quote never closes on its line shorter</p3>\n<p4/>\n</compartment>\n</compartments>\n<meta><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "Migrate store -> SQLite",
+          "content": "moved storage",
+          "p1": "moved storage",
+          "p2": "moved storage short",
+          "p3": "moved storage shorter",
+          "p4": "",
+          "importance": 70,
+          "episode_type": "a>b"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "Multi-line attrs => fine",
+          "content": "next",
+          "p1": "next",
+          "p2": "next short",
+          "p3": "next shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [],
+      "unprocessed_from": 5,
+      "user_observations": [],
+      "primer_candidates": []
+    }
   }
 ]

@@ -146,6 +146,25 @@ ${tiers("Use &amp;lt; entity &amp;amp; &lt;tag&gt; &apos;s &amp;gt;")}
 <primer_candidates><primer at_compartment="1">What is &amp;quot;?</primer></primer_candidates>
 </output>`,
     },
+    {
+        label: "raw > inside a quoted attribute value keeps the compartment",
+        text: `<output><compartments>
+<compartment start="1" end="2" title="Migrate store -> SQLite" episode_type="a>b" importance="70">
+${tiers("moved storage")}
+</compartment>
+<compartment
+  start="3"
+  end="4"
+  title="Multi-line attrs => fine">
+${tiers("next")}
+</compartment>
+<compartment start="5" end="6" title="unbalanced>
+${tiers("skipped: the quote never closes on its line")}
+</compartment>
+</compartments>
+<meta><unprocessed_from>5</unprocessed_from></meta>
+</output>`,
+    },
 ];
 
 const golden = cases.map((spec) => ({

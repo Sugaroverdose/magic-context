@@ -61,7 +61,14 @@ export interface ParsedCompartmentOutput {
 // Open tag captured separately from body so attributes (start/end/title/
 // episode_type/importance) can appear in ANY order — LLM output is not
 // attribute-order-stable. Group 1 = full attribute string, group 2 = inner body.
-const COMPARTMENT_REGEX = /<compartment\s+([^>]*?)\s*>(.*?)<\/compartment>/gs;
+// Quoted attribute values are consumed whole, so a raw `>` inside one (a title
+// like "Migrate store -> SQLite") does not end the open tag. A value may not
+// span a line, so a stray unbalanced quote cannot swallow the body.
+const COMPARTMENT_ATTRS_PATTERN = String.raw`((?:[^>"]|"[^"\n]*")*?)`;
+const COMPARTMENT_REGEX = new RegExp(
+    String.raw`<compartment\s+${COMPARTMENT_ATTRS_PATTERN}\s*>(.*?)</compartment>`,
+    "gs",
+);
 // Self-closing v2 compartments are invalid (a compartment must have ≥1 tier or
 // flat content), so we only match the paired form above.
 const ATTR_START_REGEX = /\bstart="(\d+)"/;
@@ -240,7 +247,7 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
         ? factsBlockMatch[1]
         : text
               .replace(EVENTS_BLOCK_REGEX, "")
-              .replace(/<compartment\s+[^>]*?\s*>.*?<\/compartment>/gs, "")
+              .replace(COMPARTMENT_REGEX, "")
               .replace(/<(meta|user_observations|primer_candidates)>.*?<\/\1>/gs, "")
               .replace(/<\/?(?:output|compartments)>/g, "");
     for (const categoryMatch of factsScope.matchAll(CATEGORY_BLOCK_REGEX)) {
