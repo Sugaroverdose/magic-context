@@ -363,7 +363,11 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
     };
 }
 
-export function ensureSessionMetaRow(db: Database, sessionId: string): void {
+export function ensureSessionMetaRow(
+    db: Database,
+    sessionId: string,
+    initialIsSubagent = false,
+): void {
     const defaults = getDefaultSessionMeta(sessionId);
     // Note-nudge persistence columns rely on session_meta defaults and are updated
     // through storage-meta-persisted helpers, not SessionMeta writes.
@@ -378,7 +382,7 @@ export function ensureSessionMetaRow(db: Database, sessionId: string): void {
         defaults.lastNudgeTokens,
         defaults.lastNudgeBand ?? "",
         defaults.lastTransformError ?? "",
-        defaults.isSubagent ? 1 : 0,
+        initialIsSubagent ? 1 : 0,
         defaults.lastContextPercentage,
         defaults.lastInputTokens,
         defaults.observedSafeInputTokens,

@@ -12,6 +12,14 @@
             "behavior": true
         },
         {
+            "path": "tests/opencode2/subagent-mode.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "Issue 612: native OpenCode 2.0.22 task-tool children freeze reduced mode before their first request; allowed children retain tags and reduced guidance, denied children and a denied primary suppress unavailable ctx_reduce surfaces, and children never run the historian; throwaway roots with host PID lsof containment",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/opencode2/retrospective.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },
@@ -219,7 +227,7 @@
                 "ts": true,
                 "rust": false
             },
-            "rationale": "an OpenCode agent permission denying ctx_reduce must remove tags and reduce guidance before the availability verdict freezes; agent and session permissions are an OpenCode 1 host concept, the OpenCode 2 lane passes no SDK client to read them, and Pi has no per-agent permission model",
+            "rationale": "an OpenCode 1 agent permission denying ctx_reduce must remove tags and reduce guidance before the availability verdict freezes; this scenario uses the v1 SDK/session carrier, OpenCode 2 has its native task and host-filtered tool-set proof in opencode2/subagent-mode.test.ts, and Pi has no per-agent permission model",
             "contract_refs": [
                 "TS-HARNESS"
             ],
