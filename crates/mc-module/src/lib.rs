@@ -58,6 +58,7 @@ pub mod session_resolver;
 pub mod single_store_migrate;
 pub mod single_store_reads;
 pub mod single_store_repair;
+mod stable_hash;
 mod state_sync_timing;
 mod tail_hygiene;
 mod tool_catalog;
