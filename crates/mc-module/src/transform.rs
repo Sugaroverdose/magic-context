@@ -3543,6 +3543,7 @@ fn apply_once(
     // copy that marker into CK metadata, so recognize the reserved call-id namespace here too.
     // Normalizing before projection keeps the replayed pair out of selection, coverage, and output.
     let projection_started_at = Instant::now();
+    profile_start!(perf_projection, "projection");
     let normalized_req = normalize_synthetic_todo_ingress(req);
     let ingress_req = normalized_req.as_ref().unwrap_or(req);
     // Recognition uses the canonical block projection before overlays, field stripping, or
@@ -3565,6 +3566,7 @@ fn apply_once(
             .map(|blocks| (cache.prior_fingerprint.as_str(), blocks))
     });
     timings.projection = elapsed_ms(projection_started_at);
+    profile_end!(perf_projection);
     timings.projection_reused_messages = reusable_projection.map_or(0, |cache| cache.replace_from);
     timings.projection_projected_messages = ingress_req
         .messages
@@ -3693,8 +3695,10 @@ fn apply_once(
     let tagging_surface_requested =
         crate::tagging_surface_active(serializer_profile, req.tool_present);
     let seed_or_sync_started_at = Instant::now();
+    profile_start!(perf_seed, "seed_or_sync");
     let transform_snapshot = store.load_transform_snapshot(&req.session_id)?;
     timings.seed_or_sync = elapsed_ms(seed_or_sync_started_at);
+    profile_end!(perf_seed);
     timings.store_cache_state = transform_snapshot.timings.cache_state_ms;
     let tag_hydration_started_at = Instant::now();
     let mut tag_rows = load_cached_tags(store, &req.session_id)?;
@@ -3858,8 +3862,10 @@ fn apply_once(
     // available on non-CC profiles is render-neutral: overlay bytes remain gated by
     // `tagging_active`, while the OpenCode host can receive the same ceiling decision.
     let tag_overlay_started_at = Instant::now();
+    profile_start!(perf_tag_numbers, "tag_overlay");
     let mut tag_numbers = tag_number_by_message(&tag_rows);
     timings.tag_overlay += elapsed_ms(tag_overlay_started_at);
+    profile_end!(perf_tag_numbers);
     let legacy_channel1_appends = if tagging_active {
         transform_snapshot.channel1_appends
     } else {
@@ -4192,10 +4198,13 @@ fn apply_once(
         // Deferring this refresh until the next request would split one eligible batch across
         // several provider-visible rewrites as a multi-step turn keeps minting tags.
         let tag_overlay_started_at = Instant::now();
+        profile_start!(perf_tag_numbers, "tag_overlay");
         tag_numbers = tag_number_by_message(&tag_rows);
         timings.tag_overlay += elapsed_ms(tag_overlay_started_at);
+        profile_end!(perf_tag_numbers);
     }
     let planning_started_at = Instant::now();
+    profile_start!(perf_planning, "planning");
     let pending_drops_started_at = Instant::now();
     let pending_agent_drops = store.load_pending_agent_drops(&req.session_id)?;
     let pending_drop_target_ids = pending_agent_drops
@@ -4950,7 +4959,9 @@ fn apply_once(
     }
 
     timings.planning = elapsed_ms(planning_started_at);
+    profile_end!(perf_planning);
     let state_clone_started_at = Instant::now();
+    profile_start!(perf_clone, "state_clone");
     let mut core = loaded.core.clone();
     log_reasoning_drop_seed_skips(&core, &live, &req.session_id);
     let mut meta = loaded.meta.clone();
@@ -4973,7 +4984,9 @@ fn apply_once(
         transition_hygiene_units(&mut meta, true, active_calibration.tools_ratio);
     }
     timings.state_clone = elapsed_ms(state_clone_started_at);
+    profile_end!(perf_clone);
     let state_evolution_started_at = Instant::now();
+    profile_start!(perf_evolution, "state_evolution");
     meta.boundary_divergence_pending_count = boundary_divergence_pending_count;
     meta.boundary_divergence_observed_compartment_seq = if boundary_divergence_pending_count > 0 {
         boundary_divergence_observed_compartment_seq
@@ -6053,10 +6066,13 @@ fn apply_once(
     }
     timings.todo = todo_ms;
 
+    profile_start!(perf_channel1, "evolution_channel1");
     prune_channel1_units(&mut core, &projection, meta.coverage_ordinal);
     let mut channel1_appends = channel1_append_rows(&core, &legacy_channel1_appends);
+    profile_end!(perf_channel1);
     let result_action = action_str(&plan, &core);
 
+    profile_start!(perf_overlay_maps, "evolution_overlay_maps");
     let mut tag_overlay = if tagging_active {
         tag_overlay_state(
             &tag_rows,
@@ -6083,6 +6099,8 @@ fn apply_once(
         TagOverlayState::default()
     };
 
+    profile_end!(perf_overlay_maps);
+    profile_start!(perf_hygiene, "evolution_hygiene");
     let hygiene_tag_rows =
         tag_rows_for_hygiene(&projection, &tag_rows, &tag_overlay, !tagging_active);
     let hygiene_measurement = measure_tail_hygiene_with_pending_drops(
@@ -6157,6 +6175,7 @@ fn apply_once(
                 refreshed.baseline
             })
     };
+    profile_end!(perf_hygiene);
     let refreshed_coverage = meta.coverage_ordinal;
     rearm_channel2_after_hard_fold(
         &mut meta,
@@ -6230,7 +6249,9 @@ fn apply_once(
     }
 
     timings.state_evolution = elapsed_ms(state_evolution_started_at);
+    profile_end!(perf_evolution);
     let build_output_started_at = Instant::now();
+    profile_start!(perf_build, "build_output");
     let mut no_trim_meta = None;
     if lineage_anchor_failure {
         let mut output_meta = meta.clone();
@@ -6550,6 +6571,7 @@ fn apply_once(
         assert_no_foreign_reduction_input_keys(ck_messages.iter().map(Deref::deref));
     }
     timings.build_output = elapsed_ms(build_output_started_at);
+    profile_end!(perf_build);
     timings.blocks_by_mid = build_timings.blocks_by_mid;
     timings.build_frozen_unit_index = build_timings.frozen_unit_index;
     timings.full_drop_tool_ids = build_timings.full_drop_tool_ids;
@@ -6572,6 +6594,7 @@ fn apply_once(
     timings.tail_units_matched = frozen_units_matched_to_tail(&core, req, meta.coverage_ordinal);
 
     let finalize_started_at = Instant::now();
+    profile_start!(perf_finalize, "finalize");
     // Compare only the served block hashes before committing the new sequence. The first pass
     // records its baseline, and append-only tail growth is intentionally not a divergence.
     let divergence_started_at = Instant::now();
@@ -6680,6 +6703,7 @@ fn apply_once(
     );
     scheduler_observation.identity_delta = identity_delta.clone();
     let store_commit_started_at = Instant::now();
+    profile_start!(perf_commit, "store_commit");
     let row_version = if commit_required {
         #[cfg(test)]
         run_transform_attempt_hook(&req.session_id);
@@ -6727,6 +6751,7 @@ fn apply_once(
         loaded.row_version.unwrap_or(0)
     };
     timings.store_commit = elapsed_ms(store_commit_started_at);
+    profile_end!(perf_commit);
     if let Some(cache) = output_cache {
         cache
             .lock()
@@ -6779,6 +6804,7 @@ fn apply_once(
     timings.store_memories = m1_revision_read_timings.memories_ms;
     timings.store_notes = m1_revision_read_timings.notes_ms;
     timings.finalize = elapsed_ms(finalize_started_at);
+    profile_end!(perf_finalize);
     timings.total = elapsed_ms(total_started_at);
     Ok(TransformWithProjection {
         historian_tags: Some(tag_rows),
@@ -10444,6 +10470,7 @@ fn compute_active_overlay_decisions(
         lineage_anchor_mid,
     } = input;
     let tag_mint_started_at = Instant::now();
+    profile_start!(perf_tag_mint, "tag_overlay");
     let tag_mint_work = if !tag_mint_enabled {
         TagMintWork::default()
     } else {
@@ -10487,7 +10514,9 @@ fn compute_active_overlay_decisions(
     let tag_mint_count = tag_mint_work.inputs.len();
     let tag_mint_start = append_minted_tag_rows(tag_rows, tag_mint_work.inputs, ctx.now_ms);
     let tag_mint_ms = elapsed_ms(tag_mint_started_at);
+    profile_end!(perf_tag_mint);
     let temporal_started_at = Instant::now();
+    profile_start!(perf_temporal, "temporal");
 
     let mint_by_block = tag_rows
         .iter()
@@ -10615,6 +10644,7 @@ fn compute_active_overlay_decisions(
     let max_seen_ordinal =
         decided_frontier.filter(|ordinal| frontier.is_none_or(|current| *ordinal > current));
     let temporal_ms = elapsed_ms(temporal_started_at);
+    profile_end!(perf_temporal);
     let rewrite_temporal_marks = rewrite_temporal_marks && !temporal_marks.is_empty();
 
     Ok(PendingOverlayDecisions {
