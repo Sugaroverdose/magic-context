@@ -14513,17 +14513,22 @@ fn heal_poisoned_trailing_blank_decisions(
         .filter(|message| message.role == "assistant")
         .filter_map(|message| message.meta.harness_id.as_deref())
         .collect::<HashSet<_>>();
+    // One index for the whole pass: looking each assistant up with a scan of every frozen
+    // unit made this quadratic in a long session. The index keeps the first unit per key,
+    // which is what the scan found.
+    let frozen = FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units));
     let mut healed_ids = source_decisions
         .iter()
         .filter(|&(mid, (decision, _))| {
             *decision == FrozenTrailingBlankDecision::Strip
                 && newest_assistant_mid != Some(mid.as_str())
                 && visible_assistant_ids.contains(mid.as_str())
-                && frozen_trailing_blank_decision(core, mid)
+                && output_trailing_blank_decision(&frozen, mid)
                     == Some(FrozenTrailingBlankDecision::Keep)
         })
         .map(|(mid, _)| mid.clone())
         .collect::<Vec<_>>();
+    drop(frozen);
     healed_ids.sort();
     if healed_ids.is_empty() {
         return healed_ids;
@@ -14563,6 +14568,9 @@ fn refresh_trailing_blank_decisions(
 
     let newest_assistant_mid = latest_assistant_mid(&req.messages);
     let mut updates = Vec::new();
+    // One index for the whole pass (first unit per key, as a scan finds it) instead of a
+    // scan of every frozen unit per rendered assistant, which was quadratic.
+    let frozen_units = FrozenUnitLookup::Indexed(FrozenUnitIndex::new(&core.frozen_units));
     for rendered in rendered_messages {
         let Some(mid) = rendered.meta.harness_id.as_deref() else {
             continue;
@@ -14573,10 +14581,10 @@ fn refresh_trailing_blank_decisions(
         let Some(&(decision, keep_count)) = source_decisions.get(mid) else {
             continue;
         };
-        let frozen = frozen_trailing_blank_decision(core, mid);
+        let frozen = output_trailing_blank_decision(&frozen_units, mid);
         let frozen_matches = frozen == Some(decision)
             && (decision == FrozenTrailingBlankDecision::Strip
-                || frozen_trailing_blank_keep_count(core, mid) == Some(keep_count));
+                || output_trailing_blank_keep_count(&frozen_units, mid) == Some(keep_count));
         // A strip is absorbing. If a harness blank arrives after the first serve, stripping it
         // forever makes streaming, completion, and historical projections suffix-monotonic.
         // A live keep may still change count or demote to strip when its source suffix disappears.
@@ -14590,6 +14598,7 @@ fn refresh_trailing_blank_decisions(
         }
         updates.push((mid.to_string(), decision, keep_count, frozen.is_some()));
     }
+    drop(frozen_units);
 
     let newest_replay_required = updates.iter().any(|(mid, decision, _, had_frozen)| {
         newest_assistant_mid == Some(mid.as_str())
