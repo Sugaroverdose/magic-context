@@ -69,6 +69,7 @@ serde_jcs = "0.2"
 drive-fault = []
 
 [dev-dependencies]
+cpu-time = "1"
 subc-core = { workspace = true }
 # Enable the store's seed helpers for mc-module's compose tests (populate memories +
 # mutations). The feature is gated so the writers never reach production builds.

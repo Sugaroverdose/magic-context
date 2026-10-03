@@ -16,6 +16,23 @@
 
 #![forbid(unsafe_code)]
 
+// These clocks exist only in the opt-in, in-process profiling test. Production
+// builds keep the original timers and contain no additional clock reads.
+macro_rules! profile_start {
+    ($timer:ident, $stage:literal) => {
+        #[cfg(test)]
+        let $timer = crate::per_pass_profile::start($stage);
+    };
+}
+macro_rules! profile_end {
+    ($timer:ident) => {
+        #[cfg(test)]
+        crate::per_pass_profile::finish($timer);
+    };
+}
+#[cfg(test)]
+mod per_pass_profile;
+
 pub mod boundary;
 pub mod caveman;
 pub mod ck_wire;
@@ -6152,6 +6169,7 @@ impl McHandler {
         projection: &crate::ck_wire::FlatProjection,
         prepare: HistorianPrepareContext<'_>,
     ) -> PreparedHistorianAction {
+        profile_start!(_perf_trigger, "trigger_ms");
         let HistorianPrepareContext {
             now,
             snapshot_generation,
@@ -6263,6 +6281,7 @@ impl McHandler {
             return PreparedHistorianAction::Complete(diagnostics);
         }
         let boundary_build_started_at = Instant::now();
+        profile_start!(perf_boundary, "trigger_boundary_build");
         if let Some(tags) = tag_snapshot {
             self.boundary_tokens
                 .lock()
@@ -6284,6 +6303,7 @@ impl McHandler {
         } = boundary_messages(parsed, projection, &self.boundary_tokens);
         trigger_timer.timings.boundary_build_ms +=
             boundary_build_started_at.elapsed().as_secs_f64() * 1_000.0;
+        profile_end!(perf_boundary);
         trigger_timer.timings.token_cache_hits = trigger_timer
             .timings
             .token_cache_hits
@@ -6346,6 +6366,7 @@ impl McHandler {
             context_limit,
         );
         let trigger_eval_started_at = Instant::now();
+        profile_start!(perf_eval, "trigger_eval");
         let trigger = {
             let mut formatted_token_estimator =
                 |bytes: &str| token_cache_snapshot.formatted_token_count(bytes);
@@ -6388,13 +6409,16 @@ impl McHandler {
         };
         trigger_timer.timings.trigger_eval_ms +=
             trigger_eval_started_at.elapsed().as_secs_f64() * 1_000.0;
+        profile_end!(perf_eval);
         let cache_store_started_at = Instant::now();
+        profile_start!(perf_trigger_store, "trigger_cache_store");
         self.boundary_tokens
             .lock()
             .expect("boundary token cache mutex")
             .replace(&parsed.session_id, token_cache_snapshot);
         trigger_timer.timings.cache_store_ms +=
             cache_store_started_at.elapsed().as_secs_f64() * 1_000.0;
+        profile_end!(perf_trigger_store);
         decision_context.chunk_range = trigger.progress.as_ref().and_then(|progress| {
             (progress.protected_start_ordinal > progress.eligible_start_ordinal).then(|| {
                 HistorianChunkRange {
@@ -9901,7 +9925,9 @@ impl McHandler {
         ticket: &TransformDispatchTicket<'_>,
     ) -> HandlerOutcome {
         let handler_started_at = Instant::now();
+        profile_start!(perf_handler, "handler_total");
         let request_decode_started_at = Instant::now();
+        profile_start!(perf_decode, "request_decode");
         let mut delta_expand_ms = 0.0;
         const REQUEST_OBSERVED_KEY: &str = "request_observed_at_ms";
         let request_attempt_id = request
@@ -9939,7 +9965,9 @@ impl McHandler {
             }
         };
         let request_decode_ms = request_decode_started_at.elapsed().as_secs_f64() * 1_000.0;
+        profile_end!(perf_decode);
         let handler_prepare_started_at = Instant::now();
+        profile_start!(perf_prepare, "handler_prepare");
         let serializer_profile = SerializerProfile::parse(&parsed.serializer_profile);
         if serializer_profile.is_none() {
             return unknown_serializer_profile_error();
@@ -10070,8 +10098,10 @@ impl McHandler {
             .insert(lineage_root);
         let native_delta_frontier = if parsed.tail_delta.is_some() {
             let delta_expand_started_at = Instant::now();
+            profile_start!(perf_delta, "delta_expand");
             let expanded = self.expand_transform_tail_delta(&mut parsed);
             delta_expand_ms = delta_expand_started_at.elapsed().as_secs_f64() * 1_000.0;
+            profile_end!(perf_delta);
             let frontier = match expanded {
                 Ok(frontier) => frontier,
                 Err(reason) => return need_full_sync_response(&parsed, reason),
@@ -10342,7 +10372,9 @@ impl McHandler {
             }
         };
         let handler_prepare_ms = handler_prepare_started_at.elapsed().as_secs_f64() * 1_000.0;
+        profile_end!(perf_prepare);
         let transform_execute_started_at = Instant::now();
+        profile_start!(perf_execute, "transform_execute");
         let mut result = match run_transform() {
             Ok(result) => {
                 self.runtime_store_errors
@@ -10354,7 +10386,9 @@ impl McHandler {
             Err(e) => return reject_transform(e),
         };
         let transform_execute_ms = transform_execute_started_at.elapsed().as_secs_f64() * 1_000.0;
+        profile_end!(perf_execute);
         let handler_followup_started_at = Instant::now();
+        profile_start!(perf_followup, "handler_followup");
         let mut emergency_pre_floor = (result.scheduler_pass
             == scheduler::PassDecision::Emergency95)
             .then_some(result.publication_floor_ordinal)
@@ -10561,7 +10595,9 @@ impl McHandler {
             }
         }
         let handler_followup_ms = handler_followup_started_at.elapsed().as_secs_f64() * 1_000.0;
+        profile_end!(perf_followup);
         let post_attach_started_at = Instant::now();
+        profile_start!(perf_post, "post_attach");
         let revert_epoch = result.revert_epoch;
         let reasoning_clear_units = &result.reasoning_clear_units;
         let transition_consumed = result.transition_consumed;
@@ -10600,6 +10636,7 @@ impl McHandler {
         }
         response.historian = Some(diagnostics);
         let native_attach_started_at = Instant::now();
+        profile_start!(perf_native, "native_attach");
         let native_cache_stats = if parsed.serve_native {
             attach_native_messages_incremental(
                 &mut response,
@@ -10641,6 +10678,7 @@ impl McHandler {
             native_cache_stats,
         );
         let native_attach_ms = native_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
+        profile_end!(perf_native);
         let trace_complete_started_at = Instant::now();
         let _ = store.trace_pass_completed(&parsed.session_id, &request_attempt_id, now_ms());
         let trace_complete_ms = trace_complete_started_at.elapsed().as_secs_f64() * 1_000.0;
@@ -10701,6 +10739,8 @@ impl McHandler {
             timings.native_cache_reencode_drift = native_cache_stats.reencode_drift;
             timings.post_attach = post_attach_started_at.elapsed().as_secs_f64() * 1_000.0;
         }
+        profile_end!(perf_post);
+        profile_end!(perf_handler);
         respond_transform(&parsed, response)
     }
 
@@ -18600,6 +18640,7 @@ mod tests {
     mod gate_a1_b0_baseline_probe;
     mod gate_a2;
     mod guidance_get_golden;
+    mod per_pass_cost;
     mod single_store_drill;
     mod tool_catalog;
     mod tool_catalog_conformance;
