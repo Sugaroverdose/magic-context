@@ -69,7 +69,9 @@ pub fn canonical_root(path: impl AsRef<Path>) -> PathBuf {
 
 /// Canonical foreign-memory visibility predicate used by module SQL consumers.
 /// The plugin mirrors this literal to keep cache visibility and workspace policy aligned.
-pub const FOREIGN_VISIBLE_SQL: &str = "status IN ('active','permanent') AND (expires_at IS NULL OR expires_at > :now_ms) AND shareable = 1 AND scope IN ('project','ecosystem','universe') AND category IN (SELECT value FROM json_each(:share_categories)) AND project_path IN (SELECT project_path FROM mc_workspace_members WHERE workspace_id = :workspace_id) AND project_path <> :reader_project";
+/// It reads `context.db`, where `memories` and `workspace_members` live; the store.db
+/// mirror `mc_workspace_members` it once named was dropped with the move to one store.
+pub const FOREIGN_VISIBLE_SQL: &str = "status IN ('active','permanent') AND (expires_at IS NULL OR expires_at > :now_ms) AND shareable = 1 AND scope IN ('project','ecosystem','universe') AND category IN (SELECT value FROM json_each(:share_categories)) AND project_path IN (SELECT project_path FROM workspace_members WHERE workspace_id = :workspace_id) AND project_path <> :reader_project";
 
 /// Internal mutation category used to carry foreign-visibility transitions across state sync.
 pub const MEMORY_VISIBILITY_MUTATION_CATEGORY: &str = "__mc_visibility__";
@@ -24646,6 +24648,53 @@ mod tests {
         for id in ["m#05", "m#+5", "m#00", "m#", "m# 5", "#5", "m#-1", "a#b#1"] {
             assert_eq!(split_flat_block_id(id), None, "{id:?}");
         }
+    }
+
+    #[test]
+    fn foreign_visible_predicate_runs_against_the_context_memories_table() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        let visible = store
+            .with_context_conn_for_test(|conn| {
+                let insert = |project: &str, category: &str, content: &str, shareable: i64| {
+                    conn.execute(
+                        "INSERT INTO memories(project_path, category, content, normalized_hash,
+                                              scope, shareable, first_seen_at, created_at,
+                                              updated_at, last_seen_at)
+                         VALUES (?1, ?2, ?3, ?3, 'project', ?4, 1, 1, 1, 1)",
+                        params![project, category, content, shareable],
+                    )
+                };
+                insert("git:reader", "CONSTRAINTS", "own row", 1)?;
+                insert("git:member", "CONSTRAINTS", "shared row", 1)?;
+                insert("git:member", "CONSTRAINTS", "private row", 0)?;
+                insert("git:member", "WORKFLOW", "unshared category", 1)?;
+                insert("git:outsider", "CONSTRAINTS", "not a member", 1)?;
+                conn.execute_batch(
+                    "INSERT INTO workspaces(id, name, created_at, updated_at) VALUES (7, 'ws', 0, 0);
+                     INSERT INTO workspace_members(workspace_id, project_path, display_name,
+                                                   display_path, added_at)
+                     VALUES (7, 'git:reader', 'reader', 'reader', 0),
+                            (7, 'git:member', 'member', 'member', 0);",
+                )?;
+                let mut statement = conn.prepare(&format!(
+                    "SELECT content FROM memories WHERE {FOREIGN_VISIBLE_SQL} ORDER BY id"
+                ))?;
+                let rows = statement
+                    .query_map(
+                        rusqlite::named_params! {
+                            ":now_ms": 10_i64,
+                            ":share_categories": "[\"CONSTRAINTS\"]",
+                            ":workspace_id": 7_i64,
+                            ":reader_project": "git:reader",
+                        },
+                        |row| row.get::<_, String>(0),
+                    )?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(visible, vec!["shared row".to_string()]);
     }
 }
 
