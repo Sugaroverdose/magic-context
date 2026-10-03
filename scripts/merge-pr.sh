@@ -170,13 +170,20 @@ run git -C "$worktree" merge --no-ff --no-edit "$head"
 
 changed_file=$(run mktemp "${worktree%/*}/merge-pr-files.XXXXXX")
 run git diff --name-only -z "master...$head" > "$changed_file"
-plugin=0 pi_plugin=0 cli=0 rust=0
+# Package impact table: package | runner | changed source-path prefixes.
+# Pi imports the plugin's shared core; CLI shares its config, loader and doctor
+# code. Those dependents must run even when only the plugin changes. Add a new
+# package in one row; include each shared source prefix that can affect it.
+PACKAGE_GATES=(
+  'plugin|test-typecheck|packages/plugin/'
+  'pi-plugin|test-typecheck|packages/pi-plugin/ packages/plugin/'
+  'cli|test|packages/cli/ packages/plugin/'
+  'e2e-tests|mode-manifest|packages/e2e-tests/'
+)
+rust=0
 biome_files=()
 while IFS= read -r -d '' file; do
   case "$file" in
-    packages/plugin/*) plugin=1 ;;
-    packages/pi-plugin/*) pi_plugin=1 ;;
-    packages/cli/*) cli=1 ;;
     crates/*) rust=1 ;;
   esac
   # Deleted paths still select package gates but cannot be linted. Prefix paths
@@ -186,15 +193,29 @@ done < "$changed_file"
 (
   cd "$worktree"
   run bun install --frozen-lockfile
-  if [ "$plugin" -eq 1 ]; then
-    (cd packages/plugin; run bun test; run bun run typecheck)
-  fi
-  if [ "$pi_plugin" -eq 1 ]; then
-    (cd packages/pi-plugin; run bun test; run bun run typecheck)
-  fi
-  if [ "$cli" -eq 1 ]; then
-    (cd packages/cli; run bun test)
-  fi
+  for rule in "${PACKAGE_GATES[@]}"; do
+    IFS='|' read -r package runner prefixes <<< "$rule"
+    selected=0
+    while IFS= read -r -d '' file; do
+      for prefix in $prefixes; do
+        if [[ "$file" = "$prefix"* ]]; then
+          selected=1
+          break 2
+        fi
+      done
+    done < "$changed_file"
+    if [ "$selected" -eq 1 ]; then
+      (
+        cd "packages/$package"
+        case "$runner" in
+          test-typecheck) run bun test; run bun run typecheck ;;
+          test) run bun test ;;
+          mode-manifest) run bun test scripts/validate-mode-manifest.test.ts ;;
+          *) die "Unknown package gate runner: $runner" ;;
+        esac
+      )
+    fi
+  done
   if [ "$rust" -eq 1 ]; then
     run cargo clippy --workspace -- -D warnings
     run cargo test --workspace

@@ -253,6 +253,28 @@ class MergeTests(unittest.TestCase):
         self.assertEqual(self.commands("bunx")[0]["args"], ["biome", "check", "--no-errors-on-unmatched", *["./" + path for path in sorted(paths)]])
         self.assert_cleaned()
 
+    def test_plugin_only_runs_dependent_package_gates(self):
+        run = self.run_script("--dry-run")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual([(Path(item["cwd"]).name, item["args"]) for item in self.commands("bun")], [
+            ("merge-pr-123", ["install", "--frozen-lockfile"]),
+            ("plugin", ["test"]), ("plugin", ["run", "typecheck"]),
+            ("pi-plugin", ["test"]), ("pi-plugin", ["run", "typecheck"]), ("cli", ["test"]),
+        ])
+        self.assertFalse(self.commands("cargo"))
+        self.assert_cleaned()
+
+    def test_e2e_changes_run_mode_manifest_gate(self):
+        self.prepare_pr(["packages/e2e-tests/scripts/validate-mode-manifest.test.ts"])
+        run = self.run_script("--dry-run")
+        self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
+        self.assertEqual([(Path(item["cwd"]).name, item["args"]) for item in self.commands("bun")], [
+            ("merge-pr-123", ["install", "--frozen-lockfile"]),
+            ("e2e-tests", ["test", "scripts/validate-mode-manifest.test.ts"]),
+        ])
+        self.assertFalse(self.commands("cargo"))
+        self.assert_cleaned()
+
     def test_unrelated_paths_only_install_and_biome(self):
         self.prepare_pr(["docs/example.md"])
         run = self.run_script("--dry-run")
