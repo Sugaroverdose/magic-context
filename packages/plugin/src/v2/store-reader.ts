@@ -446,6 +446,15 @@ export class V2StoreReader {
         return row?.time ?? undefined;
     }
 
+    /** Parent links are recorded by the host before a child's first context pass. */
+    isSubagent(sessionID: string): boolean | null {
+        const row = this.db
+            .prepare("SELECT parent_id FROM session_v2 WHERE id = ?")
+            .get(sessionID) as { parent_id: string | null } | undefined;
+        if (!row) return null;
+        return typeof row.parent_id === "string" && row.parent_id.length > 0;
+    }
+
     /** Native user activity on root sessions; internal children must never become
      * retrospective input. Activity is read from the source, not project-binding
      * times or optional activity keys in Magic Context's store. */

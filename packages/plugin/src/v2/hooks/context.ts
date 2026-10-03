@@ -474,21 +474,26 @@ export function recordV2ToolDefinitions(draft: SessionContext): void {
  * lost there anyway) and only detected the change on the second pass, whose
  * separate HARD fold rebuilt the cache a second time.
  *
- * The verdict is therefore frozen first, from this draft's messages, with the
- * same resolver and the same message shape the message transform later in this
- * pass freezes it from (the adapted messages carry no per-message tools map, see
- * payload.ts), so it can only freeze to the value the transform would have
- * frozen. A draft with no user message leaves the verdict provisional, as before.
- * Any future read of OpenCode 2's ctx_reduce permissions has to run before this
- * call: once frozen, the verdict never changes for the session.
+ * Freeze from the host-filtered tool set before either shared handler can fall
+ * back to the v1 tables. OC2 has already applied agent and session permissions
+ * to draft.tools; its adapted messages carry no v1 tools map. Freezing from
+ * roles alone therefore advertised a denied ctx_reduce as callable. Only the
+ * first resolved user pass decides: later tool/agent changes cannot change
+ * the guidance or tags mid-session. A draft with no user message remains
+ * provisional, as before.
  */
 export async function applyV2SystemPrompt(
     systemPrompt: Pick<ReturnType<typeof createSystemPromptHashHandler>, "handler">,
-    draft: Pick<SessionContext, "sessionID" | "model" | "messages" | "system">,
+    draft: Pick<SessionContext, "sessionID" | "model" | "messages" | "system" | "tools">,
 ): Promise<void> {
     resolveCtxReduceAvailabilityFromMessages(
         draft.sessionID,
-        draft.messages.map((message) => ({ info: { role: message.role } })),
+        draft.messages.map((message) => ({
+            info: {
+                role: message.role,
+                tools: { ctx_reduce: Object.hasOwn(draft.tools, "ctx_reduce") },
+            },
+        })),
     );
     const system = { system: draft.system.map((part) => String(part.text ?? "")) };
     await systemPrompt.handler(
