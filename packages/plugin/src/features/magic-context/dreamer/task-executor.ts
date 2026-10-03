@@ -321,7 +321,7 @@ interface CurateValidatedOutput {
     memoryOperations: CurateMemoryOperationSummary;
 }
 
-function inspectCurateMemoryOperations(messages: unknown): CurateMemoryOperationSummary {
+export function inspectCurateMemoryOperations(messages: unknown): CurateMemoryOperationSummary {
     const summary: CurateMemoryOperationSummary = { totalCalls: 0, completedActions: [] };
     if (!Array.isArray(messages)) return summary;
 

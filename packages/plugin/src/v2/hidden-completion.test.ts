@@ -1,10 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { inspectCurateMemoryOperations } from "../features/magic-context/dreamer/task-executor";
 import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../hooks/magic-context/compartment-runner-types";
 import { Database } from "../shared/sqlite";
-import { createV2HiddenCompletionExecutor, type HiddenChildHost } from "./hidden-completion";
+import {
+    createV2HiddenCompletionExecutor,
+    type HiddenChildHost,
+    toolLoopMessages,
+} from "./hidden-completion";
 import {
     HIDDEN_CURATE_AGENT,
     HIDDEN_DREAMER_AGENT,
@@ -972,5 +977,93 @@ test("hidden tool-loop hard-stops at soft prompt budget when the host has no pre
         privacySensitive: true,
         context: "test",
         log: () => {},
+    });
+});
+
+describe("curate validation over the OpenCode 2 tool-loop transcript", () => {
+    // These tool results use the shapes `v2/fold/restore.ts` builds when it restores a
+    // child's transcript into provider messages, which is what toolLoopMessages reads.
+    const call = (id: string, action: string) => ({
+        role: "assistant",
+        content: [{ type: "tool-call", id, name: "ctx_memory", input: { action, ids: [1] } }],
+    });
+    const transcript = (results: unknown[]) =>
+        toolLoopMessages({ observedMessages: results } as never);
+
+    test("counts an applied operation from a single text result", () => {
+        const messages = transcript([
+            call("c1", "archive"),
+            {
+                role: "tool",
+                content: [
+                    {
+                        type: "tool-result",
+                        id: "c1",
+                        result: { type: "text", value: "Archived memory [ID: 1]." },
+                    },
+                ],
+            },
+        ]);
+        expect(inspectCurateMemoryOperations(messages)).toEqual({
+            totalCalls: 1,
+            completedActions: ["archive"],
+        });
+    });
+
+    test("counts an applied operation from a multi-part content result", () => {
+        const messages = transcript([
+            call("c1", "merge"),
+            {
+                role: "tool",
+                content: [
+                    {
+                        type: "tool-result",
+                        id: "c1",
+                        result: {
+                            type: "content",
+                            value: [{ type: "text", text: "Merged memories [1, 2] into [3]." }],
+                        },
+                    },
+                ],
+            },
+        ]);
+        expect(inspectCurateMemoryOperations(messages).completedActions).toEqual(["merge"]);
+    });
+
+    test("never counts a failed call, even when its content reads like success", () => {
+        const messages = transcript([
+            call("c1", "archive"),
+            {
+                role: "tool",
+                content: [
+                    {
+                        type: "tool-result",
+                        id: "c1",
+                        resultType: "error",
+                        result: {
+                            error: "refused",
+                            content: [{ type: "text", text: "Archived memory [ID: 1]." }],
+                        },
+                    },
+                ],
+            },
+            call("c2", "update"),
+            {
+                role: "tool",
+                content: [
+                    {
+                        type: "tool-result",
+                        id: "c2",
+                        result: { type: "text", value: "Error: unsafe target" },
+                    },
+                ],
+            },
+        ]);
+        expect(inspectCurateMemoryOperations(messages)).toEqual({
+            totalCalls: 2,
+            completedActions: [],
+        });
+        const [refused] = messages as { parts: { state: { status: string } }[] }[];
+        expect(refused?.parts[0]?.state.status).toBe("error");
     });
 });
