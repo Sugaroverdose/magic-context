@@ -20,6 +20,7 @@ import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallbac
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
 import type { MessageLike } from "../hooks/magic-context/transform-operations";
 import { replayRustModeBindingMismatchStrips } from "../hooks/magic-context/transform-postprocess-phase";
+import { UnmanagedOverWindowError } from "../hooks/magic-context/unmanaged-over-window";
 import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolved-history-boundary";
 import { log, sessionLog } from "../shared/logger";
 import {
@@ -223,7 +224,7 @@ function preserveUserTerminatedTail(
  * - **SQLITE_BUSY / SQLITE_LOCKED**: Writer acquisition already retried before
  *   any callback ran. Replay LKG or refuse; never retry the mutating transform.
  *
- * - **UnresolvedHistoryBoundaryError / DegradedPassRefusalError**: The pass
+ * - **UnresolvedHistoryBoundaryError / UnmanagedOverWindowError / DegradedPassRefusalError**: The pass
  *   could not produce a request that is safe to send. Replay LKG or refuse.
  *
  * - **Non-BUSY errors**: Schema corruption, programming bugs, type errors.
@@ -471,6 +472,7 @@ export function createMessagesTransformHandler(args: {
             if (
                 !args.compactionOff &&
                 (error instanceof UnresolvedHistoryBoundaryError ||
+                    error instanceof UnmanagedOverWindowError ||
                     error instanceof DegradedPassRefusalError)
             ) {
                 throw error;

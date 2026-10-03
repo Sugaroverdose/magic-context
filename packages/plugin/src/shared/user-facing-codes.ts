@@ -19,6 +19,12 @@ export const USER_FACING_FAILURES = {
             "This request was not sent: the message that marks where this session's history summary ends is missing from the OpenCode store, and without it the request is larger than the model's context window.",
         action: "Run /ctx-recomp to rebuild the history summary.",
     },
+    history_over_window_unmanaged: {
+        code: "MC-H06",
+        sentence:
+            "This request was not sent: this session's history is larger than the model's context window, and Magic Context does not have a summary of it yet to send in its place.",
+        action: "Send your message again once history compression has caught up, or switch to a model with a larger context window.",
+    },
     historian_window_too_small: {
         code: "MC-H05",
         sentence:

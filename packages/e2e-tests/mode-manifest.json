@@ -709,6 +709,21 @@
             ]
         },
         {
+            "path": "tests/opencode2/fork-inheritance.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane (issue 608): a parent session with compartments and a dropped tool output is forked with OpenCode's own fork, and the fork's first request must be served under the mock provider's enforced window with the history head rendered from the inherited compartments; a session Magic Context has no state for whose raw history is over the window must be refused (MC-H06) until the historian has caught up, never sent unmanaged; a small first pass is served unchanged; the v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
             "path": "tests/opencode2/missing-history-boundary.test.ts",
             "tier": "excluded",
             "invocation": {

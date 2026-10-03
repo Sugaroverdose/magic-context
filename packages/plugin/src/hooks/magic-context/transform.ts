@@ -1,5 +1,5 @@
 import type { ProtectedTokensTierOverrides } from "../../config/project-security";
-
+import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import {
     resolveProjectIdentityForSession,
     takeDubiousOwnershipProjectIdentityWarning,
@@ -172,6 +172,7 @@ import {
     runPostTransformPhase,
 } from "./transform-postprocess-phase";
 import { logTransformTiming } from "./transform-stage-logger";
+import { isClearlyOverWindow, UnmanagedOverWindowError } from "./unmanaged-over-window";
 import { UnresolvedHistoryBoundaryError } from "./unresolved-history-boundary";
 
 export { EmergencyFailClosedError } from "./emergency-fail-closed";
@@ -674,6 +675,12 @@ export function resolveTransformHostSeams(
 export function createTransform(deps: TransformDeps) {
     const host = resolveTransformHostSeams(deps);
     const loadedSessions = new Set<string>();
+    // Sessions whose history was clearly over the model's window, with no
+    // Magic Context state to send in its place, on a pass that could not bring
+    // it under. Each later pass is checked again until one is served under the
+    // window, because the usage reading such a pass sees is not this request's:
+    // it is missing, or on an OpenCode 2 fork it is the parent's last reply.
+    const unmanagedOverWindowSessions = new Set<string>();
     const rustModeTransform =
         deps.transformMode === "rust" && deps.rustModeModuleClient
             ? createRustModeTransform(deps, {
@@ -1469,6 +1476,70 @@ export function createTransform(deps: TransformDeps) {
                   sessionID: sessionId,
               })
             : undefined;
+        // A session Magic Context holds no state for (no compartment and no
+        // dropped tag yet) sends its raw history as is, so on its first pass in
+        // this process the incoming messages are the request. Nothing else
+        // measures that request before it goes out: the usage reading is reset
+        // on a first pass, absent for a session never served, and on an
+        // OpenCode 2 fork it is the parent's last reply. When the local count
+        // is clearly over the model's window, the pass is put in the emergency
+        // band, so the historian is started and awaited and the emergency drops
+        // run, and the final check below refuses it if that was not enough.
+        // Sessions with compartments or drops are not checked here: their
+        // incoming array still holds the history and tool output the pass is
+        // about to replace, so its size says nothing about the request.
+        let unmanagedOverWindowPass: { tokens: number; limit: number } | null = null;
+        const unmanagedOverWindowCarried = unmanagedOverWindowSessions.has(sessionId);
+        if (
+            fullFeatureMode &&
+            !compactionOff &&
+            typeof resolvedContextLimit === "number" &&
+            resolvedContextLimit > 0 &&
+            (unmanagedOverWindowCarried ||
+                (isFirstTransformPassForSession &&
+                    getLastCompartmentEndMessage(db, sessionId) < 0 &&
+                    getMaxDroppedTagNumber(db, sessionId) === 0))
+        ) {
+            try {
+                const incoming = estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: runNotificationParams(sessionId)?.agent,
+                });
+                // The history alone, unscaled: system prompt and tool
+                // definitions are not something this pass can reduce, and the
+                // fit ratios the estimate applies for unknown models are upper
+                // envelopes that would flag sessions that fit.
+                const incomingTokens =
+                    incoming.messageTokens.conversation + incoming.messageTokens.toolCall;
+                if (isClearlyOverWindow(incomingTokens, resolvedContextLimit)) {
+                    unmanagedOverWindowPass = {
+                        tokens: incomingTokens,
+                        limit: resolvedContextLimit,
+                    };
+                    unmanagedOverWindowSessions.add(sessionId);
+                    const percentage = (incomingTokens / resolvedContextLimit) * 100;
+                    sessionLog(
+                        sessionId,
+                        `transform: over-window first pass: the incoming history is about ${incomingTokens} tokens (${percentage.toFixed(1)}% of the ${resolvedContextLimit}-token window) and Magic Context has nothing to send in its place; treating the pass as at the emergency band so it is reduced or refused, never sent as is`,
+                    );
+                    contextUsageEarly = {
+                        inputTokens: incomingTokens,
+                        percentage: Math.max(95, percentage),
+                    };
+                    usagePercentageSynthetic = true;
+                } else if (unmanagedOverWindowCarried) {
+                    unmanagedOverWindowSessions.delete(sessionId);
+                }
+            } catch (error) {
+                sessionLog(
+                    sessionId,
+                    `transform: over-window first-pass check could not estimate the incoming history: ${getErrorMessage(error)}`,
+                );
+            }
+        }
         const emergencyUsagePercentageEarly = usagePercentageSynthetic
             ? Math.max(95, contextUsageEarly.percentage)
             : windowGeometry?.usableHard && contextUsageEarly.inputTokens > 0
@@ -2696,6 +2767,35 @@ export function createTransform(deps: TransformDeps) {
                         boundaryContextLimit,
                     );
                 }
+            }
+            // The pass began clearly over the window with nothing to replace the
+            // history (see the check before the scheduler decision). Whatever
+            // this pass reclaimed, a request still over the window does not go
+            // out: the wrapper replays the last good request or refuses.
+            if (unmanagedOverWindowPass) {
+                const served = estimateFinalWireInputTokens({
+                    messages,
+                    systemPromptTokens: sessionMeta.systemPromptTokens,
+                    providerID: modelForBudget?.providerID,
+                    modelID: modelForBudget?.modelID,
+                    agentName: notificationParams.agent,
+                });
+                const servedTokens = served.rawTokens ?? served.tokens;
+                if (
+                    !Number.isFinite(servedTokens) ||
+                    servedTokens > unmanagedOverWindowPass.limit
+                ) {
+                    sessionLog(
+                        sessionId,
+                        `over-window first pass not sent: the request is still about ${servedTokens} tokens after this pass, over the ${unmanagedOverWindowPass.limit}-token window (history started at ${unmanagedOverWindowPass.tokens}) (MC-H06)`,
+                    );
+                    throw new UnmanagedOverWindowError(servedTokens, unmanagedOverWindowPass.limit);
+                }
+                unmanagedOverWindowSessions.delete(sessionId);
+                sessionLog(
+                    sessionId,
+                    `over-window first pass reduced: the request is about ${servedTokens} tokens (history started at ${unmanagedOverWindowPass.tokens}), under the ${unmanagedOverWindowPass.limit}-token window`,
+                );
             }
             const timedOutHistorianFailure = compartmentPhase.historianJoinTimedOut
                 ? historianJoinFailClosedMessage({
