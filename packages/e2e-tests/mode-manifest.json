@@ -34,6 +34,14 @@
             "hosts": ["opencode"]
         },
         {
+            "path": "tests/fork-over-window-oc1.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual regression probe on OpenCode 1.18.30 (issue 608): a 1.x /fork is an unlinked copy, so nothing is inherited; the fork's over-window first pass and every retry after it must be reduced or refused (MC-H06) before the mock provider's enforced window, never sent as is; throwaway root with host PID lsof containment",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/issue-574-unborn-project.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
@@ -701,6 +709,21 @@
                 "rust": false
             },
             "rationale": "OpenCode v2 lane (issue 591): /ctx-recomp over the GA command API rebuilds compartments through the v2 hidden-completion executor instead of failing with MC-R01 on the missing OpenCode 1 client, and the next turn renders the rebuilt history; the v2 lane runs from its own invocation (bun test tests/opencode2)",
+            "contract_refs": [
+                "OC2-S1"
+            ],
+            "hosts": [
+                "opencode2"
+            ]
+        },
+        {
+            "path": "tests/opencode2/fork-inheritance.test.ts",
+            "tier": "excluded",
+            "invocation": {
+                "ts": false,
+                "rust": false
+            },
+            "rationale": "OpenCode v2 lane (issue 608): a parent session with compartments and a dropped tool output is forked with OpenCode's own fork, and the fork's first request must be served under the mock provider's enforced window with the history head rendered from the inherited compartments; a session Magic Context has no state for whose raw history is over the window must be refused (MC-H06) until the historian has caught up, never sent unmanaged; a small first pass is served unchanged; the v2 lane runs from its own invocation (bun test tests/opencode2)",
             "contract_refs": [
                 "OC2-S1"
             ],

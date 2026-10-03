@@ -76,6 +76,7 @@ import {
 } from "../../hooks/magic-context/storage-busy-refusal";
 import { createSystemPromptHashHandler } from "../../hooks/magic-context/system-prompt-hash";
 import { createTransform, type TransformDeps } from "../../hooks/magic-context/transform";
+import { UnmanagedOverWindowError } from "../../hooks/magic-context/unmanaged-over-window";
 import { UnresolvedHistoryBoundaryError } from "../../hooks/magic-context/unresolved-history-boundary";
 import { scheduleAfterBootQuiet } from "../../plugin/boot-quiet";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
@@ -113,6 +114,7 @@ import { hostMediaAsset, hostUsesMediaAssets, rememberHostMedia } from "../fold/
 import { v2CompactionMarkerStrategy } from "../fold/markers";
 import { FoldOwner, foldDigest } from "../fold/owner";
 import { restoreRow } from "../fold/restore";
+import { seedV2ForkFromParent, sessionHasMagicContextState } from "../fork-inheritance";
 import { cleanupLegacyHiddenChildren } from "../hidden-child-cleanup";
 import { nativeSessionRemove } from "../hidden-child-native";
 import { createLateHiddenExecutor, createV2HiddenCompletionExecutor } from "../hidden-completion";
@@ -162,6 +164,7 @@ export function isBlockingV2TransformError(error: unknown): boolean {
     return (
         error instanceof EmergencyFailClosedError ||
         error instanceof UnresolvedHistoryBoundaryError ||
+        error instanceof UnmanagedOverWindowError ||
         error instanceof DegradedPassRefusalError ||
         isFailClosedBlockingError(error)
     );
@@ -905,6 +908,57 @@ export async function registerContext(context: V2Context) {
     const systemPromptRefreshSessions = new Set<string>();
     const tagger = createTagger();
     const deletedSessions = new DeletedSessionTombstones();
+    // Sessions whose fork inheritance has been settled in this process (seeded,
+    // declined, or not a fork), so the store is asked once per session.
+    const forkSeedSettled = new Set<string>();
+    /**
+     * On the first pass for a session with no Magic Context state, inherit the
+     * parent's state when the session is an OpenCode 2 fork. Runs before
+     * anything on this pass can tag the session: a fork already tagged is
+     * never copied into. A transient storage error is rethrown so the pass is
+     * replayed or refused and the next one retries the seed; any other
+     * failure is logged and the session goes on without inherited state.
+     */
+    const inheritForkState = (database: NonNullable<typeof db>, sessionID: string): void => {
+        if (forkSeedSettled.has(sessionID)) return;
+        if (sessionHasMagicContextState(database, sessionID)) {
+            forkSeedSettled.add(sessionID);
+            return;
+        }
+        let reader: V2StoreReader | undefined;
+        try {
+            reader = openStoreReader();
+            const outcome = seedV2ForkFromParent({
+                db: database,
+                store: reader,
+                sessionId: sessionID,
+            });
+            forkSeedSettled.add(sessionID);
+            if (outcome.kind === "seeded") {
+                const { result } = outcome;
+                sessionLog(
+                    sessionID,
+                    `v2 fork inheritance: seeded from ${outcome.parentSessionID} through the fork boundary; paired rows=${outcome.pairedRows} compartments=${result.compartmentsCopied} tags=${result.tagsCopied} pending_ops=${result.pendingOpsCopied} facts=${result.factsCopied} notes=${result.notesCopied}`,
+                );
+            } else if (outcome.kind === "parent-missing") {
+                sessionLog(
+                    sessionID,
+                    `v2 fork inheritance: fork of ${outcome.parentSessionID} starts without inherited state (${outcome.reason})`,
+                );
+            } else if (outcome.kind === "destination-not-empty") {
+                sessionLog(
+                    sessionID,
+                    `v2 fork inheritance: fork of ${outcome.parentSessionID} already has state; not copied again`,
+                );
+            }
+        } catch (error) {
+            if (isTransientSqliteError(error)) throw error;
+            forkSeedSettled.add(sessionID);
+            sessionLog(sessionID, "v2 fork inheritance failed; continuing without it:", error);
+        } finally {
+            reader?.close();
+        }
+    };
     /**
      * Record the provider's usage for the session's latest reply. Returns true only
      * when that could not be done safely (the context database is not durable, or a
@@ -1244,6 +1298,9 @@ export async function registerContext(context: V2Context) {
                 pushNotification("toast", { message, variant: "info" }, draft.sessionID);
                 storeStorageNotice(draft.sessionID, message, "recovery");
             }
+            // TypeScript mode only: in Rust mode the module owns the session's
+            // history and this state is not what it serves.
+            if (!rustModeModuleClient && !compactionOff) inheritForkState(db, draft.sessionID);
             // OpenCode 2 exposes system and message transformation through one
             // context hook, with the system handler running first below. Rebase
             // before it so a converted session initializes the new host's prompt
@@ -1667,6 +1724,7 @@ export async function registerContext(context: V2Context) {
                     // say on the TUI's notification channel what the user can do.
                     if (
                         error instanceof UnresolvedHistoryBoundaryError ||
+                        error instanceof UnmanagedOverWindowError ||
                         error instanceof DegradedPassRefusalError
                     ) {
                         pushNotification(
