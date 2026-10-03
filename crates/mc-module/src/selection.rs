@@ -55,8 +55,20 @@ pub(crate) const RECLAIM_HINT_EXCLUDED_TOOLS: &[&str] = &[
 /// `ctx_note` actions that carry no lasting value (droppable when positively read).
 const CTX_NOTE_ZERO_VALUE_ACTIONS: &[&str] = &["read", "dismiss"];
 /// Mirrors the duplicate-safe tool list in the TypeScript twin:
-/// `packages/plugin/src/hooks/magic-context/heuristic-cleanup.ts`.
+/// `packages/plugin/src/hooks/magic-context/heuristic-cleanup.ts`. Hosts hand over bare tool
+/// names (OpenCode 1.18.30 stores `read`, `grep`, `glob`; Pi stores `read`, `grep`), so the bare
+/// names are what match; the `mcp_` forms cover MCP servers that expose the same tools under that
+/// prefix.
 const DEDUP_SAFE_TOOLS: &[&str] = &[
+    "grep",
+    "read",
+    "glob",
+    "ast_grep_search",
+    "lsp_diagnostics",
+    "lsp_symbols",
+    "lsp_find_references",
+    "lsp_goto_definition",
+    "lsp_prepare_rename",
     "mcp_grep",
     "mcp_read",
     "mcp_glob",
@@ -1039,6 +1051,8 @@ fn select_supersession(
 /// Select older completed duplicate calls from safe tools. The owner is in both the lookup key
 /// and the fingerprint, so identical calls from distinct assistant messages stay distinct.
 /// Arguments use `serde_json` serialization; a serialization failure skips that candidate.
+/// Protected arcs join their group so a protected newest copy still anchors it, but are never
+/// selected themselves; leaving them out kept one unprotected copy beside the protected one.
 fn select_tool_dedup(arcs: &[&ToolArc], ctx: &SelectionContext) -> HashSet<String> {
     // Like the TS tag-side index, retain an owner-qualified lookup key separately
     // from the fingerprint bucket. The owner must also remain in the fingerprint value.
@@ -1047,11 +1061,6 @@ fn select_tool_dedup(arcs: &[&ToolArc], ctx: &SelectionContext) -> HashSet<Strin
         if !DEDUP_SAFE_TOOLS.contains(&arc.dedup_name.as_str())
             || arc.owner_message_id.is_none()
             || arc.result_ids.is_empty()
-            || arc
-                .call_inputs
-                .iter()
-                .any(|(id, _)| ctx.block_is_protected(id))
-            || arc.result_ids.iter().any(|id| ctx.block_is_protected(id))
         {
             continue;
         }
@@ -1090,6 +1099,12 @@ fn select_tool_dedup(arcs: &[&ToolArc], ctx: &SelectionContext) -> HashSet<Strin
             group.pop();
             group
                 .into_iter()
+                .filter(|arc| {
+                    !arc.call_inputs
+                        .iter()
+                        .any(|(id, _)| ctx.block_is_protected(id))
+                        && !arc.result_ids.iter().any(|id| ctx.block_is_protected(id))
+                })
                 .map(|arc| arc.arc_id.clone())
                 .collect::<Vec<_>>()
         })
@@ -4633,7 +4648,25 @@ mod tests {
 
     #[test]
     fn duplicate_non_safe_tools_never_deduplicate() {
-        let args = serde_json::json!({"path": "src/lib.rs"});
+        // `bash` can return different output for identical arguments, so it never dedups.
+        let args = serde_json::json!({"command": "date"});
+        let items = vec![
+            tool_call_with_ids("owner#0", "owner#0", 1, "bash", args.clone(), 50),
+            tool_result_with_ids("older-result#0", "owner#0", 2, "bash", 300),
+            tool_call_with_ids("owner#1", "owner#1", 1, "bash", args, 50),
+            tool_result_with_ids("newer-result#0", "owner#1", 3, "bash", 300),
+        ];
+        let mut ctx = base_ctx(PassClass::Execute);
+        ctx.supersession_ride_available = true;
+
+        let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+        assert!(out.is_empty(), "non-safe tools must stay live: {out:?}");
+    }
+
+    #[test]
+    fn duplicate_bare_host_read_names_deduplicate() {
+        // OpenCode and Pi both hand over the bare `read` name, never `mcp_read`.
+        let args = serde_json::json!({"filePath": "src/lib.rs"});
         let items = vec![
             tool_call_with_ids("owner#0", "owner#0", 1, "read", args.clone(), 50),
             tool_result_with_ids("older-result#0", "owner#0", 2, "read", 300),
@@ -4644,7 +4677,54 @@ mod tests {
         ctx.supersession_ride_available = true;
 
         let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
-        assert!(out.is_empty(), "non-safe tools must stay live: {out:?}");
+        assert_eq!(
+            out.iter()
+                .map(|decision| (decision.target_id.as_str(), decision.kind.as_str()))
+                .collect::<Vec<_>>(),
+            vec![("older-result#0", "drop"), ("owner#0", "drop")],
+            "the older bare-name duplicate must fully drop: {out:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_safe_tools_keep_one_copy_when_the_newest_is_protected() {
+        let args = serde_json::json!({"filePath": "src/lib.rs"});
+        let mut items = Vec::new();
+        for index in 0..3 {
+            let call = format!("owner#{index}");
+            let result = format!("result-{index}#0");
+            items.push(tool_call_with_ids(
+                &call,
+                &call,
+                1,
+                "read",
+                args.clone(),
+                50,
+            ));
+            items.push(tool_result_with_ids(
+                &result,
+                &call,
+                2 + index as u64,
+                "read",
+                300,
+            ));
+        }
+        let mut ctx = base_ctx(PassClass::Execute);
+        ctx.supersession_ride_available = true;
+        ctx.tag_window_protected_block_ids =
+            HashSet::from(["owner#2".to_string(), "result-2#0".to_string()]);
+
+        let out = select_reductions(&items, &HashSet::new(), &ctx, &SelectionConfig::default());
+        let mut targets = out
+            .iter()
+            .map(|decision| decision.target_id.as_str())
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+        assert_eq!(
+            targets,
+            vec!["owner#0", "owner#1", "result-0#0", "result-1#0"],
+            "both unprotected copies drop; only the protected newest stays: {out:?}"
+        );
     }
 
     #[test]
@@ -4687,6 +4767,26 @@ mod tests {
             "protected-owner#1".to_string(),
             "protected-new-result#0".to_string(),
         ]);
+        let out = select_reductions(
+            &protected_items,
+            &HashSet::new(),
+            &ctx,
+            &SelectionConfig::default(),
+        );
+        assert_eq!(
+            out.iter()
+                .map(|decision| decision.target_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["protected-old-result#0", "protected-owner#0"],
+            "a protected newest duplicate anchors its group, so the unprotected older copy drops: {out:?}"
+        );
+
+        ctx.tag_window_protected_block_ids = HashSet::from([
+            "protected-owner#0".to_string(),
+            "protected-old-result#0".to_string(),
+            "protected-owner#1".to_string(),
+            "protected-new-result#0".to_string(),
+        ]);
         assert!(
             select_reductions(
                 &protected_items,
@@ -4695,7 +4795,7 @@ mod tests {
                 &SelectionConfig::default(),
             )
             .is_empty(),
-            "a protected newest duplicate must not let the older candidate deduplicate"
+            "a protected duplicate is never selected, even with a newer copy"
         );
 
         let open_items = vec![
