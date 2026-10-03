@@ -1337,9 +1337,14 @@ fn select_emergency(
         by_tier.entry(tier).or_default().push(arc);
     }
 
-    let candidate_tokens = by_tier
-        .values()
-        .flatten()
+    // Summed in tier order: floating-point addition is not associative, so summing in
+    // the hash map's per-process iteration order could give a different last bit for the
+    // same candidates from one run to the next.
+    let mut candidate_tiers = by_tier.keys().copied().collect::<Vec<_>>();
+    candidate_tiers.sort_unstable();
+    let candidate_tokens = candidate_tiers
+        .iter()
+        .flat_map(|tier| by_tier[tier].iter())
         .map(|arc| {
             reclaim_by_arc
                 .get(&arc.arc_id)
@@ -2133,6 +2138,44 @@ mod tests {
         assert!(!outcome
             .iter()
             .any(|d| d.target_id == call_block_id("legacy")));
+    }
+
+    /// The candidate total is the same on every run for the same candidates, whatever
+    /// order the per-tier map happens to iterate in.
+    #[test]
+    fn emergency_candidate_total_does_not_depend_on_map_iteration_order() {
+        let mut ctx = base_ctx(PassClass::EmergencyForce);
+        ctx.current_total_input_tokens = 142_021.0;
+        ctx.ceiling_tokens = 116_900.0;
+        ctx.emergency_window_yields = true;
+        let mut items = vec![text_with_id("text", 1, 240_000)];
+        let mut reclaim = HashMap::new();
+        // One arc per tier, with amounts whose sum depends on the order they are added in.
+        for (n, (name, tokens)) in [("read", 0.1), ("edit", 0.2), ("bash", 0.3)]
+            .into_iter()
+            .enumerate()
+        {
+            let mid = format!("tool-{n}");
+            items.push(tool_call(
+                &mid,
+                n as u64 + 2,
+                name,
+                serde_json::json!({}),
+                0,
+            ));
+            items.push(tool_result(&mid, n as u64 + 2, name, 8_000));
+            reclaim.insert(call_block_id(&mid), tokens);
+        }
+        let arcs = group_arcs(&items, &HashSet::new());
+        let arcs = arcs.iter().collect::<Vec<_>>();
+        let totals = (0..64)
+            .map(|_| {
+                let mut assessment = None;
+                select_emergency(&arcs, &ctx, 80_000.0, &reclaim, &mut assessment);
+                assessment.unwrap().candidate_tokens.to_bits()
+            })
+            .collect::<HashSet<_>>();
+        assert_eq!(totals.len(), 1, "{totals:?}");
     }
 
     #[test]
