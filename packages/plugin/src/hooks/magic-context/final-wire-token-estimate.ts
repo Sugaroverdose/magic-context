@@ -151,6 +151,12 @@ export interface FinalWireTokenEstimate {
     messageTokens: MessageTokenEstimate;
     systemTokens: number;
     toolDefinitionTokens: number | undefined;
+    /**
+     * True when the tool-definition figure is this route's own measurement. When
+     * false, `toolDefinitionTokens` is either unknown or an upper envelope taken
+     * from the largest tool set measured on any route.
+     */
+    toolDefinitionsMeasured?: boolean;
     /** Unscaled transform-array/system/tool measurement; provider framing is unmeasured. */
     rawTokens?: number;
     rawComponents?: { system: number; tools: number; prose: number };
@@ -229,6 +235,7 @@ export function estimateFinalWireInputTokens(
         messageTokens,
         systemTokens,
         toolDefinitionTokens,
+        toolDefinitionsMeasured: measuredToolDefinitions !== undefined,
     };
 }
 
