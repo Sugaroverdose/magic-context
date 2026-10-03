@@ -49,6 +49,7 @@ import {
     setPersistedTodoSyntheticAnchor,
 } from "../../features/magic-context/storage-meta-persisted";
 import { getRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
+import * as storageTags from "../../features/magic-context/storage-tags";
 import {
     markWhitespaceAssistantTagInert,
     updateTagStatus,
@@ -583,6 +584,87 @@ function serializeAnthropicVisibleRoleGroups(messages: MessageLike[]): string {
 }
 
 describe("stripped placeholder replay across temporary marker windows", () => {
+    it("sends byte-identical postprocess output with linear and legacy trimmed-tag retirement", async () => {
+        const sessionId = "ses-trim-wire-differential";
+        const served = [
+            {
+                info: { id: "tail-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "continue" }],
+            },
+            {
+                info: { id: "tail-assistant", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: "visible answer" }],
+            },
+        ] as MessageLike[];
+        const trimmed = [
+            {
+                info: { id: "trim", role: "assistant", sessionID: sessionId },
+                parts: [{ type: "text", text: "archived output" }],
+            },
+        ] as MessageLike[];
+        const run = async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            insertTag(db, sessionId, "trim:p0", "message", 10, 1);
+            insertTag(db, sessionId, "call-trim", "tool", 10, 2, 0, "read", 0, "trim");
+            insertTag(db, sessionId, "tail-user:p0", "message", 10, 3);
+            const messages = structuredClone(served);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: "execute",
+                    pendingMaterializationSessions: new Set([sessionId]),
+                    schedulerDeferReason: null,
+                    resolvedProviderID: "anthropic",
+                    trimmedMessagesAtCompactionBoundary: structuredClone(trimmed),
+                }),
+            );
+            expect(getTagsBySession(db, sessionId).map((tag) => tag.status)).toEqual([
+                "compacted",
+                "compacted",
+                "active",
+            ]);
+            const bytes = Buffer.from(JSON.stringify(messages));
+            db.close();
+            return bytes;
+        };
+        const linear = await run();
+        let legacyCalls = 0;
+        const old = spyOn(storageTags, "markTagsCompactedByMessageIds").mockImplementation(
+            (store, session, ids) => {
+                legacyCalls++;
+                const update = store.prepare(`UPDATE tags SET status = 'compacted'
+                WHERE session_id = ? AND status IN ('active','dropped')
+                AND (message_id = ? OR message_id LIKE ? ESCAPE '\\'
+                    OR message_id LIKE ? ESCAPE '\\' OR tool_owner_message_id = ?) RETURNING id`);
+                return store
+                    .transaction(() => {
+                        let count = 0;
+                        for (const id of new Set(ids)) {
+                            const escaped = id.replace(/[\\%_]/g, "\\$&");
+                            count += update.all(
+                                session,
+                                id,
+                                `${escaped}:p%`,
+                                `${escaped}:file%`,
+                                id,
+                            ).length;
+                        }
+                        return count;
+                    })
+                    .immediate();
+            },
+        );
+        try {
+            const legacyBytes = await run();
+            expect(legacyCalls).toBe(1);
+            expect(linear.equals(legacyBytes)).toBe(true);
+            expect(linear.includes("visible answer")).toBe(true);
+            expect(linear.includes("archived output")).toBe(false);
+        } finally {
+            old.mockRestore();
+        }
+    });
+
     for (const providerID of ["anthropic", "openai-compatible"]) {
         it(`freezes a marker-only final assistant across a priced pass and appended defer (${providerID})`, async () => {
             db = new Database(":memory:");

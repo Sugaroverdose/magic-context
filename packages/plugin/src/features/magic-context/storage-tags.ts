@@ -1783,36 +1783,102 @@ export function markTagsCompactedByMessageIds(
     sessionId: string,
     messageIds: Iterable<string>,
 ): number {
-    // RETURNING counts top-level tag rows without including writes made by triggers.
-    const update = db.prepare(
-        `UPDATE tags
-         SET status = 'compacted'
-         WHERE session_id = ?
-           AND status IN ('active', 'dropped')
-           AND (
-               message_id = ?
-               OR message_id LIKE ? ESCAPE '\\'
-               OR message_id LIKE ? ESCAPE '\\'
-               OR tool_owner_message_id = ?
-           )
-         RETURNING id`,
+    const ids = new Set(messageIds);
+    if (ids.size === 0) return 0;
+
+    // SQLite's default LIKE folds ASCII only, whereas String.toLowerCase also
+    // folds Unicode. Wildcards in the source id were escaped by the old query.
+    const asciiLower = (value: string) => value.replace(/[A-Z]/g, (char) => char.toLowerCase());
+    const foldedIds = new Set(Array.from(ids, asciiLower));
+    const nulPrefixes = new Set(
+        Array.from(ids)
+            .filter((id) => id.includes("\0"))
+            .map((id) => asciiLower(id.split("\0")[0])),
     );
-    return db
-        .transaction(() => {
-            let changed = 0;
-            for (const messageId of new Set(messageIds)) {
-                const escaped = escapeLikePattern(messageId);
-                changed += update.all(
-                    sessionId,
-                    messageId,
-                    `${escaped}:p%`,
-                    `${escaped}:file%`,
-                    messageId,
-                ).length;
-            }
-            return changed;
-        })
-        .immediate();
+    const matches = (messageId: string | null, owner: string | null): boolean => {
+        if (messageId !== null && ids.has(messageId)) return true;
+        if (owner !== null && ids.has(owner)) return true;
+        if (messageId === null) return false;
+        // LIKE treats NUL as the end of both pattern and value; exact equality
+        // above does not. Keep that behavior even for malformed source ids.
+        const nul = messageId.indexOf("\0");
+        const value = nul < 0 ? messageId : messageId.slice(0, nul);
+        if (nulPrefixes.size > 0 && nulPrefixes.has(asciiLower(value))) return true;
+        // Check EVERY delimiter: ids themselves may contain :p or :file. Do not
+        // restrict :p% to numeric parts, or include Pi's :mc-text-v1: identity.
+        for (let colon = value.indexOf(":"); colon >= 0; colon = value.indexOf(":", colon + 1)) {
+            const suffix = value[colon + 1];
+            if (
+                (suffix === "p" ||
+                    suffix === "P" ||
+                    asciiLower(value.slice(colon + 1, colon + 5)) === "file") &&
+                foldedIds.has(asciiLower(value.slice(0, colon)))
+            )
+                return true;
+        }
+        return false;
+    };
+
+    // Discover candidates once, WITHOUT a writer transaction. The former OR /
+    // LIKE update used only the session prefix of the index once per source id.
+    // Scan in tag-number order: the message-id index visits the table in random
+    // source-id order, making even a single read expensive on a large store.
+    // Materialize the id sets once inside SQLite so ordinary unmatched rows
+    // never cross the JS boundary. Delimiter-bearing and NUL-bearing source ids
+    // use the general matcher above rather than assuming a single base id.
+    // All subsequent writes are primary-key lookups, not session scans.
+    const rows = db
+        .prepare(`WITH ids AS MATERIALIZED (
+            SELECT value AS source_id, lower(value) AS folded_id FROM json_each(?)
+        )
+        SELECT id, message_id, tool_owner_message_id FROM tags INDEXED BY idx_tags_session_tag_number
+        WHERE session_id = ? AND status IN ('active', 'dropped') AND (
+            message_id IN (SELECT source_id FROM ids)
+            OR tool_owner_message_id IN (SELECT source_id FROM ids)
+            OR (instr(lower(message_id), ':p') > 0 AND
+                lower(substr(message_id, 1, instr(lower(message_id), ':p') - 1)) IN (SELECT folded_id FROM ids))
+            OR (instr(lower(message_id), ':file') > 0 AND
+                lower(substr(message_id, 1, instr(lower(message_id), ':file') - 1)) IN (SELECT folded_id FROM ids))
+            OR (? AND instr(message_id, ':') > 0)
+            OR ?
+        )`)
+        .all(
+            JSON.stringify(Array.from(ids)),
+            sessionId,
+            Array.from(ids).some((id) => id.includes(":")) ? 1 : 0,
+            nulPrefixes.size > 0 ? 1 : 0,
+        ) as {
+        id: number;
+        message_id: string | null;
+        tool_owner_message_id: string | null;
+    }[];
+    const candidates = rows.filter((row) => matches(row.message_id, row.tool_owner_message_id));
+    if (candidates.length === 0) return 0;
+
+    // Recheck identity as well as status: another process can retarget or retire
+    // a tag between the read and a batch. RETURNING excludes trigger writes.
+    const update = db.prepare(
+        `UPDATE tags SET status = 'compacted'
+         WHERE id = ? AND session_id = ?
+            AND status IN ('active', 'dropped')
+            AND message_id IS ? AND tool_owner_message_id IS ?
+          RETURNING id`,
+    );
+    let cursor = 0;
+    let changed = 0;
+    const batch = db.transaction(() => {
+        const start = performance.now();
+        let processed = 0;
+        do {
+            const row = candidates[cursor++];
+            if (update.get(row.id, sessionId, row.message_id, row.tool_owner_message_id)) changed++;
+            processed++;
+        } while (cursor < candidates.length && processed < 128 && performance.now() - start < 8);
+    });
+    // A failed later batch leaves only valid compacted rows. Retrying is safe,
+    // and never redoes the rows already committed by an earlier batch.
+    while (cursor < candidates.length) batch.immediate();
+    return changed;
 }
 
 /**
