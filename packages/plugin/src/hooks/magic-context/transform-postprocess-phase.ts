@@ -1996,8 +1996,12 @@ export async function runPostTransformPhase(
         return depth === null ? "not loaded (deferred pass)" : String(depth);
     };
     // All first applications share an independently priced cache-bust permission.
+    // A retry after an aborted idle fold is still provider-cold even though its
+    // persisted pair needs no second fold. Any newly queued work belongs on that
+    // retry, not on the warm tool step after the provider finally answers.
+    const idleExpiryRebuild = !freezeM0M1 && args.m0M1?.hardSignals?.cacheExpired === true;
     const rideSignals = {
-        hardFold: foldBustsServedPrefixThisPass || firstRenderBust,
+        hardFold: foldBustsServedPrefixThisPass || firstRenderBust || idleExpiryRebuild,
         force:
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||
@@ -2542,11 +2546,10 @@ export async function runPostTransformPhase(
                 args.lastHeuristicsTurnId.set(args.sessionId, args.currentTurnId);
             }
         }
-        // After a TTL-based scheduler execute, reset lastResponseTime so
-        // subsequent transforms defer instead of re-executing every pass.
-        if (args.schedulerDecision === "execute" && !materializationRequested) {
-            updateSessionMeta(args.db, args.sessionId, { lastResponseTime: Date.now() });
-        }
+        // A prepared request has not refreshed the provider cache. In particular,
+        // an aborted request may never report usage. Keep the response clock until
+        // the provider answers; cachedM0MaterializedAt already consumes the idle
+        // fold, so an expired retry can replay it without folding a second time.
 
         // Consume only after the shared tool/text batch actually changed bytes.
         if (emergencyDropEligible && (pendingOpsDidMutate || heuristicOrReasoningDidMutate)) {

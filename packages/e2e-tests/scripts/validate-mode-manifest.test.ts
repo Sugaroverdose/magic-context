@@ -21,7 +21,7 @@ describe("mode manifest validator", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
         // removed. Moving a file between excluded and ts-only changes the invocation
         // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(159);
+        expect(validation.files.length).toBe(160);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -32,13 +32,13 @@ describe("mode manifest validator", () => {
     it("derives separate TS and Rust invocation lists", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
-        expect(ts).toHaveLength(48);
+        expect(ts).toHaveLength(49);
         expect(rust).toHaveLength(56);
         expect(rust).toContain("tests/subagent-behavior.test.ts");
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(3);
-        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(35);
-        expect(filesForMode(validation, "ts", "pi")).toHaveLength(26);
-        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(29);
+        expect(filesForMode(validation, "ts", "opencode")).toHaveLength(36);
+        expect(filesForMode(validation, "ts", "pi")).toHaveLength(27);
+        expect(filesForMode(validation, "ts", "opencode2")).toHaveLength(30);
         // These six OpenCode 2 files are ts-only with hosts ["opencode2"], so only the
         // OpenCode 2 host lane runs them; the other host lanes never select them.
         for (const path of [
@@ -54,7 +54,7 @@ describe("mode manifest validator", () => {
         }
         // OMP hashes each request into its system header, breaking within-session byte identity
         // in cache-stability and long-running-session; their manifest entries declare the omission.
-        expect(filesForMode(validation, "ts", "omp")).toHaveLength(19);
+        expect(filesForMode(validation, "ts", "omp")).toHaveLength(20);
         const excluded = validation.manifest.entries
             .filter((entry) => entry.tier === "excluded")
             .map((entry) => entry.path);

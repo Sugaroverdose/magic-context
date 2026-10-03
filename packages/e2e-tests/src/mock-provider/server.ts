@@ -107,6 +107,8 @@ export interface MockResponse {
 
 export interface CapturedRequest {
     receivedAt: number;
+    /** Exact provider request payload, before JSON parsing. */
+    rawBody?: string;
     /** Set when the mock has finished producing the response for this request. */
     responseCompletedAt?: number;
     method: string;
@@ -232,8 +234,9 @@ export class MockProvider {
 
         if (matched) {
             let body: Record<string, unknown> = {};
+            const rawBody = await req.text();
             try {
-                body = (await req.json()) as Record<string, unknown>;
+                body = JSON.parse(rawBody) as Record<string, unknown>;
             } catch {
                 body = {};
             }
@@ -249,6 +252,7 @@ export class MockProvider {
                 path: url.pathname,
                 headers,
                 body,
+                rawBody,
             };
             this.captured.push(captured);
 
