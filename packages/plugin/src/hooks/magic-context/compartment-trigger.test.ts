@@ -272,6 +272,40 @@ describe("checkCompartmentTrigger", () => {
         expect(second.partReads()).toBe(0);
     });
 
+    it("treats a message as tag-covered when its text tags carry content-derived ids", () => {
+        // Pi re-keys a drifted message's text tags by content instead of by part
+        // position; the cheap gate must still see that message as covered.
+        useTempDataHome("compartment-trigger-memory-text-tag-ids-");
+        const db = openDatabase();
+        const sessionId = "ses-memory-text-tag-ids";
+        seedTriggerPolicy(db, sessionId);
+        const first = observedRawTextMessage(1, "m-text-1", "user", "small tail");
+        const second = observedRawTextMessage(2, "m-text-2", "assistant", "small response");
+        const digests = `${"a".repeat(64)}:${"b".repeat(64)}`;
+        insertCoveredMessageTag(db, sessionId, `m-text-1:mc-text-v1:${digests}:o0`, 1, 100);
+        insertCoveredMessageTag(db, sessionId, `m-text-2:mc-text-v1:${digests}:o0`, 2, 50);
+
+        const result = checkCompartmentTrigger(
+            db,
+            sessionId,
+            makeSessionMeta(sessionId, 25),
+            { percentage: 25, inputTokens: 50_000 },
+            25,
+            65,
+            1_000,
+            undefined,
+            undefined,
+            undefined,
+            undefined,
+            inMemoryTail([first.message, second.message], 50_000),
+        );
+
+        expect(result).toEqual({ shouldFire: false });
+        // A covered message is never re-estimated from its parts.
+        expect(first.partReads()).toBe(0);
+        expect(second.partReads()).toBe(0);
+    });
+
     it("falls through when a large untagged in-memory message pushes the upper bound over budget", () => {
         useTempDataHome("compartment-trigger-memory-large-untagged-");
         const db = openDatabase();

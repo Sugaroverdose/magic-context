@@ -78,13 +78,23 @@ async function waitForActiveRunWithin(
     timeoutMs: number,
 ): Promise<"settled" | "timeout"> {
     if (timeoutMs <= 0) return "timeout";
-    return Promise.race([
-        promise.then(
-            () => "settled" as const,
-            () => "settled" as const,
-        ),
-        sleep(timeoutMs).then(() => "timeout" as const),
-    ]);
+    // The timer can be armed for the whole lease wait (up to ten minutes). Clear it
+    // as soon as the race is decided so a settled wait leaves nothing behind.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timedOut = new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+    });
+    try {
+        return await Promise.race([
+            promise.then(
+                () => "settled" as const,
+                () => "settled" as const,
+            ),
+            timedOut,
+        ]);
+    } finally {
+        clearTimeout(timer);
+    }
 }
 
 function formatAlreadyRunningMessage(state: ReturnType<typeof getWrapupInProgressState>): string {
@@ -260,7 +270,10 @@ async function runOneWrapupIteration(args: {
             ctx.liveSessionState.deferredHistoryRefreshSessions.add(sid);
         },
     });
-    registerActiveCompartmentRun(sessionId, runnerPromise, "wrapup");
+    // The registry keeps its own derived copy of the run for other waiters. A runner
+    // failure reaches this function through the await below, so the copy must not
+    // also surface as an unhandled rejection.
+    registerActiveCompartmentRun(sessionId, runnerPromise, "wrapup").promise.catch(() => {});
     try {
         await runnerPromise;
         return { ran: true };
@@ -277,7 +290,29 @@ export async function runManagedWrapup(
 ): Promise<string> {
     const messagesToKeep = Math.max(1, Math.floor(options.messagesToKeep));
     setRecompStarting(ctx.liveSessionState, sessionId, "Estimating wrapup…", "wrapup");
+    try {
+        return await runStartedWrapup(ctx, sessionId, messagesToKeep);
+    } catch (error) {
+        // Every normal exit sets a terminal progress state. A throw (planning, the
+        // durable marker, or a historian iteration) would otherwise leave the sidebar
+        // and /ctx-status showing a wrapup that is still running.
+        const reason = error instanceof Error ? error.message : String(error);
+        setRecompTerminal(
+            ctx.liveSessionState,
+            sessionId,
+            "failed",
+            `Wrapup stopped: ${reason}. Run /ctx-wrapup again to continue.`,
+        );
+        throw error;
+    }
+}
 
+/** The wrapup after its progress entry is set; every return sets a terminal state. */
+async function runStartedWrapup(
+    ctx: ManagedWrapupContext,
+    sessionId: string,
+    messagesToKeep: number,
+): Promise<string> {
     const existingWrapup = getWrapupInProgressState(ctx.db, sessionId);
     if (existingWrapup) {
         const message = formatAlreadyRunningMessage(existingWrapup);

@@ -246,6 +246,10 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         producerKey,
     );
     let completedSuccessfully = false;
+    // Set at COMMIT of the publish transaction. From then on the new compartments are
+    // durable and already signaled, so a later throw is a failed side step, not a
+    // failed historian run.
+    let publishCommitted = false;
     let retainDrainReservationForRetryThrottle = false;
     let issueNotified = false;
     let drainReservation: ReturnType<typeof reserveProtectedTailDrainTokens>["reservation"] = null;
@@ -1143,6 +1147,7 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             }
             db.exec("COMMIT");
             published = true;
+            publishCommitted = true;
             finishHistorianPublishStage(
                 sessionId,
                 "publish-txn",
@@ -1187,12 +1192,18 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
         if (deferMarkerApplication) {
             deps.onDeferredMarkerPending?.(sessionId);
         } else {
-            (deps.compactionMarkerStrategy?.publish ?? updateCompactionMarkerAfterPublication)(
-                db,
-                sessionId,
-                lastCompartmentEnd,
-                sessionDirectory,
-            );
+            try {
+                (deps.compactionMarkerStrategy?.publish ?? updateCompactionMarkerAfterPublication)(
+                    db,
+                    sessionId,
+                    lastCompartmentEnd,
+                    sessionDirectory,
+                );
+            } catch (error) {
+                // Same outcome as the update reporting false: the compartments stand and
+                // the marker catches up on a later publication.
+                sessionLog(sessionId, "compaction-marker update after publish failed:", error);
+            }
         }
 
         // v2: the LLM compressor is gone — deterministic decay-tier rendering
@@ -1380,8 +1391,20 @@ export async function runCompartmentAgent(deps: HiddenCompartmentRunnerDeps): Pr
             `historian publish completed: compartments=${persistedCompartments.length} range=${offset}-${lastCompartmentEnd}`,
         );
     } catch (error: unknown) {
-        // Historian runs are fail-closed because they update durable compartment state.
         const desc = describeError(error);
+        if (publishCommitted) {
+            // The publication is durable and was signaled right after COMMIT. Counting this
+            // as a historian failure would warn the user about a run that succeeded and
+            // feed the failure backoff.
+            telemetry.status = "success";
+            telemetry.failureReason = `post_publish_exception: ${desc.brief}`;
+            sessionLog(
+                sessionId,
+                `historian post-publish step failed; publication stands: ${desc.brief}`,
+            );
+            return;
+        }
+        // Historian runs are fail-closed because they update durable compartment state.
         telemetry.failureReason = `exception: ${desc.brief}`;
         sessionLog(
             sessionId,

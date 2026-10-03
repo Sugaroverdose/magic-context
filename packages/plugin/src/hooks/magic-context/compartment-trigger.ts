@@ -14,6 +14,7 @@ import type { ContextUsage, SessionMeta, TagEntry } from "../../features/magic-c
 import { escalationBands } from "../../shared/escalation-bands";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { contentTagOwnerMessageId } from "../../shared/tag-owner-id";
 import { hasReclaimRide, type ReclaimRideSignals, reclaimRideLabel } from "./cache-busting-signals";
 import {
     createDefaultBoundarySnapshotForTests,
@@ -43,7 +44,6 @@ const MIN_PROACTIVE_TAIL_MESSAGE_COUNT = 12;
 const DEFAULT_MIN_COMMIT_CLUSTERS_FOR_TRIGGER = 3;
 const TAIL_SIZE_TRIGGER_MULTIPLIER = 3;
 const BLOCK_UNTIL_DONE_PERCENTAGE = 95;
-const CONTENT_TAG_OWNER_SUFFIX = /:(?:p|file)\d+$/;
 
 export { BLOCK_UNTIL_DONE_PERCENTAGE, POST_DROP_TARGET_RATIO };
 
@@ -97,7 +97,7 @@ function tagOwnerMessageId(row: {
     tool_owner_message_id: string | null;
 }): string {
     if (row.type === "tool") return row.tool_owner_message_id ?? row.message_id;
-    return row.message_id.replace(CONTENT_TAG_OWNER_SUFFIX, "");
+    return contentTagOwnerMessageId(row.message_id);
 }
 
 function getActiveOrDroppedTagOwnerMessageIds(

@@ -67,9 +67,11 @@ import {
 } from "../hooks/magic-context/tag-content-primitives";
 import type { TagTarget } from "../hooks/magic-context/tag-messages";
 import { toolInputStringBytes } from "../hooks/magic-context/tool-input-size";
+import { TEXT_TAG_IDENTITY_MARKER } from "./tag-owner-id";
 import type { Transcript, TranscriptMessage, TranscriptPart } from "./transcript";
 
-export const TEXT_TAG_IDENTITY_MARKER = ":mc-text-v1:";
+// Re-exported so existing importers keep one source for the marker.
+export { TEXT_TAG_IDENTITY_MARKER };
 
 export interface TagTranscriptOptions {
     /**

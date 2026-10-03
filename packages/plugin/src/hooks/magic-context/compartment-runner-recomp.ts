@@ -168,6 +168,33 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         return "## Magic Recomp — Skipped\n\nCould not acquire the compartment-state lease for this session.";
     }
     const leaseHolderId = holderId;
+    // Once promotion commits, the rebuilt compartments are the session's history. The
+    // steps after it (depth reset, drop queue, publication signal, embedding, compaction
+    // marker) can each be repaired later. One failing must not report the committed
+    // recomp as failed or skip the steps after it, the publication signal included.
+    const logPostPublishFailure = (step: string, error: unknown): void => {
+        sessionLog(
+            sessionId,
+            `recomp post-publish step=${step} failed; publication stands: ${getErrorMessage(error)}`,
+        );
+    };
+    // Synchronous on purpose: wrapping a step must not add a yield point between
+    // promotion and the publication signal, where a concurrent transform pass could
+    // observe the promoted rows before the drop queue and signal are in place.
+    const afterPublish = (step: string, run: () => void): void => {
+        try {
+            run();
+        } catch (error) {
+            logPostPublishFailure(step, error);
+        }
+    };
+    const afterPublishAsync = async (step: string, run: () => Promise<void>): Promise<void> => {
+        try {
+            await run();
+        } catch (error) {
+            logPostPublishFailure(step, error);
+        }
+    };
     // State file for the current pass — hoisted to be accessible in finally{}
     updateSessionMeta(db, sessionId, { compartmentInProgress: true });
 
@@ -279,7 +306,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // would otherwise skip or wrongly tier the fresh compartments. Wipe
             // per-session depth state so the rebuilt compartments start at depth
             // 0, matching what partial recomp does for its rebuilt range.
-            clearCompressionDepth(db, sessionId);
+            afterPublish("compression-depth", () => clearCompressionDepth(db, sessionId));
 
             if (deps.preserveInjectionCacheUntilConsumed !== true) {
                 clearInjectionCache(sessionId);
@@ -296,7 +323,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // the search substrate (gated only by the embedding provider, not by
             // `memory.enabled`), distinct from fact promotion (which recomp
             // deliberately skips). Fire-and-forget.
-            {
+            await afterPublishAsync("embedding", async () => {
                 const projectIdentity = resolveProjectIdentity(sessionDirectory);
                 // Register the project's embedding provider before embedding;
                 // embedBatchForProject silently no-ops for unregistered projects,
@@ -309,14 +336,16 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                     endMessage: c.endMessage,
                 }));
                 void embedAndStoreCompartmentChunks(db, sessionId, projectIdentity, chunksToEmbed);
-            }
+            });
 
             if (lastCompartmentEnd > 0 && compartmentTagKeys) {
-                queueDropsForCompartmentalizedMessages(
-                    db,
-                    sessionId,
-                    lastCompartmentEnd,
-                    compartmentTagKeys,
+                afterPublish("drop-queue", () =>
+                    queueDropsForCompartmentalizedMessages(
+                        db,
+                        sessionId,
+                        lastCompartmentEnd,
+                        compartmentTagKeys,
+                    ),
                 );
             }
 
@@ -327,7 +356,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // Placed before the embedding await + marker because neither is
             // consumed by those signals, and the await window is exactly where the
             // race fired. Mirrors the incremental path.
-            deps.onCompartmentStatePublished?.(sessionId);
+            afterPublish("publication-signal", () => deps.onCompartmentStatePublished?.(sessionId));
 
             // Update compaction marker after recomp.
             // Recomp is explicit (eagerly clears injection cache), so the marker
@@ -335,23 +364,25 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
             // marker that a prior in-flight incremental publish may have left
             // behind — recomp now owns the boundary.
             if (lastCompartmentEnd > 0) {
-                const markerUpdated = updateCompactionMarkerAfterPublication(
-                    db,
-                    sessionId,
-                    lastCompartmentEnd,
-                    deps.directory,
-                );
-                // Only CAS-clear a stale pending marker blob when the direct
-                // update actually advanced the boundary. If the update failed
-                // (transient OpenCode DB write error on removal/injection), keep
-                // the pending blob so the deferred drain can still retry —
-                // clearing it would drop the only durable retry path.
-                if (markerUpdated) {
-                    const stalePending = getPendingCompactionMarkerState(db, sessionId);
-                    if (stalePending) {
-                        clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                afterPublish("compaction-marker", () => {
+                    const markerUpdated = updateCompactionMarkerAfterPublication(
+                        db,
+                        sessionId,
+                        lastCompartmentEnd,
+                        deps.directory,
+                    );
+                    // Only CAS-clear a stale pending marker blob when the direct
+                    // update actually advanced the boundary. If the update failed
+                    // (transient OpenCode DB write error on removal/injection), keep
+                    // the pending blob so the deferred drain can still retry —
+                    // clearing it would drop the only durable retry path.
+                    if (markerUpdated) {
+                        const stalePending = getPendingCompactionMarkerState(db, sessionId);
+                        if (stalePending) {
+                            clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                        }
                     }
-                }
+                });
             }
 
             sessionLog(
@@ -649,7 +680,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         }
         // Full recomp rebuilds every compartment, so all pre-existing depth
         // rows are stale. Matches partial recomp's behavior for rebuilt ranges.
-        clearCompressionDepth(db, sessionId);
+        afterPublish("compression-depth", () => clearCompressionDepth(db, sessionId));
         if (deps.preserveInjectionCacheUntilConsumed !== true) {
             clearInjectionCache(sessionId);
         }
@@ -666,18 +697,20 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         void finalFacts;
 
         if (lastCompartmentEnd > 0 && compartmentTagKeys) {
-            queueDropsForCompartmentalizedMessages(
-                db,
-                sessionId,
-                lastCompartmentEnd,
-                compartmentTagKeys,
+            afterPublish("drop-queue", () =>
+                queueDropsForCompartmentalizedMessages(
+                    db,
+                    sessionId,
+                    lastCompartmentEnd,
+                    compartmentTagKeys,
+                ),
             );
         }
 
         // Signal LAST relative to the drop queue (mirrors the incremental +
         // early-publish paths): a concurrent transform pass consuming the one-shot
         // history/materialize signals must find the drop rows durable.
-        deps.onCompartmentStatePublished?.(sessionId);
+        afterPublish("publication-signal", () => deps.onCompartmentStatePublished?.(sessionId));
 
         // v2: recompute raw chunk embeddings for the rebuilt compartments. This is
         // the NORMAL full-completion path (distinct from promoteAndFinalize, which
@@ -686,7 +719,7 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
         // → they vanish from ctx_search semantic results. Gated only by the
         // embedding provider (not `memory.enabled`), distinct from fact
         // promotion (recomp skips).
-        {
+        await afterPublishAsync("embedding", async () => {
             const projectIdentity = resolveProjectIdentity(sessionDirectory);
             // Register the embedding provider first; embedBatchForProject silently
             // no-ops for unregistered projects, leaving no chunk embeddings.
@@ -698,26 +731,28 @@ export async function executeContextRecompInternal(deps: CompartmentRunnerDeps):
                 endMessage: c.endMessage,
             }));
             void embedAndStoreCompartmentChunks(db, sessionId, projectIdentity, chunksToEmbed);
-        }
+        });
 
         // v2: advance the compaction marker on the full-completion path too (the
         // promoteAndFinalize early-exit path already does this). Without it, the
         // next incremental run may reprocess already-compartmentalized messages.
         if (lastCompartmentEnd > 0) {
-            const markerUpdated = updateCompactionMarkerAfterPublication(
-                db,
-                sessionId,
-                lastCompartmentEnd,
-                deps.directory,
-            );
-            // Only clear the stale pending blob when the boundary actually
-            // advanced — preserve it for the deferred-drain retry on failure.
-            if (markerUpdated) {
-                const stalePending = getPendingCompactionMarkerState(db, sessionId);
-                if (stalePending) {
-                    clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+            afterPublish("compaction-marker", () => {
+                const markerUpdated = updateCompactionMarkerAfterPublication(
+                    db,
+                    sessionId,
+                    lastCompartmentEnd,
+                    deps.directory,
+                );
+                // Only clear the stale pending blob when the boundary actually
+                // advanced — preserve it for the deferred-drain retry on failure.
+                if (markerUpdated) {
+                    const stalePending = getPendingCompactionMarkerState(db, sessionId);
+                    if (stalePending) {
+                        clearPendingCompactionMarkerStateIf(db, sessionId, stalePending);
+                    }
                 }
-            }
+            });
         }
 
         // v2: no compressor pass — deterministic decay-tier rendering keeps the

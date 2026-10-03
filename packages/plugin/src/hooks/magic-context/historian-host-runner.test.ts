@@ -611,6 +611,33 @@ describe("historian host runner", () => {
         expect(late).toEqual({ ok: false, refusal: "superseded_token" });
     });
 
+    it("does not start a run whose claim answer arrives after the loop was stopped", async () => {
+        const lane = new FakeClaimLane();
+        lane.queue({ runId: "run-a", sessionId: "ses-a" });
+        const { executor, script } = scriptedExecutor();
+        let started = false;
+        void script.started.then(() => {
+            started = true;
+        });
+        let stopping: Promise<void> | null = null;
+        const { runner } = runnerOver(lane, {
+            executors: new Map([["ses-a", executor]]),
+            // Shutdown lands while the claim is on the wire.
+            call: async (args) => {
+                if (args.method === "historian.claim") stopping = runner.stop();
+                return lane.call(args);
+            },
+        });
+
+        await runner.pump("ses-a");
+        await stopping;
+        await settle();
+
+        expect(started).toBe(false);
+        expect(runner.inFlightSessions()).toEqual([]);
+        expect(lane.reports).toHaveLength(0);
+    });
+
     it("stops holding a claim when the loop is stopped", async () => {
         const lane = new FakeClaimLane();
         lane.queue({ runId: "run-a", sessionId: "ses-a" });
