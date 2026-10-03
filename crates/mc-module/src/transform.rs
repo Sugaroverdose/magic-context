@@ -7735,13 +7735,11 @@ fn new_caveman_units(
             continue;
         }
         let payload = if let Some(existing) = existing {
-            // A deeper tier is allowed to replace bytes only when it does not grow the frozen
-            // payload. Equal-size output still advances depth, matching TS's persisted depth
-            // behavior for text with no additional removable material.
-            assert!(
-                compressed.len() <= existing.frozen_payload.len(),
-                "caveman deeper tier grew frozen payload for {block_id}"
-            );
+            // A deeper tier replaces bytes only when it shrinks the frozen payload. The rules can
+            // change after a payload froze (a release that changes caveman output), so the deeper
+            // output may also come out longer; equal or longer output keeps the frozen bytes and
+            // still advances depth, matching TS's persisted depth for text with no additional
+            // removable material.
             if compressed.len() < existing.frozen_payload.len() {
                 compressed.as_str()
             } else {
@@ -38683,6 +38681,57 @@ pub(crate) mod tests {
             units[0].frozen_payload,
             crate::caveman::compress(&source, crate::caveman::CavemanLevel::Ultra)
         );
+    }
+
+    /// A payload frozen under earlier caveman rules can be shorter than what the current rules
+    /// produce for a deeper tier. That must keep the frozen bytes and still advance depth instead
+    /// of panicking the transform.
+    #[test]
+    fn caveman_deeper_tier_longer_than_frozen_payload_keeps_frozen_bytes() {
+        let source = "I just really wanted to basically explain the implementation clearly. ".repeat(8);
+        let request = {
+            let mut value = req("caveman-regrowth", "cfg", vec![item("m1", 1, &source)]);
+            value.caveman_enabled = true;
+            value.caveman_min_chars = 1;
+            value.protected_tags = 0;
+            value
+        };
+        let projection = project_messages(&request.messages).unwrap();
+        let live = projection
+            .blocks
+            .iter()
+            .filter(|block| !block.synthetic)
+            .collect::<Vec<_>>();
+        let frozen = "older rules froze this shorter payload";
+        let ultra = crate::caveman::compress(&source, crate::caveman::CavemanLevel::Ultra);
+        assert!(ultra.len() > frozen.len());
+        let core = CoreState {
+            frozen_units: vec![caveman_unit("m1#0", 1, frozen)],
+            ..CoreState::default()
+        };
+        let tags = vec![McTagRow {
+            tag_number: 1,
+            block_id: "m1#0".to_string(),
+            kind: "message".to_string(),
+            token_count: 10,
+            created_at_ms: 0,
+            source_bytes: source.as_bytes().to_vec().into(),
+        }];
+        let units = new_caveman_units(
+            &core,
+            &request,
+            CavemanTagState {
+                rows: &tags,
+                protection_cutoff: &protection_cutoff(None),
+            },
+            &live,
+            None,
+            true,
+            1,
+        );
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].reset_rule, "3");
+        assert_eq!(units[0].frozen_payload, frozen);
     }
 
     #[test]
