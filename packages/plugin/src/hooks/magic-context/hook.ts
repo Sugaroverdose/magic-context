@@ -65,6 +65,7 @@ import { resolveHistorianModel } from "../../shared/model-resolution";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import type { Database } from "../../shared/sqlite";
+import { cavemanWordRulesForLanguage } from "./caveman";
 import { createMagicContextCommandHandler } from "./command-handler";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import {
@@ -802,6 +803,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             minPromptChars: deps.config.memory?.auto_search?.min_prompt_chars ?? 20,
             directory: deps.directory,
             ensureProjectRegistered: ensureProjectRegisteredFromOpenCodeDirectory,
+            wordRules: cavemanWordRulesForLanguage(deps.config.language),
         },
         // Age-tier caveman text compression is an opt-in primary-session pass.
         // Subagents are excluded in transform.ts because their context is curated
@@ -813,6 +815,8 @@ export function createMagicContextHook(deps: MagicContextDeps) {
               ? {
                     enabled: true,
                     minChars: deps.config.caveman_text_compression.min_chars ?? 500,
+                    // `language` is user-level only; a project config cannot set it.
+                    wordRules: cavemanWordRulesForLanguage(deps.config.language),
                 }
               : undefined,
         maybeAutoEmbedSession,

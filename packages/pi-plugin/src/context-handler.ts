@@ -150,6 +150,10 @@ import {
 	hasReclaimRide,
 	reclaimRideLabel,
 } from "@magic-context/core/hooks/magic-context/cache-busting-signals";
+import {
+	type CavemanWordRules,
+	cavemanWordRulesForLanguage,
+} from "@magic-context/core/hooks/magic-context/caveman";
 import { replayCavemanCompression } from "@magic-context/core/hooks/magic-context/caveman-cleanup";
 import {
 	rearmChannel2AfterCoverageAdvancingHardFold,
@@ -1180,7 +1184,11 @@ export interface PiAutoSearchHandlerOptions {
 
 /** Heuristic-cleanup config — tiered emergency drop, dedup, strips system injections. */
 export interface PiHeuristicsOptions {
-	caveman?: { enabled: boolean; minChars: number };
+	caveman?: {
+		enabled: boolean;
+		minChars: number;
+		wordRules?: CavemanWordRules;
+	};
 	/**
 	 * Number of tags before the most recent tag whose typed reasoning is
 	 * cleared on cache-busting passes. Mirrors OpenCode's
@@ -3563,6 +3571,8 @@ export function registerPiContextHandler(
 							projectPath: projectIdentity,
 							visibleMemoryIds:
 								getVisibleMemoryIds(options.db, sessionId) ?? null,
+							// `language` is user-level only; a project config cannot set it.
+							wordRules: cavemanWordRulesForLanguage(options.language),
 						},
 					});
 				} catch (err) {
@@ -5022,7 +5032,11 @@ interface RunPipelineArgs {
 	usableSoft: number;
 	/** Heuristic-cleanup config — when omitted, defaults to OpenCode parity values. */
 	heuristics?: {
-		caveman?: { enabled: boolean; minChars: number };
+		caveman?: {
+			enabled: boolean;
+			minChars: number;
+			wordRules?: CavemanWordRules;
+		};
 	};
 	isSubagent?: boolean;
 	/** Additive-only transform mode: no tags, drops, history trim, markers, or nudges. */

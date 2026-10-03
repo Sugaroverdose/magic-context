@@ -79,6 +79,7 @@ import {
 } from "./apply-operations";
 import { runAutoSearchHint } from "./auto-search-runner";
 import { hasReclaimRide, reclaimRideLabel } from "./cache-busting-signals";
+import type { CavemanWordRules } from "./caveman";
 import {
     rearmChannel2AfterCoverageAdvancingHardFold,
     rearmChannel2AfterMeasuredCollapse,
@@ -1471,6 +1472,8 @@ interface RunPostTransformPhaseArgs {
         minPromptChars: number;
         directory?: string;
         ensureProjectRegistered?: (directory: string, db: ContextDatabase) => Promise<void>;
+        /** Caveman word rules for hint fragments, from the user-level `language` setting. */
+        wordRules?: CavemanWordRules;
     };
     /**
      * Age-tier caveman compression (experimental). Caller forwards this only
@@ -1480,6 +1483,8 @@ interface RunPostTransformPhaseArgs {
     cavemanTextCompression?: {
         enabled: boolean;
         minChars: number;
+        /** From the user-level `language` setting; English word rules when absent. */
+        wordRules?: CavemanWordRules;
     };
     /**
      * Smart-drops (experimental, default off): content-aware reclaim of tool
@@ -2213,6 +2218,7 @@ export async function runPostTransformPhase(
                 ? {
                       enabled: true,
                       minChars: args.cavemanTextCompression.minChars,
+                      wordRules: args.cavemanTextCompression.wordRules,
                   }
                 : undefined;
             const heuristicTags = shouldApplyPendingOps
@@ -3267,6 +3273,7 @@ export async function runPostTransformPhase(
                     projectPath: args.projectPath,
                     ensureProjectRegistered: args.autoSearch.ensureProjectRegistered,
                     visibleMemoryIds,
+                    wordRules: args.autoSearch.wordRules,
                 },
             });
             if (!autoSearchOutcome.ok) {

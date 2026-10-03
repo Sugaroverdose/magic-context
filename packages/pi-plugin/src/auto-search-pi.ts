@@ -71,6 +71,7 @@ import {
 	withAutoSearchDeadline,
 } from "@magic-context/core/hooks/magic-context/auto-search-deadline";
 import { buildAutoSearchHint } from "@magic-context/core/hooks/magic-context/auto-search-hint";
+import type { CavemanWordRules } from "@magic-context/core/hooks/magic-context/caveman";
 import { log, sessionLog } from "@magic-context/core/shared/logger";
 import type { Database } from "@magic-context/core/shared/sqlite";
 
@@ -97,6 +98,8 @@ export interface PiAutoSearchOptions {
 	minPromptChars: number;
 	projectPath: string;
 	visibleMemoryIds?: Set<number> | null;
+	/** Caveman word rules for hint fragments, from the user-level `language` setting. */
+	wordRules?: CavemanWordRules;
 }
 
 const DEFAULT_SCORE_THRESHOLD = 0.55;
@@ -422,7 +425,9 @@ export async function runAutoSearchHintForPi(args: {
 		return messages;
 	}
 
-	const hintText = buildAutoSearchHint(results);
+	const hintText = buildAutoSearchHint(results, {
+		wordRules: options.wordRules,
+	});
 	if (!hintText) {
 		writeNoHintAndReconcile("empty");
 		return messages;

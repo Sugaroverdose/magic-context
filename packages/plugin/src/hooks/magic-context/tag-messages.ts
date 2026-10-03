@@ -267,8 +267,23 @@ export type TagTarget = {
         beforeProse: number;
         afterProse: number;
     };
-    setContent: (content: string) => boolean;
+    /**
+     * Replace the part's text. A text target treats this as a drop by default
+     * and also takes the reasoning of its message off the wire, since that
+     * reasoning answered the text that left. `keepReasoning` marks an in-place
+     * rewrite that keeps the text's meaning (caveman compression, a partial
+     * system-injection strip): the reasoning stays, because removing it would
+     * leave a gap in the middle of the history that prefix-bound models reject
+     * for every later thinking block.
+     */
+    setContent: (content: string, options?: { keepReasoning?: boolean }) => boolean;
     getContent?: () => string | null;
+    /**
+     * Text targets: the `§N§ ` prefix this pass puts in front of the text, or
+     * "" when prefixes are not injected. A rewrite computed from the stored
+     * source (which never carries the prefix) puts it back with this.
+     */
+    textPrefix?: string;
     drop?: () => ToolDropResult;
     /** Legacy skeleton: arguments replaced by the `{"dropped": …}` marker.
      * Replay-only, for `drop_mode = 'truncated'` tags not yet converted. */
@@ -901,11 +916,13 @@ export function tagMessages(
                 }
                 targets.set(tagId, {
                     message,
-                    setContent: (content) => {
+                    textPrefix: skipPrefixInjection ? "" : prependTag(tagId, ""),
+                    setContent: (content, options) => {
                         if (textPart.text === content) return false;
                         const partialEnd = messageId ? getPartialEnds().get(messageId) : undefined;
                         if (partialEnd !== undefined && partIndex > partialEnd) return false;
                         textPart.text = content;
+                        if (options?.keepReasoning === true) return true;
                         for (const tp of thinkingParts) {
                             if (partialEnd !== undefined && message.parts.indexOf(tp) > partialEnd)
                                 continue;
