@@ -1939,9 +1939,15 @@ impl TransformPageCoordinator {
         page_complete: bool,
         queued_at_ms: u64,
     ) -> Result<TransformPageStageAction, TransformPageStageError> {
-        if self.pending_transform_count >= self.max_pending_transforms
-            && !self.sessions.contains_key(session_id)
-        {
+        // Only a session that already holds a pending transform may continue past the cap.
+        // A session that merely has an entry (an idle one keeping its completed reply, or
+        // one left behind by a rejected first page) would start a NEW pending transform,
+        // so it counts against the cap like any other.
+        let already_pending = self
+            .sessions
+            .get(session_id)
+            .is_some_and(|session| Self::is_pending(&session.phase));
+        if self.pending_transform_count >= self.max_pending_transforms && !already_pending {
             return Err(TransformPageStageError::BufferOverflow);
         }
         let phase = {
@@ -1950,16 +1956,29 @@ impl TransformPageCoordinator {
         };
         match phase {
             TransformPagePhase::Idle => {
-                if page_index != 0 {
-                    return Err(TransformPageStageError::AttemptMismatch);
-                }
-                if page_bytes > self.max_staged_bytes
+                let rejection = if page_index != 0 {
+                    Some(TransformPageStageError::AttemptMismatch)
+                } else if page_bytes > self.max_staged_bytes
                     || self
                         .total_staged_bytes
                         .checked_add(page_bytes)
                         .is_none_or(|bytes| bytes > self.max_staged_bytes)
                 {
-                    return Err(TransformPageStageError::BufferOverflow);
+                    Some(TransformPageStageError::BufferOverflow)
+                } else {
+                    None
+                };
+                if let Some(rejection) = rejection {
+                    // Do not keep an empty entry for a session whose first page was
+                    // refused: nothing is staged for it and it holds no completed reply.
+                    if self
+                        .sessions
+                        .get(session_id)
+                        .is_some_and(|session| session.completed.is_none())
+                    {
+                        self.sessions.remove(session_id);
+                    }
+                    return Err(rejection);
                 }
                 self.total_staged_bytes += page_bytes;
                 self.pending_transform_count += 1;
@@ -21759,6 +21778,63 @@ mod tests {
             panic!("cached transform response failed to encode");
         };
         assert_eq!(actual, expected);
+    }
+
+    /// The pending-transform cap counts every session that would start a new pending
+    /// transform. A session that only had an entry (a refused first page left one behind,
+    /// or an idle session keeping its completed reply) used to skip the cap check.
+    #[test]
+    fn the_pending_transform_cap_applies_to_sessions_that_already_have_an_entry() {
+        let stage_first = |pages: &mut TransformPageCoordinator, session: &str, index: usize| {
+            pages.stage(
+                session,
+                format!("transform-{session}"),
+                1,
+                index,
+                2,
+                format!("digest-{index}"),
+                json!({ "messages": [] }),
+                10,
+                false,
+                0,
+            )
+        };
+        let mut pages = TransformPageCoordinator {
+            max_pending_transforms: 1,
+            ..TransformPageCoordinator::default()
+        };
+        // A refused first page leaves nothing behind.
+        assert_eq!(
+            stage_first(&mut pages, "refused", 1).err(),
+            Some(TransformPageStageError::AttemptMismatch)
+        );
+        assert!(!pages.sessions.contains_key("refused"));
+        // An idle session that keeps a completed reply.
+        pages
+            .sessions
+            .entry("idle".to_string())
+            .or_default()
+            .completed = Some(CompletedTransformPage {
+            transform_id: "done".to_string(),
+            generation: 1,
+            final_digest: "digest-final".to_string(),
+            result: Vec::new(),
+        });
+        assert!(matches!(
+            stage_first(&mut pages, "active", 0),
+            Ok(TransformPageStageAction::Ack(1))
+        ));
+        assert_eq!(pages.pending_transform_count, 1);
+        for session in ["refused", "idle", "new"] {
+            assert_eq!(
+                stage_first(&mut pages, session, 0).err(),
+                Some(TransformPageStageError::BufferOverflow),
+                "{session} must not start a pending transform past the cap"
+            );
+        }
+        assert_eq!(pages.pending_transform_count, 1);
+        // The session already pending may continue.
+        assert!(stage_first(&mut pages, "active", 1).is_ok());
     }
 
     #[tokio::test(flavor = "current_thread")]
