@@ -50,6 +50,7 @@ import {
     SubcModuleTransport,
 } from "./hooks/magic-context/module-transport";
 import { preloadTokenizer } from "./hooks/magic-context/read-session-formatting";
+import type { RustLkgReplayParticipant } from "./hooks/magic-context/rust-lkg-freeze-registry";
 import type { RustModeModuleClient } from "./hooks/magic-context/rust-mode-transform";
 import {
     createBootBudget,
@@ -879,8 +880,19 @@ const server: Plugin = async (ctx) => {
                 } catch {
                     // best-effort
                 }
+                try {
+                    // Stop offering this instance's Rust adapter to the last-known-good
+                    // replay registry, which other instances in this process share.
+                    (
+                        magicContextRuntime.magicContext as {
+                            disposeRustAdapter?: () => void;
+                        } | null
+                    )?.disposeRustAdapter?.();
+                } catch {
+                    // best-effort
+                }
                 log(
-                    "[magic-context] instance disposed — stopped RPC server, dream timer, auto-update",
+                    "[magic-context] instance disposed — stopped RPC server, dream timer, auto-update, Rust replay registration",
                 );
             },
         }),
@@ -898,6 +910,14 @@ const server: Plugin = async (ctx) => {
             compactionOff: !isCompactionEnabled(pluginConfig),
             internalChildSessions: liveSessionState.internalChildSessions,
             tryReopenStorage,
+            // This instance's own Rust adapter (null in TypeScript mode), so a replay
+            // this wrapper serves is admitted and frozen by the adapter that runs it.
+            rustReplayParticipant: () =>
+                (
+                    magicContextRuntime.magicContext as {
+                        getRustReplayParticipant?: () => RustLkgReplayParticipant | null;
+                    } | null
+                )?.getRustReplayParticipant?.() ?? null,
             onStorageBusyRefusal: async (sessionId, message) => {
                 const { sendStatusNotification } = await import(
                     "./hooks/magic-context/send-session-notification"

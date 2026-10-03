@@ -25,6 +25,12 @@ export const USER_FACING_FAILURES = {
             "This request was not sent: this session's history is larger than the model's context window, and Magic Context does not have a summary of it yet to send in its place.",
         action: "Send your message again once history compression has caught up, or switch to a model with a larger context window.",
     },
+    frozen_history_over_window: {
+        code: "MC-H07",
+        sentence:
+            "This request was not sent: the conversation is larger than the context window the provider reported, and the compressed history Magic Context has ready does not fit either.",
+        action: "Run /ctx-flush to compress it now, then send your message again.",
+    },
     historian_window_too_small: {
         code: "MC-H05",
         sentence:

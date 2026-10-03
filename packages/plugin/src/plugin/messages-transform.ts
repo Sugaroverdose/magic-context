@@ -17,6 +17,12 @@ import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-
 import { replayLkg, resolveLkgModelKeys } from "../hooks/magic-context/lkg-replay";
 import { dropSlot, getSlot, noteEntry } from "../hooks/magic-context/lkg-slot";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
+import {
+    noteExternalLkgReplay,
+    type RustLkgReplayParticipant,
+    resolveRustLkgReplayParticipant,
+    rustAdapterHasRunSession,
+} from "../hooks/magic-context/rust-lkg-freeze-registry";
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
 import type { MessageLike } from "../hooks/magic-context/transform-operations";
 import { replayRustModeBindingMismatchStrips } from "../hooks/magic-context/transform-postprocess-phase";
@@ -275,7 +281,17 @@ export function createMessagesTransformHandler(args: {
     onLkgReplay?: () => void;
     internalChildSessions?: Set<string>;
     tryReopenStorage?: () => boolean | Promise<boolean>;
+    /**
+     * The Rust adapter of this wrapper's own plugin instance, or null when the
+     * instance runs in TypeScript mode. When omitted, the process-wide replay
+     * registry picks the adapter (the one that most recently ran the session).
+     */
+    rustReplayParticipant?: () => RustLkgReplayParticipant | null | undefined;
 }): (input: Record<string, never>, output: MessagesTransformOutput) => Promise<MessageWithParts[]> {
+    const resolveRust = (sessionId: string): RustLkgReplayParticipant | undefined =>
+        args.rustReplayParticipant
+            ? (args.rustReplayParticipant() ?? undefined)
+            : resolveRustLkgReplayParticipant(sessionId);
     const run = async (input: Record<string, never>, output: MessagesTransformOutput) => {
         const sessionId = resolveSessionId(output);
         const agent = resolveAgentNameFromMessages(output.messages);
@@ -419,7 +435,22 @@ export function createMessagesTransformHandler(args: {
                 let replayBlocked = false;
                 try {
                     const db = openDatabase();
+                    // In Rust mode the adapter tracks whether the session is serving a frozen
+                    // replay, and it only replays when the replay fits the context limit.
+                    // A replay served here must update that tracking and pass the same check.
+                    const rust = resolveRust(sessionId);
                     if (
+                        (error instanceof StorageBusyRefusalError &&
+                            error.stage === "rust-mode-emergency") ||
+                        rust?.emergencyFailClosed(sessionId, output.messages as MessageLike[])
+                    ) {
+                        // The adapter refused while failing closed (usage at or above 95%
+                        // of the model's limit, or a proven provider overflow); there it
+                        // admits no last-known-good replay, so serving one here would
+                        // bypass its refusal.
+                        replayBlocked = true;
+                        sessionLog(sessionId, "lkg_emergency_band_refused");
+                    } else if (
                         !db ||
                         isEmergencyRecoveryArmed(sessionId) ||
                         getOverflowState(db, sessionId).needsEmergencyRecovery
@@ -427,31 +458,51 @@ export function createMessagesTransformHandler(args: {
                         replayBlocked = true;
                         sessionLog(sessionId, "lkg_emergency_armed");
                     } else {
-                        const keys = resolveLkgModelKeys(output.messages as MessageLike[]);
+                        const inputMessages = output.messages as MessageLike[];
+                        const inputCount = inputMessages.length;
+                        const keys = resolveLkgModelKeys(inputMessages);
                         const replay = replayLkg({
                             sessionId,
-                            messages: output.messages as MessageLike[],
+                            messages: inputMessages,
                             modelKey: keys.modelKey,
                             providerKey: keys.providerKey,
                             entry,
                             prepareReplay: (messages) =>
-                                replayRustModeBindingMismatchStrips({
-                                    db,
-                                    sessionId,
-                                    messages,
-                                    resolvedProviderID: keys.providerKey ?? undefined,
-                                }),
+                                rust
+                                    ? rust.stripPersistedReasoning(
+                                          sessionId,
+                                          messages,
+                                          inputMessages,
+                                      )
+                                    : replayRustModeBindingMismatchStrips({
+                                          db,
+                                          sessionId,
+                                          messages,
+                                          resolvedProviderID: keys.providerKey ?? undefined,
+                                      }),
                         });
-                        if (replay.ok) {
+                        if (
+                            replay.ok &&
+                            rust &&
+                            !rust.replayFits(sessionId, replay.messages, inputMessages)
+                        ) {
+                            replayBlocked = true;
+                            sessionLog(sessionId, "lkg_replay_does_not_fit");
+                        } else if (replay.ok) {
                             args.onLkgReplay?.();
                             replaceMessagesInPlace(
                                 output,
                                 replay.messages as unknown as MessageWithParts[],
                             );
+                            // The provider has now cached the replayed bytes. Tell a Rust
+                            // adapter, so its next successful pass keeps serving them instead
+                            // of switching to module output, which would bust that cache.
+                            noteExternalLkgReplay(rust, sessionId, inputCount);
                             sessionLog(sessionId, "lkg_replay_served");
                             return output.messages;
+                        } else {
+                            sessionLog(sessionId, replay.reason);
                         }
-                        sessionLog(sessionId, replay.reason);
                     }
                 } catch (replayError) {
                     replayBlocked = true;
@@ -482,6 +533,23 @@ export function createMessagesTransformHandler(args: {
             const message = error instanceof Error ? error.message : String(error);
             const isTransient =
                 isTransientSqliteError(error) || error instanceof StorageBusyRefusalError;
+            if (
+                !args.compactionOff &&
+                !isTransient &&
+                sessionId &&
+                (args.rustReplayParticipant
+                    ? resolveRust(sessionId) !== undefined
+                    : rustAdapterHasRunSession(sessionId))
+            ) {
+                // A Rust-mode session whose pass failed and whose last-known-good replay
+                // could not serve. Passing the input through unchanged would send the
+                // raw history, which can be far larger than the window and, while the
+                // adapter is frozen, rewrites bytes the provider holds. Refuse instead.
+                // TypeScript-mode sessions keep their fail-open handling below.
+                throw new DegradedPassRefusalError("rust-mode-transform-failed", {
+                    cause: error,
+                });
+            }
 
             if (isTransient) {
                 if (!args.compactionOff) {

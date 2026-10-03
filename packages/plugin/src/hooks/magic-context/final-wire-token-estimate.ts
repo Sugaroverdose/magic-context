@@ -50,16 +50,32 @@ export function describeFinalWireTail(messages: readonly MessageLike[]): string 
         .join(", ")}]`;
 }
 
+function serializedText(value: unknown): string {
+    if (value === undefined) return "";
+    return (typeof value === "string" ? value : JSON.stringify(value)) ?? "";
+}
+
 function serializedTokens(value: unknown): number {
-    if (value === undefined) return 0;
-    const serialized = typeof value === "string" ? value : JSON.stringify(value);
+    const serialized = serializedText(value);
     return serialized ? estimateTokens(serialized) : 0;
 }
 
-/** Count the token-bearing fields in the message representation sent to OpenCode. */
-export function estimateMessageTokens(message: MessageLike): MessageTokenEstimate {
-    let conversation = 0;
-    let toolCall = 0;
+type WireBucket = keyof MessageTokenEstimate;
+
+/**
+ * Visit every field of a message that reaches the provider request: `text` with
+ * the field's value (a string, or a value the request carries serialized), and
+ * `image` with the token count of an image the request carries. Fields OpenCode
+ * keeps only for itself, such as tool metadata, are not visited. Token estimates
+ * and wire byte counts both walk this, so they agree on what the wire holds.
+ */
+function visitWireContent(
+    message: MessageLike,
+    visit: {
+        text: (bucket: WireBucket, value: unknown) => void;
+        image: (bucket: WireBucket, tokens: number) => void;
+    },
+): void {
     for (const part of message.parts) {
         if (!part || typeof part !== "object") continue;
         const p = part as {
@@ -80,61 +96,107 @@ export function estimateMessageTokens(message: MessageLike): MessageTokenEstimat
             metadata?: { anthropic?: { signature?: string } };
         };
         if (p.ignored) continue;
+        const text = (value: unknown) => {
+            if (typeof value === "string") visit.text("conversation", value);
+        };
+        const tool = (value: unknown) => visit.text("toolCall", value);
         switch (p.type) {
             case "text":
-                if (typeof p.text === "string") conversation += estimateTokens(p.text);
+                text(p.text);
                 break;
-            case "reasoning": {
-                if (typeof p.text === "string") conversation += estimateTokens(p.text);
-                const signature = p.metadata?.anthropic?.signature;
-                if (typeof signature === "string") conversation += estimateTokens(signature);
+            case "reasoning":
+                text(p.text);
+                text(p.metadata?.anthropic?.signature);
                 break;
-            }
             case "thinking":
-                if (typeof p.thinking === "string") conversation += estimateTokens(p.thinking);
-                if (typeof p.signature === "string") conversation += estimateTokens(p.signature);
+                text(p.thinking);
+                text(p.signature);
                 break;
             case "redacted_thinking":
-                if (typeof p.data === "string") conversation += estimateTokens(p.data);
+                text(p.data);
                 break;
             case "file":
                 if (typeof p.mime === "string" && p.mime.startsWith("image/")) {
-                    conversation +=
+                    visit.image(
+                        "conversation",
                         typeof p.url === "string" && p.url.startsWith("data:")
                             ? estimateImageTokensFromDataUrl(p.url)
-                            : 1200;
+                            : 1200,
+                    );
                 }
                 break;
             case "tool":
-                toolCall += serializedTokens(p.state?.input ?? p.input ?? p.args);
-                toolCall += serializedTokens(
-                    p.state?.output ?? p.state?.content ?? p.output ?? p.result ?? p.content,
-                );
-                toolCall += serializedTokens(p.state?.error);
+                tool(p.state?.input ?? p.input ?? p.args);
+                tool(p.state?.output ?? p.state?.content ?? p.output ?? p.result ?? p.content);
+                tool(p.state?.error);
                 // Legacy skeletons may still carry media. Count what the wire
                 // actually contains, not what its output marker implies.
-                toolCall += estimateToolAttachmentImageTokens(p.state);
+                visit.image("toolCall", estimateToolAttachmentImageTokens(p.state));
                 break;
             case "tool-call":
-                toolCall += serializedTokens(p.input ?? p.args);
+                tool(p.input ?? p.args);
                 break;
             case "tool-invocation":
-                toolCall += serializedTokens(p.args ?? p.input);
-                toolCall += serializedTokens(p.result ?? p.output ?? p.state?.output);
-                toolCall += serializedTokens(p.state?.error);
+                tool(p.args ?? p.input);
+                tool(p.result ?? p.output ?? p.state?.output);
+                tool(p.state?.error);
                 break;
             case "tool-result":
-                toolCall += serializedTokens(p.result ?? p.content ?? p.output);
+                tool(p.result ?? p.content ?? p.output);
                 break;
             case "tool_use":
-                toolCall += serializedTokens(p.input ?? p.args);
+                tool(p.input ?? p.args);
                 break;
             case "tool_result":
-                toolCall += serializedTokens(p.content ?? p.result ?? p.output);
+                tool(p.content ?? p.result ?? p.output);
                 break;
         }
     }
-    return { conversation, toolCall };
+}
+
+/** Count the token-bearing fields in the message representation sent to OpenCode. */
+export function estimateMessageTokens(message: MessageLike): MessageTokenEstimate {
+    const total: MessageTokenEstimate = { conversation: 0, toolCall: 0 };
+    visitWireContent(message, {
+        text: (bucket, value) => {
+            total[bucket] += serializedTokens(value);
+        },
+        image: (bucket, tokens) => {
+            total[bucket] += tokens;
+        },
+    });
+    return total;
+}
+
+/**
+ * The UTF-8 bytes of the fields `messages` put on the provider wire, the same
+ * fields `estimateMessageTokens` counts; an image counts as `bytesPerToken` bytes
+ * per estimated image token, since the provider bills it by size, not by its
+ * base64 text. Stops as soon as the sum exceeds `abortAboveBytes`. Null when a
+ * field cannot be serialized.
+ */
+export function wireContentBytes(
+    messages: readonly MessageLike[],
+    abortAboveBytes: number,
+    bytesPerToken: number,
+): { bytes: number; aborted: boolean } | null {
+    let bytes = 0;
+    try {
+        for (const message of messages) {
+            visitWireContent(message, {
+                text: (_bucket, value) => {
+                    bytes += Buffer.byteLength(serializedText(value));
+                },
+                image: (_bucket, tokens) => {
+                    bytes += tokens * bytesPerToken;
+                },
+            });
+            if (bytes > abortAboveBytes) return { bytes, aborted: true };
+        }
+    } catch {
+        return null;
+    }
+    return { bytes, aborted: false };
 }
 
 export interface FinalWireTokenEstimateInput {

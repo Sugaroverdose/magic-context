@@ -159,7 +159,8 @@ function tagging(tags: Record<string, number>) {
         });
 }
 
-type Step = "throw" | string;
+/** A decision string, "throw" for a module failure, or a decision with extra response fields. */
+type Step = "throw" | string | { decision: string; response: Record<string, unknown> };
 
 /**
  * A prefix-bound Rust session whose module answers each pass from `script`
@@ -184,7 +185,8 @@ function scriptedSession(label: string) {
             const step = script.shift() ?? fallbackDecision;
             if (step === "throw") throw new Error("daemon unavailable");
             return {
-                decision: step,
+                ...(typeof step === "string" ? { decision: step } : step.response),
+                ...(typeof step === "string" ? {} : { decision: step.decision }),
                 served_from: "transform",
                 row_version: pass,
                 native_messages: moduleOutput(lastInput),
@@ -349,6 +351,71 @@ describe("release strip: the stored snapshot is not always what was served last"
         expect(hasReasoning(served, "a1")).toBe(true);
         expect(hasReasoning(served, "a2")).toBe(false);
         expect(hasReasoning(served, "a3")).toBe(false);
+    });
+});
+
+describe("release strip: a module bust while frozen", () => {
+    it("a frozen trim-only SOFT strips outage-tail thinking", async () => {
+        const s = scriptedSession("frozen-trim-only");
+        const sid = s.sessionId;
+        await s.run([user(sid, "m1", "question")], "HARD");
+        const conversation: MessageLike[] = [
+            user(sid, "m1", "question"),
+            thinkingAssistant(sid, "a1"),
+            user(sid, "m2", "turn 2"),
+        ];
+        // The module fails: the last-known-good replay serves the captured [m1] plus
+        // a1 and m2 exactly as the host sent them (untagged).
+        await s.run([...conversation], "throw");
+        expect(s.frozen()).toBe(true);
+        // Two healthy defers each append a thinking assistant and keep serving the
+        // frozen bytes; each one captures exactly what it served.
+        conversation.push(thinkingAssistant(sid, "a2"), user(sid, "m3", "turn 3"));
+        await s.run([...conversation], "SOFT+");
+        conversation.push(thinkingAssistant(sid, "a3"), user(sid, "m4", "turn 4"));
+        const lastFrozen = await s.run([...conversation], "SOFT+");
+        expect(s.frozen()).toBe(true);
+        expect(hasReasoning(lastFrozen, "a2")).toBe(true);
+        expect(hasReasoning(lastFrozen, "a3")).toBe(true);
+
+        // The module's bust removes the oldest reasoning (a1) and tags m2..m4, which
+        // the freeze served untagged. A signed thinking block is valid only while
+        // every byte before it is unchanged, so a2 and a3 become invalid even though
+        // the module reports its own edit as a reasoning trim.
+        const tag = tagging({ m2: 2, m3: 3, m4: 4 });
+        s.setModuleOutput((input) =>
+            tag(input).map((message) => {
+                const record = message as MessageLike;
+                return record.info.id === "a1"
+                    ? {
+                          ...record,
+                          parts: record.parts.filter(
+                              (part) => (part as { type?: string }).type !== "reasoning",
+                          ),
+                      }
+                    : message;
+            }),
+        );
+        const busted = await s.run([...conversation], {
+            decision: "SOFT",
+            response: { reasoning_trim_only: true },
+        });
+        expect(s.frozen()).toBe(false);
+        const divergence = firstServedDivergenceIndex(busted, lastFrozen, {
+            providerID: MODEL.providerID,
+        });
+        expect(divergence).toBe(1);
+        for (const message of busted.slice(divergence ?? 0) as MessageLike[]) {
+            expect(
+                message.parts.some((part) => (part as { type?: string }).type === "reasoning"),
+            ).toBe(false);
+        }
+        expect(s.strippedIds()).toEqual(["a2", "a3"]);
+
+        // The stripped ids were saved, so the next defer removes the same thinking
+        // and serves the same bytes.
+        const defer = await s.run([...conversation], "SOFT+");
+        expect(sha(defer)).toBe(sha(busted));
     });
 });
 

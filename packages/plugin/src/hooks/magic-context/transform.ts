@@ -3202,6 +3202,14 @@ export function createTransform(deps: TransformDeps) {
         async clearRustSession(sessionId: string): Promise<void> {
             await rustModeTransform?.clearSession(sessionId);
         },
+        /** The host disposed this instance; release the Rust adapter's process-wide registrations. */
+        disposeRust(): void {
+            rustModeTransform?.dispose();
+        },
+        /** This instance's Rust adapter, for its own messages-transform wrapper; null in TypeScript mode. */
+        getRustReplayParticipant() {
+            return rustModeTransform?.replayParticipant ?? null;
+        },
         getRustWireCacheHeapStats() {
             return (
                 rustModeTransform?.getHeapStats() ?? {

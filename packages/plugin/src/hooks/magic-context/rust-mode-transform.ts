@@ -16,7 +16,7 @@ import { isPrefixBoundThinkingModel } from "../../features/magic-context/overflo
 import { parseCacheTtl } from "../../features/magic-context/scheduler";
 import { resolveSessionCacheTtl } from "../../features/magic-context/session-cache-ttl";
 import { recordSessionProjectIdentity } from "../../features/magic-context/session-project-storage";
-import type { getOrCreateSessionMeta } from "../../features/magic-context/storage";
+import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import {
     casChannel2NudgeState,
     clearEmergencyRecovery,
@@ -54,6 +54,7 @@ import {
     withSqliteBackgroundWriter,
     withSqliteTransformPass,
 } from "../../shared/sqlite";
+import { renderUserFacingFailure } from "../../shared/user-facing-codes";
 import type { WindowGeometryResult } from "../../shared/window-geometry";
 import {
     cachedToolPermissionDenied,
@@ -83,7 +84,18 @@ import {
 import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
 import { createHistorianHostRunner } from "./historian-host-runner";
 import { saveLkgSlotToDb } from "./lkg-persist";
-import { replayLkg, resolveLkgModelKeys } from "./lkg-replay";
+import {
+    coldStartRawServedIndex,
+    coldStartUncapturedReplay,
+    replayLkg,
+    resolveLkgModelKeys,
+} from "./lkg-replay";
+import {
+    lkgReplayFits,
+    lkgReplayLimit,
+    measureLkgReplay,
+    RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
+} from "./lkg-replay-fit";
 import {
     captureSlot,
     contentSnapshotValue,
@@ -133,6 +145,11 @@ import { RECOVERY_NO_HEAD_LIMIT } from "./protected-tail-boundary";
 import { RawFallbackContextLimitError } from "./raw-fallback-context-limit";
 import { findLastAssistantModelFromOpenCodeDb } from "./read-session-db";
 import type { RawMessageOrdinalAnchor } from "./read-session-raw";
+import {
+    nextRustPassStamp,
+    type RustLkgReplayParticipant,
+    registerRustLkgReplayParticipant,
+} from "./rust-lkg-freeze-registry";
 import { SharedCompartmentBoundaryError } from "./shared-compartment-boundaries";
 import { singleStoreMigrationRequiredFailure } from "./single-store-refusal";
 import { StorageBusyRefusalError } from "./storage-busy-refusal";
@@ -148,6 +165,7 @@ import {
     applyRustModeDeferredCompactionMarker,
     replayRustModeBindingMismatchStrips,
     runRustModePostprocess,
+    rustModeServedKeyAfterPersistedStrips,
     type ThinkingBindingRecoveryApplication,
 } from "./transform-postprocess-phase";
 import { logTransformTiming } from "./transform-stage-logger";
@@ -160,6 +178,25 @@ class RustTransformProtocolError extends Error {
         this.name = "RustTransformProtocolError";
     }
 }
+
+/**
+ * A frozen replay is over the provider-proven context limit while emergency
+ * recovery is armed, and the module's output is over it too (or cannot be shown
+ * to fit). Neither array can be sent, so the pass refuses. The module itself is
+ * healthy, so this is not counted as a module failure.
+ */
+class FrozenReplayOverProvenLimitRefusal extends Error {
+    constructor(
+        readonly moduleFit: FrozenFit,
+        readonly limit: number,
+    ) {
+        super(`frozen replay and module output are over the provider-proven limit ${limit}`);
+        this.name = "FrozenReplayOverProvenLimitRefusal";
+    }
+}
+
+/** Where an array stands against a context limit; see `measureAgainstLimit` in `run`. */
+type FrozenFit = "under" | "over" | "unproven";
 
 export const RUST_FAILURE_PARK_THRESHOLD = 3;
 export const RUST_PARK_RETRY_INTERVAL = 5;
@@ -223,34 +260,6 @@ async function resolveCombinedTodowriteVerdict(
         }
     }
     return !permissionDenied;
-}
-const RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN = 4;
-
-/**
- * Serialize the raw array message-by-message with a running byte sum, aborting
- * as soon as the sum proves the prompt is over the context limit. A refusal
- * then costs a fraction of the full serialization and never runs the
- * tokenizer; when the sum stays under the budget the total matches a
- * whole-array serialization up to array punctuation.
- */
-function rawFallbackSerializedBytes(
-    messages: readonly MessageLike[],
-    abortAboveBytes: number,
-): { bytes: number; aborted: boolean } | null {
-    let bytes = 0;
-    try {
-        for (const message of messages) {
-            const serialized = JSON.stringify(message);
-            if (typeof serialized !== "string") return null;
-            // +1 accounts for the separator between array entries.
-            bytes += Buffer.byteLength(serialized) + 1;
-            if (bytes > abortAboveBytes) return { bytes, aborted: true };
-        }
-    } catch {
-        // Serialization is itself required before these messages can reach a provider.
-        return null;
-    }
-    return { bytes: bytes + 1, aborted: false };
 }
 
 export interface RustModeModuleClient extends ModuleStateSyncClient {
@@ -408,6 +417,13 @@ interface RustSessionState extends ModuleStateSyncState {
     lkgRepresentationFrozen: boolean;
     lkgFrozenHealthyPasses: number;
     lkgFrozenAtInputCount: number | null;
+    /**
+     * True until this process's first pass for the session applies module output.
+     * That pass checks whether the durable slot it inherited was captured from a
+     * frozen serve (a previous process froze and captured raw bytes) and, if so,
+     * resumes the freeze instead of adopting module output.
+     */
+    lkgColdStartCheckPending: boolean;
     /** Highest fold coverage ordinal this process has already armed the deferred-note
      * nudge for. Null until the first committed boundary of the process is observed. */
     noteNudgePublishedOrdinal: number | null;
@@ -1050,11 +1066,27 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
             lkgRepresentationFrozen: false,
             lkgFrozenHealthyPasses: 0,
             lkgFrozenAtInputCount: null,
+            lkgColdStartCheckPending: true,
             noteNudgePublishedOrdinal: null,
         };
         states.set(sessionId, state);
     }
     return state;
+}
+
+/**
+ * Enter (or keep) the frozen representation after a last-known-good replay was
+ * served, whoever served it. From here on the provider holds the replayed bytes,
+ * so later healthy passes must keep serving them until a pass installs something
+ * else. The replay appended a raw tail the slot does not hold, so the slot is no
+ * longer provably the last-served array.
+ */
+function enterLkgReplayFreeze(state: RustSessionState, inputCount: number): void {
+    if (state.lkgFrozenAtInputCount === null) state.lkgFrozenAtInputCount = inputCount;
+    state.lkgRepresentationFrozen = true;
+    state.lkgFrozenHealthyPasses = 0;
+    state.forceFullWire = true;
+    state.lkgLastServedCaptureSequence = null;
 }
 
 function getSessionDirectory(
@@ -1130,6 +1162,53 @@ function transformGeometryForWire(
         absolute_wall: geometry.derivation.absoluteWall,
         derivation,
     };
+}
+
+/**
+ * Whether a Rust-mode pass for this session must fail closed: usage at or above
+ * `RUST_EMERGENCY_WALL_PCT` of a trusted hard wall, or a provider overflow that
+ * is proven (in this process, or persisted with provider proof). A pass that
+ * fails closed admits no last-known-good replay. `providerProvenEmergency` is the
+ * narrower case where the band is reached and the overflow is provider-proven.
+ */
+function rustEmergencyFailClosed(args: {
+    sessionId: string;
+    usage: ContextUsage;
+    geometry: TransformGeometryWire | undefined;
+    trustedContextLimit: number | undefined;
+    overflowState: ReturnType<typeof getOverflowState> | undefined;
+    modelKey: string | null;
+}): { emergencyFailClosed: boolean; providerProvenEmergency: boolean } {
+    const { sessionId, overflowState } = args;
+    const hasTrustedEmergencyWall = args.geometry
+        ? args.geometry.usable_hard > 0
+        : args.trustedContextLimit !== undefined && args.trustedContextLimit > 0;
+    const hardWallPercentage = hardWallUsagePercentage(args.usage, args.geometry);
+    const providerOverflowProven = isProviderOverflowFailClosedProven(sessionId);
+    let emergencyFailClosed =
+        providerOverflowProven ||
+        (hardWallPercentage >= RUST_EMERGENCY_WALL_PCT && hasTrustedEmergencyWall);
+    let providerProvenEmergency = false;
+    if (overflowState) {
+        const detectedLimitMatchesModel =
+            overflowState.detectedContextLimitModelKey === null ||
+            canonicalModelIdentity(overflowState.detectedContextLimitModelKey) ===
+                canonicalModelIdentity(args.modelKey ?? "");
+        const hasProviderProof =
+            (overflowState.detectedContextLimit > 0 && detectedLimitMatchesModel) ||
+            // An unknown persisted arm alone is not proof. A second provider rejection
+            // while that arm is durable records the process-local reconfirmation.
+            isProviderOverflowReconfirmed(sessionId);
+        const persistedProviderEmergency =
+            overflowState.needsEmergencyRecovery &&
+            overflowState.emergencyRecoveryOrigin === "provider_overflow" &&
+            hasProviderProof;
+        emergencyFailClosed ||= persistedProviderEmergency;
+        providerProvenEmergency =
+            hardWallPercentage >= RUST_EMERGENCY_WALL_PCT &&
+            (providerOverflowProven || persistedProviderEmergency);
+    }
+    return { emergencyFailClosed, providerProvenEmergency };
 }
 
 function hardWallUsagePercentage(
@@ -1535,8 +1614,10 @@ export function createRustModeTransform(
     clearSession: (sessionId: string) => Promise<void>;
     invalidateWireState: (sessionId: string) => void;
     stopHostRunner: () => Promise<void>;
+    dispose: () => void;
     getState: (sessionId: string) => Readonly<RustSessionState>;
     getHeapStats: () => RustWireCacheHeapStats;
+    replayParticipant: RustLkgReplayParticipant;
 } {
     const states = new Map<string, RustSessionState>();
     const clock = options.clockForTests ?? { setTimeout, clearTimeout, now: Date.now };
@@ -1915,10 +1996,7 @@ export function createRustModeTransform(
             return false;
         }
         const keys = resolveLkgModelKeys(currentMessages);
-        const replayModel =
-            modelFromMessages(currentMessages) ??
-            deps.liveModelBySession?.get(sessionId) ??
-            hostModelFallback(sessionId);
+        const replayModel = resolveReplayModel(sessionId, currentMessages);
         const replay = replayLkg({
             sessionId,
             messages: currentMessages,
@@ -1939,60 +2017,167 @@ export function createRustModeTransform(
             sessionLog(sessionId, replay.reason);
             return false;
         }
-        const trustedReplayLimit = replayModel
-            ? resolveTrustedContextLimit(replayModel.providerID, replayModel.modelID, {
-                  db: deps.db,
-                  sessionID: sessionId,
-              })
-            : undefined;
-        let detectedReplayLimit = 0;
-        try {
-            detectedReplayLimit = getOverflowState(
-                deps.db,
-                sessionId,
-                keys.modelKey,
-            ).detectedContextLimit;
-        } catch {
-            // A limit read failure cannot admit cached bytes whose size is now unknown.
-            return false;
-        }
-        const replayLimit =
-            trustedReplayLimit ?? (detectedReplayLimit > 0 ? detectedReplayLimit : undefined);
-        if (replayLimit !== undefined && replayLimit > 0) {
-            try {
-                const estimate = estimateFinalWireInputTokens({
-                    messages: replay.messages,
-                    systemPromptTokens,
-                    providerID: replayModel?.providerID,
-                    modelID: replayModel?.modelID,
-                    agentName: deps.getNotificationParams?.(sessionId)?.agent,
-                });
-                if (
-                    !estimate.trusted ||
-                    !Number.isFinite(estimate.tokens) ||
-                    estimate.tokens <= 0 ||
-                    estimate.tokens > replayLimit
-                ) {
-                    sessionLog(
-                        sessionId,
-                        `${!estimate.trusted ? "lkg_fit_untrusted" : "lkg_over_context_limit"} estimated=${estimate.tokens} limit=${replayLimit}`,
-                    );
-                    return false;
-                }
-            } catch {
-                return false;
-            }
-        } else {
+        const fit = lkgReplayFits({
+            db: deps.db,
+            sessionId,
+            messages: replay.messages,
+            model: replayModel,
+            modelKey: keys.modelKey,
+            systemPromptTokens,
+            agentName: deps.getNotificationParams?.(sessionId)?.agent,
+            estimator: rawFallbackEstimator,
+        });
+        if (!fit.fits) {
+            if (fit.detail) sessionLog(sessionId, fit.detail);
             return false;
         }
         replaceMessagesInPlace(output, replay.messages);
-        // This serve adds a raw tail the slot does not hold, so the slot stops being
-        // the last-served array even if this pass captured one before failing.
-        const replayState = states.get(sessionId);
-        if (replayState) replayState.lkgLastServedCaptureSequence = null;
+        // Every provider-visible replay enters the freeze here: the failure ladder,
+        // the parked shortcut and the parked health-probe failure alike.
+        enterLkgReplayFreeze(ensureState(states, sessionId), currentMessages.length);
         sessionLog(sessionId, "lkg_replay_served");
         return true;
     };
+
+    // The model a last-known-good replay is admitted and stripped for. The outer
+    // wrapper's replay goes through the registered participant below, which uses
+    // this same function, so both replays of one tail strip it identically.
+    const resolveReplayModel = (
+        sessionId: string,
+        messages: MessageLike[],
+    ): { providerID: string; modelID: string } | null | undefined =>
+        modelFromMessages(messages) ??
+        deps.liveModelBySession?.get(sessionId) ??
+        hostModelFallback(sessionId);
+
+    /**
+     * On this process's first applied pass for a session, find whether a previous
+     * process left a freeze behind. A frozen healthy pass captures the raw bytes it
+     * served, so a durable slot ending in messages exactly as the host sent them,
+     * one of which the module now renders differently, shows the provider last saw
+     * the frozen representation (see `coldStartRawServedIndex`): the result is
+     * `frozen_slot`, with the slot's messages, the first raw-served slot index and
+     * the raw-input index where the raw run begins.
+     *
+     * Otherwise, a previous process may have ended right after a last-known-good
+     * replay it never captured (see `coldStartUncapturedReplay`): the result is
+     * `uncaptured_replay`, with the array that replay most likely served, so the
+     * thinking strip can remove thinking produced against bytes the module now
+     * renders differently.
+     *
+     * Null when neither applies. Uses the module output from before postprocess,
+     * which has side effects a pass that ends in a frozen serve must not run.
+     */
+    const detectColdStartFrozenSlot = (
+        sessionId: string,
+        rawInput: MessageLike[],
+        moduleOutput: readonly unknown[],
+        providerID: string | undefined,
+    ):
+        | { kind: "frozen_slot"; slotMessages: unknown[]; index: number; rawRunStart: number }
+        | { kind: "uncaptured_replay"; lastServed: unknown[]; rawUserIndex: number }
+        | null => {
+        try {
+            const slotMessages = parseLastServedSnapshot(getSlot(sessionId)?.jsonPrefix);
+            if (!slotMessages) return null;
+            const key = rustModeServedKeyAfterPersistedStrips({
+                db: deps.db,
+                sessionId,
+                resolvedProviderID: providerID,
+            });
+            const frozen = coldStartRawServedIndex({ slotMessages, rawInput, moduleOutput, key });
+            if (frozen) return { kind: "frozen_slot", slotMessages, ...frozen };
+            const uncaptured = coldStartUncapturedReplay({
+                slotMessages,
+                rawInput,
+                moduleOutput,
+                key,
+            });
+            if (!uncaptured) return null;
+            // The uncaptured replay removed the session's persisted thinking strips from
+            // the raw tail before serving it; do the same here so the comparison matches.
+            const lastServed = structuredClone(uncaptured.lastServed) as MessageLike[];
+            replayRustModeBindingMismatchStrips({
+                db: deps.db,
+                sessionId,
+                messages: lastServed,
+                resolvedProviderID: providerID,
+            });
+            return {
+                kind: "uncaptured_replay",
+                lastServed,
+                rawUserIndex: uncaptured.rawUserIndex,
+            };
+        } catch (error) {
+            sessionLog(sessionId, "lkg cold-start freeze check failed (ignored):", error);
+            return null;
+        }
+    };
+
+    // When this adapter last started a pass for each session; the outer wrapper's
+    // replay registry uses it to find the adapter that currently runs a session.
+    const passStampBySession = new Map<string, number>();
+    const replayParticipant: RustLkgReplayParticipant = {
+        lastPassStamp: (sessionId) =>
+            states.has(sessionId) ? passStampBySession.get(sessionId) : undefined,
+        enterFreezeFromExternalServe: (sessionId, inputCount) =>
+            enterLkgReplayFreeze(ensureState(states, sessionId), inputCount),
+        replayFits: (sessionId, messages, inputMessages) => {
+            try {
+                const fit = lkgReplayFits({
+                    db: deps.db,
+                    sessionId,
+                    messages,
+                    model: resolveReplayModel(sessionId, inputMessages),
+                    modelKey: resolveLkgModelKeys(inputMessages).modelKey,
+                    systemPromptTokens: getOrCreateSessionMeta(deps.db, sessionId)
+                        .systemPromptTokens,
+                    agentName: deps.getNotificationParams?.(sessionId)?.agent,
+                    estimator: rawFallbackEstimator,
+                });
+                if (!fit.fits && fit.detail) sessionLog(sessionId, fit.detail);
+                return fit.fits;
+            } catch (error) {
+                sessionLog(sessionId, "lkg wrapper replay fit check failed:", error);
+                return false;
+            }
+        },
+        emergencyFailClosed: (sessionId, inputMessages) => {
+            try {
+                const model = resolveReplayModel(sessionId, inputMessages) ?? undefined;
+                const modelKey = model
+                    ? canonicalModelIdentity(resolveModelKey(model.providerID, model.modelID) ?? "")
+                    : null;
+                const limits = { db: deps.db, sessionID: sessionId };
+                return rustEmergencyFailClosed({
+                    sessionId,
+                    usage: loadContextUsage(deps.contextUsageMap, deps.db, sessionId),
+                    geometry: transformGeometryForWire(
+                        model
+                            ? resolveContextWindowGeometry(model.providerID, model.modelID, limits)
+                            : undefined,
+                    ),
+                    trustedContextLimit: model
+                        ? resolveTrustedContextLimit(model.providerID, model.modelID, limits)
+                        : undefined,
+                    overflowState: getOverflowState(deps.db, sessionId, modelKey),
+                    modelKey,
+                }).emergencyFailClosed;
+            } catch (error) {
+                // Unknown pressure must not admit cached bytes.
+                sessionLog(sessionId, "lkg wrapper replay emergency check failed:", error);
+                return true;
+            }
+        },
+        stripPersistedReasoning: (sessionId, messages, inputMessages) =>
+            replayRustModeBindingMismatchStrips({
+                db: deps.db,
+                sessionId,
+                messages,
+                resolvedProviderID: resolveReplayModel(sessionId, inputMessages)?.providerID,
+            }),
+    };
+    const unregisterReplayParticipant = registerRustLkgReplayParticipant(replayParticipant);
 
     const prepareRustCapture = (
         state: RustSessionState,
@@ -2120,6 +2305,7 @@ export function createRustModeTransform(
             .find((message) => message.info.role === "assistant")?.info.id;
         const timings = emptyRustPassTimings();
         state.passCount += 1;
+        passStampBySession.set(sessionId, nextRustPassStamp());
         const syntheticTurn = observeSyntheticTurn(state, messages);
         const syntheticLoopBlocked = syntheticTurn && state.syntheticTurnCount >= 3;
         if (syntheticLoopBlocked && !state.syntheticLoopBreakerLogged) {
@@ -2208,33 +2394,14 @@ export function createRustModeTransform(
             preflightError ??= error;
         }
         const transformGeometry = transformGeometryForWire(resolvedWindowGeometry);
-        const hasTrustedEmergencyWall = transformGeometry
-            ? transformGeometry.usable_hard > 0
-            : resolvedContextLimit !== undefined && resolvedContextLimit > 0;
-        const hardWallPercentage = hardWallUsagePercentage(passUsageSnapshot, transformGeometry);
-        const providerOverflowProven = isProviderOverflowFailClosedProven(sessionId);
-        emergencyFailClosed =
-            providerOverflowProven ||
-            (hardWallPercentage >= RUST_EMERGENCY_WALL_PCT && hasTrustedEmergencyWall);
-        if (overflowState) {
-            const detectedLimitMatchesModel =
-                overflowState.detectedContextLimitModelKey === null ||
-                canonicalModelIdentity(overflowState.detectedContextLimitModelKey) ===
-                    canonicalModelIdentity(modelKey ?? "");
-            const hasProviderProof =
-                (overflowState.detectedContextLimit > 0 && detectedLimitMatchesModel) ||
-                // An unknown persisted arm alone is not proof. A second provider rejection
-                // while that arm is durable records the process-local reconfirmation.
-                isProviderOverflowReconfirmed(sessionId);
-            const persistedProviderEmergency =
-                overflowState.needsEmergencyRecovery &&
-                overflowState.emergencyRecoveryOrigin === "provider_overflow" &&
-                hasProviderProof;
-            emergencyFailClosed ||= persistedProviderEmergency;
-            providerProvenEmergency =
-                hardWallPercentage >= RUST_EMERGENCY_WALL_PCT &&
-                (providerOverflowProven || persistedProviderEmergency);
-        }
+        ({ emergencyFailClosed, providerProvenEmergency } = rustEmergencyFailClosed({
+            sessionId,
+            usage: passUsageSnapshot,
+            geometry: transformGeometry,
+            trustedContextLimit: resolvedContextLimit,
+            overflowState,
+            modelKey,
+        }));
         const serveRawFallback = (cause?: unknown): void => {
             servedFrom = "refused";
             // A lost transform reply cannot authorize unmanaged history, even when
@@ -2245,51 +2412,50 @@ export function createRustModeTransform(
             if (!deps.compactionOff && isTransientSqliteError(cause)) {
                 throw new StorageBusyRefusalError(cause, "rust-mode-transform");
             }
-            const contextLimit =
-                transformGeometry?.usable_hard ??
-                resolvedContextLimit ??
-                (overflowState && overflowState.detectedContextLimit > 0
-                    ? overflowState.detectedContextLimit
-                    : undefined);
+            // The raw full history is admitted exactly like a last-known-good replay:
+            // against the trusted limit, never the larger usable hard limit (some
+            // providers enforce their declared prompt limit), measured on what the
+            // request carries, and only when a trusted estimate is under the limit.
+            let contextLimit: number | undefined;
+            try {
+                contextLimit = lkgReplayLimit({
+                    db: deps.db,
+                    sessionId,
+                    model,
+                    modelKey: resolveLkgModelKeys(messages).modelKey,
+                });
+            } catch {
+                contextLimit = undefined;
+            }
             if (contextLimit !== undefined) {
-                // The local tokenizer is telemetry-grade and can materially undercount a new
-                // provider tokenizer. Four serialized bytes per context token is an independent,
-                // conservative risk budget for a raw full-history fallback.
-                const proxyBudgetBytes = contextLimit * RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN;
-                // Byte proxy first: once the running serialized sum crosses the budget,
-                // the refusal is proven and the tokenizer pass — seconds on giant
-                // histories — is skipped entirely on the failure path.
-                const proxy = rawFallbackSerializedBytes(messages, proxyBudgetBytes);
-                const proxyTokens =
-                    proxy === null
-                        ? contextLimit + 1
-                        : Math.ceil(proxy.bytes / RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN);
-                let estimate: ReturnType<typeof estimateFinalWireInputTokens> | undefined;
-                let estimatorRan = false;
-                if (proxy !== null && !proxy.aborted) {
-                    try {
-                        estimate = rawFallbackEstimator({
+                // The wire byte proxy runs first: once its running sum crosses the
+                // budget the refusal is proven and the tokenizer pass, seconds on giant
+                // histories, is skipped on the failure path.
+                const measure = measureLkgReplay({
+                    messages,
+                    limit: contextLimit,
+                    estimate: () =>
+                        rawFallbackEstimator({
                             messages,
                             systemPromptTokens: sessionMeta.systemPromptTokens,
                             providerID: model?.providerID,
                             modelID: model?.modelID,
                             agentName: deps.getNotificationParams?.(sessionId)?.agent,
-                        });
-                        estimatorRan = true;
-                    } catch {
-                        // The byte proxy above remains available when tokenization does not.
-                    }
-                }
-                const refusalTokens =
-                    estimate?.trusted && Number.isFinite(estimate.tokens) && estimate.tokens > 0
-                        ? Math.max(estimate.tokens, proxyTokens)
-                        : Number.POSITIVE_INFINITY;
-                if (refusalTokens > contextLimit) {
+                        }),
+                });
+                if (measure.fit !== "under") {
+                    const proxyTokens = measure.proxy
+                        ? Math.ceil(measure.proxy.bytes / RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN)
+                        : null;
+                    const refusalTokens =
+                        measure.trusted && measure.tokens !== null && measure.tokens > 0
+                            ? Math.max(measure.tokens, proxyTokens ?? 0)
+                            : Number.POSITIVE_INFINITY;
                     sessionLog(
                         sessionId,
-                        `raw_fallback_over_context_limit estimated=${estimate?.tokens ?? (estimatorRan ? "unavailable" : "skipped")} trusted=${estimate?.trusted ?? false} ` +
-                            `proxy_bytes=${proxy?.bytes ?? "unavailable"} proxy_tokens=${proxyTokens} limit=${contextLimit}` +
-                            (proxy?.aborted === true ? " early_abort=true" : ""),
+                        `raw_fallback_over_context_limit estimated=${measure.tokens ?? (measure.estimatorRan ? "unavailable" : "skipped")} trusted=${measure.trusted} ` +
+                            `proxy_bytes=${measure.proxy?.bytes ?? "unavailable"} proxy_tokens=${proxyTokens ?? "unavailable"} limit=${contextLimit}` +
+                            (measure.proxy?.aborted === true ? " early_abort=true" : ""),
                     );
                     throw new RawFallbackContextLimitError(refusalTokens, contextLimit, { cause });
                 }
@@ -2302,8 +2468,101 @@ export function createRustModeTransform(
             }
             replaceMessagesInPlace(output, messages);
             servedFrom = "raw";
+            // The provider now sees the raw input instead of the frozen array, so there is
+            // no frozen representation left to keep byte-identical.
+            state.lkgRepresentationFrozen = false;
+            state.lkgFrozenHealthyPasses = 0;
+            state.lkgFrozenAtInputCount = null;
+        };
+        // The measurement every last-known-good replay is admitted with (see
+        // `measureLkgReplay`), here with this pass's model and estimator.
+        const measureAgainstLimit = (candidate: readonly unknown[], limit: number): FrozenFit =>
+            measureLkgReplay({
+                messages: candidate as MessageLike[],
+                limit,
+                estimate: () =>
+                    rawFallbackEstimator({
+                        messages: candidate as MessageLike[],
+                        systemPromptTokens: sessionMeta.systemPromptTokens,
+                        providerID: model?.providerID,
+                        modelID: model?.modelID,
+                        agentName: deps.getNotificationParams?.(sessionId)?.agent,
+                    }),
+            }).fit;
+        /**
+         * Admission for a healthy pass that would serve the frozen replay `candidate`
+         * instead of `moduleOutput`. Returns a release reason when the frozen bytes no
+         * longer fit but the module's output does, null to keep serving the freeze, and
+         * throws `FrozenReplayOverProvenLimitRefusal` when emergency recovery is armed
+         * and neither array fits the provider-proven limit. An unproven measurement
+         * never releases: adopting module output on a guess would bust the cache of
+         * every frozen session on a model whose estimate is incomplete.
+         */
+        const frozenReplayAdmission = (
+            candidate: readonly unknown[],
+            moduleOutput: readonly unknown[],
+        ): string | null => {
+            const emergency =
+                isEmergencyRecoveryArmed(sessionId) || overflowState?.needsEmergencyRecovery;
+            if (emergency) {
+                const provenLimit =
+                    overflowState &&
+                    overflowState.detectedContextLimit > 0 &&
+                    (overflowState.detectedContextLimitModelKey === null ||
+                        canonicalModelIdentity(overflowState.detectedContextLimitModelKey) ===
+                            canonicalModelIdentity(modelKey ?? ""))
+                        ? overflowState.detectedContextLimit
+                        : undefined;
+                if (provenLimit !== undefined) {
+                    const frozenFit = measureAgainstLimit(candidate, provenLimit);
+                    if (frozenFit === "over") {
+                        const moduleFit = measureAgainstLimit(moduleOutput, provenLimit);
+                        if (moduleFit === "under") return "frozen_over_proven_limit";
+                        throw new FrozenReplayOverProvenLimitRefusal(moduleFit, provenLimit);
+                    }
+                    if (frozenFit === "unproven") {
+                        sessionLog(sessionId, `frozen_emergency_fit_unproven limit=${provenLimit}`);
+                    }
+                } else {
+                    sessionLog(sessionId, "frozen_emergency_limit_unknown");
+                }
+            }
+            // The same limit the failure and wrapper replays are admitted against.
+            let limit: number | undefined;
+            try {
+                limit = lkgReplayLimit({
+                    db: deps.db,
+                    sessionId,
+                    model,
+                    modelKey: resolveLkgModelKeys(messages).modelKey,
+                });
+            } catch {
+                limit = undefined;
+            }
+            if (limit === undefined) {
+                sessionLog(sessionId, "frozen_fit_unproven limit=unknown");
+                return null;
+            }
+            const frozenFit = measureAgainstLimit(candidate, limit);
+            if (frozenFit === "unproven") {
+                sessionLog(sessionId, `frozen_fit_unproven limit=${limit}`);
+                return null;
+            }
+            if (frozenFit === "under") return null;
+            const moduleFit = measureAgainstLimit(moduleOutput, limit);
+            if (moduleFit === "under") return "frozen_over_context_limit";
+            sessionLog(
+                sessionId,
+                moduleFit === "over"
+                    ? `frozen_fit_both_over limit=${limit}`
+                    : `frozen_fit_unproven module=unproven limit=${limit}`,
+            );
+            return null;
         };
         const finishPass = (applied: boolean, served = true): void => {
+            // A pass that serves nothing leaves the provider's last-seen array unchanged,
+            // so the proof that the slot holds that array must survive the refusal.
+            if (!served) state.lkgLastServedCaptureSequence = lastServedCaptureSequence;
             const elapsedAt = applied && appliedAt !== undefined ? appliedAt : performance.now();
             const elapsedMs = Math.max(0, elapsedAt - passStartedAt);
             sessionLog(
@@ -2492,7 +2751,12 @@ export function createRustModeTransform(
                     return;
                 }
                 if (deps.compactionOff) {
-                    serveRawFallback(error);
+                    try {
+                        serveRawFallback(error);
+                    } catch (rawFallbackError) {
+                        finishPass(false, false);
+                        throw rawFallbackError;
+                    }
                     finishPass(false);
                     return;
                 }
@@ -3464,6 +3728,9 @@ export function createRustModeTransform(
             // pass priced, but it changes bytes only from the first message the freeze
             // served raw, so it is not a permission to rewrite from the start.
             const moduleDecisionBusts = cacheBustingPass;
+            // Read the freeze flag before the deferred m0/m1 divergence below can set it, so
+            // `passStartedFrozen` records only a freeze an earlier pass entered.
+            const passStartedFrozen = state.lkgRepresentationFrozen;
             let frozenReleaseLastServed: FrozenReleaseLastServed = {
                 messages: null,
                 proven: false,
@@ -3513,25 +3780,98 @@ export function createRustModeTransform(
                 );
                 let appliedMessages = moduleMessages;
                 let replayedFrozenRepresentation = false;
+                // The slot a previous process captured from a frozen serve, when this is
+                // this process's first applied pass and that pass is a module bust: the
+                // bust replaces messages the provider last saw raw, so the thinking strip
+                // needs that array exactly as a bust of a freeze in this process would.
+                let coldStartLastServed: FrozenReleaseLastServed | null = null;
+                if (state.lkgColdStartCheckPending) {
+                    state.lkgColdStartCheckPending = false;
+                    const coldStart =
+                        !state.lkgRepresentationFrozen && state.lkgAcceptedCapture === undefined
+                            ? detectColdStartFrozenSlot(
+                                  sessionId,
+                                  messages,
+                                  moduleMessages,
+                                  model?.providerID,
+                              )
+                            : null;
+                    if (coldStart?.kind === "uncaptured_replay") {
+                        // The module now renders differently a message the previous
+                        // process's uncaptured replay served raw. Nothing proves the
+                        // reconstructed array is exact, so it is unproven: the strip
+                        // starts at its first change or at its end.
+                        coldStartLastServed = { messages: coldStart.lastServed, proven: false };
+                        sessionLog(
+                            sessionId,
+                            `lkg_cold_start_uncaptured_replay raw_user_index=${coldStart.rawUserIndex}`,
+                        );
+                    } else if (coldStart && !cacheBustingPass) {
+                        state.lkgRepresentationFrozen = true;
+                        state.forceFullWire = true;
+                        // Count raw tail growth from the first message the freeze served
+                        // raw, not from this pass, so a restart does not reset the budget
+                        // that ends a freeze. That start can sit a message or two before
+                        // the original freeze's input count, which only ends it sooner.
+                        state.lkgFrozenAtInputCount =
+                            coldStart.rawRunStart >= 0 ? coldStart.rawRunStart : inputCount;
+                        sessionLog(
+                            sessionId,
+                            `lkg_cold_start_frozen_slot_resumed raw_served_index=${coldStart.index}`,
+                        );
+                    } else if (coldStart) {
+                        // Nothing in this process proves the slot is the very last array
+                        // served (an uncaptured replay may have followed), so it is
+                        // unproven: the strip covers the first change or the slot's end.
+                        coldStartLastServed = { messages: coldStart.slotMessages, proven: false };
+                        sessionLog(
+                            sessionId,
+                            `lkg_cold_start_frozen_slot_busted raw_served_index=${coldStart.index}`,
+                        );
+                    }
+                }
+                // While frozen, the last-known-good slot holds the array the last pass served
+                // (or its prefix). Read it before any replay, because a replay that fails
+                // validation drops the slot, and also on a module-busting pass: that bust
+                // replaces messages the freeze served raw, and the thinking strip in
+                // postprocess compares against this array to find the first changed message.
+                const lastServedSlot = state.lkgRepresentationFrozen
+                    ? getSlot(sessionId)
+                    : undefined;
+                const lastServedSnapshot = (): FrozenReleaseLastServed => ({
+                    messages: parseLastServedSnapshot(lastServedSlot?.jsonPrefix),
+                    proven:
+                        lastServedSlot !== undefined &&
+                        lastServedCaptureSequence !== null &&
+                        lastServedSlot.captureSequence === lastServedCaptureSequence,
+                });
+                if (passStartedFrozen && cacheBustingPass) {
+                    frozenReleaseLastServed = lastServedSnapshot();
+                } else if (coldStartLastServed) {
+                    frozenReleaseLastServed = coldStartLastServed;
+                }
                 if (state.lkgRepresentationFrozen && !cacheBustingPass) {
                     if (state.lkgFrozenAtInputCount === null) {
                         state.lkgFrozenAtInputCount = inputCount;
                     }
                     const keys = resolveLkgModelKeys(messages);
-                    // Read before the replay: a replay that fails validation drops the slot.
-                    const lastServedSlot = getSlot(sessionId);
-                    const lastServedSnapshot = (): FrozenReleaseLastServed => ({
-                        messages: parseLastServedSnapshot(lastServedSlot?.jsonPrefix),
-                        proven:
-                            lastServedSlot !== undefined &&
-                            lastServedCaptureSequence !== null &&
-                            lastServedSlot.captureSequence === lastServedCaptureSequence,
-                    });
                     const frozen = replayLkg({
                         sessionId,
                         messages,
                         modelKey: keys.modelKey,
                         providerKey: keys.providerKey,
+                        // The stored prefix already carries the binding-mismatch strips;
+                        // the replayed tail comes from the raw input, so apply the
+                        // persisted set there too, before validation, so the array that
+                        // is validated is the array that is served. A removed thinking
+                        // block must not return on a replayed pass.
+                        prepareReplay: (replayed) =>
+                            replayRustModeBindingMismatchStrips({
+                                db: deps.db,
+                                sessionId,
+                                messages: replayed,
+                                resolvedProviderID: model?.providerID,
+                            }),
                     });
                     if (!frozen.ok) {
                         cacheBustingPass = true;
@@ -3541,28 +3881,19 @@ export function createRustModeTransform(
                         frozenHealthyPassesAfterApply = state.lkgFrozenHealthyPasses + 1;
                         const rawTailGrowth = Math.max(0, inputCount - state.lkgFrozenAtInputCount);
                         const releaseReason =
-                            rawTailGrowth >= RUST_LKG_FROZEN_RAW_TAIL_GROWTH_LIMIT
+                            frozenReplayAdmission(frozen.messages, moduleMessages) ??
+                            (rawTailGrowth >= RUST_LKG_FROZEN_RAW_TAIL_GROWTH_LIMIT
                                 ? "raw_tail_growth_limit"
                                 : frozenHealthyPassesAfterApply >=
                                     RUST_LKG_FROZEN_HEALTHY_PASS_LIMIT
                                   ? "healthy_pass_limit"
-                                  : null;
+                                  : null);
                         if (releaseReason) {
                             cacheBustingPass = true;
                             frozenReleaseReason = releaseReason;
                             frozenReleaseLastServed = lastServedSnapshot();
                         } else {
                             appliedMessages = frozen.messages;
-                            // The stored prefix already carries the binding-mismatch
-                            // strips; the replayed tail comes from the raw input, so
-                            // apply the persisted set there too. A removed thinking
-                            // block must not return on a replayed pass.
-                            replayRustModeBindingMismatchStrips({
-                                db: deps.db,
-                                sessionId,
-                                messages: appliedMessages as MessageLike[],
-                                resolvedProviderID: model?.providerID,
-                            });
                             replayedFrozenRepresentation = true;
                             servedFrom = "lkg_frozen";
                             sessionLog(sessionId, "lkg_frozen_replay_served");
@@ -3607,7 +3938,16 @@ export function createRustModeTransform(
                         ),
                         cacheBustingPass: moduleDecisionBusts,
                         moduleReasoningTrimOnly: response.reasoning_trim_only === true,
-                        ...(frozenReleaseReason ? { frozenReleaseLastServed } : {}),
+                        // A frozen session hands the strip gate the last-served array on
+                        // every pass that reaches postprocess. That includes a module bust
+                        // whose own edit only trims the oldest reasoning: it still replaces
+                        // the raw tail the freeze served with tagged module output, and a
+                        // signed thinking block is valid only while every byte before it is
+                        // unchanged, so thinking after the first changed message must be
+                        // stripped.
+                        ...(passStartedFrozen || frozenReleaseReason || coldStartLastServed
+                            ? { frozenReleaseLastServed }
+                            : {}),
                         trailingBlankSourceDecisions,
                         trailingBlankNewestAssistantId:
                             typeof trailingBlankNewestAssistantId === "string"
@@ -3913,6 +4253,23 @@ export function createRustModeTransform(
             });
             finishPass(true);
         } catch (error) {
+            if (error instanceof FrozenReplayOverProvenLimitRefusal) {
+                decision = "error";
+                materializeReason = "frozen_over_proven_limit";
+                sessionLog(
+                    sessionId,
+                    `mc_rust_emergency_refusal frozen_over_proven_limit module=${error.moduleFit} limit=${error.limit}`,
+                );
+                finishPass(false, false);
+                // The module is healthy, so "reconnecting" would be wrong. The freeze
+                // stays (the provider still holds the frozen bytes) and ends on the
+                // first pass whose module output fits (a release) or that the module
+                // busts, which /ctx-flush requests.
+                throw new EmergencyFailClosedError(
+                    renderUserFacingFailure("frozen_history_over_window", "plain"),
+                    { cause: error },
+                );
+            }
             if (error instanceof SharedCompartmentBoundaryError) {
                 decision = "error";
                 materializeReason = error.code;
@@ -3995,18 +4352,10 @@ export function createRustModeTransform(
                 output,
                 sessionMeta.systemPromptTokens,
             );
-            if (replayed) {
-                if (!state.lkgRepresentationFrozen) {
-                    state.lkgFrozenAtInputCount = inputCount;
-                }
-                state.lkgRepresentationFrozen = true;
-                state.lkgFrozenHealthyPasses = 0;
-                state.forceFullWire = true;
-            } else {
-                state.lkgRepresentationFrozen = false;
-                state.lkgFrozenHealthyPasses = 0;
-                state.lkgFrozenAtInputCount = null;
-            }
+            // A served replay entered the freeze inside replayLastGood. One that cannot
+            // serve leaves the freeze alone: either the raw fallback below serves the raw
+            // input and clears it, or the pass refuses and the provider still holds the
+            // frozen bytes the next pass must keep serving.
             servedFrom = replayed ? "lkg" : "raw";
             if (decision.toLowerCase() !== "need_full_sync") decision = "error";
             materializeReason = moduleFailureCode(error) ?? "none";
@@ -4024,7 +4373,7 @@ export function createRustModeTransform(
         }
     };
 
-    return {
+    const adapter = {
         run: async (
             sessionId: string,
             messages: MessageLike[],
@@ -4047,6 +4396,7 @@ export function createRustModeTransform(
             const clearLocalState = () => {
                 dropSlot(sessionId, "session-deleted");
                 states.delete(sessionId);
+                passStampBySession.delete(sessionId);
                 heapHolder.wireCaches.delete(sessionId);
                 promptSurfaceGuidanceEpochs?.clear(sessionId);
             };
@@ -4069,6 +4419,14 @@ export function createRustModeTransform(
         invalidateWireState,
         async stopHostRunner(): Promise<void> {
             await (hostRunner ?? undefined)?.stop();
+        },
+        /**
+         * The host disposed the instance that owns this adapter. Stop offering it
+         * to the outer wrapper's replay registry; the registry holds it weakly, so
+         * this only makes the removal immediate instead of waiting for collection.
+         */
+        dispose(): void {
+            unregisterReplayParticipant();
         },
         getState(sessionId: string): Readonly<RustSessionState> {
             return {
@@ -4094,7 +4452,12 @@ export function createRustModeTransform(
                 sessions,
             };
         },
+        // What the outer messages-transform wrapper of this adapter's own instance
+        // uses to replay and freeze. Holding it here also keeps the replay registry's
+        // weak reference alive exactly as long as the adapter is.
+        replayParticipant,
     };
+    return adapter;
 }
 
 export async function runRustModeTransform(

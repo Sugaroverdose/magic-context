@@ -643,6 +643,131 @@ export function replayLkg(args: {
     return { ok: true, messages: replayed };
 }
 
+function messageIdOf(message: unknown): string | undefined {
+    if (typeof message !== "object" || message === null) return undefined;
+    const info = (message as { info?: unknown }).info;
+    if (typeof info !== "object" || info === null) return undefined;
+    const id = (info as { id?: unknown }).id;
+    return typeof id === "string" ? id : undefined;
+}
+
+/**
+ * Where a previous process served raw messages from a frozen replay, or null when
+ * it did not: `index` is the first snapshot message the module now renders
+ * differently, and `rawRunStart` is the raw-input index where the snapshot's
+ * trailing raw run begins (the first message the freeze served raw).
+ *
+ * A frozen replay serves the snapshot's prefix followed by the raw input's newer
+ * messages, and a frozen healthy pass captures exactly that. So after a restart, a
+ * snapshot the freeze captured ends in a run of messages exactly as the host sent
+ * them, and inside that run the module now renders at least one message
+ * differently. Only that trailing run is searched.
+ *
+ * A healthy snapshot holds module output. For each message either the module
+ * renders it like the raw input (module equals raw) or it does not (snapshot
+ * differs from raw); host additions such as nudges also make the snapshot differ
+ * from raw. A healthy snapshot that is only stale (for example a database restored
+ * from an older backup) can hold a message the module has since re-rendered, but
+ * module output that differs from raw (tagged user turns) normally follows it, so
+ * it does not sit inside an all-raw trailing run. Requiring the run to reach the
+ * snapshot's end is what keeps such a snapshot from resuming a freeze.
+ *
+ * `key` must compare messages as the provider would see them; it must apply the
+ * session's persisted thinking strips to all three arrays alike, so a stripped
+ * block in the snapshot does not read as a difference.
+ */
+export function coldStartRawServedIndex(args: {
+    slotMessages: readonly unknown[];
+    rawInput: readonly unknown[];
+    moduleOutput: readonly unknown[];
+    key: (message: unknown) => string;
+}): { index: number; rawRunStart: number } | null {
+    const raw = messagesById(args.rawInput);
+    const rendered = messagesById(args.moduleOutput);
+    // Walk back from the end over messages the snapshot holds exactly as the host
+    // sent them; `runStart` is where that trailing raw run begins.
+    const rawKeys: string[] = [];
+    let runStart = args.slotMessages.length;
+    while (runStart > 0) {
+        const served = args.slotMessages[runStart - 1];
+        const id = messageIdOf(served);
+        const rawMessage = id === undefined ? undefined : raw.get(id);
+        if (rawMessage === undefined) break;
+        const rawKey = args.key(rawMessage);
+        if (args.key(served) !== rawKey) break;
+        runStart -= 1;
+        rawKeys[runStart] = rawKey;
+    }
+    for (let index = runStart; index < args.slotMessages.length; index += 1) {
+        const id = messageIdOf(args.slotMessages[index]) as string;
+        const moduleMessage = rendered.get(id);
+        if (moduleMessage !== undefined && args.key(moduleMessage) !== rawKeys[index]) {
+            const runStartId = messageIdOf(args.slotMessages[runStart]) as string;
+            const rawRunStart = args.rawInput.findIndex(
+                (message) => messageIdOf(message) === runStartId,
+            );
+            return { index, rawRunStart };
+        }
+    }
+    return null;
+}
+
+function messagesById(messages: readonly unknown[]): Map<string, unknown> {
+    const map = new Map<string, unknown>();
+    for (const message of messages) {
+        const id = messageIdOf(message);
+        if (id !== undefined) map.set(id, message);
+    }
+    return map;
+}
+
+/**
+ * The array a previous process most likely served last when it ended right after
+ * a last-known-good replay it never captured, or null when the input shows no
+ * such replay.
+ *
+ * A failure, parked or wrapper replay serves the snapshot followed by the raw
+ * input's newer messages and captures nothing, so after a restart the snapshot
+ * ends before messages the provider saw raw. A healthy pass captures through the
+ * newest real user message every time, so in a healthy session the only real user
+ * message after the snapshot's end is the newest input message. A real user
+ * message after the snapshot's end with more messages after it, which the module
+ * now renders differently from the raw input, therefore shows an uncaptured pass
+ * that served it raw (or, rarely, a healthy pass whose capture was lost), and the
+ * thinking produced after it is bound to the raw bytes.
+ *
+ * Returns the snapshot followed by the raw input after the snapshot's last
+ * message, which is what such a replay served. `key` compares messages as the
+ * provider sees them, with the session's persisted thinking strips applied.
+ */
+export function coldStartUncapturedReplay(args: {
+    slotMessages: readonly unknown[];
+    rawInput: readonly unknown[];
+    moduleOutput: readonly unknown[];
+    key: (message: unknown) => string;
+}): { lastServed: unknown[]; rawUserIndex: number } | null {
+    const lastSlotId = messageIdOf(args.slotMessages.at(-1));
+    if (lastSlotId === undefined) return null;
+    const slotEnd = args.rawInput.findIndex((message) => messageIdOf(message) === lastSlotId);
+    if (slotEnd < 0) return null;
+    const rendered = messagesById(args.moduleOutput);
+    // The newest input message is excluded: nothing has been produced against it.
+    for (let index = slotEnd + 1; index < args.rawInput.length - 1; index += 1) {
+        const rawMessage = args.rawInput[index];
+        const info = (rawMessage as { info?: { role?: unknown; synthetic?: unknown } })?.info;
+        if (info?.role !== "user" || info.synthetic === true) continue;
+        const id = messageIdOf(rawMessage);
+        const moduleMessage = id === undefined ? undefined : rendered.get(id);
+        if (moduleMessage === undefined) continue;
+        if (args.key(moduleMessage) === args.key(rawMessage)) continue;
+        return {
+            lastServed: [...args.slotMessages, ...args.rawInput.slice(slotEnd + 1)],
+            rawUserIndex: index,
+        };
+    }
+    return null;
+}
+
 export function validateLkgEntry(slot: LkgSlot, entryIds: string[]): boolean {
     return entryIdsAreValid(slot, entryIds);
 }
