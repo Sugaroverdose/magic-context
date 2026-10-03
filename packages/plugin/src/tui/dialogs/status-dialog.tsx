@@ -46,10 +46,13 @@ function toneColor(theme: TuiThemeCurrent, tone: StatusTone): string {
 
 /**
  * Width the dialog is actually laid out at, which is NOT the terminal width:
- * each host sizes its own dialog surface (OpenCode 2's widest is 88 columns on
- * a 200-column terminal), and that is the width the sections have to fit into.
- * Renderables carry their laid-out width and emit "resized" when it changes, so
- * the component reads it from its own root box.
+ * each host sizes its own dialog surface (OpenCode 1's default is 60 columns,
+ * OpenCode 2's widest is 88 columns on a 200-column terminal), and that is the
+ * width the sections have to fit into. Renderables carry their laid-out width
+ * and emit "resize" when a layout pass changes it, so the component reads it
+ * from its own root box. ("resized", with a d, is emitted only by the
+ * renderer's root; a box never sends it, and listening for it left the dialog
+ * sizing its sections from the terminal width forever.)
  *
  * Until the first layout there is no width to read; the terminal width is the
  * fallback, and an unknown terminal keeps the wide layout the dialog has always
@@ -112,8 +115,8 @@ export const StatusDialog = (props: { api: TuiPluginApi; status: StatusDetailRes
             if (Number.isFinite(width) && width > 0) setDialogWidth(width)
         }
         read()
-        element?.on?.("resized", read)
-        onCleanup(() => element?.off?.("resized", read))
+        element?.on?.("resize", read)
+        onCleanup(() => element?.off?.("resize", read))
     }
     // paddingLeft + paddingRight below; what the sections get is what is left.
     const contentWidth = () => (dialogWidth() > 0 ? dialogWidth() - 4 : terminalColumns())
@@ -239,14 +242,24 @@ export const StatusDialog = (props: { api: TuiPluginApi; status: StatusDetailRes
                 </box>
             )}
 
+            {/* Each column asks for the width its sections need, but may
+                shrink: until the dialog has measured itself the grid is chosen
+                against the terminal width, and a column that could not shrink
+                would then run past the dialog's right edge. Shrinking wraps a
+                value inside its column instead, and anything still wider
+                than a squeezed column (a fixed-width label) is clipped at the
+                column's edge rather than drawn past the dialog. The request is
+                a flexBasis, not a width: OpenTUI turns flexShrink back to 0
+                whenever a box gets a numeric width, so a fixed-width column
+                never shrinks. */}
             {columns().twoColumn ? (
                 <box flexDirection="row" width="100%" gap={4}>
-                    <box flexDirection="column" width={columns().leftWidth} flexShrink={0}>
+                    <box flexDirection="column" flexBasis={columns().leftWidth} flexGrow={0} flexShrink={1} minWidth={0} overflow="hidden">
                         {columnSections(0).map((section) => (
                             <StatusSectionView t={t()} section={section} />
                         ))}
                     </box>
-                    <box flexDirection="column" width={columns().rightWidth} flexShrink={0}>
+                    <box flexDirection="column" flexBasis={columns().rightWidth} flexGrow={0} flexShrink={1} minWidth={0} overflow="hidden">
                         {columnSections(1).map((section) => (
                             <StatusSectionView t={t()} section={section} />
                         ))}

@@ -64,10 +64,13 @@ function toneColor(theme, tone) {
 
 /**
  * Width the dialog is actually laid out at, which is NOT the terminal width:
- * each host sizes its own dialog surface (OpenCode 2's widest is 88 columns on
- * a 200-column terminal), and that is the width the sections have to fit into.
- * Renderables carry their laid-out width and emit "resized" when it changes, so
- * the component reads it from its own root box.
+ * each host sizes its own dialog surface (OpenCode 1's default is 60 columns,
+ * OpenCode 2's widest is 88 columns on a 200-column terminal), and that is the
+ * width the sections have to fit into. Renderables carry their laid-out width
+ * and emit "resize" when a layout pass changes it, so the component reads it
+ * from its own root box. ("resized", with a d, is emitted only by the
+ * renderer's root; a box never sends it, and listening for it left the dialog
+ * sizing its sections from the terminal width forever.)
  *
  * Until the first layout there is no width to read; the terminal width is the
  * fallback, and an unknown terminal keeps the wide layout the dialog has always
@@ -163,8 +166,8 @@ export const StatusDialog = props => {
       if (Number.isFinite(width) && width > 0) setDialogWidth(width);
     };
     read();
-    element?.on?.("resized", read);
-    onCleanup(() => element?.off?.("resized", read));
+    element?.on?.("resize", read);
+    onCleanup(() => element?.off?.("resize", read));
   };
   // paddingLeft + paddingRight below; what the sections get is what is left.
   const contentWidth = () => dialogWidth() > 0 ? dialogWidth() - 4 : terminalColumns();
@@ -468,7 +471,10 @@ export const StatusDialog = props => {
         _$setProp(_el$35, "width", "100%");
         _$setProp(_el$35, "gap", 4);
         _$setProp(_el$36, "flexDirection", "column");
-        _$setProp(_el$36, "flexShrink", 0);
+        _$setProp(_el$36, "flexGrow", 0);
+        _$setProp(_el$36, "flexShrink", 1);
+        _$setProp(_el$36, "minWidth", 0);
+        _$setProp(_el$36, "overflow", "hidden");
         _$insert(_el$36, () => columnSections(0).map(section => _$createComponent(StatusSectionView, {
           get t() {
             return t();
@@ -476,7 +482,10 @@ export const StatusDialog = props => {
           section: section
         })));
         _$setProp(_el$37, "flexDirection", "column");
-        _$setProp(_el$37, "flexShrink", 0);
+        _$setProp(_el$37, "flexGrow", 0);
+        _$setProp(_el$37, "flexShrink", 1);
+        _$setProp(_el$37, "minWidth", 0);
+        _$setProp(_el$37, "overflow", "hidden");
         _$insert(_el$37, () => columnSections(1).map(section => _$createComponent(StatusSectionView, {
           get t() {
             return t();
@@ -486,8 +495,8 @@ export const StatusDialog = props => {
         _$effect(_p$ => {
           var _v$14 = columns().leftWidth,
             _v$15 = columns().rightWidth;
-          _v$14 !== _p$.e && (_p$.e = _$setProp(_el$36, "width", _v$14, _p$.e));
-          _v$15 !== _p$.t && (_p$.t = _$setProp(_el$37, "width", _v$15, _p$.t));
+          _v$14 !== _p$.e && (_p$.e = _$setProp(_el$36, "flexBasis", _v$14, _p$.e));
+          _v$15 !== _p$.t && (_p$.t = _$setProp(_el$37, "flexBasis", _v$15, _p$.t));
           return _p$;
         }, {
           e: undefined,
