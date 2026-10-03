@@ -1925,11 +1925,27 @@ fn extract_key_arg(input: &Value) -> Option<String> {
 }
 
 fn truncate_arg(value: &str) -> String {
-    let max_len = 60;
-    if value.chars().count() <= max_len {
+    truncate_utf16(value, 60)
+}
+
+/// The TypeScript lane's `value.length <= max ? value : value.slice(0, max) + "…"`, which
+/// counts UTF-16 code units: a character outside the Basic Multilingual Plane (most
+/// emoji) counts as two. Where that slice would end between the two halves of such a
+/// character, JavaScript keeps a lone high surrogate, which a Rust string cannot hold;
+/// the whole character is left out instead, so the text is one unit shorter there.
+pub(crate) fn truncate_utf16(value: &str, max_units: usize) -> String {
+    if value.encode_utf16().count() <= max_units {
         return value.to_string();
     }
-    let mut out = value.chars().take(max_len).collect::<String>();
+    let mut units = 0;
+    let mut out = String::new();
+    for ch in value.chars() {
+        units += ch.len_utf16();
+        if units > max_units {
+            break;
+        }
+        out.push(ch);
+    }
     out.push('…');
     out
 }
@@ -2053,14 +2069,16 @@ fn system_reminder_regex() -> &'static Regex {
 
 fn commit_hash_extract_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)`?\b([0-9a-f]{7,12})\b`?").unwrap())
+    // ASCII word boundaries, as JavaScript's `\b` is: with Unicode boundaries a hash
+    // right after a letter such as `é` was not found, where the TypeScript lane finds it.
+    RE.get_or_init(|| Regex::new(r"(?i)`?(?-u:\b)([0-9a-f]{7,12})(?-u:\b)`?").unwrap())
 }
 
 fn commit_verb_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
     RE.get_or_init(|| {
         Regex::new(
-            r"(?i)\b(?:commit(?:ted|ting|s)?|cherry-?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))\b",
+            r"(?i)(?-u:\b)(?:commit(?:ted|ting|s)?|cherry-?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))(?-u:\b)",
         )
         .unwrap()
     })
@@ -2095,6 +2113,41 @@ fn space_before_punct_regex() -> &'static Regex {
 mod tests {
     use super::*;
     use serde::Deserialize;
+
+    /// The TypeScript lane's commit patterns use JavaScript's ASCII `\b`: a hash or a
+    /// commit verb next to a non-ASCII letter still counts, and these are its answers.
+    #[test]
+    fn commit_patterns_use_ascii_word_boundaries_like_the_typescript_lane() {
+        assert_eq!(
+            extract_commit_hashes("committed é1a2b3c4d"),
+            vec!["1a2b3c4d".to_string()]
+        );
+        assert_eq!(
+            extract_commit_hashes("see 1a2b3c4dé"),
+            vec!["1a2b3c4d".to_string()]
+        );
+        assert!(commit_verb_regex().is_match("ücommitted 1a2b3c4d"));
+        // ASCII letters and digits still join a word, so these are not hashes or verbs.
+        assert!(extract_commit_hashes("x1a2b3c4d").is_empty());
+        assert!(!commit_verb_regex().is_match("recommitted"));
+    }
+
+    /// The TypeScript lane truncates a key argument at 60 UTF-16 code units, so 40 emoji
+    /// (80 units) are cut to 30.
+    #[test]
+    fn key_arguments_are_truncated_in_utf16_units_like_the_typescript_lane() {
+        let emoji = "😀".repeat(40);
+        assert_eq!(truncate_arg(&emoji), format!("{}…", "😀".repeat(30)));
+        let ascii = "a".repeat(60);
+        assert_eq!(truncate_arg(&ascii), ascii);
+        assert_eq!(
+            truncate_arg(&"a".repeat(61)),
+            format!("{}…", "a".repeat(60))
+        );
+        // A cut that would split a surrogate pair leaves the whole character out.
+        let odd = format!("a{}", "😀".repeat(40));
+        assert_eq!(truncate_arg(&odd), format!("a{}…", "😀".repeat(29)));
+    }
 
     #[derive(Deserialize)]
     struct GoldenRoot {

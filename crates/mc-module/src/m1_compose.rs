@@ -13,7 +13,7 @@
 //!    defer replays the frozen m1 verbatim; re-composing from the now-possibly-mutated store
 //!    on a defer would change bytes on a defer, violating the deferred-work invariant).
 
-use std::collections::{hash_map::DefaultHasher, HashSet};
+use std::collections::HashSet;
 use std::hash::{Hash, Hasher};
 use std::time::Instant;
 
@@ -27,6 +27,7 @@ use crate::memory_render::{
     assemble_m1, render_memory_block, render_memory_updates, render_new_compartments,
     render_user_profile_block, workspace_source_names, M1_PLACEHOLDER,
 };
+use crate::stable_hash::StableSipHasher13;
 
 const MAX_MERGE_REPLACEMENTS_PER_DELTA: usize = 10;
 
@@ -102,7 +103,7 @@ fn digest_in_session_inputs(
     note_status_version: i64,
     user_profile_version: u64,
 ) -> u64 {
-    let mut in_session = DefaultHasher::new();
+    let mut in_session = StableSipHasher13::new();
     // Preserve the old digest format when both new inputs are zero, so sessions created
     // before these inputs existed do not appear changed solely because the signal gained fields.
     if note_status_version == 0 && user_profile_version == 0 {
@@ -274,7 +275,7 @@ pub fn m1_revision_signal_parts_for_pass_timed(
 
     let workspace_fingerprint =
         store.workspace_fingerprint_for_membership(snapshot.membership.as_ref());
-    let mut external = DefaultHasher::new();
+    let mut external = StableSipHasher13::new();
     "mc-m1-external-v2".hash(&mut external);
     workspace_fingerprint.hash(&mut external);
     // Both are baseline changes a host makes in context.db: an identity or workspace move
@@ -298,7 +299,7 @@ pub fn m1_revision_signal_parts_for_pass_timed(
         {
             0
         } else {
-            let mut history = std::collections::hash_map::DefaultHasher::new();
+            let mut history = StableSipHasher13::new();
             snapshot.compartment_history_revision.hash(&mut history);
             snapshot.m0_mutation_head.hash(&mut history);
             history.finish() | 1

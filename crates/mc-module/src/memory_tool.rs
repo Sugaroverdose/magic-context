@@ -821,8 +821,32 @@ fn push_unique_text(parts: &mut Vec<String>, text: &str) {
     }
 }
 
-fn first_match(text: &str, query: &str) -> Option<usize> {
-    text.to_lowercase().find(&query.to_lowercase())
+/// The byte range in `text` of the first case-insensitive occurrence of `query`.
+///
+/// Matching runs on the lowercased text, whose byte offsets are not the original's: some
+/// characters change length when lowercased (`İ` grows from two bytes to three, the
+/// Kelvin sign shrinks from three to one). Each lowercased byte is therefore mapped back
+/// to the original character it came from, so the range always lands on the matched text.
+fn first_match(text: &str, query: &str) -> Option<(usize, usize)> {
+    let lowered = text.to_lowercase();
+    let hit = lowered.find(&query.to_lowercase())?;
+    let hit_end = hit + query.to_lowercase().len();
+    // `str::to_lowercase` lowercases character by character (its one context rule, the
+    // final sigma, never changes a length), so walking the characters reproduces its
+    // offsets.
+    let mut lowered_at = 0;
+    let mut start = None;
+    for (original_at, ch) in text.char_indices() {
+        let next = lowered_at + ch.to_lowercase().map(char::len_utf8).sum::<usize>();
+        if start.is_none() && hit < next {
+            start = Some(original_at);
+        }
+        if hit_end <= next {
+            return Some((start.unwrap_or(original_at), original_at + ch.len_utf8()));
+        }
+        lowered_at = next;
+    }
+    start.map(|start| (start, text.len()))
 }
 
 fn preview_text(text: &str) -> String {
@@ -845,15 +869,14 @@ fn snippet_around_match(text: &str, query: &str) -> String {
     const CONTEXT: usize = 100;
     const MAX_CHARS: usize = 200;
 
-    let Some(hit) = first_match(text, query) else {
+    let Some((hit, hit_end)) = first_match(text, query) else {
         return text.chars().take(MAX_CHARS).collect();
     };
-    let query_len = query.len();
     let mut start = hit.saturating_sub(CONTEXT);
     while start > 0 && !text.is_char_boundary(start) {
         start -= 1;
     }
-    let mut end = (hit + query_len + CONTEXT).min(text.len());
+    let mut end = (hit_end + CONTEXT).min(text.len());
     while end < text.len() && !text.is_char_boundary(end) {
         end += 1;
     }
@@ -869,6 +892,22 @@ mod tests {
     use super::*;
     use cortexkit_store_types::{Isolation, StorageBackend, StorageDescriptor};
     use mc_store::{InsertMemoryInput, NoteInput, StoredCompartment};
+
+    /// Characters that change length when lowercased must not move the snippet off the
+    /// match: `İ` grows, the Kelvin sign shrinks.
+    #[test]
+    fn snippets_stay_on_the_match_when_lowercasing_changes_lengths() {
+        for filler in ["\u{130}", "\u{212a}"] {
+            let text = format!("{}needle{}", filler.repeat(150), "x".repeat(10));
+            let snippet = snippet_around_match(&text, "NEEDLE");
+            assert!(snippet.contains("needle"), "{filler:?}: {snippet:?}");
+            let (start, end) = first_match(&text, "needle").unwrap();
+            assert_eq!(&text[start..end], "needle", "{filler:?}");
+        }
+        // A match that starts inside a character's lowercase expansion covers that character.
+        let (start, end) = first_match("a\u{130}b", "i").unwrap();
+        assert_eq!(&"a\u{130}b"[start..end], "\u{130}");
+    }
 
     fn descriptor(dir: &std::path::Path) -> StorageDescriptor {
         StorageDescriptor {

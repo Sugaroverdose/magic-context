@@ -1602,11 +1602,7 @@ fn extract_key_arg(input: &Value) -> Option<String> {
 }
 
 fn truncate_arg(value: &str) -> String {
-    if value.chars().count() <= 60 {
-        value.to_string()
-    } else {
-        format!("{}…", value.chars().take(60).collect::<String>())
-    }
+    crate::boundary::truncate_utf16(value, 60)
 }
 
 fn clean_user_text(text: &str) -> String {
@@ -1739,12 +1735,14 @@ fn system_reminder_regex() -> &'static Regex {
 
 fn commit_hash_extract_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)`?\b([0-9a-f]{7,12})\b`?").unwrap())
+    // ASCII word boundaries, as JavaScript's `\b` is: with Unicode boundaries a hash
+    // right after a letter such as `é` was not found, where the TypeScript lane finds it.
+    RE.get_or_init(|| Regex::new(r"(?i)`?(?-u:\b)([0-9a-f]{7,12})(?-u:\b)`?").unwrap())
 }
 
 fn commit_verb_regex() -> &'static Regex {
     static RE: OnceLock<Regex> = OnceLock::new();
-    RE.get_or_init(|| Regex::new(r"(?i)\b(?:commit(?:ted|ting|s)?|cherry-?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))\b").unwrap())
+    RE.get_or_init(|| Regex::new(r"(?i)(?-u:\b)(?:commit(?:ted|ting|s)?|cherry-?pick(?:ed|ing|s)?|merge[ds]?|merging|rebas(?:e|ed|es|ing))(?-u:\b)").unwrap())
 }
 
 fn empty_parens_regex() -> &'static Regex {
@@ -1775,6 +1773,7 @@ fn space_before_punct_regex() -> &'static Regex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::ck_wire::{
         project_messages, CkIngressMessage, CkWireBlock, CkWireMessage, HarnessMeta,
     };
@@ -1784,6 +1783,22 @@ mod tests {
     use serde::Deserialize;
     use serde_json::json;
     use sha2::Digest;
+
+    /// The historian chunk follows the TypeScript formatter: ASCII word boundaries for
+    /// commit hashes and verbs, and key arguments truncated in UTF-16 units.
+    #[test]
+    fn chunk_commit_patterns_and_key_arguments_follow_the_typescript_formatter() {
+        assert_eq!(
+            extract_commit_hashes("committed é1a2b3c4d"),
+            vec!["1a2b3c4d".to_string()]
+        );
+        assert!(commit_verb_regex().is_match("ücommitted 1a2b3c4d"));
+        assert!(extract_commit_hashes("x1a2b3c4d").is_empty());
+        assert_eq!(
+            truncate_arg(&"😀".repeat(40)),
+            format!("{}…", "😀".repeat(30))
+        );
+    }
 
     #[derive(Deserialize)]
     struct GoldenRoot {

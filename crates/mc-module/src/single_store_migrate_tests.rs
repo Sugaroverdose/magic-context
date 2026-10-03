@@ -705,6 +705,49 @@ fn a_dry_run_reports_and_leaves_both_files_unchanged() {
 }
 
 #[test]
+fn a_dry_run_writes_nothing_and_leaves_the_backup_directory_free_for_the_real_run() {
+    let fixture = Fixture::new(Extras::default());
+    let file_bytes = |path: &Path| {
+        let mut hasher = Sha256::new();
+        hasher.update(std::fs::read(path).unwrap());
+        format!("{:x}", hasher.finalize())
+    };
+    let before = (
+        file_bytes(&fixture.store_db),
+        file_bytes(&fixture.context_db),
+    );
+    let mut options = fixture.options("backup");
+    options.dry_run = true;
+    let report = run(&options, &mut NoHooks).unwrap();
+    assert_eq!(report.status, "dry_run");
+    assert_eq!(report.backup_dir, None, "a dry run backs nothing up");
+    assert!(
+        !fixture.root.join("backup").exists(),
+        "a dry run must not create the backup directory the real run needs"
+    );
+    assert_eq!(
+        (
+            file_bytes(&fixture.store_db),
+            file_bytes(&fixture.context_db)
+        ),
+        before,
+        "a dry run must leave both files byte-for-byte unchanged"
+    );
+    let leftovers: Vec<_> = std::fs::read_dir(&fixture.root)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.contains("dry-run"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "scratch copies removed: {leftovers:?}"
+    );
+
+    let real = run(&fixture.options("backup"), &mut NoHooks).unwrap();
+    assert_eq!(real.status, "migrated");
+}
+
+#[test]
 fn the_backup_holds_both_files_and_a_manifest() {
     let fixture = Fixture::new(Extras::default());
     let report = fixture.migrate();
