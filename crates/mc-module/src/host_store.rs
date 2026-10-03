@@ -1900,8 +1900,11 @@ pub fn resolve_context_db_path() -> PathBuf {
             .join("cortexkit")
             .join("magic-context")
     } else {
-        let home = non_empty("HOME").unwrap_or_else(|| ".".to_string());
-        Path::new(&home)
+        // The host takes Node's `os.homedir()` here, which also answers on Windows (where
+        // `HOME` is usually unset) and when `HOME` is empty. The current directory is the
+        // last resort only when no home can be found at all.
+        crate::config::user_home_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
             .join(".local")
             .join("share")
             .join("cortexkit")

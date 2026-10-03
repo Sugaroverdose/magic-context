@@ -18238,8 +18238,11 @@ fn dev_descriptor() -> StorageDescriptor {
         .ok()
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| {
-            let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-            format!("{home}/.local/share")
+            let home = config::user_home_dir().unwrap_or_else(|| PathBuf::from("."));
+            home.join(".local")
+                .join("share")
+                .to_string_lossy()
+                .into_owned()
         });
     dev_descriptor_at(&data_home)
 }
