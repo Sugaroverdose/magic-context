@@ -6298,6 +6298,14 @@ fn split_flat_block_id(id: &str) -> Option<(&str, u64)> {
     if mid.is_empty() || mid.contains('#') {
         return None;
     }
+    // Only the spelling an index formats to: decimal digits with no sign and no leading
+    // zero. `m#05` would otherwise parse as block 5, whose id is rebuilt as `m#5`.
+    let canonical = !index.is_empty()
+        && index.bytes().all(|byte| byte.is_ascii_digit())
+        && (index == "0" || !index.starts_with('0'));
+    if !canonical {
+        return None;
+    }
     Some((mid, index.parse().ok()?))
 }
 
@@ -24627,6 +24635,17 @@ mod tests {
             })
             .unwrap();
         assert_eq!(dates, vec![(2, "m8".to_string())]);
+    }
+
+    #[test]
+    fn flat_block_ids_parse_only_in_their_canonical_spelling() {
+        // `{mid}#{index}` is written with a plain decimal index. Any other spelling of the
+        // same index would parse to a block whose rebuilt id is a different string.
+        assert_eq!(split_flat_block_id("m#0"), Some(("m", 0)));
+        assert_eq!(split_flat_block_id("msg_1#12"), Some(("msg_1", 12)));
+        for id in ["m#05", "m#+5", "m#00", "m#", "m# 5", "#5", "m#-1", "a#b#1"] {
+            assert_eq!(split_flat_block_id(id), None, "{id:?}");
+        }
     }
 }
 
