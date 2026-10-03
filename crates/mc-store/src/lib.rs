@@ -12708,6 +12708,7 @@ impl McStore {
                  WHERE session_id = ?1 AND row_version = ?4",
                 params![session_id, next as i64, meta_json, current],
             )?;
+            advance_row_state_digest_tx(tx, session_id, current, next as i64)?;
 
             Ok(TruncateTxnOutcome::Committed(TruncateOutcome {
                 revert_epoch: next_epoch,
@@ -13359,6 +13360,7 @@ impl McStore {
                  WHERE session_id = ?1 AND row_version = ?4",
                 params![session_id, next as i64, meta_json, current],
             )?;
+            advance_row_state_digest_tx(tx, session_id, current, next as i64)?;
             Ok(AbandonHistorianTxnOutcome::Committed(next))
         })?;
 
@@ -13415,6 +13417,7 @@ impl McStore {
                 "UPDATE mc_cache_state SET row_version = ?2, meta = ?3 WHERE session_id = ?1 AND row_version = ?4",
                 params![session_id, next as i64, meta_json, current],
             )?;
+            advance_row_state_digest_tx(tx, session_id, current, next as i64)?;
             Ok(AbandonHistorianTxnOutcome::Committed(next))
         })?;
         match outcome {
@@ -13652,6 +13655,7 @@ impl McStore {
                  WHERE session_id = ?1 AND row_version = ?4",
                 params![session_id, next as i64, meta_json, current],
             )?;
+            advance_row_state_digest_tx(tx, session_id, current, next as i64)?;
 
             Ok(PublishTxnOutcome::Committed(HistorianPublishResult {
                 row_version: next,
@@ -24385,6 +24389,105 @@ mod tests {
         assert_eq!(
             store.load("ses").unwrap().meta.historian.state,
             HistorianPhase::Publishing
+        );
+    }
+
+    fn row_state_digest_version(store: &McStore, session_id: &str) -> Option<i64> {
+        store
+            .inner
+            .with_conn(|conn| {
+                conn.query_row(
+                    "SELECT row_version FROM mc_cache_state_digest WHERE session_id = ?1",
+                    params![session_id],
+                    |row| row.get(0),
+                )
+                .optional()
+            })
+            .unwrap()
+    }
+
+    fn publish_once(
+        store: &McStore,
+        session_id: &str,
+    ) -> Result<HistorianPublishResult, HistorianPublishError> {
+        let expected = store.load(session_id).unwrap().row_version;
+        store.publish_historian_chunk(HistorianPublishRequest {
+            harness: None,
+            session_id,
+            expected_row_version: expected,
+            expected_revert_epoch: 0,
+            predicate: &publish_predicate(),
+            project_path: "git:proj",
+            compartments: &[publish_compartment()],
+            facts: &[],
+            promote_facts: false,
+            events: &[],
+            primer_candidates: &[],
+            user_memory_candidates: &[],
+            publication_floor_ordinal: 21,
+            chunk_transcript: None,
+            raw_chunk_messages: None,
+        })
+    }
+
+    #[test]
+    fn meta_only_version_steps_carry_the_row_state_digest_forward() {
+        // None of these writers touches the block-identity or served-fingerprint rows, so
+        // the digest that described them before the step still describes them after it.
+        // Left behind, it makes the next transform commit re-read and re-compare every row.
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        let at = |store: &McStore| store.load("ses").unwrap().row_version.map(|v| v as i64);
+        store
+            .commit("ses", None, &CoreState::default(), &publishing_meta())
+            .unwrap();
+        assert_eq!(row_state_digest_version(&store, "ses"), at(&store));
+
+        store
+            .record_historian_publish_failure_if_matching("ses", &publish_predicate())
+            .unwrap()
+            .expect("the predicate matches");
+        assert_eq!(
+            row_state_digest_version(&store, "ses"),
+            at(&store),
+            "publish-failure count"
+        );
+
+        publish_once(&store, "ses").unwrap();
+        assert_eq!(
+            row_state_digest_version(&store, "ses"),
+            at(&store),
+            "publish"
+        );
+
+        let loaded = store.load("ses").unwrap();
+        store
+            .truncate_compartments_for_revert("ses", 0, loaded.row_version)
+            .unwrap();
+        assert_eq!(
+            row_state_digest_version(&store, "ses"),
+            at(&store),
+            "revert re-cut"
+        );
+
+        let loaded = store.load("ses").unwrap();
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &publishing_meta())
+            .unwrap();
+        store
+            .abandon_historian_run_if_matching_with_publish_failure(
+                "ses",
+                &publish_predicate(),
+                None,
+                Some("abandoned"),
+                true,
+            )
+            .unwrap()
+            .expect("the predicate matches");
+        assert_eq!(
+            row_state_digest_version(&store, "ses"),
+            at(&store),
+            "abandon"
         );
     }
 }
