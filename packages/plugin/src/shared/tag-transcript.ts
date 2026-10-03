@@ -972,7 +972,14 @@ function applyTextPrefixAndTarget(args: TagTextPartArgs, tagId: number, text: st
     }
 
     const targetStart = args.timing ? performance.now() : 0;
-    args.targets.set(tagId, buildTextTarget(args.part, args.message));
+    args.targets.set(
+        tagId,
+        buildTextTarget(
+            args.part,
+            args.message,
+            args.skipPrefixInjection ? "" : prependTag(tagId, ""),
+        ),
+    );
     if (args.timing) args.timing.targets += performance.now() - targetStart;
 }
 
@@ -1307,8 +1314,10 @@ function buildAggregateTarget(
 function buildTextTarget(
     part: TranscriptPart,
     message: { info: { id?: string; role: string } },
+    textPrefix: string,
 ): TagTarget {
     return {
+        textPrefix,
         setContent(content: string): boolean {
             return part.setText(content);
         },

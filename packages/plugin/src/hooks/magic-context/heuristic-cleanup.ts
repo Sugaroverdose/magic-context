@@ -254,7 +254,9 @@ export function applyHeuristicCleanup(
                         }
                     }
                 } else {
-                    const didSet = target.setContent(stripped);
+                    // Only the injected reminder leaves; the message's own text
+                    // and the reasoning that produced it stay.
+                    const didSet = target.setContent(stripped, { keepReasoning: true });
                     if (didSet) {
                         replaceSourceContent(db, sessionId, tag.tagNumber, strippedSource);
                         droppedInjections++;
