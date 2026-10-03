@@ -10679,20 +10679,47 @@ fn maybe_decide_live_user_hint(
     }))
 }
 
-fn lexical_tokens(text: &str) -> BTreeSet<String> {
+/// The distinct search terms of `text`, in order of first appearance.
+fn lexical_terms(text: &str) -> Vec<String> {
     const STOPWORDS: &[&str] = &[
         "and", "are", "but", "for", "from", "have", "into", "not", "that", "the", "this", "use",
         "was", "with", "you", "your",
     ];
     // Unicode normalization is intentionally out of scope. Case folding and provider text
     // token boundaries are sufficient for this conservative, non-semantic hint gate.
+    let mut seen = HashSet::new();
     text.to_lowercase()
         .split(|ch: char| !ch.is_alphanumeric())
         .filter(|token| token.chars().count() >= 3 && !STOPWORDS.contains(token))
+        .filter(|token| seen.insert(token.to_string()))
         .map(str::to_string)
-        .collect::<BTreeSet<_>>()
+        .collect()
+}
+
+/// Every distinct term of a candidate document. A document is not capped: dropping some
+/// of its words would make a query that names them miss it.
+fn lexical_tokens(text: &str) -> BTreeSet<String> {
+    lexical_terms(text).into_iter().collect()
+}
+
+/// The query terms the score is computed over, at most [`USER_HINT_TOKEN_CAP`] of them.
+/// A long prompt keeps the terms that can tell candidates apart: those found in the pool
+/// come first, rarest first, and terms no candidate contains fill any remaining places.
+/// Ties keep the prompt's own order. A prompt with no more terms than the cap keeps all
+/// of them, so its score is unchanged.
+fn select_query_tokens(
+    query_terms: Vec<String>,
+    document_frequency: &HashMap<String, usize>,
+) -> BTreeSet<String> {
+    let mut ranked = query_terms.into_iter().enumerate().collect::<Vec<_>>();
+    ranked.sort_by_key(|(position, term)| {
+        let frequency = document_frequency.get(term).copied().unwrap_or(0);
+        (frequency == 0, frequency, *position)
+    });
+    ranked
         .into_iter()
         .take(USER_HINT_TOKEN_CAP)
+        .map(|(_, term)| term)
         .collect()
 }
 
@@ -10714,8 +10741,8 @@ fn run_user_hint_lexical_search(
         recency: i64,
     }
 
-    let query_tokens = lexical_tokens(query);
-    if query_tokens.len() < USER_HINT_MIN_MATCHED_TOKENS {
+    let query_terms = lexical_terms(query);
+    if query_terms.len() < USER_HINT_MIN_MATCHED_TOKENS {
         return Ok(Vec::new());
     }
     let mut candidates = Vec::new();
@@ -10790,13 +10817,14 @@ fn run_user_hint_lexical_search(
     }
 
     let mut document_frequency = HashMap::new();
-    for token in &query_tokens {
+    for term in &query_terms {
         let count = candidates
             .iter()
-            .filter(|candidate| candidate.tokens.contains(token))
+            .filter(|candidate| candidate.tokens.contains(term))
             .count();
-        document_frequency.insert(token, count);
+        document_frequency.insert(term.clone(), count);
     }
+    let query_tokens = select_query_tokens(query_terms, &document_frequency);
     let pool_count = candidates.len();
     let pool_size = pool_count as f64;
     let total_query_weight = query_tokens
@@ -34470,6 +34498,59 @@ pub(crate) mod tests {
                 ck_wire::CkKind::Opaque(opaque) if opaque.raw == json!({ "output": "transport" })
             ));
         });
+    }
+
+    /// A document's words are all searchable, whatever their place in the alphabet, and a
+    /// long prompt keeps the terms that tell candidates apart.
+    #[test]
+    fn lexical_hint_matches_late_alphabet_words_of_long_documents_and_prompts() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        // More than the cap of distinct words, with the discriminating one late in the
+        // alphabet: it used to fall outside the alphabetically first 24.
+        let long_memory = "amber apple banana cherry alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo \
+             lima mike november oscar papa quebec romeo sierra tango uniform victor \
+             whiskey xray yankee zulu tokenizer parity suite";
+        s.seed_memory(1, "git:proj", "CONSTRAINTS", long_memory, 50)
+            .unwrap();
+        for id in 2..=10 {
+            s.seed_memory(
+                id,
+                "git:proj",
+                "CONSTRAINTS",
+                &format!("fixture memory {id} about ordinary unrelated material"),
+                50,
+            )
+            .unwrap();
+        }
+        let hit = run_user_hint_lexical_search(
+            &s,
+            "git:proj",
+            "lexical",
+            "tokenizer parity",
+            true,
+            DEFAULT_AUTO_SEARCH_SCORE_THRESHOLD,
+            &[],
+        )
+        .unwrap();
+        assert_eq!(hit.first().map(|result| result.id), Some(1));
+
+        // A prompt with more than the cap of distinct words keeps the terms the pool
+        // contains, however late they sort or appear.
+        let mut prompt_terms = (0..30).map(|n| format!("filler{n:02}")).collect::<Vec<_>>();
+        prompt_terms.push("tokenizer".to_string());
+        prompt_terms.push("parity".to_string());
+        let frequency = HashMap::from([
+            ("tokenizer".to_string(), 1usize),
+            ("parity".to_string(), 1usize),
+        ]);
+        let kept = select_query_tokens(prompt_terms, &frequency);
+        assert_eq!(kept.len(), USER_HINT_TOKEN_CAP);
+        assert!(
+            kept.contains("tokenizer") && kept.contains("parity"),
+            "{kept:?}"
+        );
+        assert!(kept.contains("filler00") && !kept.contains("filler29"));
     }
 
     #[test]
