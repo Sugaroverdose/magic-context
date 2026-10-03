@@ -40,6 +40,7 @@ fn context() -> ProducerContext<'static> {
         guidance_date: Some("Today's date: Thu Jan 01 1970".into()),
         historian_active: false,
         wrapup_active: false,
+        caveman_english_word_rules: true,
     }
 }
 

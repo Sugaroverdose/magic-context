@@ -93,6 +93,7 @@ fn context(dir: &str) -> ProducerContext<'_> {
         guidance_date: None,
         historian_active: false,
         wrapup_active: false,
+        caveman_english_word_rules: true,
     }
 }
 
