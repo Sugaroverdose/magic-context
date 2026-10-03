@@ -20,7 +20,7 @@
  */
 
 import type { UnifiedSearchResult } from "../../features/magic-context/search";
-import { CURRENT_CAVEMAN_RULES, type CavemanWordRules, cavemanCompress } from "./caveman";
+import { type CavemanWordRules, CURRENT_CAVEMAN_RULES, cavemanCompress } from "./caveman";
 
 const MAX_FRAGMENTS = 3;
 const FRAGMENT_CHAR_CAP = 80; // ~20 tokens at 3.5 chars/token
@@ -61,7 +61,12 @@ function renderFragment(
 ): string {
     switch (result.source) {
         case "memory": {
-            const compressed = cavemanCompress(result.content, "ultra", CURRENT_CAVEMAN_RULES, wordRules);
+            const compressed = cavemanCompress(
+                result.content,
+                "ultra",
+                CURRENT_CAVEMAN_RULES,
+                wordRules,
+            );
             return truncate(compressed, charCap);
         }
         case "git_commit": {
@@ -73,7 +78,12 @@ function renderFragment(
             return `commit ${result.shortSha} ${formatAge(result.committedAtMs)}: ${body}`;
         }
         case "message": {
-            const compressed = cavemanCompress(result.content, "ultra", CURRENT_CAVEMAN_RULES, wordRules);
+            const compressed = cavemanCompress(
+                result.content,
+                "ultra",
+                CURRENT_CAVEMAN_RULES,
+                wordRules,
+            );
             return truncate(compressed, charCap);
         }
         case "compartment": {
@@ -82,11 +92,21 @@ function renderFragment(
             return truncate(compressed, charCap);
         }
         case "primer": {
-            const compressed = cavemanCompress(result.content, "ultra", CURRENT_CAVEMAN_RULES, wordRules);
+            const compressed = cavemanCompress(
+                result.content,
+                "ultra",
+                CURRENT_CAVEMAN_RULES,
+                wordRules,
+            );
             return truncate(compressed, charCap);
         }
         case "note": {
-            const compressed = cavemanCompress(result.content, "ultra", CURRENT_CAVEMAN_RULES, wordRules);
+            const compressed = cavemanCompress(
+                result.content,
+                "ultra",
+                CURRENT_CAVEMAN_RULES,
+                wordRules,
+            );
             return truncate(compressed, charCap);
         }
     }
