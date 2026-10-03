@@ -1514,7 +1514,16 @@ export function createTransform(deps: TransformDeps) {
                 // envelopes that would flag sessions that fit.
                 const incomingTokens =
                     incoming.messageTokens.conversation + incoming.messageTokens.toolCall;
-                if (isClearlyOverWindow(incomingTokens, resolvedContextLimit)) {
+                // A session refused on an earlier pass stays in the emergency
+                // band until a pass is served under the window. Its incoming
+                // array can shrink below the margin without the request
+                // fitting: on OpenCode 1 the host cuts the visible window at the
+                // compaction marker the historian's publication placed, while
+                // the system prompt and tool definitions stay as large as ever.
+                if (
+                    unmanagedOverWindowCarried ||
+                    isClearlyOverWindow(incomingTokens, resolvedContextLimit)
+                ) {
                     unmanagedOverWindowPass = {
                         tokens: incomingTokens,
                         limit: resolvedContextLimit,
@@ -1523,15 +1532,13 @@ export function createTransform(deps: TransformDeps) {
                     const percentage = (incomingTokens / resolvedContextLimit) * 100;
                     sessionLog(
                         sessionId,
-                        `transform: over-window first pass: the incoming history is about ${incomingTokens} tokens (${percentage.toFixed(1)}% of the ${resolvedContextLimit}-token window) and Magic Context has nothing to send in its place; treating the pass as at the emergency band so it is reduced or refused, never sent as is`,
+                        `transform: over-window first pass${unmanagedOverWindowCarried ? " (refused before; checked until a pass fits)" : ""}: the incoming history is about ${incomingTokens} tokens (${percentage.toFixed(1)}% of the ${resolvedContextLimit}-token window) and Magic Context has nothing to send in its place; treating the pass as at the emergency band so it is reduced or refused, never sent as is`,
                     );
                     contextUsageEarly = {
                         inputTokens: incomingTokens,
                         percentage: Math.max(95, percentage),
                     };
                     usagePercentageSynthetic = true;
-                } else if (unmanagedOverWindowCarried) {
-                    unmanagedOverWindowSessions.delete(sessionId);
                 }
             } catch (error) {
                 sessionLog(

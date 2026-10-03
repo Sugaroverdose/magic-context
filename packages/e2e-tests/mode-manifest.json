@@ -34,6 +34,14 @@
             "hosts": ["opencode"]
         },
         {
+            "path": "tests/fork-over-window-oc1.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual regression probe on OpenCode 1.18.30 (issue 608): a 1.x /fork is an unlinked copy, so nothing is inherited; the fork's over-window first pass and every retry after it must be reduced or refused (MC-H06) before the mock provider's enforced window, never sent as is; throwaway root with host PID lsof containment",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/issue-574-unborn-project.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },

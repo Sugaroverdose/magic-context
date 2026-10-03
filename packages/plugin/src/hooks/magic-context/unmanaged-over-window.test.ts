@@ -169,6 +169,23 @@ describe("a first pass with no Magic Context state and a history over the window
         );
     }, 30_000);
 
+    it("stays refused once refused, even when the next pass's history is under the margin", async () => {
+        const sessionId = "ses-unmanaged-over-window-shrinks";
+        const serve = await knownWindowTransform(sessionId);
+        await expect(serve(history(sessionId, 20, 430))).rejects.toBeInstanceOf(
+            UnmanagedOverWindowError,
+        );
+        // The host can hand over a shorter history on the next pass (on
+        // OpenCode 1 it cuts the visible window at a compaction marker) while
+        // the request is still over the window. A session met fresh with this
+        // size is served (see the margin test below); one refused before is not.
+        const shorter = history(sessionId, 10, LINES_WITHIN_MARGIN);
+        const limit = resolveTrustedContextLimit(PROVIDER, MODEL) ?? 0;
+        expect(historyTokens(shorter)).toBeGreaterThan(limit);
+        expect(historyTokens(shorter)).toBeLessThan(limit * UNMANAGED_OVER_WINDOW_FACTOR);
+        await expect(serve(shorter)).rejects.toBeInstanceOf(UnmanagedOverWindowError);
+    }, 30_000);
+
     it("serves a small first pass as before", async () => {
         const sessionId = "ses-unmanaged-small";
         const serve = await knownWindowTransform(sessionId);

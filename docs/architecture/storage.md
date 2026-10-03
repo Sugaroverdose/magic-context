@@ -63,7 +63,7 @@ A deletion that also needs the Rust module to delete its rows is recorded in `pe
 
 ## Clones
 
-`copySessionStateForClone` (`storage-clone.ts`) copies durable session state into a new session inside one immediate transaction: compartments (with ordinals re-mapped to the clone), tags with their source contents and pending operations, optionally notes and facts, and the replay-relevant `session_meta` fields. The destination check runs after the write lock is taken, so two processes cannot both copy into the same empty clone. Cached rendered bytes are not copied, so the clone rematerialises fresh. Pi uses this on branch forks ([pi.md](pi.md)); OpenCode's `/fork` does not.
+`copySessionStateForClone` (`storage-clone.ts`) copies durable session state into a new session inside one immediate transaction: compartments (with ordinals re-mapped to the clone), tags with their source contents and pending operations, optionally notes and facts, and the replay-relevant `session_meta` fields. The destination check runs after the write lock is taken, so two processes cannot both copy into the same empty clone. Cached rendered bytes are not copied, so the clone rematerialises fresh. Pi uses this on branch forks ([pi.md](pi.md)). OpenCode 2 uses it on the first pass for a fork (`v2/fork-inheritance.ts`): it pairs each copied row with the parent row of the same `seq` (the host re-mints copied ids as `<id from the fork event>_<seq>`) and copies the parent's state up to `session_v2.fork_boundary`. OpenCode 1's `/fork` records no link to its source, so it inherits nothing.
 
 ## Timestamps
 
