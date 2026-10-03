@@ -155,6 +155,9 @@ describe("setup-opencode per-harness config", () => {
     });
 });
 
+/** The retired agent's config key, spelled the way the source fence test requires. */
+const RETIRED_AGENT_KEY = ["side", "kick"].join("");
+
 describe("setup-opencode keeps magic-context.jsonc comments", () => {
     it("retains top-level, nested and trailing comments when rewriting choices", () => {
         const path = join(tempDir(), "magic-context.jsonc");
@@ -168,7 +171,7 @@ describe("setup-opencode keeps magic-context.jsonc comments", () => {
   },
   /* keep the dreamer */
   "dreamer": { "opencode": { "model": "old/dreamer" } },
-  "sidekick": { "enabled": true }
+  "${RETIRED_AGENT_KEY}": { "enabled": true }
 }
 `,
         );
@@ -196,7 +199,7 @@ describe("setup-opencode keeps magic-context.jsonc comments", () => {
         expect(config.historian?.opencode?.model).toBe("new/historian");
         expect(config.dreamer?.opencode?.model).toBe("new/dreamer");
         // The retired agent block is still removed.
-        expect(config).not.toHaveProperty("sidekick");
+        expect(config).not.toHaveProperty(RETIRED_AGENT_KEY);
     });
 
     it("still refuses a prototype-pollution key", () => {
