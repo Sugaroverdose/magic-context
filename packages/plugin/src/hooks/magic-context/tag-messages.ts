@@ -541,6 +541,30 @@ export function tagMessages(
         collectRelevantSourceTagIds(messages, assignments),
     );
     logTransformTiming(sessionId, "tag.getSourceContents", tGetSourceContents);
+    // Partial compartment ends (a compartment that stops inside a message at
+    // end_block_index), read once per pass on first use. Every text and file
+    // target's setContent needs this, and a per-call query on a large session
+    // costs hundreds of milliseconds per pass. When several partial compartments
+    // end in the same message, text and file targets keep the first row and tool
+    // targets the last, which is what their former per-target queries returned.
+    let partialEndsCache: { first: Map<string, number>; last: Map<string, number> } | undefined;
+    const loadPartialEnds = (): { first: Map<string, number>; last: Map<string, number> } => {
+        if (partialEndsCache) return partialEndsCache;
+        const first = new Map<string, number>();
+        const last = new Map<string, number>();
+        const rows = db
+            .prepare(
+                "SELECT end_message_id, end_block_index FROM compartments WHERE session_id=? AND end_block_index IS NOT NULL ORDER BY rowid",
+            )
+            .all(sessionId) as Array<{ end_message_id: string; end_block_index: number }>;
+        for (const row of rows) {
+            if (!first.has(row.end_message_id)) first.set(row.end_message_id, row.end_block_index);
+            last.set(row.end_message_id, row.end_block_index);
+        }
+        partialEndsCache = { first, last };
+        return partialEndsCache;
+    };
+    const getPartialEnds = (): Map<string, number> => loadPartialEnds().first;
     let precedingThinkingParts: ThinkingLikePart[] = [];
     let lastReduceMessageIndex = -1;
     const RECENT_REDUCE_LOOKBACK = 10;
@@ -879,22 +903,11 @@ export function tagMessages(
                     message,
                     setContent: (content) => {
                         if (textPart.text === content) return false;
-                        const partialEnd = messageId
-                            ? (db
-                                  .prepare(
-                                      "SELECT end_block_index FROM compartments WHERE session_id=? AND end_message_id=? AND end_block_index IS NOT NULL LIMIT 1",
-                                  )
-                                  .get(sessionId, messageId) as
-                                  | { end_block_index: number }
-                                  | undefined)
-                            : undefined;
-                        if (partialEnd && partIndex > partialEnd.end_block_index) return false;
+                        const partialEnd = messageId ? getPartialEnds().get(messageId) : undefined;
+                        if (partialEnd !== undefined && partIndex > partialEnd) return false;
                         textPart.text = content;
                         for (const tp of thinkingParts) {
-                            if (
-                                partialEnd &&
-                                message.parts.indexOf(tp) > partialEnd.end_block_index
-                            )
+                            if (partialEnd !== undefined && message.parts.indexOf(tp) > partialEnd)
                                 continue;
                             neutralizeDroppedReasoningPart(tp);
                         }
@@ -1031,14 +1044,8 @@ export function tagMessages(
                                 : "";
                         if (prevText === content) return false;
                         if (messageId) {
-                            const partialEnd = db
-                                .prepare(
-                                    "SELECT end_block_index FROM compartments WHERE session_id=? AND end_message_id=? AND end_block_index IS NOT NULL LIMIT 1",
-                                )
-                                .get(sessionId, messageId) as
-                                | { end_block_index: number }
-                                | undefined;
-                            if (partialEnd && partIndex > partialEnd.end_block_index) return false;
+                            const partialEnd = getPartialEnds().get(messageId);
+                            if (partialEnd !== undefined && partIndex > partialEnd) return false;
                         }
                         messageParts[partIndex] = {
                             type: "text",
@@ -1064,20 +1071,7 @@ export function tagMessages(
     logTransformTiming(sessionId, "tag.saveSource", performance.now() - accSaveSource);
 
     const partialEnds =
-        toolTagByCallId.size > 0
-            ? new Map(
-                  (
-                      db
-                          .prepare(
-                              "SELECT end_message_id, end_block_index FROM compartments WHERE session_id=? AND end_block_index IS NOT NULL",
-                          )
-                          .all(sessionId) as Array<{
-                          end_message_id: string;
-                          end_block_index: number;
-                      }>
-                  ).map((row) => [row.end_message_id, row.end_block_index]),
-              )
-            : new Map<string, number>();
+        toolTagByCallId.size > 0 ? loadPartialEnds().last : new Map<string, number>();
     for (const [compositeKey, tagId] of toolTagByCallId) {
         const occurrences = toolCallIndex.get(compositeKey)?.occurrences ?? [];
         const touchesUncoveredPart = occurrences.some(({ message, part }) => {
