@@ -7,6 +7,7 @@ import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "../../../config/schema/magic-cont
 import { getMagicContextStorageDir } from "../../../shared/data-path";
 import { getHarness } from "../../../shared/harness";
 import { log } from "../../../shared/logger";
+import { importPluginModule } from "../../../shared/stale-plugin-build";
 import { shouldEnforcePrivateStoragePermissions } from "../../../shared/storage-permissions";
 import { classifyLocalEmbeddingFailure, type EmbeddingFailure } from "./embedding-failure";
 import { getEmbeddingProviderIdentity } from "./embedding-identity";
@@ -275,7 +276,9 @@ let importWasmOrtForRuntime = async (): Promise<{
 let importTransformersForRuntime = async (): Promise<TransformersModule> => {
     // Keep transformers in a lazy split chunk: the host can load the plugin and
     // use remote embeddings without evaluating the optional native accelerator.
-    return (await import("@huggingface/transformers")) as TransformersModule;
+    return (await importPluginModule(
+        () => import("@huggingface/transformers"),
+    )) as TransformersModule;
 };
 let importTransformersWasmFallbackForRuntime = async (): Promise<TransformersModule> => {
     // The browser-condition sibling remains the compatibility path for Electron
@@ -286,7 +289,7 @@ let importTransformersWasmFallbackForRuntime = async (): Promise<TransformersMod
             : "./transformers-web.js",
         import.meta.url,
     ).href;
-    return (await import(webEntry)) as TransformersModule;
+    return (await importPluginModule(() => import(webEntry))) as TransformersModule;
 };
 let importTransformersNodeWasmFallbackForRuntime = async (): Promise<TransformersModule> => {
     // This sibling resolves Transformers.js's Node source (real node:fs) while
@@ -297,7 +300,7 @@ let importTransformersNodeWasmFallbackForRuntime = async (): Promise<Transformer
             : "./transformers-node-wasm.js",
         import.meta.url,
     ).href;
-    return (await import(nodeWasmEntry)) as TransformersModule;
+    return (await importPluginModule(() => import(nodeWasmEntry))) as TransformersModule;
 };
 let modelCacheDirForRuntime = () =>
     workerData?.magicContextEmbeddingWorker && typeof workerData.modelCacheDir === "string"

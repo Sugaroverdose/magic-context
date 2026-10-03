@@ -223,6 +223,7 @@ import {
 import { abortInFlightRecomps, awaitInFlightRecomps } from "./pi-recomp-runner";
 import { handlePiProviderFailure } from "./provider-error-recovery-pi";
 import { readPiSessionMessages } from "./read-session-pi";
+import { bindStaleBuildNotice } from "./stale-build-notice";
 import { registerStatusLine, updateStatusLine } from "./status-line";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 import {
@@ -1842,6 +1843,7 @@ async function startPiMagicContextRuntime(
 	);
 
 	pi.on("session_start", async (event, ctx) => {
+		bindStaleBuildNotice(ctx, import.meta.url);
 		// Pi emits session_start for new, resumed, and reloaded sessions. Re-read
 		// this cwd's config before setting the active tools so a memory.enabled
 		// change takes effect at the next session without restarting Pi.

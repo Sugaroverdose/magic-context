@@ -43,6 +43,7 @@ import {
     withSqliteBackgroundWriter,
 } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
+import { importPluginModule } from "../../shared/stale-plugin-build";
 import { shouldEnforcePrivateStoragePermissions } from "../../shared/storage-permissions";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 
@@ -1106,9 +1107,11 @@ function finishDatabaseOpen(
                         .then(async () => {
                             if (!readsOpenCodeStore) return;
                             const { readRawSessionMessagePage, readRawSessionMessages } =
-                                await import("../../hooks/magic-context/read-session-chunk");
-                            const { startMessageTimeBackfill } = await import(
-                                "./message-time-backfill"
+                                await importPluginModule(
+                                    () => import("../../hooks/magic-context/read-session-chunk"),
+                                );
+                            const { startMessageTimeBackfill } = await importPluginModule(
+                                () => import("./message-time-backfill"),
                             );
                             await startMessageTimeBackfill(
                                 db,
