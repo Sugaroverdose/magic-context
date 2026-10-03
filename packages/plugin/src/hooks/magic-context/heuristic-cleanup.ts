@@ -26,7 +26,21 @@ import { stripSystemInjection } from "./system-injection-stripper";
 import type { MessageLike, TagTarget } from "./tag-messages";
 import { stripTagPrefix } from "./tag-part-guards";
 
+// Read-only tools whose parallel calls with identical arguments return identical output.
+// Hosts hand the transform bare tool names (OpenCode 1.18.30 stores `read`, `grep`,
+// `glob`; Pi stores `read`, `grep`), so the bare names are what actually match. The
+// `mcp_`-prefixed forms are kept for MCP servers that expose the same tools under that
+// prefix.
 const DEDUP_SAFE_TOOLS = new Set([
+    "grep",
+    "read",
+    "glob",
+    "ast_grep_search",
+    "lsp_diagnostics",
+    "lsp_symbols",
+    "lsp_find_references",
+    "lsp_goto_definition",
+    "lsp_prepare_rename",
     "mcp_grep",
     "mcp_read",
     "mcp_glob",
@@ -294,11 +308,13 @@ export function applyHeuristicCleanup(
             }
         }
 
-        // Group tags by fingerprint
+        // Group tags by fingerprint. Protected tags join their group so a protected
+        // newest copy still anchors it; they are never dropped themselves (below).
+        // Leaving them out kept one unprotected copy alive beside the protected one.
         const fingerprintGroups = new Map<string, TagEntry[]>();
         for (const [compositeKey, fingerprint] of toolFingerprints) {
             const tag = tagsByCompositeKey.get(compositeKey);
-            if (!tag || config.protectedTagNumbers.has(tag.tagNumber)) continue;
+            if (!tag) continue;
             const group = fingerprintGroups.get(fingerprint) ?? [];
             group.push(tag);
             fingerprintGroups.set(fingerprint, group);
@@ -312,6 +328,7 @@ export function applyHeuristicCleanup(
                 // Keep the newest (last), drop the rest
                 for (let i = 0; i < group.length - 1; i++) {
                     const tag = group[i];
+                    if (config.protectedTagNumbers.has(tag.tagNumber)) continue;
                     const target = targets.get(tag.tagNumber);
                     if (target?.canDrop?.() === false) continue;
                     // Deduplication remains a full drop; only the emergency newest-window

@@ -68,10 +68,21 @@ import { sessionLog } from "@magic-context/core/shared/logger";
  * are wasted context. Anything mutating (write/edit/bash/etc.) is
  * intentionally excluded because two identical calls may have
  * different semantics in different positions of the conversation.
+ * Pi names its built-in tools bare (`read`, `grep`), so the bare names
+ * are what match; the `mcp_` forms cover MCP servers using that prefix.
  */
 export const PI_CTX_REDUCE_KEEP = 3;
 
 const DEDUP_SAFE_TOOLS = new Set([
+	"grep",
+	"read",
+	"glob",
+	"ast_grep_search",
+	"lsp_diagnostics",
+	"lsp_symbols",
+	"lsp_find_references",
+	"lsp_goto_definition",
+	"lsp_prepare_rename",
 	"mcp_grep",
 	"mcp_read",
 	"mcp_glob",
@@ -568,10 +579,13 @@ export function applyPiHeuristicCleanup(
 			}
 		}
 
+		// Protected tags join their group so a protected newest copy still anchors
+		// it; they are never dropped themselves (below). Leaving them out kept one
+		// unprotected copy alive beside the protected one.
 		const fingerprintGroups = new Map<string, TagEntry[]>();
 		for (const [compositeKey, fingerprint] of toolFingerprints) {
 			const tag = tagsByCompositeKey.get(compositeKey);
-			if (!tag || tag.tagNumber > protectedCutoff) continue;
+			if (!tag) continue;
 			const group = fingerprintGroups.get(fingerprint) ?? [];
 			group.push(tag);
 			fingerprintGroups.set(fingerprint, group);
@@ -584,6 +598,7 @@ export function applyPiHeuristicCleanup(
 				// Keep the newest, drop the rest.
 				for (let i = 0; i < group.length - 1; i++) {
 					const tag = group[i];
+					if (tag.tagNumber > protectedCutoff) continue;
 					const target = targets.get(tag.tagNumber);
 					if (target?.canDrop?.() === false) continue;
 					// Deduplication stays full-drop; only emergency recent arcs keep
