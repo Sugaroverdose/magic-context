@@ -712,6 +712,25 @@
           "x-mc-live-reload": true,
           "type": "number"
         },
+        "expand_tools": {
+          "description": "Readable historian tool expansions, keyed by exact host tool name. Templates override built-in defaults; false disables an expansion. Supports ${input.path}, ${output.path}, bare ${output}, array [N], [*].field, .each(\"${field}\"), .join(\"separator\"), .count and final .truncate(N). Missing fields are empty; placeholders default to 300 characters, lists to 10 elements, expansions to 1000 characters. Valid in user and project config; affects historian/recomp and verbose ctx_expand only, never the wire or default ctx_expand transcript.",
+          "x-mc-live-reload": true,
+          "type": "object",
+          "propertyNames": {
+            "type": "string"
+          },
+          "additionalProperties": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "boolean",
+                "const": false
+              }
+            ]
+          }
+        },
         "opencode": {
           "type": "object",
           "properties": {

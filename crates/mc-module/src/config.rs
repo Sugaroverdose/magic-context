@@ -81,6 +81,8 @@ impl Default for CavemanConfig {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct McModuleConfig {
+    /// Historian-only previews, with project entries overriding user entries.
+    pub historian_expand_tools: crate::historian_tool_template::ExpansionMap,
     // No model chain lives here. The host resolves the historian's and each dreamer
     // task's model chain from its own config and sends it with every request; the
     // module refuses a request that carries none rather than guessing from disk.
@@ -168,6 +170,7 @@ impl Default for McModuleConfig {
     fn default() -> Self {
         Self {
             historian_temperature: None,
+            historian_expand_tools: Default::default(),
             historian_runner: None,
             dreamer_runner: None,
             language: None,
@@ -806,6 +809,27 @@ fn merge_tiers_with_warnings(
     }
 
     apply_catalog_config(&mut cfg.catalog, user, project);
+    for tier in [user, project].into_iter().flatten() {
+        if let Some(entries) = tier
+            .pointer("/historian/expand_tools")
+            .and_then(Value::as_object)
+        {
+            for (name, value) in entries {
+                if value == &Value::Bool(false)
+                    || value
+                        .as_str()
+                        .is_some_and(crate::historian_tool_template::valid_template)
+                {
+                    cfg.historian_expand_tools
+                        .insert(name.clone(), value.clone());
+                } else {
+                    warnings.push(format!(
+                        "Invalid historian.expand_tools template for {name}; ignoring entry"
+                    ));
+                }
+            }
+        }
+    }
 
     cfg.execute_threshold_user_config
         .get_or_insert(ExecuteThresholdConfig::Percentage(
@@ -1818,6 +1842,33 @@ mod tests {
             "user_memories": { "enabled": false }
         });
         assert!(!user_memory_collection_at(&legacy_disabled).unwrap());
+    }
+
+    #[test]
+    fn historian_expand_tools_merges_user_and_project_templates_with_validation() {
+        let user = serde_json::json!({ "historian": { "expand_tools": { "ask": "User ${output}", "peer_send": false, "read": "${input.path}" } } });
+        let project = serde_json::json!({ "historian": { "expand_tools": { "ask": false, "board": "${input.ops.each(\"${op}\")}" } } });
+        let config = merge_tiers(Some(&user), Some(&project));
+        assert_eq!(
+            config.historian_expand_tools["ask"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            config.historian_expand_tools["peer_send"],
+            serde_json::json!(false)
+        );
+        assert_eq!(
+            config.historian_expand_tools["read"],
+            serde_json::json!("${input.path}")
+        );
+        assert!(config.historian_expand_tools.contains_key("board"));
+        let invalid =
+            serde_json::json!({ "historian": { "expand_tools": { "ask": "${input.x.nope()}" } } });
+        let (config, warnings) = merge_tiers_with_warnings(Some(&invalid), None);
+        assert!(config.historian_expand_tools.is_empty());
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("Invalid historian.expand_tools")));
     }
 
     #[test]

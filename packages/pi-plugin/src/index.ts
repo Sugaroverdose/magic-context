@@ -1106,6 +1106,7 @@ export function resolveHistorianFromConfig(
 		// historian round-trip's latency and token cost. Enable for
 		// long sessions where chunk dedupe matters more than speed.
 		twoPass: historian?.two_pass === true,
+		expandTools: historian?.expand_tools,
 		// Pi and OMP: explicit thinking level for historian subagent invocations.
 		// When set, passed as --thinking <level> to Pi subprocess.
 		// Required for providers like GitHub Copilot that apply bad defaults.
@@ -1803,6 +1804,7 @@ async function startPiMagicContextRuntime(
 	// project with a different value, users need `/reload` or a Pi restart for the
 	// tool/command/overlay surface to change, matching Pi's registration lifecycle.
 	registerMagicContextTools(pi, {
+		expandTools: config.historian?.expand_tools,
 		db,
 		ensureProjectRegistered: ensureProjectRegisteredFromPiDirectory,
 		// Main extension entry never gets the dreamer-only ctx_memory

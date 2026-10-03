@@ -434,6 +434,7 @@ export interface PiHistorianDeps {
 	 *  OpenCode's `historian.two_pass` config. Editor validation falls back
 	 *  to the first-pass result on failure. Default: false. */
 	twoPass?: boolean;
+	expandTools?: Record<string, string | false>;
 	/** Pi and OMP: explicit thinking level passed as --thinking <level> to
 	 *  historian subagent invocations. When unset, Pi's own resolution runs
 	 *  (works for most providers; may fail for e.g. github-copilot/gpt-5.4). */
@@ -815,6 +816,7 @@ export async function runPiHistorian(deps: PiHistorianDeps): Promise<void> {
 				chunkTokens,
 				offset,
 				eligibleEndOrdinal,
+				{ expandTools: deps.expandTools },
 			);
 			const forceKeepLastCompartmentForChunk =
 				forceKeepLastCompartment === true && !chunk.hasMore;

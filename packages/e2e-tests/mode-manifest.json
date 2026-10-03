@@ -3,6 +3,14 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and the Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh. The tag release workflow also runs the Rust invocation; both Rust lanes require public sibling path dependencies (../commons and ../subconscious).",
     "entries": [
         {
+            "path": "tests/historian-expand-tools.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "OpenCode 1.18.30 mock-provider communication expansions in the captured historian prompt, cheap and verbose ctx_expand, with PID lsof throwaway-store containment; Rust rendering is covered by shared module goldens",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/idle-ttl-restart.test.ts",
             "tier": "ts-only",
             "invocation": { "ts": true, "rust": false },

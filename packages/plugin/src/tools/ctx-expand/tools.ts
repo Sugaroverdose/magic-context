@@ -2,6 +2,7 @@ import { type ToolDefinition, tool } from "@opencode-ai/plugin";
 import { getLastCompartmentEndMessage } from "../../features/magic-context/compartment-storage";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { readSessionChunk } from "../../hooks/magic-context/read-session-chunk";
+import type { ToolExpansionMap } from "../../shared/historian-tool-template";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_EXPAND_DESCRIPTION, CTX_EXPAND_TOKEN_BUDGET } from "./constants";
 import { resolveCtxExpandMode } from "./mode";
@@ -12,6 +13,7 @@ export { CTX_EXPAND_LIGHT_DESCRIPTION } from "../light-descriptions";
 
 export interface CtxExpandToolDeps {
     db: ContextDatabase;
+    expandTools?: ToolExpansionMap;
 }
 
 const ctxExpandArgsShape = {
@@ -93,6 +95,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                     start,
                     effectiveEnd,
                     CTX_EXPAND_TOKEN_BUDGET,
+                    deps.expandTools,
                 );
                 if (!v.text) {
                     return `No messages found in range ${start}-${effectiveEnd}. The range may be outside this session's history.`;
@@ -116,6 +119,7 @@ function createCtxExpandTool(deps: CtxExpandToolDeps): ToolDefinition {
                 CTX_EXPAND_TOKEN_BUDGET,
                 start,
                 effectiveEnd + 1, // readSessionChunk uses exclusive end
+                { expand: false },
             );
 
             if (!chunk.text || chunk.messageCount === 0) {

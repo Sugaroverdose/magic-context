@@ -51,6 +51,7 @@ pub mod historian_host;
 pub mod historian_producer;
 pub mod historian_prompt;
 pub mod historian_runner;
+pub mod historian_tool_template;
 pub mod historian_validate;
 pub mod host_store;
 mod image_tokens;
@@ -5931,12 +5932,13 @@ impl McHandler {
                 drop(guard);
                 return Some("recovering");
             };
-            let chunk = historian_chunk::build_historian_chunk(
+            let chunk = historian_chunk::build_historian_chunk_with_expansions(
                 parsed.messages.as_slice(),
                 &live,
                 range.from_ordinal,
                 derive_historian_chunk_tokens(config.historian_context_limit_tokens),
                 range.to_ordinal.saturating_add(1),
+                &config.historian_expand_tools,
             );
             let prior_compartments = match store.load_compartments(&session_id) {
                 Ok(cs) => cs
@@ -6036,12 +6038,13 @@ impl McHandler {
                     drop(guard);
                     return Some("recovering");
                 };
-                let chunk = historian_chunk::build_historian_chunk(
+                let chunk = historian_chunk::build_historian_chunk_with_expansions(
                     parsed.messages.as_slice(),
                     &live,
                     range.from_ordinal,
                     derive_historian_chunk_tokens(config.historian_context_limit_tokens),
                     range.to_ordinal.saturating_add(1),
+                    &config.historian_expand_tools,
                 );
                 let prior_compartments = match store.load_compartments(&session_id) {
                     Ok(cs) => cs
@@ -6637,6 +6640,7 @@ impl McHandler {
             &live,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                expand_tools: cfg.historian_expand_tools.clone(),
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.to_string(),
                 project_slug: project_slug.clone(),
@@ -6875,6 +6879,7 @@ impl McHandler {
             &live,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                expand_tools: cfg.historian_expand_tools.clone(),
                 session_id: parsed.session_id.clone(),
                 project_path: project_path.clone(),
                 project_slug: project_slug.clone(),

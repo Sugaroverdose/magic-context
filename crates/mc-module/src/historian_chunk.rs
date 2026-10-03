@@ -118,6 +118,7 @@ struct Builder {
     commit_cluster_count: usize,
     last_flushed_role: String,
     tool_call_summaries: HashMap<String, String>,
+    tool_expansions: HashMap<String, String>,
     completed_tool_arcs: Vec<MessageRange>,
     completed_tool_components: Vec<MessageRange>,
     admitted_oversize_component_end: Option<u64>,
@@ -133,6 +134,7 @@ impl Builder {
         budget: usize,
         start_ordinal: u64,
         tool_call_summaries: HashMap<String, String>,
+        tool_expansions: HashMap<String, String>,
         completed_tool_arcs: Vec<MessageRange>,
     ) -> Self {
         let mut completed_tool_components: Vec<MessageRange> = Vec::new();
@@ -158,6 +160,7 @@ impl Builder {
             commit_cluster_count: 0,
             last_flushed_role: String::new(),
             tool_call_summaries,
+            tool_expansions,
             completed_tool_arcs,
             completed_tool_components,
             admitted_oversize_component_end: None,
@@ -172,6 +175,30 @@ impl Builder {
     fn accepts_ordinal(&self, ordinal: u64) -> bool {
         self.admitted_oversize_component_end
             .is_none_or(|end| ordinal <= end)
+    }
+
+    fn render_parts(&self, message: &FlatMessage<'_>, has_text: bool) -> Vec<String> {
+        message
+            .blocks
+            .iter()
+            .flat_map(|block| {
+                if let Some(expansion) = self.tool_expansions.get(&block.id) {
+                    return vec![format!("TC: {expansion}")];
+                }
+                if let CkKind::ToolCall { name, input, .. } = &block.wire.kind {
+                    return if has_text {
+                        Vec::new()
+                    } else {
+                        vec![format_tool_summary(name, input)]
+                    };
+                }
+                text_parts(&FlatMessage {
+                    ordinal: message.ordinal,
+                    role: message.role,
+                    blocks: vec![*block],
+                })
+            })
+            .collect()
     }
 
     fn pin_component_when_formatted_budget_crosses(&mut self, ordinal: u64) {
@@ -223,7 +250,21 @@ impl Builder {
         }
 
         if message.role == "tool" && !has_text_parts(message) {
-            let summaries = extract_tool_result_summaries(message, &self.tool_call_summaries);
+            let unexpanded = FlatMessage {
+                ordinal: message.ordinal,
+                role: message.role,
+                blocks: message
+                    .blocks
+                    .iter()
+                    .copied()
+                    .filter(|b| {
+                        !b.arc_id
+                            .as_ref()
+                            .is_some_and(|id| self.tool_expansions.contains_key(id))
+                    })
+                    .collect(),
+            };
+            let summaries = extract_tool_result_summaries(&unexpanded, &self.tool_call_summaries);
             if summaries.is_empty() {
                 self.pending_noise_meta.push(meta);
                 return true;
@@ -237,7 +278,7 @@ impl Builder {
         }
 
         if message.role == "user" && !has_meaningful_user_text(message) {
-            let tc_summaries = extract_tool_call_summaries(message);
+            let tc_summaries = self.render_parts(message, false);
             if tc_summaries.is_empty() {
                 self.pending_noise_meta.push(meta);
                 return true;
@@ -252,13 +293,7 @@ impl Builder {
 
         let role = compact_role(message.role);
         let text_parts = text_parts(message);
-        let tool_summaries = if text_parts.is_empty() {
-            extract_tool_call_summaries(message)
-        } else {
-            Vec::new()
-        };
-        let mut all_parts = text_parts.clone();
-        all_parts.extend(tool_summaries);
+        let all_parts = self.render_parts(message, !text_parts.is_empty());
         let compacted = compact_text_for_summary(&all_parts.join(" / "), message.role);
         if compacted.text.is_empty() {
             self.pending_noise_meta.push(meta);
@@ -498,6 +533,24 @@ pub fn build_historian_chunk(
     token_budget: usize,
     eligible_end_ordinal: u64,
 ) -> HistorianBuiltChunk {
+    build_historian_chunk_with_expansions(
+        messages,
+        blocks,
+        start_ordinal,
+        token_budget,
+        eligible_end_ordinal,
+        &BTreeMap::new(),
+    )
+}
+
+pub fn build_historian_chunk_with_expansions(
+    messages: &[CkIngressMessage],
+    blocks: &[FlatBlock],
+    start_ordinal: u64,
+    token_budget: usize,
+    eligible_end_ordinal: u64,
+    expansions: &crate::historian_tool_template::ExpansionMap,
+) -> HistorianBuiltChunk {
     let total_count = messages
         .iter()
         .filter(|message| !message.ck.meta.synthetic)
@@ -523,6 +576,7 @@ pub fn build_historian_chunk(
         token_budget,
         start,
         tool_call_summaries,
+        build_tool_expansion_lookup(blocks, eligible_end_ordinal, expansions),
         completed_tool_arc_ranges(blocks),
     );
     let blocks_by_mid = grouped_blocks_by_mid(blocks);
@@ -606,6 +660,7 @@ pub fn build_historian_chunk(
 
 #[derive(Debug, Clone)]
 pub struct HistorianAssemblerConfig {
+    pub expand_tools: crate::historian_tool_template::ExpansionMap,
     pub session_id: String,
     pub project_path: String,
     pub project_slug: String,
@@ -1035,7 +1090,14 @@ pub fn assemble_historian_firing(
         );
     }
     let source_budget = prompt_fit.chunk_tokens;
-    let chunk = build_historian_chunk(messages, live, chunk_start, source_budget, eligible_end);
+    let chunk = build_historian_chunk_with_expansions(
+        messages,
+        live,
+        chunk_start,
+        source_budget,
+        eligible_end,
+        &config.expand_tools,
+    );
     if chunk.text.is_empty() || chunk.chunk.lines.is_empty() {
         // An empty producer input is not necessarily an empty read. Persist only
         // complete observed ranges so absent raw messages cannot be declared noise.
@@ -1520,17 +1582,6 @@ fn has_meaningful_user_text(message: &FlatMessage<'_>) -> bool {
         .any(|text| !text.is_empty() && !is_system_directive(text))
 }
 
-fn extract_tool_call_summaries(message: &FlatMessage<'_>) -> Vec<String> {
-    let mut summaries = Vec::new();
-    for block in &message.blocks {
-        let CkKind::ToolCall { name, input, .. } = &block.wire.kind else {
-            continue;
-        };
-        summaries.push(format_tool_summary(name, input));
-    }
-    summaries
-}
-
 fn tool_result_body_tokens(message: &FlatMessage<'_>) -> usize {
     message
         .blocks
@@ -1570,6 +1621,58 @@ fn build_tool_call_summary_lookup(blocks: &[FlatBlock]) -> HashMap<String, Strin
         out.insert(block.id.clone(), format_tool_summary(name, input));
     }
     out
+}
+
+fn build_tool_expansion_lookup(
+    blocks: &[FlatBlock],
+    eligible_end: u64,
+    overrides: &crate::historian_tool_template::ExpansionMap,
+) -> HashMap<String, String> {
+    use crate::ck_wire::CkOutputKind;
+    let mut results = HashMap::new();
+    for block in blocks
+        .iter()
+        .filter(|b| !b.synthetic && b.ordinal < eligible_end)
+    {
+        if let (Some(arc), CkKind::ToolResult { output, .. }) = (&block.arc_id, &block.wire.kind) {
+            let value = match &output.kind {
+                CkOutputKind::Text { text } | CkOutputKind::ErrorText { text } => {
+                    Value::String(text.clone())
+                }
+                CkOutputKind::Json { value } | CkOutputKind::ErrorJson { value } => value.clone(),
+                CkOutputKind::Content { blocks } | CkOutputKind::ErrorContent { blocks } => {
+                    Value::String(
+                        blocks
+                            .iter()
+                            .filter_map(|b| {
+                                if let crate::ck_wire::ResultBlockKind::Text { text } = &b.kind {
+                                    Some(text.as_str())
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                            .join("\n"),
+                    )
+                }
+                CkOutputKind::ExecutionDenied { reason } => {
+                    Value::String(reason.clone().unwrap_or_default())
+                }
+            };
+            results.insert(arc.clone(), value);
+        }
+    }
+    blocks
+        .iter()
+        .filter(|b| !b.synthetic)
+        .filter_map(|block| {
+            let CkKind::ToolCall { name, input, .. } = &block.wire.kind else {
+                return None;
+            };
+            crate::historian_tool_template::expand(name, input, results.get(&block.id), overrides)
+                .map(|text| (block.id.clone(), text))
+        })
+        .collect()
 }
 
 fn format_tool_summary(name: &str, input: &Value) -> String {
@@ -2246,6 +2349,7 @@ mod tests {
             &projection.blocks,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                expand_tools: BTreeMap::new(),
                 model_limits: Default::default(),
                 session_id: "issue424-capacity".to_string(),
                 project_path: "/proj".to_string(),
@@ -2514,6 +2618,7 @@ mod tests {
         ];
         let projection = project_messages(&messages).unwrap();
         let config = HistorianAssemblerConfig {
+            expand_tools: BTreeMap::new(),
             model_limits: Default::default(),
             session_id: "noise".to_string(),
             project_path: "/proj".to_string(),
@@ -2654,6 +2759,7 @@ mod tests {
             &projection.blocks,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                expand_tools: BTreeMap::new(),
                 model_limits: Default::default(),
                 session_id: "ses-below-budget".to_string(),
                 project_path: "/proj".to_string(),
@@ -2712,6 +2818,7 @@ mod tests {
             &projection.blocks,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                expand_tools: BTreeMap::new(),
                 model_limits: Default::default(),
                 session_id: "ses-fold-only".to_string(),
                 project_path: "/proj".to_string(),
@@ -2795,6 +2902,7 @@ mod tests {
             &projection.blocks,
             &projection.identity_by_mid,
             HistorianAssemblerConfig {
+                expand_tools: BTreeMap::new(),
                 model_limits: Default::default(),
                 session_id: "ses-sparse".to_string(),
                 project_path: "/proj".to_string(),

@@ -180,6 +180,7 @@ export interface CompartmentRunnerDeps<
     /** When true, run an editor pass after successful historian output to clean
      *  low-signal U: lines and cross-compartment duplicates. */
     historianTwoPass?: boolean;
+    historianExpandTools?: Record<string, string | false>;
     /**
      * Cross-session memory feature gate (`memory.enabled` config). When false,
      * historian/recomp must NOT promote session facts into project memories
