@@ -6227,7 +6227,8 @@ enum PublishTxnOutcome {
 }
 
 enum AppendCompartmentsTxnOutcome {
-    Appended,
+    /// The rows landed from `first_sequence` on, as the append transaction assigned them.
+    Appended { first_sequence: i64 },
     Overlap {
         existing_sequence: i64,
         incoming_start_message: i64,
@@ -12740,9 +12741,8 @@ impl McStore {
         compartments: &[StoredCompartment],
     ) -> Result<(), McStoreError> {
         self.resume_pending_context_write(session_id)?;
-        let first_sequence = self.max_compartment_seq(session_id)? + 1;
         match self.append_compartments_now(session_id, compartments)? {
-            AppendCompartmentsTxnOutcome::Appended => {
+            AppendCompartmentsTxnOutcome::Appended { first_sequence } => {
                 self.record_appended_dates(session_id, first_sequence, compartments)
             }
             AppendCompartmentsTxnOutcome::Overlap {
@@ -12811,7 +12811,7 @@ impl McStore {
             }
             Ok(matches!(
                 append_compartments_tx(tx, session_id, std::slice::from_ref(marker))?,
-                AppendCompartmentsTxnOutcome::Appended
+                AppendCompartmentsTxnOutcome::Appended { .. }
             )
             .then_some(max_sequence + 1))
         })?;
@@ -15835,11 +15835,12 @@ fn append_compartments_tx(
     session_id: &str,
     compartments: &[StoredCompartment],
 ) -> rusqlite::Result<AppendCompartmentsTxnOutcome> {
-    if compartments.is_empty() {
-        return Ok(AppendCompartmentsTxnOutcome::Appended);
-    }
-
     let next_sequence = next_compartment_sequence_tx(tx, session_id)?;
+    if compartments.is_empty() {
+        return Ok(AppendCompartmentsTxnOutcome::Appended {
+            first_sequence: next_sequence,
+        });
+    }
     let harness = session_harness_tx(tx, session_id)?;
     let mut statement = tx.prepare(
         "SELECT sequence, start_message, end_message
@@ -15885,7 +15886,9 @@ fn append_compartments_tx(
             &harness,
         )?;
     }
-    Ok(AppendCompartmentsTxnOutcome::Appended)
+    Ok(AppendCompartmentsTxnOutcome::Appended {
+        first_sequence: next_sequence,
+    })
 }
 
 fn next_compartment_sequence_tx(
@@ -24541,6 +24544,89 @@ mod tests {
         assert_eq!(dates, 0);
         assert_eq!(store.load("ses").unwrap().row_version, before);
         assert!(store.load_compartments("ses").unwrap().is_empty());
+    }
+
+    /// A `context.db` that lets another writer append a compartment just before the
+    /// store's next write transaction starts.
+    struct AppendBeforeNextWrite {
+        inner: SqliteContextDomain,
+        writer: std::sync::Mutex<rusqlite::Connection>,
+        fired: std::sync::atomic::AtomicBool,
+    }
+
+    impl ContextDomain for AppendBeforeNextWrite {
+        fn read(
+            &self,
+            read: &mut dyn FnMut(&rusqlite::Connection) -> rusqlite::Result<()>,
+        ) -> Result<(), McStoreError> {
+            self.inner.read(read)
+        }
+
+        fn write(
+            &self,
+            tables: &[&str],
+            write: &mut dyn FnMut(&rusqlite::Transaction<'_>) -> rusqlite::Result<()>,
+        ) -> Result<(), McStoreError> {
+            if !self.fired.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                self.writer
+                    .lock()
+                    .unwrap()
+                    .execute_batch(
+                        "INSERT INTO compartments(session_id, sequence, start_message, end_message,
+                                                  start_message_id, end_message_id, title, content,
+                                                  created_at)
+                         VALUES ('ses', 1, 1, 2, 'm1', 'm2', 'raced', 'raced body', 1)",
+                    )
+                    .unwrap();
+            }
+            self.inner.write(tables, write)
+        }
+    }
+
+    #[test]
+    fn appended_dates_follow_the_sequence_the_append_transaction_assigned() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = McStore::open_for_test(&descriptor(dir.path())).unwrap();
+        let context_path = dir.path().join("context.db");
+        store.install_context_domain(Arc::new(AppendBeforeNextWrite {
+            inner: SqliteContextDomain::open(&context_path).unwrap(),
+            writer: std::sync::Mutex::new(rusqlite::Connection::open(&context_path).unwrap()),
+            fired: std::sync::atomic::AtomicBool::new(false),
+        }));
+
+        let appended = StoredCompartment {
+            sequence: 99,
+            start_message: 5,
+            end_message: 8,
+            start_message_id: "m5".into(),
+            end_message_id: "m8".into(),
+            start_date: Some("2026-01-01".into()),
+            end_date: Some("2026-01-02".into()),
+            title: "appended".into(),
+            content: "appended body".into(),
+            ..Default::default()
+        };
+        store.append_compartments("ses", &[appended]).unwrap();
+
+        // Another writer took sequence 1 between the tail read and the append, so the
+        // append landed at 2. Its dates belong to 2, not to the other writer's row.
+        let rows = store.load_compartments("ses").unwrap();
+        let landed = rows.iter().find(|row| row.title == "appended").unwrap();
+        assert_eq!(landed.sequence, 2);
+        let dates: Vec<(i64, String)> = store
+            .inner
+            .with_conn(|conn| {
+                let mut statement = conn.prepare(
+                    "SELECT sequence, end_message_id FROM mc_compartment_dates
+                      WHERE session_id = 'ses' ORDER BY sequence",
+                )?;
+                let rows = statement
+                    .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok(rows)
+            })
+            .unwrap();
+        assert_eq!(dates, vec![(2, "m8".to_string())]);
     }
 }
 
