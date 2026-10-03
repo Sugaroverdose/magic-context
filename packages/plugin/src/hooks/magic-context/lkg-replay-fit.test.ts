@@ -5,6 +5,7 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { clearModelsDevCache, refreshModelLimitsFromApi } from "../../shared/models-dev-cache";
 import { Database } from "../../shared/sqlite";
 import { resolveContextWindowGeometry, resolveTrustedContextLimit } from "./event-resolvers";
+import { wireContentBytes } from "./final-wire-token-estimate";
 import { lkgReplayFits, lkgReplayLimit } from "./lkg-replay-fit";
 import type { MessageLike } from "./transform-operations";
 
@@ -65,16 +66,16 @@ describe("one admission limit for every last-known-good replay", () => {
     });
     afterEach(() => clearModelsDevCache());
 
-    it("admits every replay against the usable hard limit, the limit the frozen pass uses", () => {
+    it("admits every replay against the trusted limit, never the larger usable hard limit", () => {
         const db = freshDb();
         const ctx = { db, sessionID: SESSION };
         const usableHard = resolveContextWindowGeometry(MODEL.providerID, MODEL.modelID, ctx)
             ?.usableHard as number;
         const trusted = resolveTrustedContextLimit(MODEL.providerID, MODEL.modelID, ctx) as number;
-        expect(trusted).toBeGreaterThan(0);
+        expect(trusted).toBe(272_000);
         expect(usableHard).toBeGreaterThan(trusted);
         expect(lkgReplayLimit({ db, sessionId: SESSION, model: MODEL, modelKey: null })).toBe(
-            usableHard,
+            trusted,
         );
 
         const fits = (tokens: number) =>
@@ -87,12 +88,39 @@ describe("one admission limit for every last-known-good replay", () => {
                 systemPromptTokens: 0,
                 estimator: estimateOf(tokens),
             });
-        // Between the trusted limit and the usable hard limit: a healthy frozen pass
-        // keeps serving this candidate, so a failure or wrapper replay serves it too
-        // rather than refusing a turn the frozen pass would have sent.
-        expect(fits(trusted + 1).fits).toBe(true);
-        expect(fits(usableHard).fits).toBe(true);
-        expect(fits(usableHard + 1).fits).toBe(false);
+        // Between the trusted limit and the usable hard limit a provider that
+        // enforces its declared prompt limit rejects the request, so no replay
+        // (failure, wrapper or healthy frozen) is admitted there.
+        expect(fits(trusted).fits).toBe(true);
+        expect(fits(trusted + 1).fits).toBe(false);
+        expect(fits(usableHard).fits).toBe(false);
+    });
+
+    it("the byte proxy counts what the request carries, not OpenCode's own tool metadata", () => {
+        const fileText = "x".repeat(100_000);
+        const editing: MessageLike = {
+            info: { id: "a1", role: "assistant", sessionID: SESSION },
+            parts: [
+                {
+                    type: "tool",
+                    tool: "edit",
+                    callID: "call-a1",
+                    state: {
+                        status: "completed",
+                        input: { filePath: "/tmp/big.ts" },
+                        output: "ok",
+                        metadata: { filediff: { before: fileText, after: fileText } },
+                    },
+                },
+                { type: "text", text: "done" },
+            ],
+        } as MessageLike;
+        const measured = wireContentBytes([editing], Number.POSITIVE_INFINITY, 4);
+        // The tool input and output, serialized, and the text part; not the file copies.
+        expect(measured).toEqual({
+            bytes: JSON.stringify({ filePath: "/tmp/big.ts" }).length + "ok".length + "done".length,
+            aborted: false,
+        });
     });
 
     it("declines an untrusted estimate", () => {

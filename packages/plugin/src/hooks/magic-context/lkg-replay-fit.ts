@@ -1,7 +1,7 @@
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { getOverflowState } from "../../features/magic-context/storage-meta-persisted";
-import { resolveContextWindowGeometry, resolveTrustedContextLimit } from "./event-resolvers";
-import { estimateFinalWireInputTokens } from "./final-wire-token-estimate";
+import { resolveTrustedContextLimit } from "./event-resolvers";
+import { estimateFinalWireInputTokens, wireContentBytes } from "./final-wire-token-estimate";
 import type { MessageLike } from "./transform-operations";
 
 /**
@@ -42,9 +42,15 @@ type ReplayModel = { providerID: string; modelID: string } | null | undefined;
 
 /**
  * The context limit every last-known-good replay is admitted against: the
- * model's usable hard limit (its window minus the output reserve), else its
- * trusted context limit, else the limit the provider reported for this model.
- * Undefined when none is known. Throws when the stored limits cannot be read.
+ * model's trusted context limit, else the limit the provider reported for this
+ * model. Undefined when none is known. Throws when the stored limits cannot be
+ * read.
+ *
+ * The trusted limit is the window's usable soft limit (a declared prompt limit
+ * when the catalog has one, else the window minus the output reserve), never the
+ * larger usable hard limit: some providers enforce the declared prompt limit
+ * (GitHub Copilot rejects a prompt over it), and a replay that overflows turns a
+ * recoverable failure into a provider rejection.
  */
 export function lkgReplayLimit(args: {
     db: ContextDatabase;
@@ -53,13 +59,6 @@ export function lkgReplayLimit(args: {
     modelKey: string | null | undefined;
 }): number | undefined {
     const { db, sessionId, model } = args;
-    const usableHard = model
-        ? resolveContextWindowGeometry(model.providerID, model.modelID, {
-              db,
-              sessionID: sessionId,
-          })?.usableHard
-        : undefined;
-    if (usableHard !== undefined && usableHard > 0) return usableHard;
     const trusted = model
         ? resolveTrustedContextLimit(model.providerID, model.modelID, { db, sessionID: sessionId })
         : undefined;
@@ -80,15 +79,21 @@ export type LkgReplayMeasure =
  * the proxy already proves over is never tokenized); under only when the proxy is
  * under and a trusted, finite, positive estimate is at or under the limit;
  * unproven otherwise (the estimate is untrusted, unusable or failed).
+ *
+ * The proxy counts only what the provider request carries (`wireContentBytes`):
+ * OpenCode keeps fields for itself, such as an edit tool's whole file before and
+ * after the edit, and a base64 image is billed by its size, so a byte count of
+ * the whole stored messages would refuse replays that fit.
  */
 export function measureLkgReplay(args: {
     messages: readonly MessageLike[];
     limit: number;
     estimate: () => ReturnType<typeof estimateFinalWireInputTokens>;
 }): LkgReplayMeasure {
-    const proxy = rawFallbackSerializedBytes(
+    const proxy = wireContentBytes(
         args.messages,
         args.limit * RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
+        RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN,
     );
     if (proxy === null) return { fit: "unproven", tokens: null };
     const proxyTokens = Math.ceil(proxy.bytes / RAW_FALLBACK_BYTES_PER_CONTEXT_TOKEN);

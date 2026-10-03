@@ -319,7 +319,7 @@ describe("review r2: the admission limit of every last-known-good replay", () =>
             COPILOT.modelID,
             ctx,
         )?.usableHard;
-        expect(lkgReplayLimit({ db, sessionId, model: COPILOT, modelKey: null })).toBe(usableHard);
+        expect(lkgReplayLimit({ db, sessionId, model: COPILOT, modelKey: null })).toBe(128_000);
         const fit = lkgReplayFits({
             db,
             sessionId,
