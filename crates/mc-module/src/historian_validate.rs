@@ -1357,7 +1357,7 @@ fn split_anchor_prefix(text: &str) -> (Option<u64>, String) {
 /// Decode the five predefined XML entities in a single left-to-right pass, so
 /// every entity is decoded exactly once. Chained replacements that decode
 /// `&amp;` first would turn the escaped literal `&amp;lt;` into `<` instead of
-/// the text `&lt;`. Mirrors `unescapeXml` in the TypeScript parser.
+/// the text `&lt;`. Mirrors `unescapeXml` in packages/plugin/src/shared/xml-unescape.ts.
 fn unescape_xml(s: &str) -> String {
     xml_entity_regex()
         .replace_all(s, |caps: &regex::Captures<'_>| {
