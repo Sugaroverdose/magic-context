@@ -12523,8 +12523,13 @@ fn is_dropped_placeholder_text(text: &str) -> bool {
     !trimmed.is_empty()
         && MARKER_ONLY
             .get_or_init(|| {
-                // ASCII digits, as JavaScript's `\d`: `§٣§` is not a tag.
-                regex::Regex::new(r"^(?:(?:§[0-9]+§|\[dropped(?: §[0-9]+§)?\]|\[cleared\])\s*)+$")
+                // `\d` here is Unicode, so `§٣§` (Arabic-Indic digit) counts as a
+                // marker, unlike JavaScript's ASCII `\d` in the TypeScript twin.
+                // This check runs on every pass (it picks the kept reasoning block
+                // and the replay-exempt message), so switching to ASCII digits
+                // changes served bytes mid-session and needs a TAGGER_FEATURE_EPOCH
+                // bump to ride a rebuild.
+                regex::Regex::new(r"^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\])\s*)+$")
                     .unwrap()
             })
             .is_match(trimmed)
@@ -28116,6 +28121,12 @@ pub(crate) mod tests {
         }
         for text in cases["negative"].as_array().unwrap() {
             let text = text.as_str().unwrap();
+            if NON_ASCII_DIGIT_MARKERS.contains(&text) {
+                // Known divergence from TypeScript, pinned by
+                // marker_only_counts_non_ascii_digit_markers.
+                assert!(is_dropped_placeholder_text(text), "divergent: {text:?}");
+                continue;
+            }
             assert!(!is_dropped_placeholder_text(text), "negative: {text:?}");
         }
         for parts in cases["positivePartCombinations"].as_array().unwrap() {
@@ -28131,6 +28142,24 @@ pub(crate) mod tests {
                 .collect();
             assert!(whole_marker_or_blank_message(&blocks), "parts: {parts:?}");
         }
+    }
+
+    /// Marker-only shapes written with non-ASCII digits. The shared fixture lists
+    /// them as negatives because TypeScript's `\d` is ASCII; Rust's is Unicode.
+    const NON_ASCII_DIGIT_MARKERS: &[&str] =
+        &["\u{a7}\u{663}\u{a7}", "[dropped \u{a7}\u{663}\u{a7}]"];
+
+    #[test]
+    fn marker_only_counts_non_ascii_digit_markers() {
+        // Pins the served-byte behaviour: this check runs on every pass, so making
+        // it ASCII-only changes which reasoning block is kept and which message is
+        // replay-exempt mid-session. Change it only together with a
+        // TAGGER_FEATURE_EPOCH bump.
+        for text in NON_ASCII_DIGIT_MARKERS {
+            assert!(is_dropped_placeholder_text(text), "{text:?}");
+        }
+        assert!(is_dropped_placeholder_text("\u{a7}\u{663}\u{a7} [cleared]"));
+        assert!(!is_dropped_placeholder_text("\u{a7}\u{663}\u{a7} prose"));
     }
 
     #[test]
