@@ -29,6 +29,7 @@ class PlacementTests(unittest.TestCase):
         root = Path(self.tmp.name)
         self.home = root / "home"
         self.bin = self.home / ".local/share/cortexkit/bin"
+        self.shared_staging = self.home / ".local/share/cortexkit/staging"
         self.store = root / "stores"
         self.shims = root / "shims"
         for path in (self.bin, self.store, self.shims):
@@ -82,6 +83,7 @@ printf '0000000100000000 T _main\\n'
             (self.shims / name).symlink_to(once(root, body))
         self.versions(90, 49)
         self.env = dict(os.environ, HOME=str(self.home), MAGIC_CONTEXT_STORAGE_DIR=str(self.store),
+                        CK_STAGING=str(self.shared_staging),
                         PATH=str(self.shims) + os.pathsep + os.environ["PATH"],
                         PYTHONPYCACHEPREFIX=str(root / "pycache"), XDG_CACHE_HOME=str(root / "cache"),
                         FAKE_DEPLOYED=str(self.bin / "ck-mc"), FAKE_POLL_COUNT=str(root / "poll-count"),
@@ -100,6 +102,16 @@ printf '0000000100000000 T _main\\n'
                     conn.execute("INSERT INTO schema_migrations VALUES (?)", (version,))
                 else:
                     conn.execute("INSERT INTO cortexkit_schema_version VALUES ('mc_cache', ?)", (version,))
+
+    def seed_shared_declaration(self, path=None):
+        self.shared_staging.mkdir(parents=True, exist_ok=True)
+        declaration = path or self.shared_staging / "magic-context.current"
+        declaration.write_text(
+            f"stage={self.shared_staging}/ck-mc.{OLD[:8]}\n"
+            f"revision={OLD}\n"
+            "declared_at=2024-01-01T00:00:00Z\n"
+        )
+        return declaration
 
     def run_script(self, *args):
         return subprocess.run(["bash", str(SCRIPT), "--dry-run", *args, str(self.staged)],
@@ -144,6 +156,27 @@ printf '0000000100000000 T _main\\n'
         self.assertEqual(rollback.read_bytes().count(OLD.encode()), 1)
         self.assertEqual((self.bin / "ck-mc").read_bytes(), self.staged.read_bytes())
 
+    def test_successful_placement_updates_shared_declaration_and_stages_exact_bytes(self):
+        run = subprocess.run(["bash", str(SCRIPT), str(self.staged)], env=self.env,
+                             cwd=ROOT, capture_output=True, text=True)
+        self.assertEqual(run.returncode, 0, run.stderr)
+
+        card_name = f"ck-mc.{NEW[:8]}"
+        card = self.shared_staging / card_name
+        sidecar = self.shared_staging / f"{card_name}.sha256"
+        declaration = self.shared_staging / "magic-context.current"
+        self.assertEqual(card.read_bytes(), (self.bin / "ck-mc").read_bytes())
+        self.assertEqual(card.read_bytes(), self.staged.read_bytes())
+        self.assertEqual(sidecar.read_text(), f"{hashlib.sha256(card.read_bytes()).hexdigest()}  {card_name}\n")
+        verified = subprocess.run(["shasum", "-a", "256", "-c", sidecar.name],
+                                  cwd=self.shared_staging, capture_output=True, text=True)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        expected_stage = Path(os.path.realpath(self.shared_staging)) / card_name
+        self.assertRegex(
+            declaration.read_text(),
+            rf"^stage={expected_stage}\nrevision={NEW}\ndeclared_at=\d{{4}}-\d{{2}}-\d{{2}}T\d{{2}}:\d{{2}}:\d{{2}}Z\n$",
+        )
+
     def test_placement_waits_for_the_restarted_module_to_declare_its_build(self):
         env = dict(self.env, FAKE_DRAINING_POLLS="3")
         run = subprocess.run(["bash", str(SCRIPT), str(self.staged)], env=env,
@@ -152,6 +185,8 @@ printf '0000000100000000 T _main\\n'
         self.assertIn("inode/version/digest/health ok", run.stdout)
 
     def test_failed_post_placement_check_prints_rollback_without_using_it(self):
+        declaration = self.seed_shared_declaration()
+        original_declaration = declaration.read_bytes()
         before = (self.bin / "ck-mc").read_bytes()
         env = dict(self.env, FAKE_BAD_HEALTH="1")
         run = subprocess.run(["bash", str(SCRIPT), str(self.staged)], env=env,
@@ -160,6 +195,8 @@ printf '0000000100000000 T _main\\n'
         self.assertIn("cp ", run.stderr)
         self.assertIn("ck module restart magic-context", run.stderr)
         self.assertNotEqual((self.bin / "ck-mc").read_bytes(), before)
+        self.assertEqual(declaration.read_bytes(), original_declaration)
+        self.assertFalse((self.shared_staging / f"ck-mc.{NEW[:8]}").exists())
 
     def test_no_restart_places_and_checks_the_file_without_restarting(self):
         restart_log = self.home / "restart-log"
@@ -187,6 +224,7 @@ printf '0000000100000000 T _main\\n'
         self.assertFalse((self.bin / "staging").exists())
 
     def test_dry_run_never_writes(self):
+        self.seed_shared_declaration()
         def snapshot():
             return {str(p.relative_to(self.home)): hashlib.sha256(p.read_bytes()).hexdigest()
                     for p in self.home.rglob("*") if p.is_file()}
@@ -195,6 +233,23 @@ printf '0000000100000000 T _main\\n'
         self.assertEqual(run.returncode, 0, run.stderr)
         self.assertIn("dry-run: would preserve", run.stdout)
         self.assertEqual(snapshot(), before)
+        self.assertFalse((self.bin / "staging").exists())
+
+    def test_disagreeing_ck_prefixed_declaration_refuses_before_placement(self):
+        self.shared_staging.mkdir(parents=True)
+        alternate = self.shared_staging / "ck-magic-context.current"
+        alternate.write_text(
+            f"stage={self.shared_staging}/ck-mc.{OLD[:8]}\n"
+            f"revision={OLD}\n"
+            "declared_at=2024-01-01T00:00:00Z\n"
+        )
+        before = (self.bin / "ck-mc").read_bytes()
+        run = subprocess.run(["bash", str(SCRIPT), str(self.staged)], env=self.env,
+                             cwd=ROOT, capture_output=True, text=True)
+        self.assertNotEqual(run.returncode, 0)
+        self.assertIn("another magic-context currency declaration disagrees", run.stderr)
+        self.assertEqual((self.bin / "ck-mc").read_bytes(), before)
+        self.assertEqual(list(self.shared_staging.iterdir()), [alternate])
         self.assertFalse((self.bin / "staging").exists())
 
 

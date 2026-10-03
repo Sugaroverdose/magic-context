@@ -13,6 +13,7 @@ no_restart=0
 require_epochs=0
 source_ref=
 staged=
+shared_staging=${CK_STAGING:-$HOME/.local/share/cortexkit/staging}
 while (($#)); do
     case "$1" in
         --dry-run) dry_run=1 ;;
@@ -72,6 +73,64 @@ sha_from() {
     printf '%s\n' "$sha"
 }
 staged_sha=$(sha_from "$staged")
+# Resolve without creating the directory: a refused or dry-run placement must not
+# leave a staging directory behind. place-module.sh reads these declarations from
+# both the staging root and the directory containing it.
+shared_staging=$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$shared_staging")
+shared_stage="$shared_staging/ck-mc.${staged_sha:0:8}"
+check_shared_declarations() {
+    local candidate actual
+    local expected
+    expected=$(printf '%s\n%s' "$shared_stage" "$staged_sha")
+    for candidate in \
+        "$(dirname "$shared_staging")/magic-context.current" \
+        "$(dirname "$shared_staging")/ck-magic-context.current" \
+        "$shared_staging/ck-magic-context.current"; do
+        [[ -f "$candidate" ]] || continue
+        grep -q '^stage=' "$candidate" 2>/dev/null || continue
+        # Match the consumer: only stage and revision determine whether two
+        # declarations agree; declared_at is informational.
+        actual=$(awk -F= '$1 == "stage" || $1 == "revision" { print $2 }' "$candidate")
+        [[ "$actual" == "$expected" ]] ||
+            die "another magic-context currency declaration disagrees: $candidate (remove or reconcile it before placing)"
+    done
+}
+check_shared_declarations
+publish_shared_stage() (
+    set -euo pipefail
+    local card_name card sidecar
+    local card_tmp="" sidecar_tmp="" manifest_tmp="" card_digest declared_at
+    trap 'rm -f "$card_tmp" "$sidecar_tmp" "$manifest_tmp"' EXIT
+    card_name=$(basename "$shared_stage")
+    card="$shared_staging/$card_name"
+    sidecar="$card.sha256"
+    mkdir -p "$shared_staging"
+
+    # Copy the verified destination bytes; signing here would change the artifact
+    # after placement and invalidate the identity checked by the restart gates.
+    card_tmp=$(mktemp "$shared_staging/.ck-mc.XXXXXXXX") || die "cannot make shared staging temp"
+    cp -p "$deployed" "$card_tmp" || die "cannot copy placed binary into shared staging"
+    cmp -s "$deployed" "$card_tmp" || die "shared staging copy differs from placed binary"
+    card_digest=$(shasum -a 256 "$card_tmp" | awk '{print $1}')
+    [[ "$card_digest" == "$staged_digest" ]] || die "shared staging copy digest differs from verified placement"
+    mv -f "$card_tmp" "$card"
+    card_tmp=""
+    cmp -s "$deployed" "$card" || die "shared staging card differs from placed binary"
+
+    sidecar_tmp=$(mktemp "$shared_staging/.ck-mc.sha256.XXXXXXXX") || die "cannot make shared sidecar temp"
+    printf '%s  %s\n' "$card_digest" "$card_name" > "$sidecar_tmp"
+    mv -f "$sidecar_tmp" "$sidecar"
+    sidecar_tmp=""
+    (cd "$shared_staging" && shasum -a 256 -c "$(basename "$sidecar")" >/dev/null) ||
+        die "shared staging sidecar does not verify its card"
+
+    declared_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    manifest_tmp=$(mktemp "$shared_staging/.magic-context.current.XXXXXXXX") || die "cannot make shared declaration temp"
+    printf 'stage=%s\nrevision=%s\ndeclared_at=%s\n' \
+        "$card" "$staged_sha" "$declared_at" > "$manifest_tmp"
+    mv -f "$manifest_tmp" "$shared_staging/magic-context.current"
+    manifest_tmp=""
+)
 if [[ -n "$source_ref" ]]; then
     source_sha=$(git rev-parse --verify "${source_ref}^{commit}") || die "unknown source ref: $source_ref"
     [[ "$staged_sha" == "$source_sha" ]] || die "staged SHA $staged_sha differs from source $source_sha"
@@ -156,6 +215,7 @@ if ((no_restart)); then
     [[ "$(shasum -a 256 "$deployed" | cut -d' ' -f1)" == "$staged_digest" ]] || false
     require_hardened "$deployed"
     trap - ERR
+    publish_shared_stage
     echo "placed ck-mc $staged_sha on disk without restarting; the running module still uses the previous build until magic-context restarts. Verify after that restart: ck --json provenance magic-context (build $staged_sha) and ck --json health magic-context. Rollback: $rollback_cmd"
     exit 0
 fi
@@ -205,4 +265,5 @@ for _ in $(seq 1 30); do
 done
 [[ $health_ok -eq 1 ]] || { echo "ck health is not ok after the restart" >&2; false; }
 trap - ERR
+publish_shared_stage
 echo "placed ck-mc $staged_sha; context.db $context_live/$context_supported store.db $store_live/$store_supported; inode/version/digest/health ok"
