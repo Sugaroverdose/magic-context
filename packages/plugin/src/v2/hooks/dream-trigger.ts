@@ -2,9 +2,13 @@ import type { DreamerConfig } from "../../config/schema/magic-context";
 import { buildDreamTaskRuntimeConfigs } from "../../features/magic-context/dreamer/task-config";
 import { createDreamTaskExecutor } from "../../features/magic-context/dreamer/task-executor";
 import { runDueTasksForProject } from "../../features/magic-context/dreamer/task-scheduler";
+import { advanceSessionActivity } from "../../features/magic-context/session-activity";
 import { openDatabase } from "../../features/magic-context/storage";
 import type { HiddenCompletionExecutor } from "../../hooks/magic-context/compartment-runner-types";
+import { getDataDir } from "../../shared/data-path";
 import { log } from "../../shared/logger";
+import { V2RetrospectiveRawProvider } from "../retrospective-raw-provider";
+import { gaDatabasePath, V2StoreReader } from "../store-reader";
 import { selectRunnableDreamTasks } from "./dream-manual";
 import type { V2Context } from "./types";
 
@@ -22,6 +26,8 @@ export function startDreamTrigger(
         projectMemoryEnabled?: boolean;
         language?: string;
         mural?: { enabled: boolean; model?: string };
+        /** Native source boundary; injectable for scheduler-only tests. */
+        openReader?: () => Pick<V2StoreReader, "rootSessionActivity" | "close">;
     },
 ) {
     const controller = new AbortController();
@@ -35,6 +41,24 @@ export function startDreamTrigger(
                 const db = openDatabase();
                 if (!db) continue;
                 try {
+                    // Keep the shared retrospective gate current on OC2, which
+                    // does not emit the OC1 message events that maintain these
+                    // keys. Source timestamps, not completion time, align the
+                    // gate with the raw provider's content watermark.
+                    const reader =
+                        args.openReader?.() ??
+                        new V2StoreReader(
+                            gaDatabasePath(getDataDir(), process.env.OPENCODE_CHANNEL ?? "latest"),
+                        );
+                    try {
+                        const activity = reader
+                            .rootSessionActivity([event.data.sessionID])
+                            .get(event.data.sessionID);
+                        if (activity !== undefined)
+                            advanceSessionActivity(db, event.data.sessionID, activity);
+                    } finally {
+                        reader.close();
+                    }
                     // Scheduled and manual runs share one capability filter so a
                     // host without a tool loop never records unsupported tasks as failed.
                     const sampled = args.sample?.();
@@ -57,6 +81,7 @@ export function startDreamTrigger(
                             parentSessionId: event.data.sessionID,
                             sessionDirectory: context.location.directory,
                             openOpenCodeDb: () => null,
+                            retrospectiveRawProvider: (db) => new V2RetrospectiveRawProvider(db),
                             language: args.language,
                             mural: sampled?.mural ?? args.mural,
                         }),

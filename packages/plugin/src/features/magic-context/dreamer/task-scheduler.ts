@@ -59,7 +59,7 @@ export interface DreamTaskRuntimeConfig {
 }
 
 export interface TaskExecOutcome {
-    status: "completed" | "failed";
+    status: "completed" | "failed" | "skipped";
     /** A transient failure (provider/network/rate-limit/timeout) hot-retries up to
      *  MAX_TASK_RETRIES; a permanent failure advances to the next cron slot. */
     transient?: boolean;
@@ -67,7 +67,7 @@ export interface TaskExecOutcome {
     /** Structured user-facing diagnostic while `error` remains the legacy value
      *  persisted in task schedule state. */
     failureDetail?: string;
-    /** Successful task detail surfaced by a manual `/ctx-dream` run. */
+    /** Completed task detail or explicit skip reason surfaced by `/ctx-dream`. */
     detail?: string;
     /** Run-local backlog when a task's scope differs from its next scheduled scope. */
     backlog?: DreamTaskBacklog;
@@ -373,6 +373,7 @@ interface DomainGroupCallbacks {
      */
     leaseWaitMs?: number;
     onRan?: (task: DreamTaskName, detail?: string, backlog?: DreamTaskBacklog) => void;
+    onSkipped?: (task: DreamTaskName, reason?: string) => void;
     onFailed?: (task: DreamTaskName, error?: string) => void;
     onBusy?: (task: DreamTaskName) => void;
 }
@@ -467,7 +468,17 @@ async function runDomainGroup(
             }
 
             const finishedAt = Date.now();
-            if (outcome.status === "completed") {
+            if (outcome.status === "skipped") {
+                advanceAfterRun(
+                    db,
+                    projectIdentity,
+                    due,
+                    finishedAt,
+                    "skipped",
+                    outcome.detail ?? null,
+                );
+                cb?.onSkipped?.(due.config.task, outcome.detail);
+            } else if (outcome.status === "completed") {
                 advanceAfterRun(
                     db,
                     projectIdentity,
@@ -508,10 +519,12 @@ async function runDomainGroup(
 }
 
 export interface ManualRunResult {
-    /** Tasks that actually executed (gate passed, lease acquired). */
+    /** Tasks that completed work (gate passed, lease acquired), excluding unavailable runs. */
     ran: string[];
     /** Tasks that were skipped because their activity gate failed. */
     skippedNoWork: string[];
+    /** Tasks unavailable or disabled, with their explicit skip reasons. */
+    skipped?: string[];
     /** Tasks whose domain lease was busy (another run in progress). */
     deferredBusy: string[];
     /** Tasks that ran but failed. */
@@ -630,6 +643,8 @@ export async function runManualDream(
                     if (detail) result.details?.push(detail);
                     if (backlog) runLocalBacklogs[t] = backlog;
                 },
+                onSkipped: (task, reason) =>
+                    (result.skipped ??= []).push(`${task}: ${reason ?? "unavailable"}`),
                 onFailed: (task, error) => {
                     result.failed.push(task);
                     if (error) result.failureDetails?.push(`${task}: ${error}`);

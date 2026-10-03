@@ -197,6 +197,7 @@ function dreamRunFailureDetail(error: unknown): DreamRunFailureDetail {
             provider_error: prompt.providerError,
             timeout_ms: prompt.timeoutMs,
             child_session_id: prompt.childSessionId,
+            ...(prompt.refusalReason ? { refusal_reason: prompt.refusalReason } : {}),
         };
     }
 
@@ -222,20 +223,27 @@ function dreamRunFailureDetail(error: unknown): DreamRunFailureDetail {
             child_session_id: null,
         };
     }
+    const localRefusal = error instanceof HiddenCompletionRefusal;
     const providerFailure =
-        error instanceof HiddenCompletionRefusal ||
-        (error instanceof Error && error.name === "DreamerProviderOutputFailureError");
+        error instanceof Error && error.name === "DreamerProviderOutputFailureError";
     return {
-        failure_class: providerFailure
-            ? "provider_error"
-            : /no models?|model chain is empty/i.test(message)
-              ? "no_models"
-              : "unknown",
+        failure_class: localRefusal
+            ? "local_refusal"
+            : providerFailure
+              ? "provider_error"
+              : /no models?|model chain is empty/i.test(message)
+                ? "no_models"
+                : "unknown",
         model_attempted: null,
         models_tried: [],
         provider_error: providerFailure ? sanitizeDiagnosticText(message).slice(0, 500) : null,
         timeout_ms: null,
         child_session_id: null,
+        ...(localRefusal
+            ? {
+                  refusal_reason: sanitizeDiagnosticText(error.message).slice(0, 500),
+              }
+            : {}),
     };
 }
 
@@ -471,28 +479,22 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             });
         };
         reportProgress(0);
-        if (config.modelChainUnavailable) {
-            return {
-                status: "completed",
-                detail: "skipped: Pi model chain is empty (no configured model resolves in Pi)",
-            };
-        }
         const incompleteMessage = (remaining: number): string => {
             const processed = processedDreamTaskItems(backlogAtStart.pending, remaining);
             return `${config.task} incomplete: ${remaining} remain (was ${backlogAtStart.pending} at run start; processed ${processed} this run)`;
         };
-        if (projectNeedsSingleStoreMigration(db, projectIdentity)) {
-            return { status: "completed", detail: renderSingleStoreMigrationRequiredRefusal() };
-        }
+        const migrationRequired = projectNeedsSingleStoreMigration(db, projectIdentity);
         let moduleRoute: Awaited<ReturnType<typeof resolveDreamerModuleRoute>>;
         if (
-            config.task === "curate" ||
-            config.task === "map-memories" ||
-            config.task === "compress-cues" ||
-            config.task === "classify-memories" ||
-            config.task === "verify" ||
-            config.task === "verify-broad" ||
-            config.task === "retrospective"
+            !migrationRequired &&
+            !config.modelChainUnavailable &&
+            (config.task === "curate" ||
+                config.task === "map-memories" ||
+                config.task === "compress-cues" ||
+                config.task === "classify-memories" ||
+                config.task === "verify" ||
+                config.task === "verify-broad" ||
+                config.task === "retrospective")
         ) {
             try {
                 moduleRoute = await resolveDreamerModuleRoute({
@@ -507,7 +509,10 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                 throw new DreamerModuleFailureError("store admission", error);
             }
         }
-        const parent = await resolveParentSessionId();
+        const parent =
+            migrationRequired || config.modelChainUnavailable
+                ? deps.parentSessionId
+                : await resolveParentSessionId();
         if (!leaseOwnershipMatches(db, holderId, leaseAcquisition.generation, leaseKey)) {
             throw new Error("Dream lease lost during executor setup");
         }
@@ -528,7 +533,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             budgetFinalized ||= state.finalizeFired;
         };
         const recordRun = (
-            status: "completed" | "failed",
+            status: "completed" | "failed" | "skipped",
             error: string | null,
             extra?: {
                 memoryChanges?: ReturnType<typeof computeMemoryDelta>;
@@ -567,6 +572,8 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                             name: config.task,
                             durationMs: Date.now() - startedAt,
                             resultChars: 0,
+                            status,
+                            ...(status === "skipped" && error ? { skipReason: error } : {}),
                             ...(status === "failed" && error ? { error } : {}),
                             ...(status === "failed"
                                 ? {
@@ -657,6 +664,14 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
         }
 
         try {
+            const skip = (reason: string): TaskExecOutcome => {
+                log(`[dreamer] ${config.task}: skipped (${reason})`);
+                recordRun("skipped", reason);
+                return { status: "skipped", detail: reason };
+            };
+            if (config.modelChainUnavailable)
+                return skip("Pi model chain is empty (no configured model resolves in Pi)");
+            if (migrationRequired) return skip(renderSingleStoreMigrationRequiredRefusal());
             if (
                 deps.hiddenCompletionExecutor?.capabilities.tools === false &&
                 DREAM_TASK_CAPABILITIES[config.task].requiresTools
@@ -675,12 +690,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             }
             if (config.task === "compress-cues") {
                 if (deps.mural?.enabled !== true) {
-                    // Config-gated no-op, but say so: a silent "completed" here
-                    // reads as a successful run in /ctx-dream summaries and would
-                    // otherwise mask a wiring gap.
-                    log("[dreamer] compress-cues: skipped (mural is not enabled)");
-                    recordRun("completed", null);
-                    return { status: "completed" };
+                    return skip("mural is not enabled");
                 }
                 // `config.model` is already resolved by task-config using the
                 // executing harness's task-specific, mural/project-level,
@@ -993,6 +1003,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
                     invocationStartedAt: startedAt,
                     moduleRoute,
                 });
+                if (retro.skipReason) return skip(retro.skipReason);
                 recordRun("completed", null, {
                     memoryChanges: computeMemoryDelta(memoryBefore),
                     backlogAfter:
@@ -1303,13 +1314,16 @@ async function runRetrospectiveTask(
 ): Promise<{
     retrospectiveWatermarkMs: number | null;
     taskStateJson?: string;
+    skipReason?: string;
 }> {
     const { db, projectIdentity, holderId, leaseKey } = ctx;
     const { deps, deadline, parent, onBudgetUpdate } = helpers;
     const provider = resolveRetrospectiveProvider(deps, db, projectIdentity);
     if (!provider) {
-        log("[dreamer] retrospective: no raw provider available — clean no-op");
-        return { retrospectiveWatermarkMs: null };
+        return {
+            retrospectiveWatermarkMs: null,
+            skipReason: "no raw-history provider is available",
+        };
     }
 
     // Content watermark (max message ts actually scanned) — NOT lastRunAt, which
@@ -1343,7 +1357,9 @@ async function runRetrospectiveTask(
         ...(clearedTaskStateJson ? { taskStateJson: clearedTaskStateJson } : {}),
     });
     const messages = withGlobalOrdinals(scan.messages);
-    const userMessages = messages.filter((message) => message.role === "user");
+    const userMessages = messages.filter(
+        (message) => message.role === "user" && message.text.trim().length > 0,
+    );
     if (userMessages.length === 0) {
         log("[dreamer] retrospective: no user messages in window");
         return completedWindow(scan.maxScannedTs);

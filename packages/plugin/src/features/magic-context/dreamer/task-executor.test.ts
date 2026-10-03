@@ -1631,7 +1631,7 @@ describe("createDreamTaskExecutor — map-memories disposition", () => {
 });
 
 describe("createDreamTaskExecutor — classify-memories", () => {
-    test("module-managed memory on a TS host returns completed without a prompt or error row", async () => {
+    test("module-managed memory on a TS host records a skipped migration refusal without a prompt", async () => {
         db = freshDb();
         const project = "git:ts-not-owner";
         for (let i = 0; i < 10; i++)
@@ -1663,13 +1663,16 @@ describe("createDreamTaskExecutor — classify-memories", () => {
             { task: "classify-memories", schedule: "0 6 * * *", timeoutMinutes: 20 },
             { db, projectIdentity: project, holderId: "ts-holder", leaseKey },
         );
-        expect(outcome.status).toBe("completed");
+        expect(outcome.status).toBe("skipped");
         expect(outcome.detail).toBe(
             "Magic Context's Rust mode needs a one-time migration of its store. Quit OpenCode and every ck-mc process, then run `magic-context doctor single-store migrate`. (MC-C14)",
         );
         expect(client.session.create).not.toHaveBeenCalled();
         expect(client.session.list).not.toHaveBeenCalled();
-        expect(getDreamRuns(db, project)).toHaveLength(0);
+        expect(getDreamRuns(db, project)[0]?.tasks_succeeded).toBe(0);
+        expect(JSON.parse(getDreamRuns(db, project)[0]!.tasks_json)[0].skipReason).toContain(
+            "MC-C14",
+        );
     });
     test("runs the non-agentic XML transform and applies the manifest host-side", async () => {
         db = freshDb();

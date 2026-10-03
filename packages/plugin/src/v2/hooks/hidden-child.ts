@@ -99,6 +99,7 @@ export interface HiddenChildAttempt {
     shaped: boolean;
     steps?: number;
     stepLimit?: HiddenAgentStepLimit;
+    refusal?: HiddenCompletionRefusal;
     budgetExceeded?: Error;
     observedMessages?: SessionContext["messages"];
     marker?: string;
@@ -372,7 +373,14 @@ export class HiddenChildHook {
                 ...(inFlight === undefined ? {} : { in_flight: inFlight }),
             })}`,
         );
-        throw new HiddenCompletionRefusal("hidden_prompt_unrecognized", reason, true);
+        const refusal = new HiddenCompletionRefusal("hidden_prompt_unrecognized", reason, true);
+        // The host serializes hook failures as an unknown session error. Retain
+        // the typed local cause on this child's attempt, never infer it from a
+        // provider's arbitrary error text or assign it to another child's run.
+        for (const attempt of this.attempts.values()) {
+            if (attempt.childSessionId === draft.sessionID) attempt.refusal = refusal;
+        }
+        throw refusal;
     }
 
     private calibratedParts(

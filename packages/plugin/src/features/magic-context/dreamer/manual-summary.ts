@@ -20,6 +20,7 @@ export function summarizeManualDream(summary: ManualRunResult): string {
     }
     if (summary.skippedNoWork.length > 0)
         lines.push(`Skipped (no work): ${summary.skippedNoWork.join(", ")}`);
+    if (summary.skipped?.length) lines.push(`Skipped: ${summary.skipped.join("; ")}`);
     if (summary.deferredBusy.length > 0)
         lines.push(
             // "Busy" means the task's DOMAIN lease is held — usually a sibling
@@ -42,6 +43,7 @@ export function summarizeManualDream(summary: ManualRunResult): string {
         summary.ran.length === 0 &&
         summary.failed.length === 0 &&
         summary.skippedNoWork.length === 0 &&
+        !summary.skipped?.length &&
         summary.deferredBusy.length === 0
     ) {
         lines.push("No enabled dream tasks to run.");

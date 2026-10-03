@@ -3,6 +3,14 @@
     "header": "CI push workflows run the manifest-derived TypeScript suites and the Rust hermetic suite through scripts/run-rust-hermetic-e2e.sh. The tag release workflow also runs the Rust invocation; both Rust lanes require public sibling path dependencies (../commons and ../subconscious).",
     "entries": [
         {
+            "path": "tests/opencode2/retrospective.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "native OpenCode 2 manual and scheduled retrospective read five real user sessions and advance the shared content watermark; throwaway roots with host PID lsof containment",
+            "contract_refs": ["S2-MIGRATION"],
+            "hosts": ["opencode2"]
+        },
+        {
             "path": "tests/adv-identical-bytes-hard.test.ts",
             "tier": "excluded",
             "invocation": {

@@ -98,6 +98,7 @@ export function executeStatus(
         backlog?: DreamTaskBacklogMap;
         progress?: DreamTaskProgress | null;
         failures?: DreamTaskFailureState[];
+        skipped?: string[];
     },
     windowGeometry?: WindowGeometryResult,
     tailHygiene?: TailHygieneStatus,
@@ -234,11 +235,13 @@ export function executeStatus(
 
         if (
             (dreamer?.backlog && Object.keys(dreamer.backlog).length > 0) ||
+            (dreamer?.skipped?.length ?? 0) > 0 ||
             (dreamer?.failures?.length ?? 0) > 0
         ) {
             lines.push(
                 "",
                 "### Dreamer",
+                ...(dreamer?.skipped ?? []).map((reason) => `- Skipped: ${reason}`),
                 ...(dreamer?.progress
                     ? [
                           `- Running: ${dreamer.progress.task} — ${dreamer.progress.processed}/${dreamer.progress.total} processed`,

@@ -1881,6 +1881,7 @@ export async function registerContext(context: V2Context) {
                     summary.ran.length > 0 ||
                     summary.failed.length > 0 ||
                     summary.skippedNoWork.length > 0 ||
+                    (summary.skipped?.length ?? 0) > 0 ||
                     summary.deferredBusy.length > 0 ||
                     Object.keys(summary.backlogBefore ?? {}).length > 0 ||
                     Object.keys(summary.backlogAfter ?? {}).length > 0;

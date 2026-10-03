@@ -1,6 +1,7 @@
 import type { createOpencodeClient } from "@opencode-ai/sdk";
 import { DreamTokenBudgetExceeded } from "../features/magic-context/dreamer/token-budget";
 import { detectOverflow } from "../features/magic-context/overflow-detection";
+import { HiddenCompletionRefusal } from "../hooks/magic-context/compartment-runner-types";
 import { HiddenAgentStepLimit } from "../v2/hooks/hidden-child";
 import {
     describeAssistantError,
@@ -116,6 +117,7 @@ export interface ValidatedPromptRetryResult<TOutput, TValidated> {
 export type PromptFailureClass =
     | "provider_timeout"
     | "provider_error"
+    | "local_refusal"
     | "step_limit"
     | "token_budget"
     | "empty_completion"
@@ -132,6 +134,7 @@ export interface PromptFailureDetail {
     providerError: string | null;
     timeoutMs: number | null;
     childSessionId: string | null;
+    refusalReason?: string | null;
 }
 
 const promptFailureDetails = new WeakMap<object, PromptFailureDetail>();
@@ -356,6 +359,7 @@ async function abortChildRun(client: Client, sessionId: string): Promise<void> {
 function isNonRetryable(error: unknown, externalSignal?: AbortSignal): boolean {
     if (
         externalSignal?.aborted ||
+        (error instanceof HiddenCompletionRefusal && error.terminal) ||
         error instanceof HiddenAgentStepLimit ||
         error instanceof DreamTokenBudgetExceeded
     )
@@ -400,6 +404,7 @@ function classifyPromptFailure(
     externalSignal?: AbortSignal,
 ): PromptFailureClass {
     const message = extractMessage(error);
+    if (error instanceof HiddenCompletionRefusal) return "local_refusal";
     if (error instanceof HiddenAgentStepLimit) return "step_limit";
     if (error instanceof DreamTokenBudgetExceeded) return "token_budget";
     if (externalSignal?.aborted || message === "prompt aborted by external signal") {
@@ -442,6 +447,11 @@ function throwWithPromptFailure(
         providerError,
         timeoutMs: failureClass === "provider_timeout" ? timeoutMs : null,
         childSessionId: transport ? (transport.childSessionId ?? null) : args.path.id || null,
+        ...(last?.error instanceof HiddenCompletionRefusal
+            ? {
+                  refusalReason: sanitizeDiagnosticText(last.error.message).slice(0, 500),
+              }
+            : {}),
     });
     throw error;
 }

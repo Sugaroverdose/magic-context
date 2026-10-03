@@ -446,6 +446,89 @@ export class V2StoreReader {
         return row?.time ?? undefined;
     }
 
+    /** Native user activity on root sessions; internal children must never become
+     * retrospective input. Activity is read from the source, not project-binding
+     * times or optional activity keys in Magic Context's store. */
+    rootSessionActivity(sessionIDs: readonly string[]): Map<string, number> {
+        const roots = new Map<string, number>();
+        for (let offset = 0; offset < sessionIDs.length; offset += 500) {
+            const chunk = sessionIDs.slice(offset, offset + 500);
+            const rows = this.db
+                .prepare(`SELECT id, (
+                    SELECT MAX(time_created) FROM session_message
+                    WHERE session_id = session_v2.id AND type = 'user'
+                ) AS time FROM session_v2
+                WHERE parent_id IS NULL
+                  AND COALESCE(json_extract(metadata, '$.magic_context'), '') <> 'hidden-run'
+                  AND id IN (${chunk.map(() => "?").join(",")})`)
+                .all(...chunk) as Array<{ id: string; time: number | null }>;
+            for (const row of rows) if (row.time !== null) roots.set(row.id, row.time);
+        }
+        return roots;
+    }
+
+    oldestUserMessageTimesSince(
+        sessionIDs: readonly string[],
+        sinceMs: number,
+    ): Map<string, number> {
+        const result = new Map<string, number>();
+        for (let offset = 0; offset < sessionIDs.length; offset += 500) {
+            const chunk = sessionIDs.slice(offset, offset + 500);
+            const rows = this.db
+                .prepare(`SELECT session_id, MIN(time_created) AS time FROM session_message
+                WHERE type = 'user' AND time_created > ? AND session_id IN (${chunk.map(() => "?").join(",")})
+                GROUP BY session_id`)
+                .all(sinceMs, ...chunk) as Array<{ session_id: string; time: number }>;
+            for (const row of rows) result.set(row.session_id, row.time);
+        }
+        return result;
+    }
+
+    /** Timestamp-bounded retrospective read. Project only genuine user text in
+     * SQLite, so assistant/tool payloads and unbounded pasted logs never enter JS. */
+    retrospectiveUserPage(
+        sessionID: string,
+        options: {
+            boundaryMs: number;
+            before?: boolean;
+            limit: number;
+            maxChars: number;
+            truncationMarker: string;
+        },
+    ): Array<{ seq: number; time_created: number; text: string }> {
+        const { boundaryMs, before, limit, maxChars, truncationMarker } = options;
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 10000)
+            throw new Error("Invalid page limit");
+        if (!Number.isSafeInteger(maxChars) || maxChars <= truncationMarker.length)
+            throw new Error("Invalid text limit");
+        const direction = before ? "DESC" : "ASC";
+        const head = Math.floor((maxChars - truncationMarker.length) / 2);
+        const tail = maxChars - truncationMarker.length - head;
+        return this.db
+            .prepare(`WITH users AS (
+            SELECT seq, time_created, data FROM session_message
+            WHERE session_id = ? AND type = 'user' AND time_created ${before ? "<=" : ">"} ?
+            ORDER BY time_created ${direction}, seq ${direction} LIMIT ?
+        ), texts AS (
+            SELECT seq, time_created, CASE
+                WHEN json_extract(data, '$.synthetic') = 1 OR json_extract(data, '$.ignored') = 1 THEN ''
+                WHEN json_type(data, '$.text') = 'text' THEN json_extract(data, '$.text')
+                ELSE COALESCE((SELECT group_concat(json_extract(value, '$.text'), char(10))
+                    FROM json_each(users.data, '$.content')
+                    WHERE json_extract(value, '$.type') IN ('text', 'input_text')
+                      AND COALESCE(json_extract(value, '$.synthetic'), 0) <> 1
+                      AND COALESCE(json_extract(value, '$.ignored'), 0) <> 1), '') END AS text
+            FROM users WHERE json_valid(data)
+        ) SELECT seq, time_created, CASE WHEN length(text) > ?
+            THEN substr(text, 1, ?) || ? || substr(text, -?) ELSE text END AS text
+          FROM texts ORDER BY time_created ${direction}, seq ${direction}`)
+            .all(sessionID, boundaryMs, limit, maxChars, head, truncationMarker, tail) as Array<{
+            seq: number;
+            time_created: number;
+            text: string;
+        }>;
+    }
+
     storedMessageCount(sessionID: string): number {
         return trackDecodeOperation("storedMessageCount", () => {
             const row = this.db

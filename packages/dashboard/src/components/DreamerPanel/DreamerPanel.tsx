@@ -710,9 +710,13 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
                             <td>{task() ? formatTaskLabel(task().name) : "—"}</td>
                             <td>
                               <span
-                                class={`dream-run-status ${run.tasks_failed > 0 ? "error" : "success"}`}
+                                class={`dream-run-status ${task()?.status === "skipped" ? "neutral" : run.tasks_failed > 0 ? "error" : "success"}`}
                               >
-                                {run.tasks_failed > 0 ? "failed" : "completed"}
+                                {task()?.status === "skipped"
+                                  ? "skipped"
+                                  : run.tasks_failed > 0
+                                    ? "failed"
+                                    : "completed"}
                               </span>
                             </td>
                             <td>{formatDuration(run.finished_at - run.started_at)}</td>
@@ -916,9 +920,13 @@ export default function DreamerPanel(props: DreamerPanelProps = {}) {
                                               <td>{formatTaskBacklog(task)}</td>
                                               <td>
                                                 <span
-                                                  class={`dream-run-status ${detail.tone === "error" ? "error" : "success"}`}
+                                                  class={`dream-run-status ${task.status === "skipped" ? "neutral" : detail.tone === "error" ? "error" : "success"}`}
                                                 >
-                                                  {detail.tone === "error" ? "✕" : "✓"}
+                                                  {task.status === "skipped"
+                                                    ? "skipped"
+                                                    : detail.tone === "error"
+                                                      ? "✕"
+                                                      : "✓"}
                                                 </span>
                                               </td>
                                               <td

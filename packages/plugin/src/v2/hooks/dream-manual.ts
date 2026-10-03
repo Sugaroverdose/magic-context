@@ -14,6 +14,7 @@ import {
 } from "../../features/magic-context/dreamer/task-scheduler";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import type { HiddenCompletionExecutor } from "../../hooks/magic-context/compartment-runner-types";
+import { V2RetrospectiveRawProvider } from "../retrospective-raw-provider";
 
 /** Validate the optional `/ctx-dream <task>` argument (mirrors the v1 command). */
 export function resolveManualDreamTask(raw: unknown): { task?: DreamTaskName; error?: string } {
@@ -87,6 +88,7 @@ export async function runManualDreamNow(args: {
         parentSessionId: args.sessionId,
         sessionDirectory: args.directory,
         openOpenCodeDb: () => null,
+        retrospectiveRawProvider: (db) => new V2RetrospectiveRawProvider(db),
         language: args.language,
         mural: args.mural,
     });

@@ -127,6 +127,17 @@ export function getFailingDreamTasks(db: Database, projectPath: string): DreamTa
         }));
 }
 
+/** Explicit unavailable/disabled outcomes, not activity-gate skips with no reason. */
+export function getSkippedDreamTasks(db: Database, projectPath: string): string[] {
+    return db
+        .prepare<[string], { task: string; last_error: string }>(`
+        SELECT task, last_error FROM task_schedule_state
+        WHERE project_path = ? AND last_status = 'skipped' AND last_error IS NOT NULL AND last_error <> ''
+        ORDER BY task`)
+        .all(projectPath)
+        .map((row) => `${row.task}: ${row.last_error}`);
+}
+
 /**
  * Most recent successful Dreamer task run for a project, as an epoch-ms value,
  * or null if no task has run yet. `last_run_at` advances only on task success

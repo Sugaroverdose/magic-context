@@ -359,6 +359,7 @@ export interface DreamerProject {
 export type DreamRunFailureClass =
   | "provider_timeout"
   | "provider_error"
+  | "local_refusal"
   | "empty_completion"
   | "no_models"
   | "child_aborted"
@@ -372,12 +373,15 @@ export interface DreamRunFailureDetail {
   provider_error: string | null;
   timeout_ms: number | null;
   child_session_id: string | null;
+  refusal_reason?: string | null;
 }
 
 export interface DreamRunTask {
   name: string;
   durationMs: number;
   resultChars: number;
+  status?: "completed" | "failed" | "skipped";
+  skipReason?: string;
   /** Failure detail only. Missing means no failure was recorded; an empty
    * string is treated as absent by the dashboard. */
   error?: string;

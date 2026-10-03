@@ -13,6 +13,8 @@ function nonEmpty(value: string | undefined): string | undefined {
 
 export function formatDreamRunFailureDetail(failure: DreamRunFailureDetail): string {
   const parts: string[] = [failure.failure_class];
+  if (failure.refusal_reason)
+    parts.push(`refused before reaching the model: ${failure.refusal_reason}`);
   if (failure.model_attempted) parts.push(`model: ${failure.model_attempted}`);
   if (failure.provider_error) {
     parts.push(failure.provider_error.split(/\r?\n/, 1)[0]?.trim() ?? "");
@@ -28,6 +30,8 @@ export function formatDreamRunFailureDetail(failure: DreamRunFailureDetail): str
  * failed tasks therefore renders that legacy value neutrally.
  */
 export function getDreamRunTaskDetail(task: DreamRunTask, tasksFailed: number): DreamRunTaskDetail {
+  if (task.status === "skipped")
+    return { text: `Skipped: ${task.skipReason ?? "unavailable"}`, tone: "neutral" };
   const error = nonEmpty(task.error);
   if (tasksFailed > 0 && task.failure) {
     return { text: formatDreamRunFailureDetail(task.failure), tone: "error" };
