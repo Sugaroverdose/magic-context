@@ -3136,7 +3136,13 @@ pub fn run(options: &EngineOptions, hooks: &mut dyn EngineHooks) -> Result<Repor
         if !context_migrated && marker.2.ends_with(schema::FRESH_INSTALL_MARKER_SUFFIX) {
             // A fresh store that McStore::open migrated, whose context.db flag the module
             // had not written yet. There is nothing to move; write the flag.
-            write_fresh_context_flag(&context_conn, marker.1.unwrap_or(options.now_ms), &marker.2)?;
+            if !options.dry_run {
+                write_fresh_context_flag(
+                    &context_conn,
+                    marker.1.unwrap_or(options.now_ms),
+                    &marker.2,
+                )?;
+            }
             return Ok(Report {
                 status: "already_migrated".into(),
                 migrated_at: marker.1,
@@ -3173,7 +3179,78 @@ pub fn run(options: &EngineOptions, hooks: &mut dyn EngineHooks) -> Result<Repor
     drop(context_conn);
     drop(store_conn);
 
+    if options.dry_run {
+        return dry_run_on_copies(options, hooks, store_version);
+    }
     backup(options)?;
+    migrate_files(options, hooks, store_version)
+}
+
+/// Run the whole migration against copies of both files and report what it would do.
+///
+/// The migration cannot run read-only: it upgrades an older `store.db` to the version it
+/// starts from, switches both files out of WAL mode, and runs its work in a write
+/// transaction it then rolls back. Done on the live files, a dry run would change
+/// `store.db` and create the backup directory, after which the real run with the same
+/// `--backup-dir` refuses with `BACKUP_DIR_EXISTS`. The copies are taken the same way the
+/// backup is (a checked `VACUUM INTO`), into a scratch directory beside the requested
+/// backup directory so they land on the same volume the real backup would use, and the
+/// directory is removed afterwards whatever the outcome.
+fn dry_run_on_copies(
+    options: &EngineOptions,
+    hooks: &mut dyn EngineHooks,
+    store_version: u32,
+) -> Result<Report, EngineError> {
+    let scratch = DryRunScratch::new(&options.backup_dir)?;
+    let mut copy = options.clone();
+    copy.backup_dir = scratch.path.clone();
+    backup_files(&copy)?;
+    copy.context_db = scratch.path.join("context.db");
+    copy.store_db = scratch.path.join("store.db");
+    let mut report = migrate_files(&copy, hooks, store_version)?;
+    // Nothing was backed up for the caller, and the sizes are those of the live file.
+    report.backup_dir = None;
+    report.store_db_bytes.before = file_len(&options.store_db);
+    Ok(report)
+}
+
+/// The scratch directory a dry run copies both files into, removed when dropped.
+struct DryRunScratch {
+    path: PathBuf,
+}
+
+impl DryRunScratch {
+    fn new(backup_dir: &Path) -> Result<Self, EngineError> {
+        let name = backup_dir
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "single-store-backup".to_string());
+        let path = backup_dir.with_file_name(format!(
+            "{name}.dry-run-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        // `create_dir` (not `create_dir_all`) so an existing directory is never adopted
+        // and then deleted by the drop below.
+        std::fs::create_dir(&path)?;
+        Ok(DryRunScratch { path })
+    }
+}
+
+impl Drop for DryRunScratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
+
+/// Everything after the backup: bring an older `store.db` up to the starting version,
+/// switch both files to rollback-journal mode, run the transaction, restore WAL, and on a
+/// real run compact `store.db`.
+fn migrate_files(
+    options: &EngineOptions,
+    hooks: &mut dyn EngineHooks,
+    store_version: u32,
+) -> Result<Report, EngineError> {
     if store_version < schema::PRE_SINGLE_STORE_VERSION {
         mc_store::migrate_store_to_pre_single_store(&options.store_db)?;
     }
