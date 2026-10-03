@@ -1111,3 +1111,252 @@ describe("bounded sentinel dump scans", () => {
         expect(scan(base + 39_000).filesExamined).toBe(0);
     }, 30_000);
 });
+
+describe("analyze-cache-bust wire-family meters (Broca cache-dump exports)", () => {
+    const brocaRoot = join(import.meta.dir, "test-fixtures", "cache-bust-broca");
+    const bodiesRoot = join(import.meta.dir, "test-fixtures", "cache-bust-bodies");
+    const analyzer = join(import.meta.dir, "analyze-cache-busts.ts");
+    const runAnalyzer = (args: string[]) =>
+        Bun.spawnSync([process.execPath, analyzer, ...args, "--mc-log", "/nonexistent"]);
+    const geminiRows = () =>
+        __test.analyzeSnapshots(
+            snapshotsFor(join(brocaRoot, "google-codeassist"), "alfonso:bg_geminiFixture"),
+        );
+
+    test("google_codeassist reads the Gemini meter: a hit stays STABLE, a zero read over an unchanged prefix is LATENCY", () => {
+        const rows = geminiRows();
+
+        expect(rows.map((row) => row.verdict)).toEqual([
+            "BASE",
+            "STABLE",
+            "LATENCY",
+            "LATENCY",
+            "STABLE",
+            "BUST",
+        ]);
+        const base = rows[0].current;
+        expect(base.wireFamily).toBe("google_codeassist");
+        expect(base.provider).toBe("gemini");
+        // promptTokenCount already includes cachedContentTokenCount: the total is
+        // the prompt count and the direct input is the prompt minus the cache read.
+        expect(base.usage).toMatchObject({
+            provider: "gemini",
+            total: 20_000,
+            cacheRead: 16_000,
+            input: 4_000,
+            output: 50,
+        });
+        // system + tools + one user turn: the Code Assist envelope was unwrapped.
+        expect(base.segments.map((segment) => segment.role)).toEqual(["system", "tools", "user"]);
+
+        // Hit: a 9-token dip below the previous read is meter jitter, not a miss.
+        expect(rows[1].comparableRead).toBe(15_991);
+        expect(rows[1].meterFloor).toBe(15_936);
+        expect(rows[1].byteVerdict).toBe("STABLE");
+
+        // Miss: nothing cached over an appended-only (byte-identical) prefix.
+        expect(rows[2].comparableRead).toBe(0);
+        expect(rows[2].byteVerdict).toBe("STABLE");
+        expect(rows[2].divergenceClass).toBe("provider_short_read_identical_bytes");
+    });
+
+    test("a partial Gemini read inside a miss run is still short against the read before the run", () => {
+        const rows = geminiRows();
+
+        // The previous request read nothing, so its uncached input is the whole
+        // prompt; the floor comes from the request before the miss instead.
+        expect(rows[3].verdict).toBe("LATENCY");
+        expect(rows[3].comparableRead).toBe(4_000);
+        expect(rows[3].meterReference?.file).toBe("run-sid-fixture-s2.meta.json");
+        expect(rows[3].meterFloor).toBe(15_927);
+        // The raw Code Assist `{response: {usageMetadata}}` shape is read too.
+        expect(rows[4].current.usage?.source).toBe("response.response.usageMetadata");
+        expect(rows[4].verdict).toBe("STABLE");
+        // An in-place rewrite of the first user turn is a byte bust at that turn.
+        expect(rows[5].divergenceIndex).toBe(2);
+        expect(rows[5].byteVerdict).toBe("BUST");
+    });
+
+    test("prints the wire family, the meter, and the metered count in the report", () => {
+        const run = runAnalyzer([
+            "--session",
+            "alfonso:bg_geminiFixture",
+            "--dir",
+            join(brocaRoot, "google-codeassist"),
+        ]);
+        const output = run.stdout.toString();
+
+        expect(run.exitCode).toBe(0);
+        expect(output).toContain("Provider: gemini (from wire_family; searched as explicit --dir)");
+        expect(output).toContain("Wire family: google_codeassist");
+        expect(output).toContain("Meter:    gemini (promptTokenCount/cachedContentTokenCount)");
+        expect(output).toContain("Metered:  6 of 6 analysed request(s) carry a usable meter reading.");
+        expect(output).toContain("2 latency-only short read(s)");
+    });
+
+    test("refuses with meter_missing when no request carries the meter's fields", () => {
+        const run = runAnalyzer([
+            "--session",
+            "alfonso:bg_geminiUnmetered",
+            "--dir",
+            join(brocaRoot, "google-codeassist-unmetered"),
+            "--all-rows",
+        ]);
+        const output = run.stdout.toString();
+
+        expect(run.exitCode).toBe(2);
+        expect(output).toContain(
+            "meter_missing: 2 of 2 requests carry no gemini usage (promptTokenCount/cachedContentTokenCount) (wire_family=google_codeassist)",
+        );
+        expect(output).toContain("Metered:  0 of 2 analysed request(s)");
+        expect(output).not.toContain("No metered busts");
+    });
+
+    test("refuses when the OpenAI meter is forced onto a Gemini export", () => {
+        const run = runAnalyzer([
+            "--session",
+            "alfonso:bg_geminiFixture",
+            "--dir",
+            join(brocaRoot, "google-codeassist"),
+            "--meter",
+            "openai",
+        ]);
+        const output = run.stdout.toString();
+
+        expect(run.exitCode).toBe(2);
+        expect(output).toContain(
+            "meter_missing: 6 of 6 requests carry no openai usage (prompt_tokens|input_tokens + cached_tokens) (wire_family=google_codeassist; meter forced by --meter)",
+        );
+        expect(output).not.toContain("No metered busts");
+    });
+
+    test("a recorded anthropic_messages or openai_responses wire family overrides the directory it was found in", () => {
+        for (const [source, family, provider, wrongDirFlag] of [
+            ["anthropic", "anthropic_messages", "anthropic", "--openai-dir"],
+            ["openai-auth", "openai_responses", "openai", "--anthropic-dir"],
+        ] as const) {
+            const dir = mkdtempSync(join(tmpdir(), `cache-bust-wire-family-${provider}-`));
+            tempDirs.push(dir);
+            const session = `ses_wireFamily${provider}`;
+            for (const index of [1, 2] as const) {
+                const stem = `2026-09-02T08-4${index}-00-000Z-00000${index}-${session}`;
+                writeDump(
+                    dir,
+                    stem,
+                    `2026-09-02T08:4${index}:00.000Z`,
+                    session,
+                    JSON.parse(readFileSync(join(bodiesRoot, source, `00${index}-request.json`), "utf8")),
+                    JSON.parse(readFileSync(join(bodiesRoot, source, `00${index}-response.json`), "utf8")),
+                );
+                const metaPath = join(dir, `${stem}.meta.json`);
+                const meta = JSON.parse(readFileSync(metaPath, "utf8")) as Record<string, unknown>;
+                writeFileSync(metaPath, JSON.stringify({ ...meta, wire_family: family }));
+            }
+            // Found under the other provider's directory, the dump is still read
+            // with its own body shape and meter because meta.json names them.
+            const snapshots = __test.loadSnapshots(
+                __test.parseArgs([
+                    "bun",
+                    "analyze-cache-busts.ts",
+                    "--session",
+                    session,
+                    wrongDirFlag,
+                    dir,
+                    wrongDirFlag === "--openai-dir" ? "--anthropic-dir" : "--openai-dir",
+                    join(dir, "missing"),
+                ]),
+            );
+            const row = __test.analyzeSnapshots(snapshots)[1];
+
+            expect(row.current.provider).toBe(provider);
+            expect(row.verdict).toBe("BUST");
+            expect(row.comparableRead).toBe(provider === "anthropic" ? 200 : 100);
+            expect(row.meterFloor).toBe(900);
+        }
+    });
+
+    // Dumps from the OpenCode auth plugins carry no wire family. Their report must
+    // stay byte-for-byte what it was before wire families existed; these goldens
+    // were captured from the analyzer before the wire-family change.
+    for (const [source, flag, session, golden] of [
+        [
+            "anthropic",
+            "--anthropic-dir",
+            "ses_anthropicGolden",
+            `Session:  ses_anthropicGolden
+Provider: anthropic (anthropic-auth)
+Dumps:    2  (dir: <dir>)
+
+Dashboard times are local (UTC+2); table times are UTC.
+Meter rule (anthropic): Anthropic explicit cache: cache_read_input_tokens + direct input versus prior read/write/input total. Short when the provider-comparable read < prevTotal - ε, ε=max(64, previous direct/uncached input); bytes distinguish BUST from LATENCY.
+time(UTC)          | segs | verdict          | meter                                                  | meterVsBytes | first-divergence                | prevBodyBytes → curBodyBytes | reusableNormalizedPrefix@breakpoint
+-------------------|------|------------------|--------------------------------------------------------|--------------|---------------------------------|-----------------------------|------------------------
+09-02 08:41:00 UTC |    2 | BASE             |                                                        |              | (first request)                 |                             |
+09-02 08:42:00 UTC |    2 | BUST (meter)     | read=100 + input=100 = 200; floor=900 (prevTotal=1,000, ε=100); rewritten≈800 | AGREE        | message[1] role=user parts=[text(19)] text="cached prefix after" (bytes BUST) | 417B → 416B                 | message[0] role=system parts=[text(13)] text="stable system" (77B)
+          └─ divergence-class: no_mc_pass_row
+          └─ segment diff @char 63:
+             prev: {"role":"user","content":[{"type":"text","text":"cached prefix [before]"}]}
+             cur:  {"role":"user","content":[{"type":"text","text":"cached prefix [after]"}]}
+
+1 metered bust(s) across 2 request(s).
+`,
+        ],
+        [
+            "openai-auth",
+            "--openai-dir",
+            "ses_openaiGolden",
+            `Session:  ses_openaiGolden
+Provider: openai (openai-auth)
+Dumps:    2  (dir: <dir>)
+
+Dashboard times are local (UTC+2); table times are UTC.
+Meter rule (openai): OpenAI implicit-prefix cache: prompt_tokens_details.cached_tokens; no write premium. Short when the provider-comparable read < prevTotal - ε, ε=max(64, previous direct/uncached input); bytes distinguish BUST from LATENCY.
+time(UTC)          | segs | verdict          | meter                                                  | meterVsBytes | first-divergence                | prevBodyBytes → curBodyBytes | reusableNormalizedPrefix@breakpoint
+-------------------|------|------------------|--------------------------------------------------------|--------------|---------------------------------|-----------------------------|------------------------
+09-02 08:41:00 UTC |    2 | BASE             |                                                        |              | (first request)                 |                             |
+09-02 08:42:00 UTC |    2 | BUST (meter)     | cached=100; floor=900 (prevTotal=1,000, ε=100); rewritten≈900 | AGREE        | message[1] role=user parts=[input_text(19)] text="cached prefix after" (bytes BUST) | 251B → 250B                 | (none) (0B)
+          └─ divergence-class: no_mc_pass_row
+          └─ segment diff @char 69:
+             prev: {"role":"user","content":[{"type":"input_text","text":"cached prefix [before]"}]}
+             cur:  {"role":"user","content":[{"type":"input_text","text":"cached prefix [after]"}]}
+
+1 metered bust(s) across 2 request(s).
+`,
+        ],
+    ] as const) {
+        test(`${source} dumps without a wire family keep the pre-wire-family report byte for byte`, () => {
+            const dir = mkdtempSync(join(tmpdir(), `cache-bust-golden-${source}-`));
+            tempDirs.push(dir);
+            for (const index of [1, 2] as const) {
+                // Raw copies keep the fixture's exact body bytes, which the report prints.
+                const stem = `2026-09-02T08-4${index}-00-000Z-00000${index}-${session}`;
+                writeFileSync(
+                    join(dir, `${stem}.body.json`),
+                    readFileSync(join(bodiesRoot, source, `00${index}-request.json`)),
+                );
+                writeFileSync(
+                    join(dir, `${stem}.response.json`),
+                    readFileSync(join(bodiesRoot, source, `00${index}-response.json`)),
+                );
+                writeFileSync(
+                    join(dir, `${stem}.meta.json`),
+                    JSON.stringify({ createdAt: `2026-09-02T08:4${index}:00.000Z` }),
+                );
+            }
+            const other = flag === "--anthropic-dir" ? "--openai-dir" : "--anthropic-dir";
+            const run = runAnalyzer([
+                "--session",
+                session,
+                flag,
+                dir,
+                other,
+                join(dir, "missing"),
+                "--all-rows",
+                "--show-diff",
+            ]);
+
+            expect(run.exitCode).toBe(0);
+            expect(run.stdout.toString().replaceAll(dir, "<dir>")).toBe(golden);
+        });
+    }
+});
