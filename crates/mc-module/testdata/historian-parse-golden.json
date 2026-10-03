@@ -1,0 +1,179 @@
+[
+  {
+    "label": "well-formed tiers, facts and side channels",
+    "text": "<output>\n<compartments>\n<compartment start=\"1\" end=\"2\" title=\"Setup\" episode_type=\"infra\" importance=\"40\">\n<p1>did setup</p1>\n<p2>did setup short</p2>\n<p3>did setup shorter</p3>\n<p4/>\n</compartment>\n</compartments>\n<facts>\n<PROJECT_RULES>\n* Keep goldens deterministic.\n</PROJECT_RULES>\n</facts>\n<events><causal_incident at_compartment=\"1\"><summary>Setup broke.</summary></causal_incident></events>\n<user_observations>\n* Prefers short answers.\n</user_observations>\n<primer_candidates><primer at_compartment=\"1\">How is setup done?</primer></primer_candidates>\n<meta><unprocessed_from>3</unprocessed_from></meta>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "Setup",
+          "content": "did setup",
+          "p1": "did setup",
+          "p2": "did setup short",
+          "p3": "did setup shorter",
+          "p4": "",
+          "importance": 40,
+          "episode_type": "infra"
+        }
+      ],
+      "facts": [
+        {
+          "category": "PROJECT_RULES",
+          "content": "Keep goldens deterministic.",
+          "origin_compartment_index": null
+        }
+      ],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 1,
+          "fields": {
+            "summary": "Setup broke."
+          }
+        }
+      ],
+      "unprocessed_from": 3,
+      "user_observations": [
+        {
+          "content": "Prefers short answers.",
+          "origin_compartment_index": null
+        }
+      ],
+      "primer_candidates": [
+        {
+          "question": "How is setup done?",
+          "origin_compartment_index": 1
+        }
+      ]
+    }
+  },
+  {
+    "label": "mismatched and missing tier closes stay lenient",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"mismatch\"><p1>first</p2><p2>second</p1><p3>third</p3><p4 /></compartment>\n<compartment start=\"3\" end=\"4\" title=\"missing\"><p1>first body<p2>second body</p2><p3>third</p3><p4/></compartment>\n<compartment start=\"5\" end=\"6\" title=\"overcapture\"><p1>alpha<p2>beta</p1><p3>gamma</p3><p4/></compartment>\n<compartment start=\"7\" end=\"8\" title=\"flat\">just flat content</compartment>\n</compartments></output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "mismatch",
+          "content": "first",
+          "p1": "first",
+          "p2": "second",
+          "p3": "third",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "missing",
+          "content": "first body",
+          "p1": "first body",
+          "p2": "second body",
+          "p3": "third",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 5,
+          "end_message": 6,
+          "title": "overcapture",
+          "content": "alpha",
+          "p1": "alpha",
+          "p2": "beta",
+          "p3": "gamma",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 7,
+          "end_message": 8,
+          "title": "flat",
+          "content": "just flat content",
+          "p1": null,
+          "p2": null,
+          "p3": null,
+          "p4": null,
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [],
+      "unprocessed_from": null,
+      "user_observations": [],
+      "primer_candidates": []
+    }
+  },
+  {
+    "label": "xml entities decode exactly once",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"A &amp;lt; B &quot;q&quot;\" episode_type=\"x&amp;amp;y\">\n<p1>Use &amp;lt; entity &amp;amp; &lt;tag&gt; &apos;s &amp;gt;</p1>\n<p2>Use &amp;lt; entity &amp;amp; &lt;tag&gt; &apos;s &amp;gt; short</p2>\n<p3>Use &amp;lt; entity &amp;amp; &lt;tag&gt; &apos;s &amp;gt; shorter</p3>\n<p4/>\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"flat\">Flat &amp;quot; body &amp; more</compartment>\n</compartments>\n<facts>\n<ARCHITECTURE>\n* Escape with &amp;amp; before &amp;lt;.\n</ARCHITECTURE>\n</facts>\n<events><causal_incident at_compartment=\"1\"><summary>Saw &amp;lt;p1&amp;gt; literally</summary></causal_incident></events>\n<user_observations>\n* Writes &amp;apos; often.\n</user_observations>\n<primer_candidates><primer at_compartment=\"1\">What is &amp;quot;?</primer></primer_candidates>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "A &lt; B \"q\"",
+          "content": "Use &lt; entity &amp; <tag> 's &gt;",
+          "p1": "Use &lt; entity &amp; <tag> 's &gt;",
+          "p2": "Use &lt; entity &amp; <tag> 's &gt; short",
+          "p3": "Use &lt; entity &amp; <tag> 's &gt; shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": "x&amp;y"
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "flat",
+          "content": "Flat &quot; body & more",
+          "p1": null,
+          "p2": null,
+          "p3": null,
+          "p4": null,
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [
+        {
+          "category": "ARCHITECTURE",
+          "content": "Escape with &amp; before &lt;.",
+          "origin_compartment_index": null
+        }
+      ],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 1,
+          "fields": {
+            "summary": "Saw &lt;p1&gt; literally"
+          }
+        }
+      ],
+      "unprocessed_from": null,
+      "user_observations": [
+        {
+          "content": "Writes &apos; often.",
+          "origin_compartment_index": null
+        }
+      ],
+      "primer_candidates": [
+        {
+          "question": "What is &quot;?",
+          "origin_compartment_index": 1
+        }
+      ]
+    }
+  }
+]

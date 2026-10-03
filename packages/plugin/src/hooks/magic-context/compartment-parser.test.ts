@@ -471,3 +471,20 @@ the full p1 narrative
         expect(c.content).toBe("just flat content, no tiers here");
     });
 });
+
+describe("parseCompartmentOutput — body text and attribute robustness", () => {
+    const tiers = (p1: string) => `<p1>${p1}</p1>\n<p2>short</p2>\n<p3>shorter</p3>\n<p4/>`;
+
+    it("decodes each XML entity exactly once", () => {
+        const parsed = parseCompartmentOutput(`<output><compartments>
+<compartment start="1" end="2" title="A &amp;lt; B">
+${tiers("Use &amp;lt; entity &amp;amp; &lt;tag&gt;")}
+</compartment>
+</compartments>
+<primer_candidates><primer at_compartment="1">What is &amp;quot;?</primer></primer_candidates>
+</output>`);
+        expect(parsed.compartments[0].title).toBe("A &lt; B");
+        expect(parsed.compartments[0].p1).toBe("Use &lt; entity &amp; <tag>");
+        expect(parsed.primerCandidates[0].question).toBe("What is &quot;?");
+    });
+});

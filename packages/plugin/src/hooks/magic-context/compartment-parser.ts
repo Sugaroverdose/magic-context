@@ -339,11 +339,22 @@ function parseEvents(text: string): ParsedEvent[] {
     return events;
 }
 
+const XML_ENTITY_REGEX = /&(amp|apos|quot|lt|gt);/g;
+const XML_ENTITIES: Readonly<Record<string, string>> = {
+    amp: "&",
+    apos: "'",
+    quot: '"',
+    lt: "<",
+    gt: ">",
+};
+
+/**
+ * Decode the five predefined XML entities in a single left-to-right pass, so
+ * every entity is decoded exactly once. Chained replacements that decode
+ * `&amp;` first would turn the escaped literal `&amp;lt;` into `<` instead of
+ * the text `&lt;`. The Rust parser (`historian_validate::unescape_xml`) must
+ * stay identical.
+ */
 function unescapeXml(s: string): string {
-    return s
-        .replace(/&amp;/g, "&")
-        .replace(/&apos;/g, "'")
-        .replace(/&quot;/g, '"')
-        .replace(/&lt;/g, "<")
-        .replace(/&gt;/g, ">");
+    return s.replace(XML_ENTITY_REGEX, (entity, name: string) => XML_ENTITIES[name] ?? entity);
 }

@@ -1178,12 +1178,28 @@ fn split_anchor_prefix(text: &str) -> (Option<u64>, String) {
     (None, text.trim().to_string())
 }
 
+/// Decode the five predefined XML entities in a single left-to-right pass, so
+/// every entity is decoded exactly once. Chained replacements that decode
+/// `&amp;` first would turn the escaped literal `&amp;lt;` into `<` instead of
+/// the text `&lt;`. Mirrors `unescapeXml` in the TypeScript parser.
 fn unescape_xml(s: &str) -> String {
-    s.replace("&amp;", "&")
-        .replace("&apos;", "'")
-        .replace("&quot;", "\"")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
+    xml_entity_regex()
+        .replace_all(s, |caps: &regex::Captures<'_>| {
+            match caps.get(1).map(|m| m.as_str()) {
+                Some("amp") => "&",
+                Some("apos") => "'",
+                Some("quot") => "\"",
+                Some("lt") => "<",
+                Some("gt") => ">",
+                _ => unreachable!("xml_entity_regex only captures the five predefined entities"),
+            }
+        })
+        .into_owned()
+}
+
+fn xml_entity_regex() -> &'static Regex {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    RE.get_or_init(|| Regex::new(r"&(amp|apos|quot|lt|gt);").unwrap())
 }
 
 fn output_document_regex() -> &'static Regex {
@@ -1487,6 +1503,29 @@ mod tests {
                 "validation mismatch in {}",
                 case.label
             );
+        }
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct ParseGoldenCase {
+        label: String,
+        text: String,
+        parsed: ParsedCompartmentOutput,
+    }
+
+    /// Parser parity with the TypeScript host: the golden records what
+    /// `parseCompartmentOutput` returns for each raw historian output
+    /// (regenerate with `bun crates/mc-module/gen/gen-historian-parse-golden.ts`).
+    #[test]
+    fn parse_golden_matches_typescript_parser() {
+        let raw = include_str!("../testdata/historian-parse-golden.json");
+        let cases: Vec<ParseGoldenCase> =
+            serde_json::from_str(raw).expect("parse historian parse golden");
+        assert!(!cases.is_empty(), "empty historian parse golden");
+        for case in &cases {
+            let parsed = parse_compartment_output(&case.text)
+                .unwrap_or_else(|error| panic!("{} failed to parse: {error}", case.label));
+            assert_eq!(parsed, case.parsed, "parsed mismatch in {}", case.label);
         }
     }
 
