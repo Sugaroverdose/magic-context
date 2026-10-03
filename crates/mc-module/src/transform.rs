@@ -12543,9 +12543,51 @@ fn directive_block_end(text: &str, body_start: usize) -> usize {
     text.len()
 }
 
+/// OpenCode up to 1.17.8 wrapped a user message sent while the agent was still running in this
+/// exact reminder before plugins saw it (1.17.9 removed the wrapper). The body is the user's own
+/// words, so it is never an injection: stripping it would empty the block and drop the user's
+/// instruction for good. The trailer anchors the match, so a reminder the user's text itself
+/// contains stays inside the preserved block. Twin of `STEERING_WRAPPER_REGEX` in
+/// `packages/plugin/src/hooks/magic-context/system-injection-stripper.ts`.
+fn steering_wrapper_regex() -> &'static regex::Regex {
+    static STEERING_WRAPPER: OnceLock<regex::Regex> = OnceLock::new();
+    STEERING_WRAPPER.get_or_init(|| {
+        regex::Regex::new(
+            r"(?s)<system-reminder>\nThe user sent the following message:\n.*?\n\nPlease address this message and continue with your tasks\.\n</system-reminder>",
+        )
+        .unwrap()
+    })
+}
+
 /// Remove known injected regions while retaining authored text around them. A returned empty
 /// string means the caller should preserve the message/block shape with its provider sentinel.
 fn strip_system_injection(text: &str) -> Option<String> {
+    let wrappers: Vec<regex::Match<'_>> = steering_wrapper_regex().find_iter(text).collect();
+    if wrappers.is_empty() {
+        return strip_injected_regions(text);
+    }
+    // Strip only the text between wrapped user messages; keep each wrapper verbatim.
+    let mut result = String::with_capacity(text.len());
+    let mut changed = false;
+    let mut keep_or_strip =
+        |segment: &str, result: &mut String| match strip_injected_regions(segment) {
+            Some(stripped) => {
+                result.push_str(&stripped);
+                changed = true;
+            }
+            None => result.push_str(segment),
+        };
+    let mut cursor = 0;
+    for wrapper in wrappers {
+        keep_or_strip(&text[cursor..wrapper.start()], &mut result);
+        result.push_str(wrapper.as_str());
+        cursor = wrapper.end();
+    }
+    keep_or_strip(&text[cursor..], &mut result);
+    changed.then(|| result.trim().to_string())
+}
+
+fn strip_injected_regions(text: &str) -> Option<String> {
     let has_injection = SYSTEM_INJECTION_MARKERS
         .iter()
         .any(|marker| text.contains(marker))
@@ -17278,6 +17320,56 @@ pub(crate) mod tests {
             let source = format!("authored\n\n{marker}\ntransport details");
             assert_eq!(strip_system_injection(&source).as_deref(), Some("authored"));
         }
+    }
+
+    /// Byte-exact shape OpenCode 1.17.8 hands plugins for a user message sent mid-run.
+    fn steering_wrapped(user_text: &str) -> String {
+        format!(
+            "<system-reminder>\nThe user sent the following message:\n{user_text}\n\nPlease address this message and continue with your tasks.\n</system-reminder>"
+        )
+    }
+
+    #[test]
+    fn steering_wrapped_user_message_survives_injection_strip_on_bust() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = store(dir.path());
+        let wrapped = steering_wrapped("Stop and use the staging database instead.");
+        let mut messages = vec![wire_item("user", "steer", 1, &[wrapped.as_str()])];
+        messages.extend(
+            (2..=41).map(|ordinal| item(&format!("tail-{ordinal}"), ordinal, "authored tail")),
+        );
+        let request = req("steering-wrapper", "cfg0", messages);
+
+        let bust = run(&store, &request, &spine());
+        assert_eq!(bust.action, "HARD");
+        assert_eq!(tail_bytes(&bust, "steer"), wrapped);
+        let frozen = store.load("steering-wrapper").unwrap();
+        assert!(
+            !frozen
+                .core
+                .frozen_units
+                .iter()
+                .any(|unit| unit.key.contains("steer")),
+            "a wrapped user message must not freeze a strip unit"
+        );
+    }
+
+    #[test]
+    fn steering_wrapper_is_kept_while_harness_reminders_around_it_strip() {
+        let wrapped = steering_wrapped("use staging");
+        assert_eq!(strip_system_injection(&wrapped), None);
+        let nested = steering_wrapped("quote <system-reminder>x</system-reminder> then go");
+        assert_eq!(strip_system_injection(&nested), None);
+        let mixed =
+            format!("{wrapped}\n\n<system-reminder>\nPlan mode is active.\n</system-reminder>");
+        assert_eq!(
+            strip_system_injection(&mixed).as_deref(),
+            Some(wrapped.as_str())
+        );
+        assert_eq!(
+            strip_system_injection("<system-reminder>internal</system-reminder>").as_deref(),
+            Some("")
+        );
     }
 
     fn planning_carrier(id: &str, ordinal: u64, bytes: usize) -> CkIngressMessage {
