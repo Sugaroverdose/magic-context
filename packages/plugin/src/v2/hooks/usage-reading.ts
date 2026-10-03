@@ -1,3 +1,5 @@
+import { isSuccessfulProviderCompletion } from "../../shared/provider-response-completion";
+
 export interface UsageReadingInput {
     rowModel?: { providerID?: unknown; id?: unknown };
     draftModel: { providerID: string; id: string };
@@ -7,6 +9,8 @@ export interface UsageReadingInput {
         cache?: { read?: number; write?: number };
     };
     completed?: number;
+    finish?: string;
+    error?: unknown;
     /** Resolve the output-reserved usable window for a model. */
     limitFor: (providerID: string, modelID: string) => number;
 }
@@ -20,6 +24,8 @@ export interface UsageReading {
     /** Absent when a legacy row carries no model metadata. */
     modelKey?: string;
     completed?: number;
+    finish?: string;
+    error?: unknown;
 }
 
 export function usageReadingMatchesDraft(
@@ -39,7 +45,12 @@ export function usageReadingMatchesDraft(
  */
 export function resolveUsageReading(input: UsageReadingInput): UsageReading | undefined {
     const { tokens } = input;
-    if (!tokens) return undefined;
+    const successfulCompletion = isSuccessfulProviderCompletion({
+        completedAt: input.completed,
+        finish: input.finish,
+        error: input.error,
+    });
+    if (!tokens && !successfulCompletion) return undefined;
     const numeric = (value: unknown): number =>
         typeof value === "number" && Number.isFinite(value) ? value : 0;
     const rowProviderID =
@@ -48,9 +59,9 @@ export function resolveUsageReading(input: UsageReadingInput): UsageReading | un
     const measuredProviderID = rowProviderID ?? input.draftModel.providerID;
     const measuredModelID = rowModelID ?? input.draftModel.id;
     const inputTokens =
-        numeric(tokens.input) + numeric(tokens.cache?.read) + numeric(tokens.cache?.write);
+        numeric(tokens?.input) + numeric(tokens?.cache?.read) + numeric(tokens?.cache?.write);
     const limit = input.limitFor(measuredProviderID, measuredModelID);
-    if (!Number.isFinite(limit) || limit <= 0) return undefined;
+    if ((!Number.isFinite(limit) || limit <= 0) && !successfulCompletion) return undefined;
     const sameModel =
         measuredProviderID === input.draftModel.providerID &&
         measuredModelID === input.draftModel.id;
@@ -67,5 +78,7 @@ export function resolveUsageReading(input: UsageReadingInput): UsageReading | un
         ...(typeof input.completed === "number" && Number.isFinite(input.completed)
             ? { completed: input.completed }
             : {}),
+        ...(input.finish !== undefined ? { finish: input.finish } : {}),
+        ...(input.error !== undefined ? { error: input.error } : {}),
     };
 }

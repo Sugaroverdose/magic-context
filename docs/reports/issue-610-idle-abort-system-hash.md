@@ -1,5 +1,75 @@
 # Issue 610: an aborted idle refresh followed by a late system hash
 
+## Completion follow-up: providers that omit usage
+
+Review identified a loop left by a usage-only clock owner: after a model/provider
+switch to responses without token accounting, the first expiry would remain
+armed indefinitely. The corrected rule is **served response**, not **usage**:
+positive usage without a failure is one proof; a non-failed terminal assistant
+completion is another. No clock write is made merely for preparing a request.
+Clock writes are monotonic: a delayed usage-bearing update cannot move the
+clock back after a newer successful usage-less reply.
+
+The shared `provider-response-completion.ts` predicate gives failure precedence
+over finish/timestamps. An error object, or an error/abort/interrupted finish,
+cannot refresh the clock. OpenCode 1 updates the clock even when its pressure
+map is empty, before the no-usage early return, using the reported completion
+time (or event time for finish-only updates). Native OpenCode 2 passes stored
+finish/error/completion through its usage reader; omitted usage or an unknown
+window still permits a completion-only clock write without zeroing the last
+measured pressure. Legacy finish-only stored rows use a stable stored message
+time, not a fresh timestamp on every reread. Pi/OMP stamp at successful
+assistant `message_end`; their `timestamp` is the message **start**, not its end.
+
+Real throwaway-host observations with all-zero usage:
+
+| Host | Successful terminal record | Failed/aborted record | Clock result |
+| --- | --- | --- | --- |
+| OpenCode 1.18.30 | `finish="stop"`, `time.completed`, zero token fields | `error.name="MessageAbortedError"` and `time.completed` | success advances; abort does not |
+| OpenCode 2.0.22 | `finish="stop"`, `time.completed`, zero token fields | `finish="error"`, `error={type:"aborted",message:"Step interrupted"}`, `time.completed` | success advances; interrupt does not |
+| Pi 0.87.1 | `stopReason="stop"`, zero usage | real refusal: `stopReason="error"`, nonempty `errorMessage`, zero usage | success advances; refusal does not |
+| OMP 18.2.6 | `stopReason="stop"`, zero usage | real refusal: `stopReason="error"`, nonempty `errorMessage`, zero usage | success advances; refusal does not |
+
+Pi's pinned RPC `abort` waits for idle and did not acknowledge or emit a terminal
+event in the held-stream probe (bounded at 5 seconds); no passing real Pi abort
+is claimed. Its deployed assistant/stream API reports `stopReason="aborted"`
+with `errorMessage` on cancellation, and the `message_end` unit fixture exercises
+that distinct shape directly. The real Pi drive covers the successful no-usage
+record and provider-error veto; OpenCode 1 and 2 additionally cover actual aborts.
+
+The new portable host scenario first serves usage, switches to zero-usage
+completion (an actual second model on OpenCode 1), ages the persisted clocks,
+and observes **one execute**, followed by **defer** after the successful
+zero-usage reply. Units independently switch model identities and prove the
+same expiry-once invariant for all three clock writers. Reinstating usage-only
+completion proof makes each named switch test fail at its clock assertion;
+the old abort/error vetoes remain. The original midnight abort/resend real-host
+cases pass unchanged after this completion correction.
+
+The former native-v2 test inferred a refusal from zero tokens alone. It now
+supplies an explicit error while retaining the assertion that refusal cannot
+advance the clock; a separate successful no-usage test covers the broadened
+contract. The rejection-pressure test still proves an old accepted reading
+cannot overwrite newer rejection pressure, but now also requires the refusal
+to leave the cache clock unchanged. The Pi test name was updated to describe
+served assistants rather than incorrectly requiring usage for every success.
+
+This follow-up introduces **no request-byte mutations**: it changes only
+completion/clock persistence and decision binding. After one real expiry, a
+successful usage-less reply closes idle ride permission and silent hash
+adoption just as a usage-bearing reply does. An errored or aborted attempt
+still leaves the original expiry armed. It needs no database migration.
+
+Follow-up verification: 333 impacted OpenCode tests and 27 Pi tests passed in
+separate package processes, both package typecheck scripts passed (TypeScript
+5.9.3), and `bun run build` passed (Bun 1.4.2). The real OpenCode 1 switch case,
+both original midnight abort/resend variants and warm-midnight control passed;
+the native OpenCode 2 switch/interrupt case and Pi/OMP success/refusal cases also
+passed. Three isolated red-before controls ignored usage-less successful
+completion and failed the exact switch tests at timestamp assertions, then
+restored with empty diffs. The e2e compiler scope has zero changed-file errors;
+24 unrelated full-project diagnostics remain in that follow-up check.
+
 ## What the supplied trace proves
 
 Read issue 610 and all five comments, the diagnostic attachment, and all 699 lines
@@ -24,8 +94,9 @@ queuing a second head rewrite after the first request had recached it.
 
 ## Changes and precise byte scope
 
-* Remove the prepare-time response-clock write. Provider usage remains the
-  clock's owner. The persisted materialization timestamp still consumes the
+* Remove the prepare-time response-clock write. Served responses remain the
+  clock's owner, including successful completions without usage. The persisted
+  materialization timestamp still consumes the
   first idle fold: an expired retry does not fold the same head twice.
 * Price newly queued work on an expired retry even if its head was already
   prepared by the aborted attempt. That retry is still provider-cold.
@@ -244,10 +315,9 @@ non-empty mutation diff captured and an empty diff after checkout/touch restore:
    The same named real-host test passed after restoring the source.
 
 All mutation markers were restored; none remains in production.
-One additional writer, `storage-meta-persisted.ts:recordOverflowDetected`, stamps
-a rejection-derived pressure reading's clock when an error reports input size.
-That different overflow flow was not the usage-less abort in this report and is
-not changed here; it remains a separately reviewable clock-ownership question.
+The completion follow-up below also removes the rejection-derived clock write
+from `storage-meta-persisted.ts:recordOverflowDetected`. It still records recovery
+pressure, but a provider refusal cannot refresh the response clock.
 
 All XDG data/config/state/runtime roots, `OPENCODE_DB` and
 `MAGIC_CONTEXT_STORAGE_DIR` were throwaway paths under

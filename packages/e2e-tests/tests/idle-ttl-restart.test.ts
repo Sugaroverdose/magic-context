@@ -20,6 +20,9 @@ import {
 import { openTestDb } from "../src/test-db";
 import { createE2ETempDir } from "../src/temp-dir";
 import { PLUGIN_ENTRY } from "../src/opencode-runner/spawn";
+import { TestHarness } from "../src/harness";
+import { PiTestHarness } from "../src/pi-harness";
+import { OpenCode } from "@opencode/client";
 
 const IDLE = 16.5 * 60 * 60 * 1000;
 const LOW_USAGE = {
@@ -581,6 +584,220 @@ export default async (ctx) => {
 }
 
 forEachHost(import.meta.url, "idle TTL head replay", (host) => {
+	it("completed replies without usage spend one expiry after a reporting/model switch, but failures do not", async () => {
+		const oldLogPath = process.env.MAGIC_CONTEXT_LOG_PATH;
+		const logPath = join(createE2ETempDir("no-usage-clock-"), "pass.log");
+		process.env.MAGIC_CONTEXT_LOG_PATH = logPath;
+		const h = await createScenarioHarness(host, {
+			modelContextLimit: 100_000,
+			historianMockModel: { id: "usage-less", contextLimit: 100_000 },
+			magicContextConfig: {
+				cache_ttl: { default: "1h" },
+				execute_threshold_percentage: 90,
+				historian: { disable: true },
+			},
+			mockDefault: { text: "measured answer", usage: LOW_USAGE },
+		});
+		try {
+			const session = await createFreshSession(h);
+			const clock = () =>
+				(
+					h
+						.contextDb()
+						.prepare(
+							"SELECT last_response_time AS at FROM session_meta WHERE session_id = ? AND harness = ?",
+						)
+						.get(session, h.harnessId) as { at: number }
+				).at;
+			const logs = () =>
+				host === "opencode2"
+					? (
+							h as unknown as { opencode: { pluginLog: () => string } }
+						).opencode.pluginLog()
+					: existsSync(logPath)
+						? readFileSync(logPath, "utf8")
+						: "";
+			const send = (text: string) =>
+				h instanceof TestHarness
+					? h.sendPrompt(session, text, {
+							modelID:
+								text === "initial measured reply"
+									? "mock-sonnet"
+									: "usage-less",
+							timeoutMs: 60_000,
+						})
+					: h.sendPrompt(session, text, { timeoutMs: 60_000 });
+			await send("initial measured reply");
+			await h.waitForMockQuiescence();
+			const measuredClock = clock();
+			expect(measuredClock).toBeGreaterThan(0);
+			h.mock.setDefault({
+				text: "completed without usage",
+				usage: { input_tokens: 0, output_tokens: 0 },
+			});
+			await send("switch to replies without usage");
+			await send("settle the new model identity");
+			await h.waitForMockQuiescence();
+			expect(clock()).toBeGreaterThan(measuredClock);
+			expire(h, session);
+			const expiredClock = clock();
+			const start = Date.now();
+			await send("one expired request with no usage");
+			await h.waitFor(() => clock() > expiredClock, {
+				timeoutMs: 5_000,
+				label: "usage-less completion spends expiry",
+			});
+			await send("warm request with no usage");
+			await h.waitForMockQuiescence();
+			await h.waitFor(
+				() =>
+					logs()
+						.split("\n")
+						.filter(
+							(line) =>
+								line.includes(session) &&
+								Date.parse(line.slice(1, 25)) >= start &&
+								/decision=/.test(line),
+						).length >= 2,
+				{ timeoutMs: 5_000, label: "no-usage scheduler logs" },
+			);
+			const passLog = logs()
+				.split("\n")
+				.filter(
+					(line) =>
+						line.includes(session) &&
+						Date.parse(line.slice(1, 25)) >= start &&
+						/decision=|rematerialized/.test(line),
+				);
+			expect(
+				passLog.filter((line) =>
+					/(?:scheduler:|transform: usage=).*decision=execute/.test(line),
+				),
+			).toHaveLength(1);
+			expect(passLog.some((line) => /decision=defer/.test(line))).toBe(true);
+			const beforeAbort = clock();
+			const count = h.requests().length;
+			// Hold an active stream so the abort precedes any clean terminal reply.
+			h.mock.enqueue(
+				h instanceof PiTestHarness
+					? {
+							error: {
+								status: 400,
+								type: "invalid_request_error",
+								message: "Request refused without serving a response.",
+							},
+						}
+					: {
+							text: "not served",
+							usage: { input_tokens: 0, output_tokens: 0 },
+							streamHoldMs: 3_000,
+						},
+			);
+			const aborted = send("abort a usage-less attempt").catch((error) =>
+				String(error),
+			);
+			await h.waitFor(() => h.requests().length > count, {
+				label: "usage-less abort reaches provider",
+			});
+			if (h instanceof TestHarness) {
+				expect(
+					(
+						await fetch(`${h.serverUrl}/session/${session}/abort`, {
+							method: "POST",
+						})
+					).ok,
+				).toBe(true);
+			} else if (h instanceof PiTestHarness) {
+				// Exercise the real failure record. The pinned Pi RPC abort
+				// waits indefinitely for idle in this held-stream drive; its
+				// distinct "aborted" stop reason is covered by the message_end
+				// unit fixture rather than claiming a real abort completed here.
+			} else {
+				const oc = (
+					h as unknown as { opencode: { url: string; password: string } }
+				).opencode;
+				await OpenCode.make({
+					baseUrl: oc.url,
+					headers: {
+						authorization: `Basic ${btoa(`opencode:${oc.password}`)}`,
+					},
+				}).session.interrupt({ sessionID: session });
+			}
+			await aborted;
+			await h.waitForMockQuiescence();
+			let assistantStates: unknown;
+			if (h instanceof TestHarness) {
+				const messages = (await (
+					await fetch(`${h.serverUrl}/session/${session}/message`)
+				).json()) as { info: Record<string, unknown> }[];
+				assistantStates = messages
+					.filter((message) => message.info.role === "assistant")
+					.map((message) => message.info);
+			} else if (h instanceof PiTestHarness) {
+				assistantStates = (await h.getMessages())
+					.filter((message) => message.role === "assistant")
+					.map(({ stopReason, errorMessage, timestamp, usage }) => ({
+						stopReason,
+						errorMessage,
+						timestamp,
+						usage,
+					}));
+			} else {
+				const env = (
+					h as unknown as { opencode: { env: { OPENCODE_DB: string } } }
+				).opencode.env;
+				const db = openTestDb(join(h.dataDir, "opencode", env.OPENCODE_DB));
+				try {
+					assistantStates = db
+						.prepare(
+							"SELECT data FROM session_message WHERE session_id = ? AND type = 'assistant' ORDER BY id",
+						)
+						.all(session);
+				} finally {
+					db.close();
+				}
+			}
+			const inventory = assertContained(h);
+			console.log(
+				"USAGE_LESS_CLOCK",
+				JSON.stringify({
+					host,
+					measuredClock,
+					expiredClock,
+					beforeAbort,
+					afterAbort: clock(),
+					passLog,
+					assistantStates,
+				}),
+			);
+			const evidence = process.env.IDLE_TTL_EVIDENCE;
+			if (evidence) {
+				mkdirSync(evidence, { recursive: true });
+				writeFileSync(
+					join(evidence, `${host}-usage-less-clock.json`),
+					JSON.stringify(
+						{
+							measuredClock,
+							expiredClock,
+							beforeAbort,
+							afterAbort: clock(),
+							passLog,
+							assistantStates,
+							inventory,
+							requests: h.requests(),
+						},
+						null,
+						2,
+					),
+				);
+			}
+			expect(clock()).toBe(beforeAbort);
+		} finally {
+			await h.dispose();
+			if (oldLogPath === undefined) delete process.env.MAGIC_CONTEXT_LOG_PATH;
+			else process.env.MAGIC_CONTEXT_LOG_PATH = oldLogPath;
+		}
+	}, 120_000);
 	for (const expired of [false, true])
 		it.skipIf(host !== "opencode")(
 			`a ${expired ? "genuinely expired" : "normal warm"} turn across midnight ${expired ? "releases the date only on the rebuild" : "keeps the frozen date and prefix"}`,

@@ -117,6 +117,10 @@ import {
 	createPromptSurfaceGuidanceEpochCache,
 	createPromptSurfaceRuntime,
 } from "@magic-context/core/shared/prompt-surface-runtime";
+import {
+	isSuccessfulProviderCompletion,
+	providerResponseFailed,
+} from "@magic-context/core/shared/provider-response-completion";
 import { setStoragePrivatePermissionEnforcement } from "@magic-context/core/shared/storage-permissions";
 import {
 	hasTrustedAbsoluteWall,
@@ -828,16 +832,31 @@ export async function persistPiPressureFromMessageEnd(args: {
 	}> = {};
 	// last_response_time is the idle clock for the provider cache: the
 	// scheduler's TTL execute and the ttl_idle HARD fold both measure from it.
-	// Only a request the provider served refreshes that cache, and only such a
-	// request reports usage, so only an assistant message with provider usage
-	// moves the clock (the same rule as OpenCode's message.updated handler).
+	// Usage or successful terminal completion proves a served response. Pi's
+	// timestamp is the message start, so stamp at message_end, not at that start.
 	// Pi also emits message_end for the user's own prompt (before that
 	// prompt's context pass), for tool results, and for failed requests (a
 	// quota error arrives as an assistant message with zero usage). Stamping
 	// on those made a pass after a long idle look like it followed a fresh
 	// response, so it deferred and queued drops never applied.
-	if (unboundedPressure !== null) {
-		updates.lastResponseTime = Date.now();
+	const assistant =
+		args.message && typeof args.message === "object"
+			? (args.message as {
+					role?: unknown;
+					stopReason?: unknown;
+					errorMessage?: unknown;
+				})
+			: undefined;
+	const completion = {
+		finish: assistant?.stopReason,
+		error: assistant?.errorMessage,
+	};
+	if (
+		assistant?.role === "assistant" &&
+		!providerResponseFailed(completion) &&
+		(unboundedPressure !== null || isSuccessfulProviderCompletion(completion))
+	) {
+		updates.lastResponseTime = Math.max(meta.lastResponseTime, Date.now());
 	}
 
 	if (
