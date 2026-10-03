@@ -45,7 +45,7 @@ rusqlite = { workspace = true }
 # The tool-provider/v1 role contract: tool.catalog and role.describe wire types,
 # schema and composition digests, and the capability-tag check. Its own
 # subc-protocol dependency is unified with the workspace's by [patch.crates-io].
-cortexkit-role-tool-provider = "=0.4.5"
+cortexkit-role-tool-provider = "=0.5.0"
 # RFC 8785 (JCS) canonical JSON for tool.catalog's answer bytes and digests: the
 # same canonicaliser the role crate uses, so floats and non-ASCII keys in a
 # caller's composition hash exactly as the runner hashes them.
@@ -84,4 +84,4 @@ proc-macro2 = { version = "1", features = ["span-locations"] }
 async-trait = "0.1"
 # The role's conformance suite, run in-process against tool.catalog and
 # role.describe (src/tests/tool_catalog_conformance.rs).
-cortexkit-role-tool-provider-conformance = "=0.4.5"
+cortexkit-role-tool-provider-conformance = "=0.5.0"
