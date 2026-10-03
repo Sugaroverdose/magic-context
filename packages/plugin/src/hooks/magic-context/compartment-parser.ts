@@ -103,9 +103,9 @@ const USER_OBSERVATIONS_REGEX = /<user_observations>(.*?)<\/user_observations>/s
 const USER_OBS_ITEM_REGEX = /^\s*\*\s*(.+)$/gm;
 const PRIMER_CANDIDATES_REGEX = /<primer_candidates>(.*?)<\/primer_candidates>/s;
 // Preferred form: <primer at_compartment="N">question</primer>, where N is the
-// `start` ordinal of the origin compartment (reuses the ordinal the historian is
-// already emitting on each <compartment start="N">). The legacy bullet form
-// (*/-/1.) is still accepted and falls back to the chunk span at emission.
+// 1-based index of the origin compartment in this output (the same convention
+// as <events>). The legacy bullet form (*/-/1.) is still accepted and falls back
+// to the chunk span at emission.
 const PRIMER_ELEMENT_REGEX = /<primer\s+at_compartment="(\d+)"\s*>(.*?)<\/primer>/gs;
 const PRIMER_ITEM_REGEX = /^\s*(?:\*|-|\d+\.)\s*(.+)$/gm;
 
@@ -444,17 +444,42 @@ export function parseCompartmentOutput(text: string): ParsedCompartmentOutput {
 
     const events = parseEvents(outside);
 
-    compartments.sort((a, b) => a.startMessage - b.startMessage);
+    // Compartments are returned sorted by start, but `at_compartment` anchors
+    // count compartments in the order the model emitted them. When the model
+    // emits them out of order, re-point each in-range anchor at the same
+    // compartment's sorted position, since every consumer indexes the sorted
+    // list. Out-of-range anchors are left for validation to discard. The Rust
+    // parser (`historian_validate::parse_compartment_output`) does the same.
+    const sortedByStart = compartments
+        .map((compartment, emitted) => ({ compartment, emitted }))
+        .sort((a, b) => a.compartment.startMessage - b.compartment.startMessage);
+    const sortedPosition: number[] = [];
+    sortedByStart.forEach(({ emitted }, sorted) => {
+        sortedPosition[emitted] = sorted + 1;
+    });
+    const remapAnchor = (anchor: number): number =>
+        anchor >= 1 && anchor <= sortedPosition.length ? sortedPosition[anchor - 1] : anchor;
 
     return {
-        compartments,
+        compartments: sortedByStart.map(({ compartment }) => compartment),
         facts,
         droppedFactBlocks,
         droppedFacts,
-        events,
+        events: events.map((event) =>
+            event.atCompartment === null
+                ? event
+                : { ...event, atCompartment: remapAnchor(event.atCompartment) },
+        ),
         unprocessedFrom,
         userObservations,
-        primerCandidates,
+        primerCandidates: primerCandidates.map((candidate) =>
+            candidate.originCompartmentIndex === undefined
+                ? candidate
+                : {
+                      ...candidate,
+                      originCompartmentIndex: remapAnchor(candidate.originCompartmentIndex),
+                  },
+        ),
     };
 }
 

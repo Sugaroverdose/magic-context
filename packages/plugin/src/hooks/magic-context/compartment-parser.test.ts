@@ -545,6 +545,31 @@ ${tiers("next work")}
         ]);
         expect(parsed.unprocessedFrom).toBe(5);
     });
+
+    it("remaps event and primer anchors when compartments are emitted out of order", () => {
+        const parsed = parseCompartmentOutput(`<output><compartments>
+<compartment start="3" end="4" title="Later">
+${tiers("later work")}
+</compartment>
+<compartment start="1" end="2" title="Earlier">
+${tiers("earlier work")}
+</compartment>
+</compartments>
+<events><causal_incident at_compartment="1"><summary>About later.</summary></causal_incident>
+<trajectory_correction at_compartment="2"><summary>About earlier.</summary></trajectory_correction>
+<causal_incident at_compartment="7"><summary>Out of range.</summary></causal_incident></events>
+<primer_candidates><primer at_compartment="1">How does the later work fit?</primer></primer_candidates>
+</output>`);
+        expect(parsed.compartments.map((c) => c.title)).toEqual(["Earlier", "Later"]);
+        expect(parsed.events.map((e) => [e.fields.summary, e.atCompartment])).toEqual([
+            ["About later.", 2],
+            ["About earlier.", 1],
+            ["Out of range.", 7],
+        ]);
+        expect(parsed.primerCandidates).toEqual([
+            { question: "How does the later work fit?", originCompartmentIndex: 2 },
+        ]);
+    });
 });
 
 describe("parseCompartmentOutput — side channels are read outside compartment bodies", () => {

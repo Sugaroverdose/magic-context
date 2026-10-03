@@ -460,7 +460,45 @@ pub fn parse_compartment_output(
         }
     }
 
-    let events = parse_events(&outside);
+    let mut events = parse_events(&outside);
+
+    // Compartments are returned sorted by start, but `at_compartment` anchors
+    // count compartments in the order the model emitted them. When the model
+    // emits them out of order, re-point each in-range anchor at the same
+    // compartment's sorted position, since every consumer indexes the sorted
+    // list. Out-of-range anchors are left for validation to discard. Mirrors the
+    // TypeScript parser; the Rust-only fact and observation anchors use the same
+    // convention and are remapped too.
+    let mut emitted_order: Vec<usize> = (0..compartments.len()).collect();
+    emitted_order.sort_by_key(|&emitted| compartments[emitted].start_message);
+    let mut sorted_position = vec![0_u64; compartments.len()];
+    for (sorted, &emitted) in emitted_order.iter().enumerate() {
+        sorted_position[emitted] = sorted as u64 + 1;
+    }
+    let remap_anchor = |anchor: &mut Option<u64>| {
+        if let Some(index) = anchor.as_mut() {
+            if let Some(&position) = usize::try_from(*index)
+                .ok()
+                .and_then(|index| index.checked_sub(1))
+                .and_then(|slot| sorted_position.get(slot))
+            {
+                *index = position;
+            }
+        }
+    };
+    for event in &mut events {
+        remap_anchor(&mut event.at_compartment);
+    }
+    for candidate in &mut primer_candidates {
+        remap_anchor(&mut candidate.origin_compartment_index);
+    }
+    for fact in &mut facts {
+        remap_anchor(&mut fact.origin_compartment_index);
+    }
+    for observation in &mut user_observations {
+        remap_anchor(&mut observation.origin_compartment_index);
+    }
+    // Stable, so equal starts keep emission order exactly as `emitted_order` did.
     compartments.sort_by_key(|c| c.start_message);
 
     Ok(ParsedCompartmentOutput {
@@ -1722,6 +1760,33 @@ mod tests {
             "parsed mismatch in {} case(s):\n{}",
             mismatches.len(),
             mismatches.join("\n")
+        );
+    }
+
+    #[test]
+    fn rust_only_side_channel_anchors_follow_out_of_order_compartments() {
+        // Emission order: compartment 1 covers 3-4, compartment 2 covers 1-2.
+        let text = "<output><compartments>\
+<compartment start=\"3\" end=\"4\" title=\"later\"><p1>later</p1><p2>l</p2><p3>l</p3><p4/></compartment>\
+<compartment start=\"1\" end=\"2\" title=\"earlier\"><p1>earlier</p1><p2>e</p2><p3>e</p3><p4/></compartment>\
+</compartments><facts><PROJECT_RULES>\n* [at_compartment=1] Fact from later.\n</PROJECT_RULES></facts>\
+<user_observations>\n* (origin_compartment=2) Observation from earlier.\n</user_observations></output>";
+        let parsed = parse_compartment_output(text).expect("parse out-of-order output");
+        let titles: Vec<&str> = parsed
+            .compartments
+            .iter()
+            .map(|c| c.title.as_str())
+            .collect();
+        assert_eq!(titles, ["earlier", "later"]);
+        assert_eq!(parsed.facts[0].content, "Fact from later.");
+        assert_eq!(parsed.facts[0].origin_compartment_index, Some(2));
+        assert_eq!(
+            parsed.user_observations[0].content,
+            "Observation from earlier."
+        );
+        assert_eq!(
+            parsed.user_observations[0].origin_compartment_index,
+            Some(1)
         );
     }
 

@@ -362,5 +362,90 @@
       "user_observations": [],
       "primer_candidates": []
     }
+  },
+  {
+    "label": "anchors follow their compartment when compartments are emitted out of order",
+    "text": "<output><compartments>\n<compartment start=\"5\" end=\"6\" title=\"Third\">\n<p1>third</p1>\n<p2>third short</p2>\n<p3>third shorter</p3>\n<p4/>\n</compartment>\n<compartment start=\"1\" end=\"2\" title=\"First\">\n<p1>first</p1>\n<p2>first short</p2>\n<p3>first shorter</p3>\n<p4/>\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"Second\">\n<p1>second</p1>\n<p2>second short</p2>\n<p3>second shorter</p3>\n<p4/>\n</compartment>\n</compartments>\n<events><causal_incident at_compartment=\"1\"><summary>About third.</summary></causal_incident>\n<trajectory_correction at_compartment=\"3\"><summary>About second.</summary></trajectory_correction>\n<causal_incident at_compartment=\"0\"><summary>Zero stays.</summary></causal_incident>\n<causal_incident at_compartment=\"9\"><summary>Out of range stays.</summary></causal_incident></events>\n<primer_candidates><primer at_compartment=\"2\">How did the first part go?</primer></primer_candidates>\n<meta><unprocessed_from>7</unprocessed_from></meta>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "First",
+          "content": "first",
+          "p1": "first",
+          "p2": "first short",
+          "p3": "first shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "Second",
+          "content": "second",
+          "p1": "second",
+          "p2": "second short",
+          "p3": "second shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 5,
+          "end_message": 6,
+          "title": "Third",
+          "content": "third",
+          "p1": "third",
+          "p2": "third short",
+          "p3": "third shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 3,
+          "fields": {
+            "summary": "About third."
+          }
+        },
+        {
+          "kind": "trajectory_correction",
+          "at_compartment": 2,
+          "fields": {
+            "summary": "About second."
+          }
+        },
+        {
+          "kind": "causal_incident",
+          "at_compartment": 0,
+          "fields": {
+            "summary": "Zero stays."
+          }
+        },
+        {
+          "kind": "causal_incident",
+          "at_compartment": 9,
+          "fields": {
+            "summary": "Out of range stays."
+          }
+        }
+      ],
+      "unprocessed_from": 7,
+      "user_observations": [],
+      "primer_candidates": [
+        {
+          "question": "How did the first part go?",
+          "origin_compartment_index": 1
+        }
+      ]
+    }
   }
 ]

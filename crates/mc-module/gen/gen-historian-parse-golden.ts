@@ -223,6 +223,27 @@ ${tiers("next work")}
 <unprocessed_from>3</unprocessed_from>
 </output>`,
     },
+    {
+        label: "anchors follow their compartment when compartments are emitted out of order",
+        text: `<output><compartments>
+<compartment start="5" end="6" title="Third">
+${tiers("third")}
+</compartment>
+<compartment start="1" end="2" title="First">
+${tiers("first")}
+</compartment>
+<compartment start="3" end="4" title="Second">
+${tiers("second")}
+</compartment>
+</compartments>
+<events><causal_incident at_compartment="1"><summary>About third.</summary></causal_incident>
+<trajectory_correction at_compartment="3"><summary>About second.</summary></trajectory_correction>
+<causal_incident at_compartment="0"><summary>Zero stays.</summary></causal_incident>
+<causal_incident at_compartment="9"><summary>Out of range stays.</summary></causal_incident></events>
+<primer_candidates><primer at_compartment="2">How did the first part go?</primer></primer_candidates>
+<meta><unprocessed_from>7</unprocessed_from></meta>
+</output>`,
+    },
 ];
 
 const golden = cases.map((spec) => ({
