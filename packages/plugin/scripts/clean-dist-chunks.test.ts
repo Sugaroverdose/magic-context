@@ -15,7 +15,7 @@ function scratch(): string {
 }
 
 function run(...args: string[]) {
-    return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", windowsHide: true });
+    return spawnSync(process.execPath, [script, ...args], { encoding: "utf8", windowsHide: true, timeout: 10_000 });
 }
 
 afterEach(() => {
@@ -69,6 +69,89 @@ describe("clean-dist-chunks", () => {
 // empty match, so a clean build failed there. Package scripts delete build
 // outputs through clean-dist-chunks.mjs instead of a shell glob.
 describe("package build scripts", () => {
+    it("package clean preserves chunks needed by running hosts", () => {
+        for (const pkg of ["plugin", "pi-plugin"]) {
+            const root = scratch();
+            const dist = join(root, "packages", pkg, "dist");
+            mkdirSync(dist, { recursive: true });
+            mkdirSync(join(root, "scripts"));
+            writeFileSync(join(root, "scripts", "clean-dist-chunks.mjs"), readFileSync(script));
+            writeFileSync(join(dist, "index.js"), "old entry");
+            writeFileSync(join(dist, "index-running.js"), "old lazy chunk");
+            const command = JSON.parse(readFileSync(join(repoRoot, "packages", pkg, "package.json"), "utf8")).scripts.clean;
+            const result = spawnSync(process.execPath, ["exec", command], {
+                cwd: join(root, "packages", pkg), encoding: "utf8", timeout: 10_000,
+            });
+            expect(result.status).toBe(0);
+            expect(readFileSync(join(dist, "index-running.js"), "utf8")).toBe("old lazy chunk");
+            expect(existsSync(join(dist, "index.js"))).toBe(false);
+        }
+    });
+
+    it("restart-window merges distributions without deleting a running generation", () => {
+        if (process.platform === "win32") return; // The deployment script requires Bash and rsync.
+        const root = scratch();
+        const repo = join(root, "repo");
+        const source = join(root, "prebuilt");
+        mkdirSync(join(repo, "scripts"), { recursive: true });
+        writeFileSync(join(repo, "scripts", "clean-dist-chunks.mjs"), readFileSync(script));
+        const expired = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
+        for (const pkg of ["plugin", "pi-plugin"]) {
+            const dist = join(repo, "packages", pkg, "dist");
+            const incoming = join(source, "packages", pkg, "dist");
+            mkdirSync(join(dist, "v2"), { recursive: true });
+            mkdirSync(incoming, { recursive: true });
+            writeFileSync(join(dist, "index-running.js"), "running lazy chunk");
+            writeFileSync(join(dist, "index-expired.js"), "expired");
+            utimesSync(join(dist, "index-expired.js"), expired, expired);
+            writeFileSync(join(dist, "v2", "server-running.js"), "running v2 chunk");
+            writeFileSync(join(incoming, "index.js"), "new entry");
+            writeFileSync(join(incoming, "index-new.js"), "new lazy chunk");
+            // Copying a prebuilt checkout preserves timestamps. Never prune a
+            // newly copied chunk that its entry point still references.
+            utimesSync(join(incoming, "index-new.js"), expired, expired);
+        }
+        // Execute only the real dist-copy block, never deployment preflight, stores,
+        // migrations or service control. This exercises the production command,
+        // rather than a safe proxy for the formerly destructive rsync operation.
+        const deployment = readFileSync(join(repoRoot, "scripts/restart-window.sh"), "utf8");
+        const block = deployment.match(/say "swapping in[^\n]*\n([\s\S]*?)\n\(cd "\$REPO"/);
+        expect(block).not.toBeNull();
+        const result = spawnSync("bash", ["-euc", `post_fail() { exit 1; }; ${block![1]}`], {
+            env: { ...process.env, REPO: repo, DISTS: source }, encoding: "utf8", timeout: 10_000,
+        });
+        expect(result.status).toBe(0);
+        for (const pkg of ["plugin", "pi-plugin"]) {
+            const dist = join(repo, "packages", pkg, "dist");
+            expect(readFileSync(join(dist, "index-running.js"), "utf8")).toBe("running lazy chunk");
+            expect(readFileSync(join(dist, "v2", "server-running.js"), "utf8")).toBe("running v2 chunk");
+            expect(readFileSync(join(dist, "index.js"), "utf8")).toBe("new entry");
+            expect(readFileSync(join(dist, "index-new.js"), "utf8")).toBe("new lazy chunk");
+            expect(existsSync(join(dist, "index-expired.js"))).toBe(false);
+        }
+    });
+
+    it("Bun CLI and API builds keep unrelated split chunks in an existing outdir", async () => {
+        const root = scratch();
+        const dist = join(root, "dist");
+        mkdirSync(dist);
+        const entry = join(root, "entry.ts");
+        const lazy = join(root, "lazy.ts");
+        writeFileSync(entry, 'export const load = () => import("./lazy.ts");');
+        writeFileSync(lazy, 'export const generation = "first";');
+        const args = ["build", entry, "--outdir", dist, "--target", "node", "--format", "esm", "--splitting"];
+        expect(spawnSync(process.execPath, args, { encoding: "utf8", timeout: 10_000 }).status).toBe(0);
+        const firstChunks = readdirSync(dist).filter((name) => name !== "entry.js");
+        expect(firstChunks.length).toBeGreaterThan(0);
+        const contents = firstChunks.map((name) => readFileSync(join(dist, name), "utf8"));
+        writeFileSync(lazy, 'export const generation = "second";');
+        expect(spawnSync(process.execPath, args, { encoding: "utf8", timeout: 10_000 }).status).toBe(0);
+        writeFileSync(lazy, 'export const generation = "third";');
+        const built = await Bun.build({ entrypoints: [entry], outdir: dist, target: "node", format: "esm", splitting: true });
+        expect(built.success).toBe(true);
+        expect(firstChunks.map((name) => readFileSync(join(dist, name), "utf8"))).toEqual(contents);
+    });
+
     it("never delete with a shell glob", () => {
         const offenders: string[] = [];
         for (const pkg of ["package.json", "packages/plugin/package.json", "packages/pi-plugin/package.json", "packages/cli/package.json"]) {

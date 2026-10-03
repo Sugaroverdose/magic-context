@@ -124,6 +124,7 @@ import type {
     StatusDetail,
 } from "../shared/rpc-types";
 import { getSqliteMemoryStats } from "../shared/sqlite";
+import { importPluginModule } from "../shared/stale-plugin-build";
 import { shouldEnforcePrivateStoragePermissions } from "../shared/storage-permissions";
 import {
     resolveTailHygieneStatus,
@@ -1621,12 +1622,13 @@ export function registerRpcHandlers(
     const buildManagedCtx = async (
         db: NonNullable<ReturnType<typeof getDb>>,
     ): Promise<ManagedRecompContext> => {
-        const { deriveHistorianChunkTokens, resolveHistorianContextLimit } = await import(
-            "../hooks/magic-context/derive-budgets"
+        const { deriveHistorianChunkTokens, resolveHistorianContextLimit } =
+            await importPluginModule(() => import("../hooks/magic-context/derive-budgets"));
+        const { resolveHistorianModel } = await importPluginModule(
+            () => import("../shared/model-resolution"),
         );
-        const { resolveHistorianModel } = await import("../shared/model-resolution");
-        const { userMemoryCollectionEnabled } = await import(
-            "../features/magic-context/dreamer/task-config"
+        const { userMemoryCollectionEnabled } = await importPluginModule(
+            () => import("../features/magic-context/dreamer/task-config"),
         );
         const DEFAULT_HISTORIAN_TIMEOUT_MS = 10 * 60 * 1000;
         const runConfig = historianRunConfig(
@@ -1671,9 +1673,11 @@ export function registerRpcHandlers(
         const db = readDatabase();
         if (!db) return { ok: false, error: "db unavailable" };
 
-        const { runManagedRecomp } = await import("../hooks/magic-context/recomp-orchestrator");
-        const { sendIgnoredMessage } = await import(
-            "../hooks/magic-context/send-session-notification"
+        const { runManagedRecomp } = await importPluginModule(
+            () => import("../hooks/magic-context/recomp-orchestrator"),
+        );
+        const { sendIgnoredMessage } = await importPluginModule(
+            () => import("../hooks/magic-context/send-session-notification"),
         );
         log(`[rpc] recomp requested for session ${sessionId}`);
         // The historian needs a way to run hidden completions: OpenCode 1 opens
@@ -1771,7 +1775,9 @@ export function registerRpcHandlers(
         const db = readDatabase();
         if (!db) return { ok: false, error: "db unavailable" };
 
-        const { runManagedWrapup } = await import("../hooks/magic-context/wrapup-orchestrator");
+        const { runManagedWrapup } = await importPluginModule(
+            () => import("../hooks/magic-context/wrapup-orchestrator"),
+        );
         const model = liveSessionState.liveModelBySession.get(sessionId);
         const contextLimit = model
             ? resolveContextLimit(model.providerID, model.modelID, { db, sessionID: sessionId })

@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getMagicContextLogPath } from "./data-path";
 import { sanitizeConfigValue, sanitizeDiagnosticText } from "./redaction";
+import { stalePluginBuildDiagnostic } from "./stale-plugin-build";
 
 const isTestEnv = process.env.NODE_ENV === "test";
 
@@ -217,8 +218,15 @@ export function writeForwardedLogLine(line: string): void {
 }
 
 export function log(message: string, data?: unknown): void {
-    if (isTestEnv) return;
     try {
+        let diagnostic = stalePluginBuildDiagnostic(data);
+        if (diagnostic === undefined) diagnostic = stalePluginBuildDiagnostic(message);
+        if (diagnostic === null) return;
+        if (diagnostic !== undefined) {
+            message = diagnostic;
+            data = undefined;
+        }
+        if (isTestEnv) return;
         const timestamp = new Date().toISOString();
         const serialized =
             data === undefined

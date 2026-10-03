@@ -70,6 +70,7 @@ import { isDisposedInstanceDirectory } from "./plugin/instance-disposal";
 import { createMessagesTransformHandler } from "./plugin/messages-transform";
 import { disableNativeAutoCompaction } from "./plugin/native-compaction-guard";
 import { isDebugRpcEnabled, registerRpcHandlers } from "./plugin/rpc-handlers";
+import { bindStaleBuildNotice } from "./plugin/stale-build-notice";
 import { createToolRegistry } from "./plugin/tool-registry";
 import { claimConfigParseFailuresOnce } from "./shared/config-diagnostics";
 import { buildOpenCodeConfigWarningBanner } from "./shared/config-warning-surface";
@@ -98,6 +99,7 @@ import {
 import { createPromptSurfaceRuntime } from "./shared/prompt-surface-runtime";
 import { MagicContextRpcServer } from "./shared/rpc-server";
 import { closeQuietly } from "./shared/sqlite-helpers";
+import { importPluginModule } from "./shared/stale-plugin-build";
 import { setStoragePrivatePermissionEnforcement } from "./shared/storage-permissions";
 import { reloadWindowOverlay } from "./shared/window-geometry";
 import { CTX_MEMORY_LIST_TOOL_NAME } from "./tools/ctx-memory";
@@ -107,6 +109,7 @@ const BOOT_SERVER_DEADLINE_MS = 15_000;
 const RESOLVED_CONFIG_TIMEOUT_MS = 2_000;
 
 const server: Plugin = async (ctx) => {
+    bindStaleBuildNotice(ctx.client, import.meta.url);
     const bootStartedAt = performance.now();
     const bootBudget = createBootBudget(BOOT_SERVER_DEADLINE_MS, bootStartedAt);
     const storageBootTimings = { openMs: 0, guardMs: 0, migrateMs: 0 };
@@ -197,8 +200,8 @@ const server: Plugin = async (ctx) => {
         if (hasBannerEntries)
             setTimeout(async () => {
                 try {
-                    const { sendStatusNotification } = await import(
-                        "./hooks/magic-context/send-session-notification"
+                    const { sendStatusNotification } = await importPluginModule(
+                        () => import("./hooks/magic-context/send-session-notification"),
                     );
                     // Route the RPC warning to the first active session; never append a chat row.
                     // SDK types don't expose `session.list()`'s actual response shape (the
@@ -236,8 +239,8 @@ const server: Plugin = async (ctx) => {
         );
         setTimeout(async () => {
             try {
-                const { sendStatusNotification } = await import(
-                    "./hooks/magic-context/send-session-notification"
+                const { sendStatusNotification } = await importPluginModule(
+                    () => import("./hooks/magic-context/send-session-notification"),
                 );
                 type SessionListFn = () => Promise<
                     { data?: Array<{ id?: string }> } | Array<{ id?: string }>
@@ -704,13 +707,15 @@ const server: Plugin = async (ctx) => {
     {
         const fence = getSchemaFenceRejection();
         if (fence) {
-            void import("./plugin/conflict-warning-hook").then(({ sendSchemaFenceWarning }) =>
-                sendSchemaFenceWarning(
-                    ctx.client as unknown as Record<string, unknown>,
-                    ctx.directory,
-                    fence,
-                ),
-            );
+            void importPluginModule(() => import("./plugin/conflict-warning-hook"))
+                .then(({ sendSchemaFenceWarning }) =>
+                    sendSchemaFenceWarning(
+                        ctx.client as unknown as Record<string, unknown>,
+                        ctx.directory,
+                        fence,
+                    ),
+                )
+                .catch((error) => log("[magic-context] schema-fence warning unavailable:", error));
         }
     }
 
@@ -721,11 +726,11 @@ const server: Plugin = async (ctx) => {
             : typeof serverUrl === "string"
               ? serverUrl.replace(/\/$/, "")
               : undefined;
-    void import("./hooks/magic-context/send-session-notification").then(
-        ({ setNotificationServerUrl }) => {
+    void importPluginModule(() => import("./hooks/magic-context/send-session-notification"))
+        .then(({ setNotificationServerUrl }) => {
             setNotificationServerUrl(serverUrlStr);
-        },
-    );
+        })
+        .catch((error) => log("[magic-context] notification transport unavailable:", error));
 
     // Conflict warning / cleanup for Desktop mode.
     // TUI handles this via a startup dialog; this covers Desktop where we can't show dialogs.
@@ -767,7 +772,7 @@ const server: Plugin = async (ctx) => {
     // so a failure here can never block plugin startup.
     if (pluginConfig.enabled && !conflictResult?.hasConflict) {
         setTimeout(() => {
-            void import("./shared/announcement")
+            void importPluginModule(() => import("./shared/announcement"))
                 .then(
                     ({
                         shouldShowAnnouncement,
@@ -777,16 +782,17 @@ const server: Plugin = async (ctx) => {
                         markAnnouncementSeen,
                     }) => {
                         if (!shouldShowAnnouncement()) return;
-                        return import("./plugin/conflict-warning-hook").then(
-                            ({ sendStartupAnnouncement }) =>
-                                sendStartupAnnouncement(
-                                    ctx.client as unknown as Record<string, unknown>,
-                                    ctx.directory,
-                                    ANNOUNCEMENT_VERSION,
-                                    ANNOUNCEMENT_FEATURES,
-                                    ANNOUNCEMENT_FOOTER,
-                                    markAnnouncementSeen,
-                                ),
+                        return importPluginModule(
+                            () => import("./plugin/conflict-warning-hook"),
+                        ).then(({ sendStartupAnnouncement }) =>
+                            sendStartupAnnouncement(
+                                ctx.client as unknown as Record<string, unknown>,
+                                ctx.directory,
+                                ANNOUNCEMENT_VERSION,
+                                ANNOUNCEMENT_FEATURES,
+                                ANNOUNCEMENT_FOOTER,
+                                markAnnouncementSeen,
+                            ),
                         );
                     },
                 )
@@ -919,11 +925,11 @@ const server: Plugin = async (ctx) => {
                     } | null
                 )?.getRustReplayParticipant?.() ?? null,
             onStorageBusyRefusal: async (sessionId, message) => {
-                const { sendStatusNotification } = await import(
-                    "./hooks/magic-context/send-session-notification"
+                const { sendStatusNotification } = await importPluginModule(
+                    () => import("./hooks/magic-context/send-session-notification"),
                 );
-                const { abortSessionFailClosed } = await import(
-                    "./hooks/magic-context/transform-postprocess-phase"
+                const { abortSessionFailClosed } = await importPluginModule(
+                    () => import("./hooks/magic-context/transform-postprocess-phase"),
                 );
                 await sendStatusNotification(ctx.client, sessionId, message, {
                     toastDurationMs: 15000,

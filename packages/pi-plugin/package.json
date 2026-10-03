@@ -38,7 +38,7 @@
 		"lint:fix": "biome check --write src",
 		"format": "biome format --write src",
 		"format:check": "biome format src",
-		"clean": "rm -rf dist",
+		"clean": "bun ../../scripts/clean-dist-chunks.mjs dist index.js subagent-entry.js historian-calibration-extension.js embedding-worker.js migration-worker.js transformers-web.js transformers-node-wasm.js",
 		"prepublishOnly": "bun run build"
 	},
 	"dependencies": {

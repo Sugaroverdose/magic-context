@@ -148,7 +148,14 @@ say "context.db now $got"
 
 say "swapping in the fence-$CONTEXT_FENCE plugin dists from $DISTS"
 for pkg in plugin pi-plugin; do
-    rsync -a --delete "$DISTS/packages/$pkg/dist/" "$REPO/packages/$pkg/dist/" || post_fail "dist swap for $pkg"
+    # A host that escaped the restart window can still import its old lazy
+    # chunks. Merge the new build; only the shared age-based cleaner may prune
+    # chunks, including the separately built OpenCode 2 distribution.
+    # Prune before copying, just as a local build does. A prebuilt checkout can
+    # have old mtimes even on chunks referenced by its current entry points.
+    bun "$REPO/scripts/clean-dist-chunks.mjs" "$REPO/packages/$pkg/dist" || post_fail "dist cleanup for $pkg"
+    bun "$REPO/scripts/clean-dist-chunks.mjs" "$REPO/packages/$pkg/dist/v2" || post_fail "v2 dist cleanup for $pkg"
+    rsync -a "$DISTS/packages/$pkg/dist/" "$REPO/packages/$pkg/dist/" || post_fail "dist swap for $pkg"
 done
 (cd "$REPO" && bun -e "await import('./packages/plugin/dist/index.js'); await import('./packages/pi-plugin/dist/index.js'); console.log('dists load ok')") \
     || post_fail "the swapped dists do not load"

@@ -19,7 +19,7 @@ import type {
     QuickJSAsyncWASMModule,
     QuickJSHandle,
 } from "quickjs-emscripten";
-
+import { classifyStalePluginBuild, importPluginModule } from "../../../shared/stale-plugin-build";
 import type { SmartNoteCapabilityApi, SmartNoteCapabilityFactory } from "./capabilities";
 import { isSmartNoteNetworkError, type SmartNoteCheckResult, SmartNoteNetworkError } from "./types";
 
@@ -42,10 +42,12 @@ export function getQuickJsNativeMemoryStats(): { loadAttempted: boolean; loaded:
 function getAsyncModule(): Promise<QuickJSAsyncWASMModule> {
     asyncModulePromise ??= (async () => {
         const [{ default: singlefileAsyncifyVariant }, { newQuickJSAsyncWASMModuleFromVariant }] =
-            await Promise.all([
-                import("@jitl/quickjs-singlefile-cjs-release-asyncify"),
-                import("quickjs-emscripten"),
-            ]);
+            await importPluginModule(() =>
+                Promise.all([
+                    import("@jitl/quickjs-singlefile-cjs-release-asyncify"),
+                    import("quickjs-emscripten"),
+                ]),
+            );
         const module = await newQuickJSAsyncWASMModuleFromVariant(singlefileAsyncifyVariant);
         asyncModuleLoaded = true;
         return module;
@@ -236,6 +238,10 @@ export async function runCompiledSmartNoteCheck(
         quickjs = await acquireSandboxModule(options.signal);
     } catch (error) {
         if (options.signal?.aborted) return cancelledResult(options.signal.reason);
+        const stale = classifyStalePluginBuild(error);
+        // Infrastructure disappeared, not a note's condition. Cancellation leaves
+        // the note pending without failure counters, fallback or rewrite notices.
+        if (stale) return cancelledResult(stale.guidance);
         return failureResult(formatSandboxError(error), false);
     }
     // Serialize the actual sandbox work (see withSandboxLock): only one

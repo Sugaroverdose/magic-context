@@ -1,4 +1,5 @@
 import { loadPluginConfigDetailed } from "../config";
+import { bindStaleBuildNotice } from "../plugin/stale-build-notice";
 import { setHarness } from "../shared/harness";
 import { flushLogger, log } from "../shared/logger";
 import { registerContext } from "./hooks/context";
@@ -45,6 +46,7 @@ export async function setup(context: V2Context) {
         return async () => {};
     }
     setHarness("opencode2");
+    bindStaleBuildNotice({}, import.meta.url, "opencode2");
     const duties = await registerContext(context);
     const checks =
         loadPluginConfigDetailed(context.location.directory).config.auto_update === false

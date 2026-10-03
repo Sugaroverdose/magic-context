@@ -50,7 +50,7 @@
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
     "format:check": "biome format .",
-    "clean": "rm -rf dist",
+    "clean": "bun ../../scripts/clean-dist-chunks.mjs dist index.js embedding-worker.js migration-worker.js transformers-web.js transformers-node-wasm.js && bun ../../scripts/clean-dist-chunks.mjs dist/v2 server.js embedding-worker.js migration-worker.js transformers-web.js transformers-node-wasm.js",
     "prepublishOnly": "bun run build && bun run build:tui"
   },
   "dependencies": {
