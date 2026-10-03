@@ -78,6 +78,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { describeStorageUnavailability } from "@magic-context/core/features/magic-context/storage-unavailable-reason";
 import { runDeferredV22Backfill } from "@magic-context/core/features/magic-context/v22-deferred-backfill";
+import { cavemanWordRulesForLanguage } from "@magic-context/core/hooks/magic-context/caveman";
 import { setCtxReduceRegisteredGlobally } from "@magic-context/core/hooks/magic-context/ctx-reduce-availability";
 import {
 	deriveHistorianChunkTokens,
@@ -1511,6 +1512,8 @@ async function startPiMagicContextRuntime(
 				? {
 						enabled: cfg.caveman_text_compression.enabled,
 						minChars: cfg.caveman_text_compression.min_chars,
+						// `language` is user-level only; a project config cannot set it.
+						wordRules: cavemanWordRulesForLanguage(cfg.language),
 					}
 				: undefined,
 			clearReasoningAge: cfg.clear_reasoning_age,

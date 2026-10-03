@@ -12,7 +12,7 @@ import {
 import { createTagger } from "../../features/magic-context/tagger";
 import type { Database as DatabaseType } from "../../shared/sqlite";
 import { Database } from "../../shared/sqlite";
-import { cavemanCompress } from "./caveman";
+import { type CavemanWordRules, cavemanCompress } from "./caveman";
 import { applyCavemanCleanup, replayCavemanCompression } from "./caveman-cleanup";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import { type MessageLike, tagMessages } from "./tag-messages";
@@ -65,12 +65,17 @@ function runPass(db: DatabaseType, sessionId: string): Pass {
 }
 
 /** A pass that already rebuilds the cache: replay, then fresh cleanup. */
-function runRebuildingPass(db: DatabaseType, sessionId: string): Pass {
+function runRebuildingPass(
+    db: DatabaseType,
+    sessionId: string,
+    wordRules: CavemanWordRules = "english",
+): Pass {
     const pass = runPass(db, sessionId);
     applyCavemanCleanup(sessionId, db, pass.targets, getActiveTagsBySession(db, sessionId), {
         enabled: true,
         minChars: 20,
         protectedCutoff: null,
+        wordRules,
     });
     return pass;
 }
@@ -137,6 +142,7 @@ describe("caveman compression on the wire", () => {
         const switched = runRebuildingPass(db, sessionId);
         expect(getCavemanReplayState(db, sessionId)).toEqual({
             currentRules: true,
+            englishWordRules: true,
             legacyReasoningTags: new Set([1, 2]),
         });
         expect(textOf(switched.messages[0])).toBe(
@@ -152,6 +158,35 @@ describe("caveman compression on the wire", () => {
 
         const after = runPass(db, sessionId);
         expect(wire(after.messages)).toBe(wire(switched.messages));
+    });
+
+    it("applies a changed language setting only on a rebuilding pass", () => {
+        const db = openTestDb();
+        const sessionId = "ses-caveman-language";
+        runPass(db, sessionId);
+        const english = runRebuildingPass(db, sessionId);
+        expect(textOf(english.messages[0])).toBe(
+            `\u00a71\u00a7 ${cavemanCompress(TEXTS[0], "ultra")}`,
+        );
+
+        // The setting changed to Spanish: passes that only replay keep the English bytes.
+        const replayed = runPass(db, sessionId);
+        expect(wire(replayed.messages)).toBe(wire(english.messages));
+
+        const switched = runRebuildingPass(db, sessionId, "none");
+        expect(getCavemanReplayState(db, sessionId).englishWordRules).toBe(false);
+        for (let index = 0; index < 3; index += 1) {
+            expect(textOf(switched.messages[index])).toBe(
+                `\u00a7${index + 1}\u00a7 ${cavemanCompress(TEXTS[index], "lite", undefined, "none")}`,
+            );
+        }
+        expect(textOf(switched.messages[0])).toContain("I think we should really refactor");
+        expect(wire(runPass(db, sessionId).messages)).toBe(wire(switched.messages));
+
+        // Back to English, again on a rebuilding pass only.
+        expect(wire(runPass(db, sessionId).messages)).toBe(wire(switched.messages));
+        const back = runRebuildingPass(db, sessionId, "english");
+        expect(wire(back.messages)).toBe(wire(english.messages));
     });
 
     it("keeps the reasoning when only a system injection is stripped from the text", () => {

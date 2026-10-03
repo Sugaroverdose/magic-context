@@ -614,8 +614,27 @@ pub struct ProducerContext<'a> {
     /// is bounded by the 3,800-second `historian::MAX_WRAPUP_REQUEST_BUDGET` and is released on
     /// every terminal path, so a damaged row delayed by this signal becomes eligible afterward.
     pub wrapup_active: bool,
+    /// Whether caveman compression may use its English word rules, from the user-level
+    /// `language` setting (`caveman_english_word_rules`). New caveman units and new user-hint
+    /// fragments read it; frozen payloads keep the bytes they were minted with.
+    pub caveman_english_word_rules: bool,
     #[cfg(test)]
     pub injected_reductions: Vec<ReductionDecision>,
+}
+
+/// Whether caveman may use its English word rules for the user-level `language` setting: yes
+/// when it is unset, "en", "en-*", or not a resolvable code (the same values that produce no
+/// language directive); no for any other language. The TypeScript twin is
+/// `cavemanWordRulesForLanguage` in packages/plugin/src/hooks/magic-context/caveman.ts.
+pub(crate) fn caveman_english_word_rules(language: Option<&str>) -> bool {
+    let code = language
+        .map(str::trim)
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if code == "en" || code.starts_with("en-") {
+        return true;
+    }
+    crate::content_language::resolve_language_name(Some(&code)).is_none()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -4823,6 +4842,7 @@ fn apply_once(
         loaded.meta.coverage_ordinal,
         non_tool_bust_opportunity,
         planned_age_basis,
+        ctx.caveman_english_word_rules,
     );
     let planned_reasoning_cutoff = reasoning_clear_cutoff_with_tags(
         req,
@@ -7670,6 +7690,7 @@ struct CavemanTagState<'a> {
     protection_cutoff: &'a TagNumberCutoffProjection,
 }
 
+#[allow(clippy::too_many_arguments)]
 fn new_caveman_units(
     core: &CoreState,
     req: &TransformRequest,
@@ -7678,6 +7699,7 @@ fn new_caveman_units(
     coverage: Option<u64>,
     is_bust_pass: bool,
     age_basis_tag: u64,
+    english_word_rules: bool,
 ) -> Vec<FrozenUnit> {
     if !is_bust_pass || !req.caveman_enabled || req.is_subagent || age_basis_tag == 0 {
         return Vec::new();
@@ -7730,7 +7752,7 @@ fn new_caveman_units(
             continue;
         }
         let level = caveman_level(target_depth).expect("nonzero caveman depth has a level");
-        let compressed = crate::caveman::compress(&source, level);
+        let compressed = crate::caveman::compress_with(&source, level, english_word_rules);
         if compressed.is_empty() {
             continue;
         }
@@ -10668,7 +10690,7 @@ fn maybe_decide_live_user_hint(
             req.auto_search_score_threshold,
             rendered_memory_ids,
         )?;
-        render_user_hint(&results).unwrap_or_default()
+        render_user_hint(&results, ctx.caveman_english_word_rules).unwrap_or_default()
     };
     Ok(Some(UserHintDecisionInput {
         ordinal: message.ordinal,
@@ -11064,7 +11086,10 @@ pub(crate) fn utf16_prefix(text: &str, limit: usize) -> &str {
     &text[..end]
 }
 
-fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Option<String> {
+fn render_user_hint(
+    results: &[crate::memory_tool::MemorySearchResult],
+    english_word_rules: bool,
+) -> Option<String> {
     if results.is_empty() {
         return None;
     }
@@ -11072,8 +11097,11 @@ fn render_user_hint(results: &[crate::memory_tool::MemorySearchResult]) -> Optio
         .iter()
         .take(USER_HINT_RESULT_LIMIT)
         .map(|result| {
-            let fragment =
-                crate::caveman::compress(&result.snippet, crate::caveman::CavemanLevel::Ultra);
+            let fragment = crate::caveman::compress_with(
+                &result.snippet,
+                crate::caveman::CavemanLevel::Ultra,
+                english_word_rules,
+            );
             format!(
                 "- {}",
                 one_line_fragment(&fragment, USER_HINT_FRAGMENT_CHAR_CAP)
@@ -18239,6 +18267,7 @@ pub(crate) mod tests {
             guidance_date: Some("Today's date: Thu Jan 01 1970".to_string()),
             historian_active: false,
             wrapup_active: false,
+            caveman_english_word_rules: true,
             injected_reductions: Vec::new(),
         }
     }
@@ -33653,7 +33682,7 @@ pub(crate) mod tests {
             note_session_id: None,
             source_project_path: None,
         }];
-        let singular = render_user_hint(&single).unwrap();
+        let singular = render_user_hint(&single, true).unwrap();
         assert!(singular.contains("Your memory may contain 1 related fragment:"));
 
         let results = (1..=4)
@@ -33675,7 +33704,7 @@ pub(crate) mod tests {
                 source_project_path: None,
             })
             .collect::<Vec<_>>();
-        let hint = render_user_hint(&results).unwrap();
+        let hint = render_user_hint(&results, true).unwrap();
         let bullets = hint
             .lines()
             .filter(|line| line.starts_with("- "))
@@ -33686,59 +33715,62 @@ pub(crate) mod tests {
         assert!(hint.contains("If the fragments above seem relevant to the current request"));
         assert!(hint.chars().count() <= USER_HINT_TOTAL_CHAR_CAP + 2);
 
-        let golden = render_user_hint(&[
-            crate::memory_tool::MemorySearchResult {
-                source_kind: crate::memory_tool::MemorySearchSourceKind::Memory,
-                id: 1,
-                snippet: "alpha".to_string(),
-                category: None,
-                sequence: None,
-                title: None,
-                note_status: None,
-                surface_condition: None,
-                score_hundredths: 100,
-                start_ordinal: None,
-                end_ordinal: None,
-                note_created_at_ms: None,
-                note_anchor_ordinal: None,
-                note_session_id: None,
-                source_project_path: None,
-            },
-            crate::memory_tool::MemorySearchResult {
-                source_kind: crate::memory_tool::MemorySearchSourceKind::Memory,
-                id: 2,
-                snippet: "beta".to_string(),
-                category: None,
-                sequence: None,
-                title: None,
-                note_status: None,
-                surface_condition: None,
-                score_hundredths: 100,
-                start_ordinal: None,
-                end_ordinal: None,
-                note_created_at_ms: None,
-                note_anchor_ordinal: None,
-                note_session_id: None,
-                source_project_path: None,
-            },
-            crate::memory_tool::MemorySearchResult {
-                source_kind: crate::memory_tool::MemorySearchSourceKind::Memory,
-                id: 3,
-                snippet: "gamma".to_string(),
-                category: None,
-                sequence: None,
-                title: None,
-                note_status: None,
-                surface_condition: None,
-                score_hundredths: 100,
-                start_ordinal: None,
-                end_ordinal: None,
-                note_created_at_ms: None,
-                note_anchor_ordinal: None,
-                note_session_id: None,
-                source_project_path: None,
-            },
-        ])
+        let golden = render_user_hint(
+            &[
+                crate::memory_tool::MemorySearchResult {
+                    source_kind: crate::memory_tool::MemorySearchSourceKind::Memory,
+                    id: 1,
+                    snippet: "alpha".to_string(),
+                    category: None,
+                    sequence: None,
+                    title: None,
+                    note_status: None,
+                    surface_condition: None,
+                    score_hundredths: 100,
+                    start_ordinal: None,
+                    end_ordinal: None,
+                    note_created_at_ms: None,
+                    note_anchor_ordinal: None,
+                    note_session_id: None,
+                    source_project_path: None,
+                },
+                crate::memory_tool::MemorySearchResult {
+                    source_kind: crate::memory_tool::MemorySearchSourceKind::Memory,
+                    id: 2,
+                    snippet: "beta".to_string(),
+                    category: None,
+                    sequence: None,
+                    title: None,
+                    note_status: None,
+                    surface_condition: None,
+                    score_hundredths: 100,
+                    start_ordinal: None,
+                    end_ordinal: None,
+                    note_created_at_ms: None,
+                    note_anchor_ordinal: None,
+                    note_session_id: None,
+                    source_project_path: None,
+                },
+                crate::memory_tool::MemorySearchResult {
+                    source_kind: crate::memory_tool::MemorySearchSourceKind::Memory,
+                    id: 3,
+                    snippet: "gamma".to_string(),
+                    category: None,
+                    sequence: None,
+                    title: None,
+                    note_status: None,
+                    surface_condition: None,
+                    score_hundredths: 100,
+                    start_ordinal: None,
+                    end_ordinal: None,
+                    note_created_at_ms: None,
+                    note_anchor_ordinal: None,
+                    note_session_id: None,
+                    source_project_path: None,
+                },
+            ],
+            true,
+        )
         .unwrap();
         assert_eq!(
             golden,
@@ -38455,6 +38487,7 @@ pub(crate) mod tests {
             None,
             false,
             1,
+            true,
         );
         assert!(no_units.is_empty(), "defer must not mint a cav unit");
 
@@ -38469,6 +38502,7 @@ pub(crate) mod tests {
             None,
             true,
             1,
+            true,
         );
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].key, "cav:m1#0");
@@ -38674,6 +38708,7 @@ pub(crate) mod tests {
             None,
             true,
             1,
+            true,
         );
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].reset_rule, "3");
@@ -38684,12 +38719,74 @@ pub(crate) mod tests {
         );
     }
 
+    #[test]
+    fn caveman_english_word_rules_follow_the_shared_language_fixture() {
+        let golden: Value =
+            serde_json::from_str(include_str!("../testdata/caveman-language-golden.json")).unwrap();
+        for language in golden["englishLanguages"].as_array().unwrap() {
+            assert!(
+                caveman_english_word_rules(language.as_str()),
+                "english: {language:?}"
+            );
+        }
+        for language in golden["nonEnglishLanguages"].as_array().unwrap() {
+            assert!(
+                !caveman_english_word_rules(language.as_str()),
+                "non-english: {language:?}"
+            );
+        }
+    }
+
+    /// Without the English word rules a new caveman unit carries only the language-neutral
+    /// output; English stays the default for every existing caller.
+    #[test]
+    fn caveman_units_without_english_word_rules_keep_the_words() {
+        let source = "Voy a revisar si quite la cache, y es muy importante. ".repeat(8);
+        let request = {
+            let mut value = req("caveman-language", "cfg", vec![item("m1", 1, &source)]);
+            value.caveman_enabled = true;
+            value.caveman_min_chars = 1;
+            value.protected_tags = 0;
+            value
+        };
+        let projection = project_messages(&request.messages).unwrap();
+        let live = projection
+            .blocks
+            .iter()
+            .filter(|block| !block.synthetic)
+            .collect::<Vec<_>>();
+        let tags = vec![McTagRow {
+            tag_number: 1,
+            block_id: "m1#0".to_string(),
+            kind: "message".to_string(),
+            token_count: 10,
+            created_at_ms: 0,
+            source_bytes: source.as_bytes().to_vec().into(),
+        }];
+        let units = new_caveman_units(
+            &CoreState::default(),
+            &request,
+            CavemanTagState {
+                rows: &tags,
+                protection_cutoff: &protection_cutoff(None),
+            },
+            &live,
+            None,
+            true,
+            1,
+            false,
+        );
+        assert_eq!(units.len(), 1);
+        assert_eq!(units[0].frozen_payload, source.trim());
+    }
+
     /// A payload frozen under earlier caveman rules can be shorter than what the current rules
     /// produce for a deeper tier. That must keep the frozen bytes and still advance depth instead
     /// of panicking the transform.
     #[test]
     fn caveman_deeper_tier_longer_than_frozen_payload_keeps_frozen_bytes() {
-        let source = "I just really wanted to basically explain the implementation clearly. ".repeat(8);
+        let source =
+            "I just really wanted to basically explain the implementation clearly. ".repeat(8);
         let request = {
             let mut value = req("caveman-regrowth", "cfg", vec![item("m1", 1, &source)]);
             value.caveman_enabled = true;
@@ -38729,6 +38826,7 @@ pub(crate) mod tests {
             None,
             true,
             1,
+            true,
         );
         assert_eq!(units.len(), 1);
         assert_eq!(units[0].reset_rule, "3");
@@ -38767,6 +38865,7 @@ pub(crate) mod tests {
             None,
             true,
             1,
+            true,
         )
         .is_empty());
 
@@ -38794,6 +38893,7 @@ pub(crate) mod tests {
             None,
             true,
             1,
+            true,
         )
         .is_empty());
 
@@ -38818,6 +38918,7 @@ pub(crate) mod tests {
             None,
             true,
             1,
+            true,
         )
         .is_empty());
     }

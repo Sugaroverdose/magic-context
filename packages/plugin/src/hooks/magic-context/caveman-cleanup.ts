@@ -44,13 +44,14 @@ import { getSourceContents, updateCavemanDepth } from "../../features/magic-cont
 import {
     type CavemanReplayState,
     getCavemanReplayState,
-    markCavemanCurrentRules,
+    recordCavemanCurrentRules,
 } from "../../features/magic-context/storage-caveman-rules";
 import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
 import {
     type CavemanLevel,
     type CavemanRules,
+    type CavemanWordRules,
     CURRENT_CAVEMAN_RULES,
     cavemanCompress,
 } from "./caveman";
@@ -70,6 +71,8 @@ const DEPTH_TO_LEVEL: Record<number, CavemanLevel> = {
 export interface CavemanCleanupConfig {
     enabled: boolean;
     minChars: number;
+    /** From the user-level `language` setting (`cavemanWordRulesForLanguage`); English when absent. */
+    wordRules?: CavemanWordRules;
 }
 
 export interface CavemanCleanupResult {
@@ -159,18 +162,20 @@ export function applyCavemanCleanup(
     });
 
     // This pass already rebuilds the provider cache, so it is where a session
-    // still on the original rules switches to the current ones (see
-    // storage-caveman-rules.ts). Every tag compressed so far is rewritten now,
-    // so the next pass replays exactly these bytes. Tags deepened below are
-    // rewritten there instead.
+    // still on the original rules switches to the current ones, and where a
+    // changed `language` setting takes effect (see storage-caveman-rules.ts).
+    // Every tag compressed so far is rewritten now, so the next pass replays
+    // exactly these bytes. Tags deepened below are rewritten there instead.
+    const englishWordRules = (config.wordRules ?? "english") === "english";
     let state = getCavemanReplayState(db, sessionId);
-    if (!state.currentRules) {
+    if (!state.currentRules || state.englishWordRules !== englishWordRules) {
         const compressedBefore = tags.filter(
             (tag) => tag.type === "message" && tag.status === "active" && tag.cavemanDepth > 0,
         );
-        const switched = markCavemanCurrentRules(
+        const switched = recordCavemanCurrentRules(
             db,
             sessionId,
+            englishWordRules,
             compressedBefore.map((tag) => tag.tagNumber),
         );
         if (switched) {
@@ -205,7 +210,7 @@ export function applyCavemanCleanup(
             }
             sessionLog(
                 sessionId,
-                `caveman cleanup: switched to current rules, rewrote ${rewrites.length} compressed text tags`,
+                `caveman cleanup: switched to current rules (${englishWordRules ? "English" : "language-neutral"} word rules), rewrote ${rewrites.length} compressed text tags`,
             );
         }
     }
@@ -241,7 +246,12 @@ export function applyCavemanCleanup(
             // Compress from the ORIGINAL, never from an already-cavemaned
             // intermediate. Idempotent: compressing the same original at the
             // same level always produces the same output.
-            if (cavemanCompress(originalText, level, rulesFor(state)).length === 0) continue;
+            if (
+                cavemanCompress(originalText, level, rulesFor(state), wordRulesFor(state))
+                    .length === 0
+            ) {
+                continue;
+            }
 
             const target = targets.get(tag.tagNumber);
             if (!target) continue;
@@ -277,6 +287,10 @@ function rulesFor(state: CavemanReplayState): CavemanRules {
     return state.currentRules ? CURRENT_CAVEMAN_RULES : "ascii-v1";
 }
 
+function wordRulesFor(state: CavemanReplayState): CavemanWordRules {
+    return state.englishWordRules ? "english" : "none";
+}
+
 /**
  * Put the compressed text of one tag on the wire, as the session's replay
  * state serves it. Returns whether the text changed.
@@ -304,7 +318,12 @@ function applyCompressedText(
         if (!state.currentRules) return legacy.length > 0 && target.setContent(legacy);
         if (legacy.length > 0) target.setContent(legacy);
     }
-    const compressed = cavemanCompress(originalText, level, CURRENT_CAVEMAN_RULES);
+    const compressed = cavemanCompress(
+        originalText,
+        level,
+        CURRENT_CAVEMAN_RULES,
+        wordRulesFor(state),
+    );
     if (compressed.length === 0) return false;
     target.setContent(`${target.textPrefix ?? ""}${compressed}`, { keepReasoning: true });
     return target.getContent ? target.getContent() !== before : true;

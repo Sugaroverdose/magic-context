@@ -18,27 +18,39 @@ import {
  * cache. That pass records the current rules and rewrites every compressed tag
  * with them, and every later pass replays the current rules.
  *
- * `legacyReasoningTags` lists the tags compressed before that switch. The
- * original rules also took the reasoning of each compressed message off the
- * wire; those messages keep that, since putting the reasoning back would
- * change bytes the provider already cached. Tags compressed after the switch
- * keep their reasoning.
+ * `englishWordRules` records whether the current rules run their English word
+ * lists, which the user-level `language` setting decides. A changed setting
+ * takes effect the same way: on the next cleanup pass, which records it and
+ * rewrites every compressed tag. Absent means English, the only choice before
+ * the setting existed.
+ *
+ * `legacyReasoningTags` lists the tags compressed before the switch to the
+ * current rules. The original rules also took the reasoning of each compressed
+ * message off the wire; those messages keep that, since putting the reasoning
+ * back would change bytes the provider already cached. Tags compressed after
+ * the switch keep their reasoning.
  */
 const NAMESPACE = "caveman";
 const CURRENT_RULES_VERSION = 2;
 
 export interface CavemanReplayState {
     currentRules: boolean;
+    englishWordRules: boolean;
     legacyReasoningTags: ReadonlySet<number>;
 }
 
-const ORIGINAL_RULES: CavemanReplayState = { currentRules: false, legacyReasoningTags: new Set() };
+const ORIGINAL_RULES: CavemanReplayState = {
+    currentRules: false,
+    englishWordRules: true,
+    legacyReasoningTags: new Set(),
+};
 
 function parseState(lane: unknown): CavemanReplayState {
     if (!isRecord(lane) || lane.rules !== CURRENT_RULES_VERSION) return ORIGINAL_RULES;
     const tags = Array.isArray(lane.legacyReasoningTags) ? lane.legacyReasoningTags : [];
     return {
         currentRules: true,
+        englishWordRules: lane.englishWordRules !== false,
         legacyReasoningTags: new Set(
             tags.filter((tag): tag is number => Number.isSafeInteger(tag) && tag > 0),
         ),
@@ -60,24 +72,33 @@ export function getCavemanReplayState(db: Database, sessionId: string): CavemanR
 }
 
 /**
- * Record that the session's compressed text now uses the current rules, with
- * the tags compressed before the switch. Returns the persisted state, which is
- * the earlier one when the switch was already recorded, or null when the
- * document could not be written; the caller must then keep the original rules.
+ * Record that the session's compressed text now uses the current rules with
+ * the given word rules. `legacyReasoningTags` is written only by the switch
+ * from the original rules; a session already on the current rules keeps the
+ * list it recorded then. Returns the persisted state, or null when the
+ * document could not be written; the caller must then keep the state it read.
  */
-export function markCavemanCurrentRules(
+export function recordCavemanCurrentRules(
     db: Database,
     sessionId: string,
+    englishWordRules: boolean,
     legacyReasoningTags: Iterable<number>,
 ): CavemanReplayState | null {
     const tags = [...new Set(legacyReasoningTags)].sort((a, b) => a - b);
     const persisted = updateReplayDocument(db, sessionId, (doc) => {
-        if (parseState(doc[NAMESPACE]).currentRules) return false;
+        const current = parseState(doc[NAMESPACE]);
+        if (current.currentRules && current.englishWordRules === englishWordRules) return false;
         doc.version = 2;
-        doc[NAMESPACE] = { rules: CURRENT_RULES_VERSION, legacyReasoningTags: tags };
+        doc[NAMESPACE] = {
+            rules: CURRENT_RULES_VERSION,
+            legacyReasoningTags: current.currentRules
+                ? [...current.legacyReasoningTags].sort((a, b) => a - b)
+                : tags,
+            ...(englishWordRules ? {} : { englishWordRules: false }),
+        };
         return true;
     });
     if (!persisted) return null;
     const state = getCavemanReplayState(db, sessionId);
-    return state.currentRules ? state : null;
+    return state.currentRules && state.englishWordRules === englishWordRules ? state : null;
 }

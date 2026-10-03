@@ -37,6 +37,7 @@ import { log, sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { AUTO_SEARCH_TIMEOUT_MS, withAutoSearchDeadline } from "./auto-search-deadline";
 import { buildAutoSearchHint } from "./auto-search-hint";
+import type { CavemanWordRules } from "./caveman";
 import { hasMeaningfulUserText } from "./read-session-formatting";
 import { appendReminderToUserMessageById } from "./transform-message-helpers";
 import type { MessageLike } from "./transform-operations";
@@ -60,6 +61,8 @@ export interface AutoSearchRunnerOptions {
     /** Memory ids already rendered in the injected <session-history> block —
      *  skip fragments that just duplicate visible memories. */
     visibleMemoryIds?: Set<number>;
+    /** Caveman word rules for hint fragments, from the user-level `language` setting. */
+    wordRules?: CavemanWordRules;
 }
 
 function collectUserPromptParts(message: MessageLike): string {
@@ -341,7 +344,7 @@ export async function runAutoSearchHint(args: {
         return writeNoHintAndReconcile("below-threshold");
     }
 
-    const hintText = buildAutoSearchHint(results);
+    const hintText = buildAutoSearchHint(results, { wordRules: options.wordRules });
     if (!hintText) {
         return writeNoHintAndReconcile("empty");
     }

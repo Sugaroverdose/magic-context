@@ -635,6 +635,7 @@ export function applyPiHeuristicCleanup(
 			{
 				enabled: true,
 				minChars: config.caveman.minChars,
+				wordRules: config.caveman.wordRules,
 				protectedCutoff,
 			},
 		);

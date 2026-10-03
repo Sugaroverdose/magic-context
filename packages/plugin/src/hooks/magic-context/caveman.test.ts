@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { resolve } from "node:path";
-import { cavemanCompress, findFilePathMatches } from "./caveman";
+import { cavemanCompress, cavemanWordRulesForLanguage, findFilePathMatches } from "./caveman";
 
 describe("cavemanCompress", () => {
     describe("empty and passthrough", () => {
@@ -391,5 +391,75 @@ describe("Unicode rules", () => {
         expect(
             cavemanCompress("The historian was\ncompressed and the\nresult was fixed.", "full"),
         ).toBe("historian was\ncompressed and the\nresult fixed.");
+    });
+});
+
+type CavemanLanguageGolden = {
+    englishLanguages: Array<string | null>;
+    nonEnglishLanguages: string[];
+    cases: Array<{ text: string; neutral: string }>;
+};
+
+describe("language gate (shared with the Rust module)", () => {
+    const load = async () =>
+        (await Bun.file(
+            resolve(
+                import.meta.dir,
+                "../../../../../crates/mc-module/testdata/caveman-language-golden.json",
+            ),
+        ).json()) as CavemanLanguageGolden;
+
+    test("treats unset, en, en-* and invalid codes as English and other languages as not", async () => {
+        const golden = await load();
+        for (const language of golden.englishLanguages) {
+            expect({ language, rules: cavemanWordRulesForLanguage(language ?? undefined) }).toEqual(
+                {
+                    language,
+                    rules: "english",
+                },
+            );
+        }
+        for (const language of golden.nonEnglishLanguages) {
+            expect({ language, rules: cavemanWordRulesForLanguage(language) }).toEqual({
+                language,
+                rules: "none",
+            });
+        }
+    });
+
+    test("another language keeps only the language-neutral passes, at every level", async () => {
+        const golden = await load();
+        expect(golden.cases.length).toBeGreaterThan(60);
+        for (const fixture of golden.cases) {
+            for (const level of ["lite", "full", "ultra"] as const) {
+                expect(cavemanCompress(fixture.text, level, undefined, "none")).toBe(
+                    fixture.neutral,
+                );
+            }
+        }
+        expect(
+            cavemanCompress("Voy a revisar la configuraci\u00f3n.", "full", undefined, "none"),
+        ).toBe("Voy a revisar la configuraci\u00f3n.");
+        expect(
+            cavemanCompress("Es mejor que quite la l\u00ednea.", "ultra", undefined, "none"),
+        ).toBe("Es mejor que quite la l\u00ednea.");
+    });
+
+    test("English output is unchanged for unset and English settings", async () => {
+        const path = resolve(
+            import.meta.dir,
+            "../../../../../crates/mc-module/testdata/caveman-golden.json",
+        );
+        const cases = (await Bun.file(path).json()) as CavemanGoldenCase[];
+        for (const language of [undefined, "en", "en-US"]) {
+            const rules = cavemanWordRulesForLanguage(language);
+            for (const fixture of cases) {
+                expect(cavemanCompress(fixture.text, "lite", undefined, rules)).toBe(fixture.lite);
+                expect(cavemanCompress(fixture.text, "full", undefined, rules)).toBe(fixture.full);
+                expect(cavemanCompress(fixture.text, "ultra", undefined, rules)).toBe(
+                    fixture.ultra,
+                );
+            }
+        }
     });
 });

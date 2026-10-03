@@ -29,6 +29,8 @@
  * same bytes until a cache-rebuilding pass switches it.
  */
 
+import { isValidLanguageCode } from "../../agents/language-directive";
+
 export type CavemanLevel = "lite" | "full" | "ultra";
 
 // ---------------------------------------------------------------------------
@@ -658,6 +660,29 @@ function applyUltraAbbreviationsUnicode(text: string): string {
 export type CavemanRules = "ascii-v1" | "unicode-v2";
 export const CURRENT_CAVEMAN_RULES: CavemanRules = "unicode-v2";
 
+/**
+ * Whether the current rules may use their English word lists (articles,
+ * auxiliaries, fillers, hedges, pleasantries, phrase shortenings, connectives
+ * and abbreviations). On other languages those lists rewrite real words
+ * ("quite" is Spanish for "remove", "a" is a Spanish preposition), so with
+ * "none" only the language-neutral passes run, the same at every level:
+ * region protection, whitespace normalization and trimming. The original
+ * ASCII rules always use the English lists.
+ */
+export type CavemanWordRules = "english" | "none";
+
+/**
+ * The word rules for the user-level `language` setting: English when it is
+ * unset, "en", "en-*", or not a valid code (the same values that produce no
+ * language directive); none for any other language. The Rust twin is
+ * `caveman_word_rules_for_language` in crates/mc-module/src/transform.rs.
+ */
+export function cavemanWordRulesForLanguage(language: string | undefined): CavemanWordRules {
+    const code = typeof language === "string" ? language.trim().toLowerCase() : "";
+    if (code === "en" || code.startsWith("en-")) return "english";
+    return isValidLanguageCode(code) ? "none" : "english";
+}
+
 /** Compress `text` using caveman-style rules at the given `level`.
  *
  *  Preserved regions (code, URLs, paths, hashes, tag markers, U: lines) are
@@ -668,6 +693,7 @@ export function cavemanCompress(
     text: string,
     level: CavemanLevel,
     rules: CavemanRules = CURRENT_CAVEMAN_RULES,
+    wordRules: CavemanWordRules = "english",
 ): string {
     if (text.length === 0) return text;
     if (rules === "ascii-v1") return cavemanCompressAsciiV1(text, level);
@@ -676,6 +702,7 @@ export function cavemanCompress(
 
     const transformed = transformPreservingUserLines(protectedText, (chunk) => {
         let working = chunk;
+        if (wordRules === "none") return working;
 
         working = dropPhrasesUnicode(working, UNICODE_FILLER_DROP);
         working = dropPhrasesUnicode(working, UNICODE_HEDGING_DROP);

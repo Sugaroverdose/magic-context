@@ -132,20 +132,14 @@ const ULTRA_ABBREVIATIONS: &[(&str, &str)] = &[
 fn is_js_whitespace(ch: char) -> bool {
     matches!(
         ch,
-        '\t' | '\n'
-            | '\u{0B}'
-            | '\u{0C}'
-            | '\r'
-            | ' '
-            | '\u{A0}'
-            | '\u{1680}'
-            | '\u{2000}'..='\u{200A}'
-            | '\u{2028}'
-            | '\u{2029}'
-            | '\u{202F}'
-            | '\u{205F}'
-            | '\u{3000}'
-            | '\u{FEFF}'
+        '\t' | '\n' | '\u{0B}' | '\u{0C}' | '\r' | ' ' | '\u{A0}' | '\u{1680}' | '\u{2000}'
+            ..='\u{200A}'
+                | '\u{2028}'
+                | '\u{2029}'
+                | '\u{202F}'
+                | '\u{205F}'
+                | '\u{3000}'
+                | '\u{FEFF}'
     )
 }
 
@@ -371,7 +365,12 @@ fn expand_placeholders(
             Some((index, length)) => {
                 if expanded[index].is_none() {
                     let mut restored = String::with_capacity(preserved[index].original.len());
-                    expand_placeholders(&preserved[index].original, preserved, expanded, &mut restored);
+                    expand_placeholders(
+                        &preserved[index].original,
+                        preserved,
+                        expanded,
+                        &mut restored,
+                    );
                     expanded[index] = Some(restored);
                 }
                 output.push_str(expanded[index].as_deref().unwrap_or_default());
@@ -449,7 +448,7 @@ fn drop_articles(text: &str) -> String {
                 ""
             };
             if !word.is_empty() && has_word_boundary_after(text, cursor + word.len()) {
-                let mut end = cursor + word.len();
+                let end = cursor + word.len();
                 let space_end = skip_horizontal_space(text, end);
                 if space_end > end {
                     cursor = space_end;
@@ -711,13 +710,25 @@ fn normalize_whitespace(text: &str) -> String {
     output
 }
 
-/// Compress `text` using the same deterministic rules as the TypeScript oracle.
+/// Compress `text` using the same deterministic rules as the TypeScript oracle, with the English
+/// word rules.
 pub fn compress(text: &str, level: CavemanLevel) -> String {
+    compress_with(text, level, true)
+}
+
+/// Compress `text`; without `english_word_rules` only the language-neutral passes run (region
+/// protection, whitespace normalization and trimming), the same at every level. The English
+/// word lists rewrite real words of other languages ("quite" is Spanish for "remove", "a" is a
+/// Spanish preposition). Mirrors `cavemanCompress(..., wordRules)` in caveman.ts.
+pub fn compress_with(text: &str, level: CavemanLevel, english_word_rules: bool) -> String {
     if text.is_empty() {
         return text.to_string();
     }
     let (protected_text, preserved) = protect_regions(text);
     let transformed = transform_preserving_user_lines(&protected_text, |chunk| {
+        if !english_word_rules {
+            return chunk.to_string();
+        }
         let mut working = drop_phrases(chunk, FILLER_WORDS);
         working = drop_phrases(&working, HEDGING_PHRASES);
         working = drop_phrases(&working, PLEASANTRIES);
@@ -783,6 +794,60 @@ mod tests {
         }
     }
 
+    #[derive(Debug, Deserialize)]
+    struct LanguageGolden {
+        cases: Vec<LanguageCase>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct LanguageCase {
+        text: String,
+        neutral: String,
+    }
+
+    #[test]
+    fn language_neutral_golden_matches_typescript_oracle() {
+        let golden: LanguageGolden =
+            serde_json::from_str(include_str!("../testdata/caveman-language-golden.json"))
+                .expect("valid caveman language golden");
+        assert!(golden.cases.len() > 60);
+        for case in golden.cases {
+            for level in [CavemanLevel::Lite, CavemanLevel::Full, CavemanLevel::Ultra] {
+                assert_eq!(
+                    compress_with(&case.text, level, false),
+                    case.neutral,
+                    "{level:?}: {:?}",
+                    case.text
+                );
+            }
+        }
+        assert_eq!(
+            compress_with("Voy a revisar la configuración.", CavemanLevel::Full, false),
+            "Voy a revisar la configuración."
+        );
+    }
+
+    #[test]
+    fn english_word_rules_keep_the_english_golden_output() {
+        let cases: Vec<GoldenCase> =
+            serde_json::from_str(include_str!("../testdata/caveman-golden.json"))
+                .expect("valid caveman golden");
+        for case in cases {
+            assert_eq!(
+                compress_with(&case.text, CavemanLevel::Lite, true),
+                case.lite
+            );
+            assert_eq!(
+                compress_with(&case.text, CavemanLevel::Full, true),
+                case.full
+            );
+            assert_eq!(
+                compress_with(&case.text, CavemanLevel::Ultra, true),
+                case.ultra
+            );
+        }
+    }
+
     /// A long whitespace run used to rescan its rest from every character, and restoring
     /// placeholders rescanned the whole text once per preserved region. Both are linear now; the
     /// bounds are far above the linear cost and far below the old quadratic one.
@@ -819,6 +884,9 @@ mod tests {
         assert_eq!(compress(nested, CavemanLevel::Lite), nested);
         // A literal placeholder in the source is restored region by region, as TS does.
         let literal = "keep \u{0}MC_PRES_0\u{0} and `code`";
-        assert_eq!(compress(literal, CavemanLevel::Lite), "keep `code` and `code`");
+        assert_eq!(
+            compress(literal, CavemanLevel::Lite),
+            "keep `code` and `code`"
+        );
     }
 }

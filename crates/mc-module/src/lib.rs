@@ -10157,6 +10157,9 @@ impl McHandler {
                     &handler_entry_state,
                 ),
                 wrapup_active: self.wrapup_active(&parsed.session_id),
+                caveman_english_word_rules: crate::transform::caveman_english_word_rules(
+                    binding.config.language.as_deref(),
+                ),
                 #[cfg(test)]
                 injected_reductions: self
                     .reduction_injection
@@ -35363,6 +35366,7 @@ mod tests {
                 guidance_date: Some("Today's date: Thu Jan 01 1970".to_string()),
                 historian_active: false,
                 wrapup_active: false,
+                caveman_english_word_rules: true,
                 injected_reductions: Vec::new(),
             },
         )
@@ -36345,6 +36349,7 @@ mod tests {
                 guidance_date: Some("Today's date: Thu Jan 01 1970".to_string()),
                 historian_active: false,
                 wrapup_active: false,
+                caveman_english_word_rules: true,
                 injected_reductions: Vec::new(),
             },
         )

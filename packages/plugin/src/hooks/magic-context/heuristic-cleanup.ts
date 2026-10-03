@@ -353,6 +353,7 @@ export function applyHeuristicCleanup(
         const cavemanResult = applyCavemanCleanup(sessionId, db, targets, tags, {
             enabled: true,
             minChars: config.caveman.minChars,
+            wordRules: config.caveman.wordRules,
             protectedCutoff: config.protectedCutoff,
         });
         compressedTextTags =
