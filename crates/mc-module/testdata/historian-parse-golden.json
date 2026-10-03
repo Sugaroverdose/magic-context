@@ -214,5 +214,153 @@
       "user_observations": [],
       "primer_candidates": []
     }
+  },
+  {
+    "label": "tier tags written inside a properly closed tier stay text",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"Tier tags\">\n<p1>Discussed <p2> tags vs <pre> and the </p1> close</p1>\n<p2>Tier tag talk with <p3/></p2>\n<p3>Tags</p3>\n<p4>mentions <p1> again</p4>\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"duplicate close\"><p1>dup</p1></p1>\n<p2>two</p2><p3>three</p3><p4/></compartment>\n<compartment start=\"5\" end=\"6\" title=\"prose between tiers\"><p1>kept</p1>\nstray note\n<p2>two</p2><p3>three</p3><p4/></compartment>\n</compartments></output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "Tier tags",
+          "content": "Discussed <p2> tags vs <pre> and the </p1> close",
+          "p1": "Discussed <p2> tags vs <pre> and the </p1> close",
+          "p2": "Tier tag talk with <p3/>",
+          "p3": "Tags",
+          "p4": "mentions <p1> again",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "duplicate close",
+          "content": "dup",
+          "p1": "dup",
+          "p2": "two",
+          "p3": "three",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 5,
+          "end_message": 6,
+          "title": "prose between tiers",
+          "content": "kept",
+          "p1": "kept",
+          "p2": "two",
+          "p3": "three",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [],
+      "unprocessed_from": null,
+      "user_observations": [],
+      "primer_candidates": []
+    }
+  },
+  {
+    "label": "compartment close and block tags written inside a body stay text",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"XML format\">\n<p1>Each block ends with </compartment> and facts go in <facts> or <events>.</p1>\n<p2>The example was <events><causal_incident at_compartment=\"1\"><summary>Fake.</summary></causal_incident></events> and <unprocessed_from>9</unprocessed_from>.</p2>\n<p3>Quoted <primer_candidates><primer at_compartment=\"1\">Fake?</primer></primer_candidates> too, all inside <output>…</output></p3>\n<p4/>\n</compartment>\n<compartment start=\"3\" end=\"4\" title=\"Next\">\n<p1>next work</p1>\n<p2>next work short</p2>\n<p3>next work shorter</p3>\n<p4/>\n</compartment>\n</compartments>\n<facts>\n<PROJECT_RULES>\n* Real fact mentioning </compartment> as text.\n</PROJECT_RULES>\n</facts>\n<events><causal_incident at_compartment=\"2\"><summary>Real event about </p1> text.</summary><evidence>Saw </compartment> too</evidence></causal_incident></events>\n<user_observations>\n* Real observation.\n</user_observations>\n<primer_candidates><primer at_compartment=\"2\">Real question?</primer></primer_candidates>\n<meta><unprocessed_from>5</unprocessed_from></meta>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "XML format",
+          "content": "Each block ends with </compartment> and facts go in <facts> or <events>.",
+          "p1": "Each block ends with </compartment> and facts go in <facts> or <events>.",
+          "p2": "The example was <events><causal_incident at_compartment=\"1\"><summary>Fake.</summary></causal_incident></events> and <unprocessed_from>9</unprocessed_from>.",
+          "p3": "Quoted <primer_candidates><primer at_compartment=\"1\">Fake?</primer></primer_candidates> too, all inside <output>…</output>",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        },
+        {
+          "start_message": 3,
+          "end_message": 4,
+          "title": "Next",
+          "content": "next work",
+          "p1": "next work",
+          "p2": "next work short",
+          "p3": "next work shorter",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [
+        {
+          "category": "PROJECT_RULES",
+          "content": "Real fact mentioning </compartment> as text.",
+          "origin_compartment_index": null
+        }
+      ],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [
+        {
+          "kind": "causal_incident",
+          "at_compartment": 2,
+          "fields": {
+            "evidence": "Saw </compartment> too",
+            "summary": "Real event about </p1> text."
+          }
+        }
+      ],
+      "unprocessed_from": 5,
+      "user_observations": [
+        {
+          "content": "Real observation.",
+          "origin_compartment_index": null
+        }
+      ],
+      "primer_candidates": [
+        {
+          "question": "Real question?",
+          "origin_compartment_index": 2
+        }
+      ]
+    }
+  },
+  {
+    "label": "bare legacy fact blocks are read outside compartment bodies",
+    "text": "<output><compartments>\n<compartment start=\"1\" end=\"2\" title=\"Legacy\">\n<p1>Body quoting </compartment> then <NAMING>\n* Fake fact\n</NAMING></p1>\n<p2>two</p2><p3>three</p3><p4/>\n</compartment>\n</compartments>\n<NAMING>\n* Real legacy fact\n</NAMING>\n<unprocessed_from>3</unprocessed_from>\n</output>",
+    "parsed": {
+      "compartments": [
+        {
+          "start_message": 1,
+          "end_message": 2,
+          "title": "Legacy",
+          "content": "Body quoting </compartment> then <NAMING>\n* Fake fact\n</NAMING>",
+          "p1": "Body quoting </compartment> then <NAMING>\n* Fake fact\n</NAMING>",
+          "p2": "two",
+          "p3": "three",
+          "p4": "",
+          "importance": null,
+          "episode_type": null
+        }
+      ],
+      "facts": [
+        {
+          "category": "NAMING",
+          "content": "Real legacy fact",
+          "origin_compartment_index": null
+        }
+      ],
+      "dropped_fact_blocks": 0,
+      "dropped_facts": 0,
+      "events": [],
+      "unprocessed_from": 3,
+      "user_observations": [],
+      "primer_candidates": []
+    }
   }
 ]

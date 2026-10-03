@@ -499,4 +499,71 @@ ${tiers("Use &amp;lt; entity &amp;amp; &lt;tag&gt;")}
         expect(parsed.compartments[0].p1).toBe("Use &lt; entity &amp; <tag>");
         expect(parsed.primerCandidates[0].question).toBe("What is &quot;?");
     });
+    it("keeps literal tier tags inside a tier body as text", () => {
+        const parsed = parseCompartmentOutput(`<output><compartments>
+<compartment start="1" end="2" title="Tier tags">
+<p1>Discussed <p2> tags vs <pre> and the </p1> close</p1>
+<p2>Tier tag talk</p2>
+<p3>Tags</p3>
+<p4>mentions <p1> again</p4>
+</compartment>
+</compartments></output>`);
+        const c = parsed.compartments[0];
+        expect(c.p1).toBe("Discussed <p2> tags vs <pre> and the </p1> close");
+        expect(c.p2).toBe("Tier tag talk");
+        expect(c.p3).toBe("Tags");
+        expect(c.p4).toBe("mentions <p1> again");
+    });
+
+    it("keeps literal </compartment> and side-channel tags inside a body as text", () => {
+        const parsed = parseCompartmentOutput(`<output><compartments>
+<compartment start="1" end="2" title="XML format">
+<p1>Each block ends with </compartment> and facts go in <facts> or <events>.</p1>
+<p2>Format</p2>
+<p3>Format</p3>
+<p4/>
+</compartment>
+<compartment start="3" end="4" title="Next">
+${tiers("next work")}
+</compartment>
+</compartments>
+<facts>
+<PROJECT_RULES>
+* Real fact.
+</PROJECT_RULES>
+</facts>
+<events><causal_incident at_compartment="2"><summary>Real event.</summary></causal_incident></events>
+<meta><unprocessed_from>5</unprocessed_from></meta>
+</output>`);
+        expect(parsed.compartments.map((c) => c.title)).toEqual(["XML format", "Next"]);
+        expect(parsed.compartments[0].p1).toBe(
+            "Each block ends with </compartment> and facts go in <facts> or <events>.",
+        );
+        expect(parsed.facts).toEqual([{ category: "PROJECT_RULES", content: "Real fact." }]);
+        expect(parsed.events).toEqual([
+            { kind: "causal_incident", atCompartment: 2, fields: { summary: "Real event." } },
+        ]);
+        expect(parsed.unprocessedFrom).toBe(5);
+    });
+});
+
+describe("parseCompartmentOutput — side channels are read outside compartment bodies", () => {
+    it("ignores side-channel markup quoted inside a compartment body", () => {
+        const parsed = parseCompartmentOutput(`<output><compartments>
+<compartment start="1" end="2" title="Format docs">
+<p1>The example was <events><causal_incident at_compartment="1"><summary>Fake.</summary></causal_incident></events> and <unprocessed_from>9</unprocessed_from> and <primer_candidates><primer at_compartment="1">Fake?</primer></primer_candidates>.</p1>
+<p2>Format</p2>
+<p3>Format</p3>
+<p4/>
+</compartment>
+</compartments>
+<events><causal_incident at_compartment="1"><summary>Real.</summary></causal_incident></events>
+<primer_candidates><primer at_compartment="1">Real?</primer></primer_candidates>
+<meta><unprocessed_from>3</unprocessed_from></meta>
+</output>`);
+        expect(parsed.compartments[0].p1).toContain("<unprocessed_from>9</unprocessed_from>");
+        expect(parsed.events.map((e) => e.fields.summary)).toEqual(["Real."]);
+        expect(parsed.primerCandidates.map((p) => p.question)).toEqual(["Real?"]);
+        expect(parsed.unprocessedFrom).toBe(3);
+    });
 });

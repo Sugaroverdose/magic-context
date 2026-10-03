@@ -165,6 +165,64 @@ ${tiers("skipped: the quote never closes on its line")}
 <meta><unprocessed_from>5</unprocessed_from></meta>
 </output>`,
     },
+    {
+        label: "tier tags written inside a properly closed tier stay text",
+        text: `<output><compartments>
+<compartment start="1" end="2" title="Tier tags">
+<p1>Discussed <p2> tags vs <pre> and the </p1> close</p1>
+<p2>Tier tag talk with <p3/></p2>
+<p3>Tags</p3>
+<p4>mentions <p1> again</p4>
+</compartment>
+<compartment start="3" end="4" title="duplicate close"><p1>dup</p1></p1>
+<p2>two</p2><p3>three</p3><p4/></compartment>
+<compartment start="5" end="6" title="prose between tiers"><p1>kept</p1>
+stray note
+<p2>two</p2><p3>three</p3><p4/></compartment>
+</compartments></output>`,
+    },
+    {
+        label: "compartment close and block tags written inside a body stay text",
+        text: `<output><compartments>
+<compartment start="1" end="2" title="XML format">
+<p1>Each block ends with </compartment> and facts go in <facts> or <events>.</p1>
+<p2>The example was <events><causal_incident at_compartment="1"><summary>Fake.</summary></causal_incident></events> and <unprocessed_from>9</unprocessed_from>.</p2>
+<p3>Quoted <primer_candidates><primer at_compartment="1">Fake?</primer></primer_candidates> too, all inside <output>…</output></p3>
+<p4/>
+</compartment>
+<compartment start="3" end="4" title="Next">
+${tiers("next work")}
+</compartment>
+</compartments>
+<facts>
+<PROJECT_RULES>
+* Real fact mentioning </compartment> as text.
+</PROJECT_RULES>
+</facts>
+<events><causal_incident at_compartment="2"><summary>Real event about </p1> text.</summary><evidence>Saw </compartment> too</evidence></causal_incident></events>
+<user_observations>
+* Real observation.
+</user_observations>
+<primer_candidates><primer at_compartment="2">Real question?</primer></primer_candidates>
+<meta><unprocessed_from>5</unprocessed_from></meta>
+</output>`,
+    },
+    {
+        label: "bare legacy fact blocks are read outside compartment bodies",
+        text: `<output><compartments>
+<compartment start="1" end="2" title="Legacy">
+<p1>Body quoting </compartment> then <NAMING>
+* Fake fact
+</NAMING></p1>
+<p2>two</p2><p3>three</p3><p4/>
+</compartment>
+</compartments>
+<NAMING>
+* Real legacy fact
+</NAMING>
+<unprocessed_from>3</unprocessed_from>
+</output>`,
+    },
 ];
 
 const golden = cases.map((spec) => ({
