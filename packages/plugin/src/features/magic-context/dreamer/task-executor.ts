@@ -407,6 +407,12 @@ function requireDreamTransport(deps: DreamTaskExecutorDeps): {
  * if the lease is lost, and writes one per-task dream_runs telemetry row.
  */
 export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecutor {
+    const backgroundSessionsAreHidden =
+        (
+            deps.client as
+                | (PluginContext["client"] & { backgroundSessionsAreHidden?: boolean })
+                | undefined
+        )?.backgroundSessionsAreHidden === true;
     // Memoize the PROMISE, not a flag+value. Domain groups run concurrently
     // (task-scheduler runs them under Promise.all), so several tasks call this at
     // once. A flag-then-await memo set the "resolved" flag BEFORE the session.list
@@ -417,27 +423,50 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
     // single shared promise makes every caller await the same populated result.
     let parentSessionIdPromise: Promise<string | undefined> | undefined;
 
-    const resolveParentSessionId = (): Promise<string | undefined> => {
-        if (deps.hiddenCompletionExecutor || deps.parentSessionId)
+    const resolveParentSessionId = (deadline: number): Promise<string | undefined> => {
+        if (deps.hiddenCompletionExecutor || deps.parentSessionId || backgroundSessionsAreHidden)
             return Promise.resolve(deps.parentSessionId);
         if (!parentSessionIdPromise) {
             parentSessionIdPromise = (async () => {
                 try {
-                    const listResponse = await requireDreamClient(deps.client).session.list({
-                        query: { directory: deps.sessionDirectory },
-                    });
-                    const sessions = shared.normalizeSDKResponse(
-                        listResponse,
-                        [] as { id?: string; title?: string; parentID?: string }[],
-                        { preferResponseOnMissingData: true },
+                    // OpenCode limits session.list to the 100 most recent rows.
+                    // Filter children on the host, before that limit, and search
+                    // the project: a timer's checkout may have no conversations
+                    // while a sibling worktree has the project's ordinary root.
+                    // Older leaked Magic Context roots still need client-side
+                    // filtering. Grow the prefix until it includes a real parent
+                    // or exhausts the roots; /session has no cursor pagination.
+                    for (let limit = 100; Date.now() < deadline; limit *= 2) {
+                        const query = {
+                            directory: deps.sessionDirectory,
+                            scope: "project",
+                            roots: true,
+                            limit,
+                        };
+                        const listResponse = await requireDreamClient(deps.client).session.list({
+                            query,
+                        });
+                        const sessions = shared.normalizeSDKResponse(
+                            listResponse,
+                            null as { id?: string; title?: string; parentID?: string }[] | null,
+                        );
+                        if (!Array.isArray(sessions)) {
+                            throw new Error("session.list did not return a session array");
+                        }
+                        const parent = sessions.find(
+                            (s) =>
+                                typeof s?.id === "string" &&
+                                !s.parentID &&
+                                !s.title?.startsWith("magic-context-"),
+                        )?.id;
+                        if (parent || sessions.length < limit) return parent;
+                    }
+                    log(`[dreamer] parent lookup timed out for ${deps.sessionDirectory}`);
+                    return undefined;
+                } catch (error) {
+                    log(
+                        `[dreamer] parent lookup failed for ${deps.sessionDirectory}: ${describeError(error).brief}`,
                     );
-                    return sessions?.find(
-                        (s) =>
-                            typeof s?.id === "string" &&
-                            !s.parentID &&
-                            !s.title?.startsWith("magic-context-"),
-                    )?.id;
-                } catch {
                     return undefined;
                 }
             })().then((parent) => {
@@ -512,7 +541,7 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
         const parent =
             migrationRequired || config.modelChainUnavailable
                 ? deps.parentSessionId
-                : await resolveParentSessionId();
+                : await resolveParentSessionId(deadline);
         if (!leaseOwnershipMatches(db, holderId, leaseAcquisition.generation, leaseKey)) {
             throw new Error("Dream lease lost during executor setup");
         }
@@ -672,6 +701,17 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             if (config.modelChainUnavailable)
                 return skip("Pi model chain is empty (no configured model resolves in Pi)");
             if (migrationRequired) return skip(renderSingleStoreMigrationRequiredRefusal());
+            // A visible host must not create a background root. Skip the whole
+            // scheduled task before opening batches or advancing task cursors;
+            // the scheduler moves skipped work to its next cron without retries.
+            // Hidden carriers and Pi's process-local sessions need no parent.
+            if (
+                deps.client &&
+                !deps.hiddenCompletionExecutor &&
+                !backgroundSessionsAreHidden &&
+                !parent
+            )
+                return skip("no ordinary parent session is available on this host");
             if (
                 deps.hiddenCompletionExecutor?.capabilities.tools === false &&
                 DREAM_TASK_CAPABILITIES[config.task].requiresTools
