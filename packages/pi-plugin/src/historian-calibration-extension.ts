@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { readHostSystemPrompt } from "./host-system-prompt";
 import { promptFingerprint } from "./subagent-telemetry";
 
 export const HISTORIAN_TEMPERATURE_ENV = "MAGIC_CONTEXT_HISTORIAN_TEMPERATURE";
@@ -80,7 +81,8 @@ export default function historianCalibrationExtension(pi: ExtensionAPI): void {
 		// context runs after ALL before_agent_start handlers have composed the prompt.
 		// Unlike before_provider_request it also runs for custom provider extensions.
 		pi.on("context", (_event, ctx) => {
-			const effective = ctx.getSystemPrompt();
+			const effective = readHostSystemPrompt(ctx);
+			if (effective === undefined) return;
 			process.stdout.write(
 				`${JSON.stringify({ type: "mc_system_prompt", ...promptFingerprint(effective), containsIntended: effective.includes(intended) })}\n`,
 			);

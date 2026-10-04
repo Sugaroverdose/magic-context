@@ -82,6 +82,7 @@ import type { WindowGeometryResult } from "@magic-context/core/shared/window-geo
 import packageJson from "../../package.json";
 import { resolveSessionId } from "../commands/pi-command-utils";
 import { getPiChannel1Baseline } from "../ctx-reduce-nudge-pi";
+import { readHostSystemPrompt } from "../host-system-prompt";
 import { resolvePiWindowGeometry } from "../pi-context-limit";
 import { resolvePiStatusPressureSnapshot } from "../pi-pressure";
 import { isPiRecompInFlight } from "../pi-recomp-runner";
@@ -758,11 +759,8 @@ export function buildPiStatusDetail(
 	// so the dialog still has a sensible number outside command context.
 	let systemPromptTokens = meta.systemPromptTokens;
 	try {
-		const sysPrompt =
-			typeof ctx.getSystemPrompt === "function"
-				? ctx.getSystemPrompt()
-				: undefined;
-		if (typeof sysPrompt === "string" && sysPrompt.length > 0) {
+		const sysPrompt = readHostSystemPrompt(ctx);
+		if (sysPrompt !== undefined && sysPrompt.length > 0) {
 			systemPromptTokens = estimateTokens(sysPrompt);
 		}
 	} catch {

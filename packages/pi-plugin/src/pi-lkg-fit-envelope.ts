@@ -8,6 +8,7 @@ import {
 	hasTokenizerForFit,
 } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
+import { readHostSystemPrompt } from "./host-system-prompt";
 import type { PiFitEnvelope } from "./pi-raw-fallback";
 
 /** Only complete current host metadata can make a replay admissible. Counting
@@ -20,13 +21,8 @@ export function readPiLkgFitEnvelope(
 	frozen: DecisionCalibration,
 ): PiFitEnvelope | undefined {
 	try {
-		if (
-			!modelKey ||
-			typeof ctx.getSystemPrompt !== "function" ||
-			typeof pi.getAllTools !== "function"
-		)
-			return;
-		const system = ctx.getSystemPrompt();
+		if (!modelKey || typeof pi.getAllTools !== "function") return;
+		const system = readHostSystemPrompt(ctx);
 		const allTools = pi.getAllTools();
 		if (
 			typeof system !== "string" ||

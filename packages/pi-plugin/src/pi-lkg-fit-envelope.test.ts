@@ -51,6 +51,16 @@ test("LKG envelope counts full tool schemas with the matching frozen model polic
 	).toThrow();
 });
 
+test("LKG envelope reads Oh My Pi's segmented system prompt", () => {
+	const envelope = readPiLkgFitEnvelope(
+		{ getSystemPrompt: () => ["A complete", "system prompt."] },
+		{ getAllTools: () => [tool("small")] },
+		key,
+		calibrationForModelKey(key),
+	);
+	expect(envelope).toBeDefined();
+});
+
 test("unknown LKG models use the unknown-model fit rule instead of a family or other-model freeze", () => {
 	const envelope = readPiLkgFitEnvelope(
 		system,

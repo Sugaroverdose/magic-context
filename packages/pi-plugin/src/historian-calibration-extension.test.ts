@@ -132,14 +132,14 @@ it("observes the effective context prompt rather than before-agent input", async
 		process.env.MAGIC_CONTEXT_SUBAGENT_PROMPT_FILE = file;
 		const handlers = new Map<
 			string,
-			(event: unknown, ctx: { getSystemPrompt(): string }) => unknown
+			(event: unknown, ctx: { getSystemPrompt(): unknown }) => unknown
 		>();
 		extension({
 			on: (
 				name: string,
 				handler: (
 					event: unknown,
-					ctx: { getSystemPrompt(): string },
+					ctx: { getSystemPrompt(): unknown },
 				) => unknown,
 			) => handlers.set(name, handler),
 		} as never);
@@ -154,6 +154,16 @@ it("observes the effective context prompt rather than before-agent input", async
 		expect(event.containsIntended).toBe(true);
 		expect(event.sha256).toHaveLength(64);
 		expect(JSON.stringify(event)).not.toContain("plus extension");
+
+		// Oh My Pi returns one string per prompt segment (issue 618).
+		handlers.get("context")?.(
+			{},
+			{ getSystemPrompt: () => ["intended", "<project-context>"] },
+		);
+		const segmented = JSON.parse(String(output.mock.calls[1]?.[0]));
+		expect(segmented.type).toBe("mc_system_prompt");
+		expect(segmented.bytes).toBe("intended\n\n<project-context>".length);
+		expect(segmented.containsIntended).toBe(true);
 	} finally {
 		output.mockRestore();
 		if (previous === undefined)
