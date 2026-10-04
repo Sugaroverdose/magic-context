@@ -76,6 +76,7 @@ import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
 import { formatDate } from "./temporal-awareness";
+import { renderUserProfileContent } from "./user-profile-render";
 
 export interface PreparedCompartmentInjection {
     block: string;
@@ -2269,7 +2270,7 @@ function renderUserProfileBlock(memories: UserMemory[], wrapper = "user-profile"
     if (memories.length === 0) return "";
     const lines = [`<${wrapper}>`];
     for (const memory of memories) {
-        lines.push(`- ${escapeXmlContent(memory.content)}`);
+        lines.push(`- ${escapeXmlContent(renderUserProfileContent(memory.content))}`);
     }
     lines.push(`</${wrapper}>`);
     return lines.join("\n");

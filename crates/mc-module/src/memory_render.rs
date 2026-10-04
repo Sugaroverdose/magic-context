@@ -46,6 +46,17 @@ fn escape_xml_content(s: &str) -> String {
         .replace('>', "&gt;")
 }
 
+fn render_user_profile_content(content: &str) -> String {
+    let Some(remainder) = content.strip_prefix("User ") else {
+        return content.to_string();
+    };
+    let mut characters = remainder.chars();
+    let Some(first) = characters.next() else {
+        return String::new();
+    };
+    first.to_uppercase().chain(characters).collect()
+}
+
 /// The five canonical V2 memory categories, in render order. This is the single
 /// source of truth for the accepted write categories (see crate::MEMORY_CATEGORIES).
 pub(crate) const MEMORY_CATEGORY_ORDER: [&str; 5] = [
@@ -158,7 +169,10 @@ pub fn render_user_profile_block(profile_lines: &[String], wrapper: &str) -> Str
     let mut lines = Vec::with_capacity(profile_lines.len() + 2);
     lines.push(format!("<{wrapper}>"));
     for content in profile_lines {
-        lines.push(format!("- {}", escape_xml_content(content)));
+        lines.push(format!(
+            "- {}",
+            escape_xml_content(&render_user_profile_content(content))
+        ));
     }
     lines.push(format!("</{wrapper}>"));
     lines.join("\n")
@@ -502,6 +516,32 @@ mod tests {
             block,
             "<user-profile>\n- prefers root cause\n- x &lt; y\n</user-profile>"
         );
+    }
+
+    #[test]
+    fn user_profile_prefix_matches_shared_fixture() {
+        #[derive(Deserialize)]
+        struct Fixture {
+            cases: Vec<Case>,
+        }
+        #[derive(Deserialize)]
+        struct Case {
+            input: String,
+            expected: String,
+        }
+
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/user-profile-render.json"
+        ))
+        .expect("parse shared user-profile render fixture");
+        for case in fixture.cases {
+            assert_eq!(render_user_profile_content(&case.input), case.expected);
+            let block = render_user_profile_block(&[case.input], "user-profile");
+            assert_eq!(
+                block,
+                format!("<user-profile>\n- {}\n</user-profile>", case.expected)
+            );
+        }
     }
 
     #[test]

@@ -93,6 +93,7 @@ import {
 } from "@magic-context/core/hooks/magic-context/inject-compartments";
 
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { renderUserProfileContent } from "@magic-context/core/hooks/magic-context/user-profile-render";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
 import { logSlowWriteTransaction } from "@magic-context/core/shared/write-transaction-timing";
@@ -1277,7 +1278,10 @@ function renderUserProfileBlock(
 	const memories = memoriesOverride ?? safeGetActiveUserMemoriesPi(db);
 	if (memories.length === 0) return "";
 	return `<${wrapper}>\n${memories
-		.map((memory) => `- ${escapeXmlContent(memory.content)}`)
+		.map(
+			(memory) =>
+				`- ${escapeXmlContent(renderUserProfileContent(memory.content))}`,
+		)
 		.join("\n")}\n</${wrapper}>`;
 }
 
