@@ -122,6 +122,9 @@ describe("Pi in-turn lock wait at the production busy timeout", () => {
 				await writer.release();
 			}
 			db.exec("BEGIN IMMEDIATE; COMMIT");
+			// Releasing the lock doesn't guarantee the event loop has reached the
+			// check phase yet, so yield once before asserting the deferred work ran.
+			await new Promise<void>((resolve) => setImmediate(resolve));
 			expect(deferredRan).toBe(true);
 		} finally {
 			closeQuietly(db);
