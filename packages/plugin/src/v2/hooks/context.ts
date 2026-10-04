@@ -1630,7 +1630,6 @@ export async function registerContext(context: V2Context) {
             await createMessagesTransformHandler({
                 magicContext: { "experimental.chat.messages.transform": transform },
                 compactionOff,
-                propagateUnexpectedErrors: true,
                 onLkgReplay: restoreLkgSystem,
                 rustReplayParticipant: () => transform?.getRustReplayParticipant() ?? null,
             })(
@@ -1734,20 +1733,26 @@ export async function registerContext(context: V2Context) {
                 );
                 throw new V2ContextRefusal(STORAGE_BUSY_MESSAGE, { cause: refusal });
             }
-            if (isBlockingV2TransformError(error)) {
+            // Failures before the shared wrapper (for example adapting host
+            // history) also cannot hand the provider an unmanaged draft.
+            const managedError =
+                !compactionOff && !isBlockingV2TransformError(error)
+                    ? new DegradedPassRefusalError("v2-context-failed", { cause: error })
+                    : error;
+            if (isBlockingV2TransformError(managedError)) {
                 // These errors mean the shared transform cannot prove a safe prompt.
                 // Native compaction owns recovery when Magic Context compaction is off.
                 if (!compactionOff) {
                     // The host records an interrupted turn without its reason, so
                     // say on the TUI's notification channel what the user can do.
                     if (
-                        error instanceof UnresolvedHistoryBoundaryError ||
-                        error instanceof UnmanagedOverWindowError ||
-                        error instanceof DegradedPassRefusalError
+                        managedError instanceof UnresolvedHistoryBoundaryError ||
+                        managedError instanceof UnmanagedOverWindowError ||
+                        managedError instanceof DegradedPassRefusalError
                     ) {
                         pushNotification(
                             "toast",
-                            { message: error.message, variant: "error" },
+                            { message: managedError.message, variant: "error" },
                             draft.sessionID,
                         );
                     }
@@ -1755,10 +1760,10 @@ export async function registerContext(context: V2Context) {
                         context.session,
                         draft.sessionID,
                         "blocking-transform-error",
-                        error,
+                        managedError,
                     );
                     throw new V2ContextRefusal("Magic Context refused to send an unsafe prompt.", {
-                        cause: error,
+                        cause: managedError,
                     });
                 }
                 log("[magic-context] compaction-off: fail-closed inert, passing through", error);

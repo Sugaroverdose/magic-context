@@ -103,6 +103,7 @@ import {
     type DroppedTokenReduction,
     estimateDroppedTokensFromTagReductions,
 } from "./dropped-token-estimate";
+import { degradedPassError } from "./degraded-pass-refusal";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
@@ -125,7 +126,7 @@ import {
 } from "./inject-compartments";
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
-import type { PassOutcome } from "./pass-outcome";
+import type { PassDegradationKind, PassDegradationSite, PassOutcome } from "./pass-outcome";
 import {
     postprocessOldestTags,
     postprocessReplaySnapshot,
@@ -1727,6 +1728,20 @@ export async function runPostTransformPhase(
 ): Promise<PostTransformPhaseResult> {
     const tPostprocessSetup = performance.now();
     const compactionOff = args.compactionOff === true;
+    // A caught error or failed persistence can leave an already-mutated array
+    // only partly replayed. Never publish it, even if it fits the window. The
+    // wrapper owns last-good replay or refusal; native compaction owns off mode.
+    const failPass = (
+        site: PassDegradationSite,
+        error: unknown = new Error(`Could not complete ${site}`),
+        kind?: PassDegradationKind,
+    ): void => {
+        args.passOutcome?.record(site, kind);
+        if (!compactionOff) {
+            sessionLog(args.sessionId, `transform refused degraded pass site=${site}:`, error);
+            throw degradedPassError(site, error);
+        }
+    };
     const trailingBlankSourceDecisions =
         args.trailingBlankSourceDecisions ?? snapshotTrailingBlankSourceDecisions(args.messages);
     // Capture before todo/history synthesis can add assistant messages. Reasoning replay skips a
@@ -1967,7 +1982,7 @@ export async function runPostTransformPhase(
         } catch (error) {
             preparedPrefix = cachedPrefixBeforePreflight;
             prefixPreflightFailed = true;
-            args.passOutcome?.record("m0-m1-fold-preexecution-degradation");
+            failPass("m0-m1-fold-preexecution-degradation", error);
             sessionLog(
                 args.sessionId,
                 "transform: m[0] HARD fold pre-execution failed:",
@@ -2465,6 +2480,7 @@ export async function runPostTransformPhase(
                         persisted = addRemovedReasoningIds(args.db, args.sessionId, newIds);
                     } catch (error) {
                         sessionLog(args.sessionId, "reasoning removal: persistence threw:", error);
+                        failPass("reasoning-removal-persistence-failure", error);
                     }
                     if (persisted) {
                         for (const id of newIds) removedReasoningIds.add(id);
@@ -2479,6 +2495,7 @@ export async function runPostTransformPhase(
                                 "reasoning removal: committed set re-read failed:",
                                 error,
                             );
+                            failPass("reasoning-removal-read-failure", error);
                         }
                         removedReasoningMessages = newIds.length;
                         sessionLog(
@@ -2486,7 +2503,7 @@ export async function runPostTransformPhase(
                             `reasoning removal: froze ${newIds.length} assistant(s), total=${removedReasoningIds.size}`,
                         );
                     } else {
-                        args.passOutcome?.record("reasoning-removal-persistence-failure");
+                        failPass("reasoning-removal-persistence-failure");
                         sessionLog(
                             args.sessionId,
                             "reasoning removal: persistence failed; serving the earlier set only",
@@ -2661,8 +2678,8 @@ export async function runPostTransformPhase(
             if (deferredMaterialize) deferredMaterializedSuccessfully = true;
         }
     } catch (error) {
-        args.passOutcome?.record("pending-operation-failure");
         sessionLog(args.sessionId, "transform failed applying pending operations:", error);
+        failPass("pending-operation-failure", error);
         updateSessionMeta(args.db, args.sessionId, { lastTransformError: getErrorMessage(error) });
     }
 
@@ -2719,7 +2736,7 @@ export async function runPostTransformPhase(
             }
             logTransformTiming(args.sessionId, "dropStaleReduceCalls", t8);
         } catch (error) {
-            args.passOutcome?.record("stale-reduce-strip-exception");
+            failPass("stale-reduce-strip-exception", error);
             sessionLog(args.sessionId, "transform failed dropping stale ctx_reduce calls:", error);
         }
     }
@@ -2744,7 +2761,7 @@ export async function runPostTransformPhase(
             }
             logTransformTiming(args.sessionId, "stripProcessedImages", tImg);
         } catch (error) {
-            args.passOutcome?.record("image-strip-exception");
+            failPass("image-strip-exception", error);
             sessionLog(args.sessionId, "transform failed stripping processed images:", error);
         }
     }
@@ -2799,20 +2816,19 @@ export async function runPostTransformPhase(
                 );
             }
         } catch (error) {
-            args.passOutcome?.record("m0-m1-injection-degradation");
+            // A failed injection may have committed a newer trim boundary. Drop
+            // its in-memory cache before refusing so a retry rebuilds from the
+            // persisted prefix rather than cutting against an unserved one.
+            clearInjectionCache(args.sessionId);
+            failPass("m0-m1-injection-degradation", error);
             sessionLog(
                 args.sessionId,
                 "transform: m[0]/m[1] injection failed:",
                 getErrorMessage(error),
             );
-            // Fail-closed: prepareCompartmentInjection already spliced the
-            // summarized raw history out of `messages` (transform.ts), so if
-            // m[0]/m[1] injection throws, the model would otherwise receive
-            // NEITHER the raw history NOR <session-history> — silent context
-            // loss. Re-inject the prepared legacy block as a degraded fallback
-            // so the compacted history is still present this pass. This pass
-            // already busted (it threw), so the non-m0/m1 shape costs nothing;
-            // the next pass re-materializes the proper m[0]/m[1] layout.
+            // Only compaction-off reaches this fallback: managed passes already
+            // threw above. Keep the off mode's existing additive fallback rather
+            // than substituting a legacy history block for a managed prefix.
             if (args.pendingCompartmentInjection) {
                 try {
                     const fallbackResult = renderCompartmentInjection(
@@ -2834,25 +2850,6 @@ export async function runPostTransformPhase(
                     );
                 }
             }
-            // History-loss guard: on a cache-busting pass,
-            // prepareCompartmentInjection (transform.ts) already trimmed the raw
-            // tail to the LATEST compartment AND cached that new boundary, and the
-            // explicit history-refresh signal was already drained. Since m[0]/m[1]
-            // injection just threw, the cached m[1] still reflects the PRE-failure
-            // compartment set. If we left the in-memory injection cache holding the
-            // new boundary, a later same-process DEFER pass would reuse it
-            // (isCacheBusting=false hits the cached path), trim the raw tail to the
-            // new boundary, and replay the stale m[1] — so a compartment published
-            // this turn would be summarized in NEITHER m[1] NOR the raw tail =
-            // silent history loss persisting past this pass. Clearing the cache
-            // forces the next defer pass through the cold-rebuild path, which trims
-            // only to the persisted baseline boundary the cached m[1] actually
-            // covers (keeping the new compartment's raw messages visible until a
-            // later exec pass folds them). We intentionally do NOT re-arm the
-            // refresh signal: a persistent injection failure would then bust the
-            // cache every pass; the scheduler's next natural execute pass retries
-            // materialization on its own.
-            clearInjectionCache(args.sessionId);
         }
         logTransformTiming(args.sessionId, "pp.injectM0M1", tInjectM0M1);
     } else if (args.fullFeatureMode && !compactionOff && args.pendingCompartmentInjection) {
@@ -3114,7 +3111,7 @@ export async function runPostTransformPhase(
                         }
                         break;
                     case "retryable-failure":
-                        args.passOutcome?.record("compaction-marker-drain-failure");
+                        failPass("compaction-marker-drain-failure", outcome.error);
                         sessionLog(
                             args.sessionId,
                             "compaction-marker drain: retryable failure; preserving deferred history refresh signal",
@@ -3196,7 +3193,7 @@ export async function runPostTransformPhase(
             appendReminderToUserMessageById(args.messages, anchoredMessageId, noteInstruction);
             noteNudgeAppendedThisPass = true;
         } else if (anchoredMessageId && !outcome.ok) {
-            args.passOutcome?.record("note-nudge-cas-failure");
+            failPass("note-nudge-cas-failure");
             sessionLog(args.sessionId, `note-nudge delivery skipped wire append: ${outcome.kind}`);
         }
     }
@@ -3312,7 +3309,7 @@ export async function runPostTransformPhase(
                 args.passOutcome?.record(`auto-search-${autoSearchOutcome.kind}`);
             }
         } catch (error) {
-            args.passOutcome?.record("auto-search-internal-failure");
+            failPass("auto-search-internal-failure", error);
             sessionLog(args.sessionId, "auto-search runner failed:", error);
         }
         autoSearchHintAppendedThisPass =
@@ -3425,7 +3422,7 @@ export async function runPostTransformPhase(
                         lateEditBeforeNewestThinking = true;
                     }
                 } else {
-                    args.passOutcome?.record("thinking-binding-recovery-persistence-failure");
+                    failPass("thinking-binding-recovery-persistence-failure");
                     sessionLog(
                         args.sessionId,
                         "thinking binding recovery: persistence failed; leaving the bound blocks intact",
@@ -3462,7 +3459,7 @@ export async function runPostTransformPhase(
                         // from the middle of the history.
                         lateEditBeforeNewestThinking = true;
                     } else {
-                        args.passOutcome?.record("merged-reasoning-strip-persistence-failure");
+                        failPass("merged-reasoning-strip-persistence-failure");
                         sessionLog(
                             args.sessionId,
                             "merged reasoning strip: persistence failed; leaving newly detected assistants intact",
@@ -3471,7 +3468,7 @@ export async function runPostTransformPhase(
                 }
             }
         } catch (error) {
-            args.passOutcome?.record("merged-reasoning-strip-exception");
+            failPass("merged-reasoning-strip-exception", error);
             sessionLog(args.sessionId, "transform failed freezing merged reasoning strip:", error);
         }
     }
@@ -3514,7 +3511,7 @@ export async function runPostTransformPhase(
                     poisonedKeepIds,
                 );
                 if (demotedIds === null) {
-                    args.passOutcome?.record("trailing-blank-heal-persistence-failure");
+                    failPass("trailing-blank-heal-persistence-failure");
                     sessionLog(
                         args.sessionId,
                         "trailing blank heal: persistence failed; retaining frozen keep decisions",
@@ -3531,7 +3528,7 @@ export async function runPostTransformPhase(
                     }
                 }
             } catch (error) {
-                args.passOutcome?.record("trailing-blank-heal-exception");
+                failPass("trailing-blank-heal-exception", error);
                 sessionLog(
                     args.sessionId,
                     "transform failed healing trailing blank decisions:",
@@ -3585,14 +3582,14 @@ export async function runPostTransformPhase(
                         lateEditBeforeNewestThinking = true;
                     }
                 } else {
-                    args.passOutcome?.record("trailing-blank-decision-persistence-failure");
+                    failPass("trailing-blank-decision-persistence-failure");
                     sessionLog(
                         args.sessionId,
                         "trailing blank decision: persistence failed; serving the frozen decisions",
                     );
                 }
             } catch (error) {
-                args.passOutcome?.record("trailing-blank-decision-exception");
+                failPass("trailing-blank-decision-exception", error);
                 sessionLog(
                     args.sessionId,
                     "transform failed freezing trailing blank decision:",
@@ -3686,7 +3683,7 @@ export async function runPostTransformPhase(
             }
             bustedThisPass = true;
         } else if (outcome.persistenceFailed) {
-            args.passOutcome?.record("proactive-thinking-strip-persistence-failure");
+            failPass("proactive-thinking-strip-persistence-failure");
         }
     }
 

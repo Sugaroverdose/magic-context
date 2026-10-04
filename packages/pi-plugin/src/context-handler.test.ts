@@ -3935,7 +3935,7 @@ describe("registerPiContextHandler", () => {
 				},
 			});
 
-			await handler(throwingEvent, fakeContext("ses-context") as never);
+			await expect(handler(throwingEvent, fakeContext("ses-context") as never)).rejects.toMatchObject({ name: "PiStorageBusyError" });
 			expect(getOrCreateSessionMeta(db, "ses-context").lastTransformError).toBe(
 				"boom messages",
 			);
@@ -4310,7 +4310,7 @@ describe("registerPiContextHandler", () => {
 				);
 			};
 
-			expect(await runPass()).toBeUndefined();
+			await expect(runPass()).rejects.toMatchObject({ name: "PiStorageBusyError" });
 			expect(getOrCreateSessionMeta(db, sessionId).piStableIdScheme ?? 0).toBe(
 				0,
 			);

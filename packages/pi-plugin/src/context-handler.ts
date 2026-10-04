@@ -299,7 +299,6 @@ import {
 	assertPiRawFallbackFits,
 	PiDegradedPassError,
 	PiStorageBusyError,
-	piRawMessagesExceedLimit,
 } from "./pi-raw-fallback";
 import { injectSyntheticTodowriteForPi } from "./pi-todo-inject";
 import {
@@ -4014,10 +4013,9 @@ export function registerPiContextHandler(
 			const message = err instanceof Error ? err.message : String(err);
 			const stack = err instanceof Error ? err.stack : undefined;
 			const transientStorageFailure = isTransientPiStorageError(err);
-			// A failed tagging or drop-replay stage is handled like a busy store:
-			// Pi's own messages lack the session's persisted reductions.
-			const degradedPass =
-				err instanceof PiDegradedPassError && !lkgCompactionOff;
+            // Every failed managed pass is handled like a busy store: Pi's own
+            // messages lack the session's persisted reductions, even if they fit.
+			const degradedPass = !lkgCompactionOff;
 			const replayOrRefuse = transientStorageFailure || degradedPass;
 			const failureLabel = transientStorageFailure
 				? "TRANSIENT STORAGE FAILURE"
@@ -4064,13 +4062,13 @@ export function registerPiContextHandler(
 					}
 					logPiLkgRecovery(
 						sessionIdForError,
-						`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); ${transientStorageFailure ? `refusing unreduced ${rawMessageCount}-message input` : `checking raw ${rawMessageCount}-message input`}`,
+						`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${replay.reason}); refusing unreduced ${rawMessageCount}-message input`,
 					);
 				} catch (replayError) {
 					if (replayError instanceof PiStorageBusyError) throw replayError;
 					logPiLkgRecovery(
 						sessionIdForError,
-						`${failureLabel} ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); ${transientStorageFailure ? `refusing unreduced ${rawMessageCount}-message input` : `checking raw ${rawMessageCount}-message input`}`,
+						`${failureLabel} ${piStorageErrorReason(err)}: LKG replay unavailable (${replayError instanceof Error ? replayError.message : String(replayError)}); refusing unreduced ${rawMessageCount}-message input`,
 					);
 				}
 			} else if (replayOrRefuse && sessionIdForError) {
@@ -4081,23 +4079,12 @@ export function registerPiContextHandler(
 						: (lkgPassSnapshot?.preparationFailure ?? "lkg_miss");
 				logPiLkgRecovery(
 					sessionIdForError,
-					`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); ${transientStorageFailure ? `refusing unreduced ${rawMessageCount}-message input` : `checking raw ${rawMessageCount}-message input`}`,
+					`${failureLabel} ${piStorageErrorReason(err)}: LKG unavailable (${refusal}); refusing unreduced ${rawMessageCount}-message input`,
 				);
 			}
 			// Keep refusal outside the replay try/catch: it must reach Pi, not be
 			// mistaken for another replay failure and swallowed into raw fallthrough.
 			if (transientStorageFailure) throw new PiStorageBusyError({ cause: err });
-			if (replayOrRefuse) {
-				assertPiRawFallbackFits(
-					event.messages,
-					rawFallbackLimit,
-					(line) => {
-						if (sessionIdForError) logPiLkgRecovery(sessionIdForError, line);
-						else log(line);
-					},
-					err,
-				);
-			}
 			if (sessionIdForError && !transientStorageFailure) {
 				// baseOptions.db (not the per-pass `options`, which is scoped to
 				// the try). The DB handle is shared across all projects.
@@ -4108,28 +4095,12 @@ export function registerPiContextHandler(
 					sessionMetaForPass?.lastTransformError,
 				);
 			}
-			// Last-resort size guard: an ordinary failure still hands Pi its
-			// unmodified messages, but never ones already over the context limit.
-			// The provider would only reject them.
+			// Fit is not enough: raw messages omit persisted decisions even when
+			// small. Only a validated last-good replay may serve a failed pass.
 			if (!lkgCompactionOff) {
-				let rawMessages: readonly unknown[] | undefined;
-				try {
-					rawMessages = event.messages;
-				} catch {
-					rawMessages = undefined;
-				}
-				const raw = rawMessages
-					? piRawMessagesExceedLimit(rawMessages, rawFallbackLimit)
-					: { exceeds: false, tokens: null };
-				if (raw.exceeds) {
-					log(
-						`[magic-context][pi] context handler failed and the unmodified messages (${raw.tokens} tokens) exceed the context limit ${rawFallbackLimit}; refusing the turn: ${message}`,
-						stack,
-					);
-					throw new PiDegradedPassError("raw-messages-over-limit", {
-						cause: err,
-					});
-				}
+				throw new PiStorageBusyError({
+					cause: err instanceof PiDegradedPassError ? err : new PiDegradedPassError("context-handler-failed", { cause: err }),
+				});
 			}
 			log(
 				`[magic-context][pi] context handler failed (continuing without mutation): ${message}`,

@@ -154,7 +154,7 @@ describe("Pi context handler LKG replay", () => {
 	});
 
 	for (const emergency of [true, false]) {
-		it(`installed host ${emergency ? "aborts emergency refusals" : "preserves intentional non-storage raw fallthrough"}`, async () => {
+		it(`installed host ${emergency ? "aborts emergency refusals" : "aborts ordinary failures even when raw messages fit"}`, async () => {
 			const db = createTestDb();
 			const sessionId = `pi-failure-${emergency}`;
 			sessions.add(sessionId);
@@ -196,15 +196,7 @@ describe("Pi context handler LKG replay", () => {
 					raw,
 					ctx,
 				);
-				if (emergency) host.assertRefused(served, raw);
-				else {
-					expect(Buffer.byteLength(JSON.stringify(served)) / 4).toBeGreaterThan(
-						204000,
-					);
-					expect(served).toEqual(raw);
-					expect(host.controller.signal.aborted).toBe(false);
-					expect(host.entries).toEqual([]);
-				}
+				host.assertRefused(served, raw);
 			} finally {
 				closeQuietly(db);
 			}

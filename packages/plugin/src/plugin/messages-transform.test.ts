@@ -20,6 +20,7 @@ import {
     resetEmergencyRecoveryRegistryForTest,
 } from "../features/magic-context/storage-meta-persisted";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
+import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
 import { finalizeMessageRepresentation } from "../hooks/magic-context/transform-postprocess-phase";
 import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolved-history-boundary";
@@ -92,7 +93,7 @@ describe("createMessagesTransformHandler — error boundary (issue #23)", () => 
         }
     });
 
-    it("swallows unexpected non-SQLITE errors too", async () => {
+    it("refuses unexpected non-SQLITE errors without a last-good replay", async () => {
         const handler = createMessagesTransformHandler({
             magicContext: {
                 "experimental.chat.messages.transform": async () => {
@@ -102,7 +103,25 @@ describe("createMessagesTransformHandler — error boundary (issue #23)", () => 
         });
 
         const output = makeOutput();
-        await expect(handler({}, output)).resolves.toBeDefined();
+        await expect(handler({}, output)).rejects.toMatchObject({
+            name: "DegradedPassRefusalError",
+            site: "messages-transform-failed",
+            cause: new TypeError("unexpected undefined access"),
+        });
+    });
+
+    it("refuses ordinary errors after partial mutation even without a session id", async () => {
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async (_input, output) => {
+                    output.messages[0].parts.length = 0;
+                    throw new Error("half replayed");
+                },
+            },
+        });
+        const output = makeOutput();
+        delete output.messages[0].info.sessionID;
+        await expect(handler({}, output)).rejects.toBeInstanceOf(DegradedPassRefusalError);
     });
 
     it("surfaces an oversized raw-fallback refusal to the prompt loop", async () => {

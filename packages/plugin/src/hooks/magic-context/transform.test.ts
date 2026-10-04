@@ -668,8 +668,15 @@ describe("createTransform", () => {
             : options.sourceBoundaryMissing
               ? [source()[3]!]
               : source();
-        await transform({}, { messages });
+        const refusal = await transform({}, { messages }).then(
+            () => null,
+            (error: unknown) => {
+                if (options.applyOutcome !== "retryable-failure") throw error;
+                return error;
+            },
+        );
         return {
+            refusal,
             applyDeferred,
             db,
             deferredHistoryRefreshSessions,
@@ -729,6 +736,10 @@ describe("createTransform", () => {
         const result = await runMarkerBoundaryFixture({
             name: "persistence-failure",
             applyOutcome: "retryable-failure",
+        });
+        expect(result.refusal).toMatchObject({
+            name: "DegradedPassRefusalError",
+            site: "compaction-marker-drain-failure",
         });
         expect(result.applyDeferred).toHaveBeenCalledTimes(1);
         expect(getPendingCompactionMarkerState(result.db, result.sessionId)).not.toBeNull();

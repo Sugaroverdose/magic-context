@@ -1,6 +1,8 @@
 /// <reference types="bun-types" />
 
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
+import { createHash } from "node:crypto";
+import { writeFileSync } from "node:fs";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import {
     closeDatabase,
@@ -11,6 +13,16 @@ import {
     updateTagStatus,
 } from "../../features/magic-context/storage";
 import { getDatabasePath } from "../../features/magic-context/storage-db";
+import {
+    addMergedReasoningStrippedIds,
+    addProcessedImageStrippedIds,
+    addStaleReduceStrippedIds,
+    addTrailingBlankDecisions,
+    thinkingBindingRecoveryFrozenId,
+} from "../../features/magic-context/storage-meta-persisted";
+import * as coordinateRebase from "../../features/magic-context/store-generation-rebase";
+import * as modeTransition from "./compaction-off-transition";
+import * as staleReduce from "./drop-stale-reduce-calls";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
@@ -153,7 +165,7 @@ async function sessionWithPersistedDrop(sessionId: string) {
         },
     };
     const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
-    const transform = createTransform({
+    const deps: Parameters<typeof createTransform>[0] = {
         tagger,
         scheduler,
         contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
@@ -166,7 +178,8 @@ async function sessionWithPersistedDrop(sessionId: string) {
         clearReasoningAge: 50,
         protectedTokens: 0,
         historianRunnable: false,
-    });
+    };
+    const transform = createTransform(deps);
     const handler = createMessagesTransformHandler({
         magicContext: { "experimental.chat.messages.transform": transform },
     });
@@ -190,6 +203,7 @@ async function sessionWithPersistedDrop(sessionId: string) {
 
     return {
         db,
+        deps,
         managed,
         serve,
         armLockDuringTagging: () => {
@@ -210,6 +224,136 @@ function expectReplayOfManaged(served: Message[], managed: string, sessionId: st
 }
 
 describe("a degraded transform pass is never served", () => {
+    it("keeps seeded ordinary passes byte-identical in pure replay", async () => {
+        const sessionId = "ses-pure-replay-degraded-pass";
+        const session = await sessionWithPersistedDrop(sessionId);
+        session.deps.liveModelBySession = new Map([
+            [sessionId, { providerID: "anthropic", modelID: "claude-sonnet-4" }],
+        ]);
+        const source = () => {
+            const messages = history(sessionId);
+            messages[1].parts.push({
+                type: "tool",
+                tool: "ctx_reduce",
+                callID: "reduce-old",
+                state: { status: "completed", input: {}, output: "saved reduction" },
+            });
+            messages[2].parts.push({
+                type: "file",
+                mime: "image/png",
+                url: `data:image/png;base64,${"c2VlZA".repeat(50)}`,
+            });
+            messages[3].parts.unshift({
+                type: "thinking",
+                thinking: "SAVED-REASONING",
+                signature: "signature",
+            });
+            messages[3].parts.push({ type: "text", text: "" });
+            return messages;
+        };
+        expect(addStaleReduceStrippedIds(session.db, sessionId, ["a1"])).toBe(true);
+        expect(addProcessedImageStrippedIds(session.db, sessionId, ["u2"])).toBe(true);
+        expect(
+            addMergedReasoningStrippedIds(session.db, sessionId, [
+                thinkingBindingRecoveryFrozenId("a2"),
+            ]),
+        ).toBe(true);
+        expect(addTrailingBlankDecisions(session.db, sessionId, [["a2", "strip"]])).toBe(true);
+        const managed = JSON.stringify(await session.serve(source()));
+        expect(managed).not.toContain("saved reduction");
+        expect(managed).not.toContain("SAVED-REASONING");
+        expect(managed).not.toContain("data:image/png");
+        const requests = [managed];
+        for (let pass = 0; pass < 3; pass++) {
+            const served = JSON.stringify(await session.serve(source()));
+            expect(served).toBe(managed);
+            requests.push(served);
+        }
+        const withTail = () => [
+            ...source(),
+            ...nextTurn(sessionId).slice(history(sessionId).length),
+        ];
+        const firstTail = JSON.stringify(await session.serve(withTail()));
+        requests.push(firstTail);
+        expect(JSON.stringify(await session.serve(withTail()))).toBe(firstTail);
+        const hashes = requests.map((request) =>
+            createHash("sha256").update(request).digest("hex"),
+        );
+        console.info(
+            `pure replay: ${requests.length} served requests bytes=${requests.map((request) => Buffer.byteLength(request))} sha256=${hashes}`,
+        );
+        if (process.env.MC_PURE_REPLAY_CAPTURE)
+            writeFileSync(process.env.MC_PURE_REPLAY_CAPTURE, JSON.stringify(requests));
+    }, 30_000);
+    it("replays the last good request after an ordinary wrapper exception", async () => {
+        const sessionId = "ses-ordinary-wrapper-replay";
+        const session = await sessionWithPersistedDrop(sessionId);
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async (_input, output) => {
+                    output.messages[0].parts.length = 0;
+                    throw new TypeError("partial replay defect");
+                },
+            },
+        });
+        const output = { messages: nextTurn(sessionId) } as unknown as Output;
+        await handler({}, output);
+        expectReplayOfManaged(output.messages as unknown as Message[], session.managed, sessionId);
+    }, 30_000);
+
+    for (const stage of ["rebase", "mode transition", "stale reduce", "image strip"] as const) {
+        for (const lkg of [true, false]) {
+            it(`${lkg ? "replays" : "refuses"} when ${stage} fails under the limit`, async () => {
+                const sessionId = `ses-stage-${stage.replaceAll(" ", "-")}-${lkg}`;
+                const session = await sessionWithPersistedDrop(sessionId);
+                if (!lkg) dropSlot(sessionId);
+                session.deps.storeGeneration = stage === "rebase" ? "v2" : undefined;
+                session.deps.liveModelBySession = new Map([
+                    [sessionId, { providerID: "anthropic", modelID: "claude-sonnet-4" }],
+                ]);
+                const fail = () => {
+                    throw new Error(`injected ${stage}`);
+                };
+                const spy =
+                    stage === "rebase"
+                        ? spyOn(
+                              coordinateRebase,
+                              "rebaseSessionCoordinatesAsync",
+                          ).mockImplementation(async () => fail())
+                        : stage === "mode transition"
+                          ? spyOn(modeTransition, "reconcileCompactionMode").mockImplementation(
+                                fail,
+                            )
+                          : stage === "stale reduce"
+                            ? spyOn(staleReduce, "dropStaleReduceCalls").mockImplementation(fail)
+                            : spyOn(transformOperations, "stripProcessedImages").mockImplementation(
+                                  fail,
+                              );
+                const site = {
+                    rebase: "store-generation-rebase-failure",
+                    "mode transition": "compaction-mode-transition-failure",
+                    "stale reduce": "stale-reduce-strip-exception",
+                    "image strip": "image-strip-exception",
+                }[stage];
+                try {
+                    if (lkg)
+                        expectReplayOfManaged(
+                            await session.serve(nextTurn(sessionId)),
+                            session.managed,
+                            sessionId,
+                        );
+                    else
+                        await expect(session.serve(nextTurn(sessionId))).rejects.toMatchObject({
+                            name: "DegradedPassRefusalError",
+                            site,
+                        });
+                    expect(spy).toHaveBeenCalledTimes(1);
+                } finally {
+                    spy.mockRestore();
+                }
+            }, 30_000);
+        }
+    }
     it("replays the last good request when the writer lock is held across tagging", async () => {
         const sessionId = "ses-degraded-tagging-busy";
         const session = await sessionWithPersistedDrop(sessionId);
@@ -410,21 +554,20 @@ describe("the served-request size guard", () => {
         return { client, directory };
     }
 
-    it("refuses a pass whose failed stage can change the request when it is over the context limit", async () => {
+    it("refuses a failed m[0]/m[1] stage before the context-limit backstop", async () => {
         const sessionId = "ses-size-guard-degraded";
         const { client, directory } = resolvedProject();
         const transform = smallWindowTransform(sessionId, client, { directory });
         // The session-history head messages (m[0]/m[1]) fail to render, so the
-        // pass records a degradation and serves a fallback history block that
-        // a healthy pass would not.
+        // pass refuses rather than serving a fallback history block, regardless
+        // of whether its estimate would fit.
         const inject = spyOn(injectCompartments, "injectM0M1").mockImplementation(() => {
             throw new Error("m[0]/m[1] render failed");
         });
         try {
             await expect(transform({}, { messages: oversized(sessionId) })).rejects.toMatchObject({
                 name: "DegradedPassRefusalError",
-                site: "served-request-over-limit",
-                contextLimitTokens: 2_000,
+                site: "m0-m1-fold-preexecution-degradation",
             });
             expect(inject).toHaveBeenCalled();
         } finally {

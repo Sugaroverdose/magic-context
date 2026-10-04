@@ -8,8 +8,8 @@ export type PassDegradationKind = "degraded" | "fatal";
  *   on (persisted drops and truncations, the history cut, the session-history
  *   head messages m[0]/m[1], and the reasoning, image and ctx_reduce strips
  *   replayed from earlier passes), so the served request can be larger than a
- *   healthy one or differ from it. Such a pass is not served when it is over
- *   the context limit.
+ *   healthy one or differ from it. With compaction enabled, failed stages
+ *   replay the last-good request or refuse, regardless of the context limit.
  * - `served`: the request equals a healthy pass's, or a healthy pass's minus
  *   text appended to a new, never-served turn, so it can be neither larger nor
  *   different in anything already served. The pass is served as a healthy one
@@ -60,8 +60,8 @@ export const PASS_DEGRADATION_EFFECTS = {
     "proactive-thinking-strip-persistence-failure": "changes-request",
     // The saved removal set is unreadable: the pass fails closed.
     "reasoning-removal-read-failure": "changes-request",
-    // This pass's new removals were not saved, so it serves the earlier set
-    // only and can be larger than a healthy pass.
+    // This pass's new removals were not saved: replay or refuse rather than
+    // serving a partially prepared request.
     "reasoning-removal-persistence-failure": "changes-request",
 } as const satisfies Record<string, "changes-request" | "served">;
 

@@ -611,10 +611,15 @@ describe("reasoning removal through postprocess", () => {
             });
             return session;
         };
-        await pass(database, sessionId, withInline(), {
-            busting: true,
-            providerID: "anthropic",
-            prefixBound: true,
+        await expect(
+            pass(database, sessionId, withInline(), {
+                busting: true,
+                providerID: "anthropic",
+                prefixBound: true,
+            }),
+        ).rejects.toMatchObject({
+            name: "DegradedPassRefusalError",
+            site: "merged-reasoning-strip-exception",
         });
         expect(getOrCreateSessionMeta(database, sessionId).clearedReasoningThroughTag ?? 0).toBe(0);
         const next = withInline();
@@ -628,11 +633,16 @@ describe("reasoning removal through postprocess", () => {
         const sessionId = "ses-bound-age";
         blockWrites(database, "merged_reasoning_stripped_ids");
         const session = toolLoop(8);
-        await pass(database, sessionId, session, {
-            busting: true,
-            providerID: "anthropic",
-            prefixBound: true,
-            overrides: { reasoningByMessage: reasoningMap(session.messages) as never },
+        await expect(
+            pass(database, sessionId, session, {
+                busting: true,
+                providerID: "anthropic",
+                prefixBound: true,
+                overrides: { reasoningByMessage: reasoningMap(session.messages) as never },
+            }),
+        ).rejects.toMatchObject({
+            name: "DegradedPassRefusalError",
+            site: "merged-reasoning-strip-exception",
         });
         expect(getOrCreateSessionMeta(database, sessionId).clearedReasoningThroughTag ?? 0).toBe(0);
         expect(JSON.stringify(session.messages)).not.toContain("[cleared]");
@@ -659,7 +669,7 @@ describe("reasoning removal through postprocess", () => {
         expect(JSON.stringify(unresolved.messages)).not.toContain("[cleared]");
     });
 
-    it("serves the legacy drop bytes when the switch cannot be persisted on a rebuilding pass", async () => {
+    it("refuses a failed rebuilding write without committing the drop switch", async () => {
         const database = openDb();
         const sessionId = "ses-switch-blocked";
         getOrCreateSessionMeta(database, sessionId);
@@ -668,11 +678,13 @@ describe("reasoning removal through postprocess", () => {
         blockWrites(database, "trailing_blank_decisions", "IGNORE");
         const session = toolLoop(4);
         neutralizeDroppedReasoningPart(session.messages[2].parts[1]);
-        await pass(database, sessionId, session, { busting: true, providerID: "openai" });
-        expect(session.messages[2].parts[1]).toMatchObject({
-            type: "reasoning",
-            text: "[cleared]",
+        await expect(
+            pass(database, sessionId, session, { busting: true, providerID: "openai" }),
+        ).rejects.toMatchObject({
+            name: "DegradedPassRefusalError",
+            site: "reasoning-removal-persistence-failure",
         });
+        expect(getReasoningRemovalState(database, sessionId).dropLeavesReasoning).toBe(false);
     });
 
     it("serves the committed set after the write, including ids another process added meanwhile", async () => {
