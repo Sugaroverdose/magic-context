@@ -2539,7 +2539,11 @@ fn run_transform_attempt_hook(session_id: &str) {
 
 static PREFIX_PROJECTION_DIFFERENTIAL: OnceLock<bool> = OnceLock::new();
 
-fn prefix_projection_differential_enabled() -> bool {
+pub(super) fn prefix_projection_differential_enabled() -> bool {
+    #[cfg(test)]
+    if crate::tests::per_pass_differentials_disabled() {
+        return false;
+    }
     cfg!(test)
         || *PREFIX_PROJECTION_DIFFERENTIAL.get_or_init(|| {
             std::env::var("MC_PREFIX_PROJECTION_DIFFERENTIAL").as_deref() == Ok("1")
