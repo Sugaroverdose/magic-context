@@ -1,4 +1,8 @@
-import type { BuiltinCommandConfig } from "./types";
+import type { Config } from "@opencode-ai/sdk";
+
+// Keep command metadata independent of server features: config validation and
+// the separately shipped TUI need the same reserved command names.
+type BuiltinCommandConfig = NonNullable<Config["command"]>;
 
 const COMPACTION_ENABLED_PATH = `compaction${".enabled"}`;
 
