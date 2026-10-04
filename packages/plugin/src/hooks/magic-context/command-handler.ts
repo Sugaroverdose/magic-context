@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import { COMPACTION_ENABLED_PATH } from "../../config/agent-disable";
 import type { DreamerConfig, MagicContextConfig } from "../../config/schema/magic-context";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
-import type { MagicContextBuiltinCommandName } from "../../features/builtin-commands/commands";
 import { summarizeManualDream } from "../../features/magic-context/dreamer/manual-summary";
 import {
     getFailingDreamTasks,
@@ -20,6 +19,7 @@ import type { ManualRunResult } from "../../features/magic-context/dreamer/task-
 import { getCompartments, getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import type { RustSessionStatus } from "../../plugin/rpc-handlers";
 import { sessionLog } from "../../shared";
+import type { MagicContextBuiltinCommandName } from "../../shared/builtin-commands";
 import type { ConfigParseFailure } from "../../shared/config-diagnostics";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
 import type { StatusDetail } from "../../shared/rpc-types";

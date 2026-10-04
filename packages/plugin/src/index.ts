@@ -11,7 +11,6 @@ import { isCompactionEnabled, isDreamerRunnable } from "./config/agent-disable";
 import { createDreamerOutputCapSampler } from "./config/live-child-output-cap";
 import { dreamerRunConfig, historianRunConfig, pluginConfigReader } from "./config/live-run-config";
 import { migrateMagicContextConfigLocations } from "./config/migrate-config-location";
-import { getMagicContextBuiltinCommands } from "./features/builtin-commands/commands";
 import { openOpenCodeDb } from "./features/magic-context/dreamer/open-opencode-db";
 import { DREAMER_SYSTEM_PROMPT } from "./features/magic-context/dreamer/task-prompts";
 import type {
@@ -72,6 +71,7 @@ import { disableNativeAutoCompaction } from "./plugin/native-compaction-guard";
 import { isDebugRpcEnabled, registerRpcHandlers } from "./plugin/rpc-handlers";
 import { bindStaleBuildNotice } from "./plugin/stale-build-notice";
 import { createToolRegistry } from "./plugin/tool-registry";
+import { getMagicContextBuiltinCommands } from "./shared/builtin-commands";
 import { claimConfigParseFailuresOnce } from "./shared/config-diagnostics";
 import { buildOpenCodeConfigWarningBanner } from "./shared/config-warning-surface";
 import {

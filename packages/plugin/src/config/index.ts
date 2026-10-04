@@ -1,6 +1,6 @@
 import { existsSync } from "node:fs";
 
-import { getMagicContextBuiltinCommands } from "../features/builtin-commands/commands";
+import { getMagicContextBuiltinCommands } from "../shared/builtin-commands";
 import {
     CONFIG_WARNING_CLASS,
     type ConfigParseFailure,

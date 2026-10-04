@@ -1,4 +1,4 @@
-import { getMagicContextBuiltinCommands } from "../../features/builtin-commands/commands";
+import { getMagicContextBuiltinCommands } from "../../shared/builtin-commands";
 import { log } from "../../shared/logger";
 import { isTuiConnected, pushNotification } from "../../shared/rpc-notifications";
 import type { MagicContextRpcServer } from "../../shared/rpc-server";
