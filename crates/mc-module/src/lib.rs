@@ -1446,10 +1446,12 @@ const STATE_IMPORT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
 const TRANSFORM_SNAPSHOT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const BOUNDARY_TOKEN_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
 // A 9,268-message full sync can retain ~208 MiB of projection even when its wire request is
-// ~116 MB. Allow that entry and its measured ~73 MiB neighbor to coexist, with growth headroom,
-// rather than alternating full syncs. Keep the native cache's independent budgets unchanged.
-const PROJECTION_CACHE_BUDGET_BYTES: usize = 320 * 1024 * 1024;
-const PROJECTION_CACHE_ENTRY_BUDGET_BYTES: usize = 224 * 1024 * 1024;
+// ~116 MB, and that session grew to ~224 MiB within five hours. Allow such an entry and its
+// measured ~73 MiB neighbor to coexist, with growth headroom, rather than alternating full syncs.
+// This is a ceiling, not the fix: the projection retains several copies of each message's text,
+// so its size should shrink instead. Keep the native cache's independent budgets unchanged.
+const PROJECTION_CACHE_BUDGET_BYTES: usize = 384 * 1024 * 1024;
+const PROJECTION_CACHE_ENTRY_BUDGET_BYTES: usize = 288 * 1024 * 1024;
 const ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES: usize = TRANSFORM_SNAPSHOT_BUDGET_BYTES;
 const MAX_ACTIVE_SNAPSHOT_LEASES: usize = 8;
 /// InFlight snapshot markers have no byte charge, so they need their own count bound:
@@ -3149,7 +3151,7 @@ const NATIVE_ATTACHMENT_CACHE_ENTRY_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 // the adapter for a full request. No cache may interpret another cache's presence as authority.
 // Keep the ordinary aggregate admission target explicit when any individual budget changes; an
 // oversized native delta core is the documented exception and remains honestly charged.
-const TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES: usize = 832 * 1024 * 1024;
+const TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES: usize = 896 * 1024 * 1024;
 const _: () = assert!(
     transform::SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES
         + NATIVE_ATTACHMENT_CACHE_BUDGET_BYTES
@@ -23937,7 +23939,7 @@ mod tests {
             "fixture must exercise the old ceiling"
         );
         assert!(
-            charge <= 224 * 1024 * 1024,
+            charge <= PROJECTION_CACHE_ENTRY_BUDGET_BYTES,
             "fixture must fit the bounded larger ceiling"
         );
 
