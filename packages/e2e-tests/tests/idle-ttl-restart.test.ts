@@ -4,13 +4,12 @@
  * about 240k tokens of history; the ordinary restart regression runs in CI.
  */
 import { expect, it } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { estimateTokens } from "../../plugin/src/hooks/magic-context/read-session-formatting";
 import type { CapturedRequest } from "../src/mock-provider/server";
-import { assertOpenPaths } from "../src/opencode2-runner/spawn";
+import { inspectHostOpenFiles } from "../src/host-open-files";
 import {
 	createFreshSession,
 	createScenarioHarness,
@@ -135,40 +134,23 @@ function assertContained(h: ScenarioHarness) {
 	if (h.host === "opencode2")
 		return { guardedBy: "OC2 runner process-group/inode guard" };
 	if (!pid) throw new Error("host PID unavailable for live-store isolation");
-	const inventory = execFileSync(
-		"timeout",
-		["10s", "lsof", "-p", String(pid), "-Fn"],
-		{ encoding: "utf8" },
-	);
-	const paths = inventory
-		.split("\n")
-		.filter((line) => line.startsWith("n"))
-		.map((line) => line.slice(1));
-	assertOpenPaths(paths, dirname(h.dataDir));
-	const databases = paths.filter((path) => /\.db(-wal|-shm)?$/.test(path));
-	expect(databases.length).toBeGreaterThan(0);
+	// OMP is spawned directly as Bun + CLI, not through a shell wrapper.
+	// Requiring context.db's inode makes a stale or wrapper PID fail closed.
+	const hostInventory = inspectHostOpenFiles(pid, dirname(h.dataDir),
+		h.host === "omp" ? h.contextDbPath() : undefined);
+	expect(hostInventory.databases.length).toBeGreaterThan(0);
 	const moduleInventories = RUST_MODE
 		? (JSON.parse(
 				readFileSync(join(h.dataDir, "cortexkit", "rust-e2e-pids.json"), "utf8"),
 			) as { pids: { pid: number; role: string }[] }).pids
 			.filter((entry) => entry.role === "module" || entry.role === "daemon")
 			.map((entry) => {
-				const inventory = execFileSync(
-					"timeout", ["10s", "lsof", "-p", String(entry.pid), "-Fn"],
-					{ encoding: "utf8" },
-				);
-				const paths = inventory.split("\n")
-					.filter((line) => line.startsWith("n"))
-					.map((line) => line.slice(1));
-				assertOpenPaths(paths, dirname(h.dataDir));
-				const databases = paths.filter((path) => /\.db(-wal|-shm)?$/.test(path));
-				if (entry.role === "module") {
-					expect(databases.length).toBeGreaterThan(0);
-				}
-				return { ...entry, inventory, databases };
+				const inventory = inspectHostOpenFiles(entry.pid, dirname(h.dataDir));
+				if (entry.role === "module") expect(inventory.databases.length).toBeGreaterThan(0);
+				return { ...entry, ...inventory };
 			})
 		: [];
-	return { pid, inventory, databases, moduleInventories };
+	return { ...hostInventory, moduleInventories };
 }
 
 function moduleDbPath(h: ScenarioHarness) {
