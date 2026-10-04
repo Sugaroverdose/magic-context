@@ -6,6 +6,7 @@
  * provider billed, for each of the three encodings the harness drives.
  */
 import type { RequestShape, UsageRecord, WireProtocol } from "./types";
+import { createHash } from "node:crypto";
 
 type Json = Record<string, unknown>;
 const isRecord = (value: unknown): value is Json =>
@@ -19,7 +20,39 @@ function hasBashTool(body: Json): boolean {
         : isRecord(body.toolConfig) && Array.isArray(body.toolConfig.tools)
           ? body.toolConfig.tools
           : [];
-    return JSON.stringify(tools).includes('"bash"');
+    return /"(?:mcp_)?bash"/i.test(JSON.stringify(tools));
+}
+
+const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+
+/** Anthropic signed blocks are counted atomically; only hashes, never their text, are recorded. */
+function anthropicShape(body: Json): Omit<RequestShape, "kind" | "bytes"> {
+    const messages = Array.isArray(body.messages) ? body.messages as Json[] : [];
+    let map = "";
+    let reasoningItems = 0;
+    let toolCalls = 0;
+    let toolResults = 0;
+    const history = messages.map((message) => {
+        const content = Array.isArray(message.content) ? message.content as Json[] : [{ type: "text", text: message.content }];
+        const thinking = content.filter((b) => b.type === "thinking" || b.type === "redacted_thinking");
+        const signed = thinking.filter((b) => typeof b.signature === "string" || typeof b.data === "string");
+        if (message.role === "assistant") {
+            reasoningItems += thinking.length;
+            map += thinking.length ? "R" : "-";
+        }
+        toolCalls += content.filter((b) => b.type === "tool_use").length;
+        toolResults += content.filter((b) => b.type === "tool_result").length;
+        // Cache markers may move when a new turn is appended. They do not alter signed content.
+        const withoutCache = (block: Json) => { const { cache_control, ...rest } = block; return rest; };
+        return {
+            role: message.role,
+            signed: signed.map((b) => hash(withoutCache(b))),
+            nonThinking: content.filter((b) => !thinking.includes(b)).map((b) => ({ type: b.type, hash: hash(withoutCache(b)) })),
+        };
+    });
+    return { reasoningMap: map, reasoningItems, emptyReasoning: 0, toolCalls, toolResults,
+        flags: { thinking: body.thinking ?? null, maxTokens: body.max_tokens, outputConfig: body.output_config ?? null,
+            systemHash: hash(body.system ?? null), toolsHash: hash(body.tools ?? null), history } };
 }
 
 function nonEmptyText(value: unknown): boolean {
@@ -155,6 +188,8 @@ export function requestShape(protocol: WireProtocol, text: string): RequestShape
     const shape =
         protocol === "openai-responses"
             ? responsesShape(body)
+            : protocol === "anthropic-messages"
+              ? anthropicShape(body)
             : protocol === "bedrock-converse"
               ? bedrockShape(body)
               : chatShape(body);
@@ -256,6 +291,24 @@ export interface ResponseReading {
     usage: UsageRecord | null;
     /** Error text carried inside a 200 stream (provider rejected mid-stream). */
     streamError: string | null;
+    diagnostics: Record<string, unknown>;
+}
+
+function anthropicUsage(usage: Json): UsageRecord {
+    return { input: num(usage.input_tokens), inputField: "input_tokens (excludes cache reads and writes)",
+        cachedRead: num(usage.cache_read_input_tokens), cacheWrite: num(usage.cache_creation_input_tokens),
+        output: num(usage.output_tokens), reasoning: null, cost: null, raw: usage };
+}
+
+/** Find diagnostics wherever the API places them, including message_start and message_delta. */
+function collectDiagnostics(value: unknown, out: Record<string, unknown>, path = ""): void {
+    if (!isRecord(value)) return;
+    for (const [key, item] of Object.entries(value)) {
+        const next = path ? `${path}.${key}` : key;
+        if (/transformation|applied_edits|thinking_dropped/.test(key)) out[next] = item;
+        else if (key === "type" && typeof item === "string" && /transformation|thinking_dropped/.test(item)) out[next] = item;
+        else if (isRecord(item)) collectDiagnostics(item, out, next);
+    }
 }
 
 export function readResponse(protocol: WireProtocol, text: string): ResponseReading {
@@ -265,6 +318,7 @@ export function readResponse(protocol: WireProtocol, text: string): ResponseRead
         return {
             usage: bedrockUsage(text),
             streamError: exception ? `${exception[1]}: ${message?.[1] ?? ""}` : null,
+            diagnostics: {},
         };
     }
     const events = sseEvents(text);
@@ -272,7 +326,10 @@ export function readResponse(protocol: WireProtocol, text: string): ResponseRead
     const all = single ? [single] : events;
     let usage: UsageRecord | null = null;
     let streamError: string | null = null;
+    const diagnostics: Record<string, unknown> = {};
+    let anthropicRaw: Json = {};
     for (const event of all) {
+        collectDiagnostics(event, diagnostics);
         if (protocol === "openai-responses") {
             const response = isRecord(event.response) ? event.response : event;
             if (isRecord(response.usage)) usage = responsesUsage(response.usage);
@@ -280,12 +337,18 @@ export function readResponse(protocol: WireProtocol, text: string): ResponseRead
                 const error = isRecord(response.error) ? response.error : event;
                 streamError = String(error.message ?? JSON.stringify(error));
             }
+        } else if (protocol === "anthropic-messages") {
+            const message = isRecord(event.message) ? event.message : event;
+            if (isRecord(message.usage)) anthropicRaw = { ...anthropicRaw, ...message.usage };
+            if (isRecord(event.usage)) anthropicRaw = { ...anthropicRaw, ...event.usage };
+            if (Object.keys(anthropicRaw).length) usage = anthropicUsage(anthropicRaw);
+            if (isRecord(event.error)) streamError = String(event.error.message ?? JSON.stringify(event.error));
         } else {
             if (isRecord(event.usage)) usage = chatUsage(event.usage);
             if (isRecord(event.error)) streamError = String(event.error.message ?? JSON.stringify(event.error));
         }
     }
-    return { usage, streamError };
+    return { usage, streamError, diagnostics };
 }
 
 /** Provider error text, cut short and with anything shaped like a key removed. */

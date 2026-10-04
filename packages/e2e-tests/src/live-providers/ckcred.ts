@@ -13,7 +13,7 @@
  * secret is kept only until the token arrives, in a 0600 file under $TMPDIR, because the vault
  * needs it to authorize the poll and returns the token exactly once.
  *
- * Secret material from `fetchCredential` must only ever be written into a throwaway host config
+ * Secret material from `fetchCredential` must only ever be written into a throwaway host config/login slot
  * that is deleted with its scenario root. Nothing here logs it. A provider rejecting a key is a
  * test result, so this module never reports auth failures back to the vault.
  */
@@ -28,13 +28,13 @@ export const CONSUMER_NAME = "mc-e2e";
 /** The vault records this harness reads. Each needs an exact read grant for `mc-e2e`. */
 export const CREDENTIAL_IDS = [
     "apikey:openai",
-    "apikey:amazon-bedrock",
     "apikey:openrouter",
     "apikey:deepseek",
     "apikey:kimi-for-coding",
     "oauth:anthropic",
+    "chatgpt:openai",
 ] as const;
-export type CredentialId = (typeof CREDENTIAL_IDS)[number];
+export type CredentialId = (typeof CREDENTIAL_IDS)[number] | `oauth:anthropic:${string}` | `chatgpt:openai:${string}`;
 
 export const ENROLLMENT_PATH =
     process.env.MC_E2E_ENROLLMENT_PATH ?? join(homedir(), ".config", "cortexkit", CONSUMER_NAME, "enrollment.json");

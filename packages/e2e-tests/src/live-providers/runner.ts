@@ -4,7 +4,9 @@
  *
  *   MC_LIVE_PROVIDERS=1 bun packages/e2e-tests/src/live-providers/runner.ts \
  *     [--opencode /abs/opencode-1.18.30] [--out "$TMPDIR/magic-context/live-providers/<run>"] \
- *     [--only openai:age,deepseek:drop] [--providers amazon-bedrock,kimi-for-coding] \
+ *     [--only claude-oauth:trim-only] [--providers anthropic,kimi-for-coding] \
+ *     [--anthropic-auth /abs/anthropic-auth/packages/opencode/dist/index.js] \
+ *     [--openai-auth /abs/openai-auth/packages/opencode/dist/index.js] \
  *     [--models-catalog /abs/models.dev-api.json] [--keep-bodies]
  *
  * `--models-catalog` copies a models.dev `api.json` into the host cache, so OpenCode resolves
@@ -30,11 +32,13 @@ import { Database } from "bun:sqlite";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { fetchCredential } from "./ckcred";
+import { fetchCredential, type CredentialId } from "./ckcred";
+import { assertThrowawayRoot, authPluginPath } from "./auth";
 import { readIfExists, startHost, type Host } from "./host";
 import { startRecorder } from "./recorder";
 import { ALL_SCENARIOS, scenarioId } from "./scenarios";
-import type { CallRecord, ScenarioResult, ScenarioSpec, ScenarioSummary } from "./types";
+import { qualifyTrimOnly } from "./trim-only";
+import type { AuthPlugin, CallRecord, ScenarioResult, ScenarioSpec, ScenarioSummary } from "./types";
 import { scrubError } from "./wire";
 
 /** Upper bound on provider calls for one run, across every scenario. */
@@ -47,11 +51,14 @@ export interface RunOptions {
     opencode: string;
     out: string;
     only: string[] | null;
-    /** OpenCode provider ids to run (`amazon-bedrock,kimi-for-coding`); null runs all. */
+    /** OpenCode provider ids to run (`anthropic,kimi-for-coding`); null runs all. */
     providers?: string[] | null;
     modelsCatalog?: string;
     /** Also write every request body (no headers, so no keys) under `<out>/bodies/`. */
     keepBodies?: boolean;
+    authPlugins?: Partial<Record<AuthPlugin, string>>;
+    /** Explicit single account selection, never an account-rotation loop. */
+    claudeCredential?: CredentialId;
 }
 
 function loopPrompt(steps: number): string {
@@ -128,11 +135,11 @@ function queueOldestToolDrop(host: Host, sessionId: string): number {
 
 const REMOVAL_LOG = /reasoning removal|reasoning cleanup|pending op|applyPendingOperations|ctx-flush|drop/i;
 
-export async function runScenario(spec: ScenarioSpec, options: RunOptions, callsLeft: number): Promise<ScenarioResult> {
+export async function runScenario(spec: ScenarioSpec, options: RunOptions, callsLeft: number, material?: string): Promise<ScenarioResult> {
     const id = scenarioId(spec);
     const startedAt = new Date().toISOString();
     const root = join(options.out, "roots", id.replace(/[^\w.-]/g, "_"));
-    const key = await fetchCredential(spec.route.credentialId);
+    const key = material ?? await fetchCredential(spec.route.credentialId);
     const secrets = () => [key];
     const recorder = startRecorder(
         spec.route,
@@ -153,6 +160,7 @@ export async function runScenario(spec: ScenarioSpec, options: RunOptions, calls
             apiKey: key,
             recorderBaseURL: recorder.baseURL,
             modelsCatalog: options.modelsCatalog,
+            authPlugins: options.authPlugins,
             magicContext: {
                 clear_reasoning_age: spec.clearReasoningAge,
                 execute_threshold_percentage: 80,
@@ -160,6 +168,7 @@ export async function runScenario(spec: ScenarioSpec, options: RunOptions, calls
         });
         const activeHost = host;
         const session = (await activeHost.api("/session", { title: `live ${id}` })).value as { id: string };
+        dbFiles = activeHost.checkIsolation();
         const warnings = activeHost.configWarnings();
         if (warnings.length > 0) throw new Error(`Magic Context rejected the scenario config: ${warnings.join(" | ")}`);
         const stopReason = (): string | null => {
@@ -197,8 +206,21 @@ export async function runScenario(spec: ScenarioSpec, options: RunOptions, calls
             await recorder.settled();
             abortReason = stopReason();
         }
-        for (let turn = 2; turn <= 1 + FOLLOW_UP_TURNS && !abortReason; turn++) {
-            await prompt(`turn-${turn}`, followUpPrompt(turn));
+        if (spec.kind === "trim-only") {
+            if (!abortReason) await prompt("trim-only", "Think briefly: what is 7 times 8? Reply only with the number. Do not use tools.");
+            if (!abortReason) await prompt("cache-follow-up", "Think briefly: what is 8 times 9? Reply only with the number. Do not use tools.");
+            if (!abortReason) {
+                queueOldestToolDrop(activeHost, session.id);
+                recorder.setPhase("mixed-flush");
+                await activeHost.api(`/session/${session.id}/command`, { command: "ctx-flush", arguments: "" });
+                await recorder.settled();
+                abortReason = stopReason();
+            }
+            if (!abortReason) await prompt("tool-edit", "Think briefly: what is 9 times 10? Reply only with the number. Do not use tools.");
+        } else {
+            for (let turn = 2; turn <= 1 + FOLLOW_UP_TURNS && !abortReason; turn++) {
+                await prompt(`turn-${turn}`, followUpPrompt(turn));
+            }
         }
         dbFiles = activeHost.checkIsolation();
     } catch (error) {
@@ -217,6 +239,8 @@ export async function runScenario(spec: ScenarioSpec, options: RunOptions, calls
     writeFileSync(join(options.out, `${id.replace(/[^\w.-]/g, "_")}.mc.log`), scrub(mcLog));
     writeFileSync(join(options.out, `${id.replace(/[^\w.-]/g, "_")}.host.log`), scrub(hostLog));
     const calls = recorder.calls;
+    const trimOnly = spec.kind === "trim-only" ? qualifyTrimOnly(calls) : undefined;
+    if (trimOnly && !trimOnly.qualified) abortReason ??= trimOnly.failures.join("; ");
     return {
         scenario: id,
         route: spec.route.id,
@@ -235,19 +259,29 @@ export async function runScenario(spec: ScenarioSpec, options: RunOptions, calls
             .split("\n")
             .filter((line) => REMOVAL_LOG.test(line))
             .slice(0, 60),
-        isolation: { dbFiles, rootRemoved: !existsSync(root) },
+        isolation: { hostPid: host?.pid ?? null, dbFiles, rootRemoved: !existsSync(root) },
         summary: summarize(calls),
+        ...(trimOnly ? { trimOnly } : {}),
     };
 }
 
 export async function runAll(options: RunOptions): Promise<ScenarioResult[]> {
+    assertThrowawayRoot(options.out);
     mkdirSync(options.out, { recursive: true, mode: 0o700 });
+    if (options.claudeCredential && !/^oauth:anthropic(?::[\w.-]+)?$/.test(options.claudeCredential)) {
+        throw new Error("--claude-credential must name a single enrolled oauth:anthropic account");
+    }
     const selected = ALL_SCENARIOS.filter(
         (spec) =>
             (!options.only || options.only.includes(scenarioId(spec))) &&
             (!options.providers || options.providers.includes(spec.route.providerId)),
-    );
+    ).map((spec) => spec.route.authPlugin === "anthropic-auth" && options.claudeCredential
+        ? { ...spec, route: { ...spec.route, credentialId: options.claudeCredential } } : spec);
+    if (!selected.length) throw new Error("No live scenarios selected");
+    for (const spec of selected) authPluginPath(spec.route, options.authPlugins);
     const results: ScenarioResult[] = [];
+    // One vault read/account per route per run. Never enumerate the subscription roster.
+    const credentials = new Map<string, string>();
     const stoppedRoutes = new Set<string>();
     const skipped: Array<{ scenario: string; reason: string }> = [];
     let used = 0;
@@ -263,7 +297,12 @@ export async function runAll(options: RunOptions): Promise<ScenarioResult[]> {
         }
         if (used >= RUN_CALL_CAP) break;
         console.error(`[live] ${scenarioId(spec)} starting (${used}/${RUN_CALL_CAP} calls used)`);
-        const result = await runScenario(spec, options, RUN_CALL_CAP - used);
+        let material = credentials.get(spec.route.credentialId);
+        if (!material) {
+            material = await fetchCredential(spec.route.credentialId);
+            credentials.set(spec.route.credentialId, material);
+        }
+        const result = await runScenario(spec, options, RUN_CALL_CAP - used, material);
         used += result.calls.length;
         results.push(result);
         write();
@@ -300,7 +339,7 @@ if (import.meta.main) {
         arg("out") ??
             join(process.env.TMPDIR ?? "/tmp", "magic-context", "live-providers", `run-${Date.now().toString(36)}`),
     );
-    if (!out.includes("/magic-context/")) throw new Error("Output root must be under $TMPDIR/magic-context/");
+    assertThrowawayRoot(out);
     if (existsSync(join(out, "results.json"))) throw new Error("Use a new output root");
     const opencode =
         arg("opencode") ??
@@ -313,6 +352,12 @@ if (import.meta.main) {
         providers: arg("providers")?.split(",") ?? null,
         modelsCatalog: arg("models-catalog"),
         keepBodies: process.argv.includes("--keep-bodies"),
+        authPlugins: {
+            "anthropic-auth": arg("anthropic-auth") ?? process.env.MC_LIVE_ANTHROPIC_AUTH_PLUGIN,
+            "openai-auth": arg("openai-auth") ?? process.env.MC_LIVE_OPENAI_AUTH_PLUGIN,
+        },
+        claudeCredential: arg("claude-credential") as CredentialId | undefined,
     });
     console.log(JSON.stringify({ out, scenarios: results.map((r) => ({ id: r.scenario, ...r.summary, outcome: r.outcome, abortReason: r.abortReason })) }, null, 2));
+    if (results.some((r) => r.outcome !== "completed")) process.exitCode = 1;
 }

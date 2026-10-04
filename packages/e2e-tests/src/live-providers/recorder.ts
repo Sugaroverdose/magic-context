@@ -82,6 +82,8 @@ export function startRecorder(
                 accepted: false,
                 error: null,
                 usage: null,
+                diagnostics: {},
+                requestId: null,
                 request: requestShape(route.protocol, text),
                 durationMs: 0,
             };
@@ -105,6 +107,21 @@ export function startRecorder(
                 return Response.json({ error: { message: "upstream unreachable" } }, { status: 502 });
             }
             record.status = upstream.status;
+            record.requestId = upstream.headers.get("request-id") ?? upstream.headers.get("x-request-id");
+            record.request.flags.bindingBeta = req.headers.get("anthropic-beta")?.includes("thinking-binding-controls-2026-08-01") ?? false;
+            // Subscription plugins can sleep/retry for minutes on 429. Record the genuine
+            // rejection, then return a non-retryable local error so a capped run stops promptly.
+            if (!upstream.ok) {
+                const raw = await upstream.text();
+                const parsed = readResponse(route.protocol, raw);
+                record.usage = parsed.usage;
+                record.diagnostics = parsed.diagnostics;
+                record.error = scrubError(raw, secrets());
+                record.durationMs = Date.now() - started;
+                halted = true;
+                return Response.json({ type: "error", error: { type: "invalid_request_error",
+                    message: `Live harness stopped after upstream HTTP ${upstream.status}; see recorded rejection` } }, { status: 400 });
+            }
             const responseHeaders = new Headers(upstream.headers);
             for (const name of DROP_RESPONSE_HEADERS) responseHeaders.delete(name);
             if (!upstream.body) {
@@ -121,6 +138,7 @@ export function startRecorder(
                 const raw = Buffer.from(bytes).toString(route.protocol === "bedrock-converse" ? "latin1" : "utf8");
                 const parsed = readResponse(route.protocol, raw);
                 record.usage = parsed.usage;
+                record.diagnostics = parsed.diagnostics;
                 record.durationMs = Date.now() - started;
                 if (!upstream.ok) record.error = scrubError(raw, secrets());
                 else if (parsed.streamError) record.error = scrubError(parsed.streamError, secrets());
