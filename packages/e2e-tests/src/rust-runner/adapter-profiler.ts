@@ -30,6 +30,7 @@ export function profileAdapterReceive(transport: SubcModuleTransport) {
     let dispatchToDecodeMs = 0;
     let decodedAt = 0;
     let frames = 0;
+    let replyPages = 1;
     let lastTick = performance.now();
     let maxTimerLagMs = 0;
     const sampleTimer = () => {
@@ -48,7 +49,12 @@ export function profileAdapterReceive(transport: SubcModuleTransport) {
         if (arrivedAt === undefined) throw new Error("reply decoded without a dispatch timestamp");
         dispatchToDecodeMs += start - arrivedAt;
         try {
-            return decode.call(this, frame);
+            const reply = decode.call(this, frame);
+            if (reply && typeof reply === "object" && "reply_page" in reply) {
+                const page = (reply as { reply_page: { index: number; total: number } }).reply_page;
+                if (page.index === 0) replyPages = page.total;
+            }
+            return reply;
         } finally {
             decodedAt = performance.now();
             decodeMs += decodedAt - start;
@@ -65,6 +71,7 @@ export function profileAdapterReceive(transport: SubcModuleTransport) {
         },
         reset() {
             decodeMs = dispatchToDecodeMs = decodedAt = frames = maxTimerLagMs = 0;
+            replyPages = 1;
             lastTick = performance.now();
         },
         sample() {
@@ -76,6 +83,7 @@ export function profileAdapterReceive(transport: SubcModuleTransport) {
                 decodeToResumeMs: decodedAt ? resumedAt - decodedAt : 0,
                 maxTimerLagMs,
                 frames,
+                replyPages,
             };
         },
         dispose() {
