@@ -4,18 +4,31 @@
  *
  * Every state root the host or Magic Context could touch (HOME, all XDG roots, OPENCODE_DB,
  * MAGIC_CONTEXT_STORAGE_DIR, TMPDIR) lives under the scenario root, and `lsof -p <host pid>`
- * must show every open database inside it. The provider key is written only into the
- * scenario's `opencode.json`; `dispose` deletes the whole root, key included.
+ * must show every open database inside it. API keys go in the disposable `opencode.json`;
+ * subscription bearers go in its disposable `data/opencode/auth.json`. `dispose` deletes
+ * the whole root, including any auth state the loaded plugin generated from that bearer.
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
 import { prepareContextDatabase } from "../prepare-context-db";
-import type { ProviderRoute } from "./types";
+import { assertThrowawayRoot, authPluginPath, writeAuthConfig } from "./auth";
+import type { AuthPlugin, ProviderRoute } from "./types";
 
 export const EXPECTED_HOST_VERSION = "1.18.30";
 const repoRoot = resolve(import.meta.dir, "../../../..");
 export const PLUGIN_ENTRY = join(repoRoot, "packages/plugin/dist/index.js");
+
+export function databaseFilesFromLsof(out: string, root: string): string[] {
+    const canonicalRoot = realpathSync(root);
+    const rows = out.split("\n").filter((line) => /REG/.test(line) && /\.db(?:-|\s|$)/.test(line));
+    const paths = rows.map((line) => line.split(/\s+/).slice(8).join(" "));
+    if (!paths.length || paths.some((path) => !path.startsWith(`${canonicalRoot}/`) && !path.startsWith(`${root}/`))) {
+        throw new Error("Database isolation failed: database handles must be inside the throwaway root");
+    }
+    return [...new Set(paths.map((path) => path.replace(canonicalRoot, "<root>").replace(root, "<root>")))];
+}
 
 export interface HostOptions {
     binary: string;
@@ -26,6 +39,7 @@ export interface HostOptions {
     magicContext: Record<string, unknown>;
     /** Optional models.dev catalogue copied into the host cache, so model metadata is current. */
     modelsCatalog?: string;
+    authPlugins?: Partial<Record<AuthPlugin, string>>;
 }
 
 export interface Host {
@@ -53,7 +67,7 @@ function providerConfig(options: HostOptions): Record<string, unknown> {
             npm: route.npm,
             options: {
                 ...route.providerOptions,
-                apiKey: options.apiKey,
+                ...(!route.authPlugin ? { apiKey: options.apiKey } : {}),
                 baseURL: options.recorderBaseURL,
             },
             models: {
@@ -73,9 +87,23 @@ function providerConfig(options: HostOptions): Record<string, unknown> {
 }
 
 export async function startHost(options: HostOptions): Promise<Host> {
+    assertThrowawayRoot(options.root);
+    if (existsSync(options.root)) throw new Error(`Scenario root already exists: ${options.root}`);
+    try {
+        return await startHostInRoot(options);
+    } catch (error) {
+        // Startup can fail before a Host exists; still delete its disposable credential file.
+        assertThrowawayRoot(options.root);
+        rmSync(options.root, { recursive: true, force: true });
+        throw error;
+    }
+}
+
+async function startHostInRoot(options: HostOptions): Promise<Host> {
     const { root, route } = options;
-    if (!root.includes("/magic-context/")) throw new Error("Scenario root must be under $TMPDIR/magic-context/");
+    assertThrowawayRoot(root);
     if (existsSync(root)) throw new Error(`Scenario root already exists: ${root}`);
+    const authPath = authPluginPath(route, options.authPlugins);
     const dirs = Object.fromEntries(
         ["home", "config", "data", "cache", "state", "runtime", "work", "tmp"].map((key) => [key, join(root, key)]),
     ) as Record<string, string>;
@@ -88,7 +116,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
     writeFileSync(
         join(dirs.config, "opencode.json"),
         JSON.stringify({
-            plugin: [`file://${PLUGIN_ENTRY}`],
+            plugin: [pathToFileURL(PLUGIN_ENTRY).href, ...(authPath ? [pathToFileURL(authPath).href] : [])],
             provider: providerConfig(options),
             enabled_providers: [route.providerId],
             model,
@@ -96,6 +124,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
             autoupdate: false,
             share: "disabled",
             compaction: { auto: false, prune: false },
+            agent: { title: { disable: true }, summary: { disable: true } },
             permission: { bash: "allow", edit: "deny", webfetch: "deny", external_directory: "deny" },
         }),
         { mode: 0o600 },
@@ -129,6 +158,7 @@ export async function startHost(options: HostOptions): Promise<Host> {
         TMPDIR: dirs.tmp,
         OPENCODE_DISABLE_AUTOUPDATE: "true",
         OPENCODE_DISABLE_MODELS_FETCH: "true",
+        ...writeAuthConfig(root, route, options.apiKey, options.recorderBaseURL),
     };
     const version = Bun.spawnSync([options.binary, "--version"], { env, windowsHide: true }).stdout.toString().trim();
     if (version !== EXPECTED_HOST_VERSION) throw new Error(`Expected OpenCode ${EXPECTED_HOST_VERSION}, got ${version}`);
@@ -155,26 +185,32 @@ export async function startHost(options: HostOptions): Promise<Host> {
     };
 
     const checkIsolation = () => {
-        const out = Bun.spawnSync(["lsof", "-p", String(child.pid)], { windowsHide: true }).stdout.toString();
+        const sample = Bun.spawnSync(["lsof", "-p", String(child.pid)], { windowsHide: true });
+        if (sample.exitCode !== 0) throw new Error("lsof failed; database isolation is unproven");
+        const out = sample.stdout.toString();
         writeFileSync(join(root, "lsof.txt"), out);
-        const rows = out.split("\n").filter((line) => /REG/.test(line) && /\.db(?:-|\s|$)/.test(line));
-        if (!rows.length || rows.some((line) => !line.includes(root))) {
-            throw new Error(`Database isolation failed: ${rows.join(" | ")}`);
-        }
-        return rows.map((line) => (line.split(/\s+/).slice(8).join(" ") as string).replace(root, "<root>"));
+        return databaseFilesFromLsof(out, root);
     };
 
     const dispose = async () => {
+        process.off("SIGTERM", terminate);
+        process.off("SIGINT", terminate);
         if (child.exitCode === null) {
             child.kill("SIGTERM");
             const exited = await Promise.race([
                 new Promise<boolean>((r) => child.once("exit", () => r(true))),
                 Bun.sleep(15_000).then(() => false),
             ]);
-            if (!exited) child.kill("SIGKILL");
+            if (!exited) {
+                child.kill("SIGKILL");
+                await new Promise<void>((r) => child.once("exit", () => r()));
+            }
         }
         rmSync(root, { recursive: true, force: true });
     };
+    const terminate = () => { void dispose().finally(() => process.exit(124)); };
+    process.once("SIGTERM", terminate);
+    process.once("SIGINT", terminate);
 
     let ready = false;
     for (let i = 0; i < 120 && !ready; i++) {

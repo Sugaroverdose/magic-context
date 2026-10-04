@@ -4,6 +4,31 @@ import type { CallRecord, RequestShape } from "./types";
 import { readResponse, requestShape, scrubError } from "./wire";
 
 describe("live-provider wire reading", () => {
+    it("reads Anthropic signed blocks, tool pairs and subscription-prefixed tools", () => {
+        const shape = requestShape("anthropic-messages", JSON.stringify({
+            tools: [{ name: "mcp_Bash" }], max_tokens: 1024, thinking: { type: "adaptive" },
+            messages: [{ role: "assistant", content: [{ type: "thinking", thinking: "fixture", signature: "fixture-signature" },
+                { type: "tool_use", id: "t1", name: "mcp_Bash", input: { command: "echo ok" } }] },
+                { role: "user", content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }] },
+                { role: "assistant", content: [{ type: "redacted_thinking", data: "fixture-redacted" }, { type: "text", text: "OK" }] }],
+        }));
+        expect(shape).toMatchObject({ kind: "loop", reasoningMap: "RR", reasoningItems: 2, toolCalls: 1, toolResults: 1 });
+        expect(shape.flags.maxTokens).toBe(1024);
+        expect(JSON.stringify(shape)).not.toContain("fixture-signature");
+        expect(JSON.stringify(shape)).not.toContain("fixture-redacted");
+    });
+
+    it("merges Anthropic start/delta usage and records nested transformation diagnostics", () => {
+        const response = 'data: {"type":"message_start","message":{"usage":{"input_tokens":9,"cache_read_input_tokens":100,"cache_creation_input_tokens":30,"output_tokens":1},"input_transformations":[{"type":"thinking_dropped"}]}}\n' +
+            'data: {"type":"message_delta","usage":{"output_tokens":12},"context_management":{"applied_edits":[]}}';
+        expect(readResponse("anthropic-messages", response)).toMatchObject({
+            usage: { input: 9, cachedRead: 100, cacheWrite: 30, output: 12 }, streamError: null,
+            diagnostics: { "message.input_transformations": [{ type: "thinking_dropped" }], "context_management.applied_edits": [] },
+        });
+        expect(readResponse("anthropic-messages", '{"usage":{"input_tokens":7,"output_tokens":2}}').diagnostics).toEqual({});
+        expect(readResponse("anthropic-messages", 'data: {"type":"error","error":{"message":"prefix mismatch"}}').streamError).toBe("prefix mismatch");
+    });
+
     it("maps OpenAI Responses steps to reasoning-bearing and bare ones", () => {
         const body = {
             input: [
@@ -82,6 +107,8 @@ describe("live-provider scenario summary", () => {
         accepted,
         error: null,
         usage: null,
+        diagnostics: {},
+        requestId: null,
         request: shape(map, toolCalls),
         durationMs: 0,
     });
