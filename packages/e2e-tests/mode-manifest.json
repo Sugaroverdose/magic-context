@@ -1620,6 +1620,15 @@
             ]
         },
         {
+            "path": "tests/issue-617-omp-disabled-builtins.test.ts",
+            "tier": "ts-only",
+            "invocation": { "ts": true, "rust": false },
+            "rationale": "an isolated OMP host with grep disabled must still start the dreamer mapper subprocess and reach the mock provider",
+            "contract_refs": ["PI-HARNESS"],
+            "hosts": ["omp"],
+            "behavior": true
+        },
+        {
             "path": "tests/pi-rust-degradation-arc-1.test.ts",
             "tier": "rust-only",
             "invocation": {
