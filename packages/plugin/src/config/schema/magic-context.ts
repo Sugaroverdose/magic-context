@@ -6,8 +6,8 @@ import type {
     AGENTIC_DREAM_TASKS,
     DreamTaskName,
 } from "../../features/magic-context/dreamer/task-registry";
-import { isValidPromptSurfaceModelKey } from "../../shared/prompt-surface";
 import { toolTemplateError } from "../../shared/historian-tool-template";
+import { isValidPromptSurfaceModelKey } from "../../shared/prompt-surface";
 import { AgentOverrideConfigSchema } from "./agent-overrides";
 
 export const DEFAULT_EXECUTE_THRESHOLD_PERCENTAGE = 65;

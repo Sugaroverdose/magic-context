@@ -4013,8 +4013,8 @@ export function registerPiContextHandler(
 			const message = err instanceof Error ? err.message : String(err);
 			const stack = err instanceof Error ? err.stack : undefined;
 			const transientStorageFailure = isTransientPiStorageError(err);
-            // Every failed managed pass is handled like a busy store: Pi's own
-            // messages lack the session's persisted reductions, even if they fit.
+			// Every failed managed pass is handled like a busy store: Pi's own
+			// messages lack the session's persisted reductions, even if they fit.
 			const degradedPass = !lkgCompactionOff;
 			const replayOrRefuse = transientStorageFailure || degradedPass;
 			const failureLabel = transientStorageFailure
@@ -4101,7 +4101,12 @@ export function registerPiContextHandler(
 			// (Pi's runtime manager is missing), so the host's input passes through.
 			if (!lkgCompactionOff && sessionIdForError) {
 				throw new PiStorageBusyError({
-					cause: err instanceof PiDegradedPassError ? err : new PiDegradedPassError("context-handler-failed", { cause: err }),
+					cause:
+						err instanceof PiDegradedPassError
+							? err
+							: new PiDegradedPassError("context-handler-failed", {
+									cause: err,
+								}),
 				});
 			}
 			log(

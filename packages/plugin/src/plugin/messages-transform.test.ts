@@ -19,8 +19,8 @@ import {
     recordOverflowDetected,
     resetEmergencyRecoveryRegistryForTest,
 } from "../features/magic-context/storage-meta-persisted";
-import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
+import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
 import { finalizeMessageRepresentation } from "../hooks/magic-context/transform-postprocess-phase";
 import { UnresolvedHistoryBoundaryError } from "../hooks/magic-context/unresolved-history-boundary";

@@ -131,8 +131,8 @@ describe("Pi context handler never serves a degraded pass", () => {
 		expect(result.ok).toBe(false);
 		if (!result.ok) {
 			expect(result.error).toMatchObject({
-                name: "PiStorageBusyError",
-                cause: { name: "PiDegradedPassError", site: "context-handler-failed" },
+				name: "PiStorageBusyError",
+				cause: { name: "PiDegradedPassError", site: "context-handler-failed" },
 			});
 		}
 	});
@@ -148,14 +148,24 @@ describe("Pi context handler never serves a degraded pass", () => {
 			[userMessage("hello", 1)],
 		);
 		expect(result.ok).toBe(false);
-		if (!result.ok) expect(result.error).toMatchObject({ name: "PiStorageBusyError", cause: { name: "PiDegradedPassError", site: "context-handler-failed" } });
+		if (!result.ok)
+			expect(result.error).toMatchObject({
+				name: "PiStorageBusyError",
+				cause: { name: "PiDegradedPassError", site: "context-handler-failed" },
+			});
 	});
 
 	it("passes through an ordinary failure when compaction is off", async () => {
-		const { result } = await runFailingPass("pi-degraded-off", {
-			compactionOff: true,
-			resolveForProject: () => { throw new Error("ordinary transform defect"); },
-		}, [userMessage("hello", 1)]);
+		const { result } = await runFailingPass(
+			"pi-degraded-off",
+			{
+				compactionOff: true,
+				resolveForProject: () => {
+					throw new Error("ordinary transform defect");
+				},
+			},
+			[userMessage("hello", 1)],
+		);
 		expect(result).toEqual({ ok: true, value: undefined });
 	});
 });

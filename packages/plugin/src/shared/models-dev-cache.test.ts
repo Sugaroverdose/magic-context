@@ -662,7 +662,11 @@ describe("prompt_only detected limit above a declared input cap", () => {
                                 id: "anthropic",
                                 models: {
                                     "capped-model": {
-                                        limit: { context: 400_000, input: 272_000, output: 128_000 },
+                                        limit: {
+                                            context: 400_000,
+                                            input: 272_000,
+                                            output: 128_000,
+                                        },
                                     },
                                 },
                             },

@@ -98,12 +98,12 @@ import {
     todowritePermissionDenied,
 } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
+import { degradedPassError } from "./degraded-pass-refusal";
 import { dropStaleReduceCalls } from "./drop-stale-reduce-calls";
 import {
     type DroppedTokenReduction,
     estimateDroppedTokensFromTagReductions,
 } from "./dropped-token-estimate";
-import { degradedPassError } from "./degraded-pass-refusal";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";

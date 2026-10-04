@@ -32,6 +32,7 @@ import {
     updateTagDropMode,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import * as replayStorage from "../../features/magic-context/storage-meta-persisted";
 import {
     addMergedReasoningStrippedIds,
     addTrailingBlankDecisions,
@@ -48,9 +49,8 @@ import {
     setPersistedTodoPermissionDenied,
     setPersistedTodoSyntheticAnchor,
 } from "../../features/magic-context/storage-meta-persisted";
-import { getRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
 import * as reasoningStorage from "../../features/magic-context/storage-reasoning-removal";
-import * as replayStorage from "../../features/magic-context/storage-meta-persisted";
+import { getRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
 import * as storageTags from "../../features/magic-context/storage-tags";
 import {
     markWhitespaceAssistantTagInert,
@@ -60,15 +60,12 @@ import { createTagger } from "../../features/magic-context/tagger";
 import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import * as autoSearchRunner from "./auto-search-runner";
 import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
-import * as autoSearchRunner from "./auto-search-runner";
 import * as staleReduce from "./drop-stale-reduce-calls";
-import * as noteNudger from "./note-nudger";
-import * as operations from "./transform-operations";
-import { createPassOutcome } from "./pass-outcome";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
 import * as compartmentInjection from "./inject-compartments";
 import {
@@ -76,6 +73,8 @@ import {
     injectM0M1,
     type M0HardSignals,
 } from "./inject-compartments";
+import * as noteNudger from "./note-nudger";
+import { createPassOutcome } from "./pass-outcome";
 import * as readSessionFormatting from "./read-session-formatting";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { stripStructuralNoise } from "./strip-structural-noise";
@@ -92,6 +91,7 @@ import {
     type ToolCallIndex,
     ToolMutationBatch,
 } from "./tool-drop-target";
+import * as operations from "./transform-operations";
 import { applyFlushedStatuses } from "./transform-operations";
 import {
     abortSessionFailClosed,

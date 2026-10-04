@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import fixture from "../../../../../crates/mc-module/testdata/historian-tool-expansions.json";
+import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { DEFAULT_TOOL_EXPANSIONS, expandToolPart } from "../../shared/historian-tool-expansions";
 import { renderToolTemplate, toolTemplateError } from "../../shared/historian-tool-template";
-import { MagicContextConfigSchema } from "../../config/schema/magic-context";
-import { estimateTokens } from "./read-session-formatting";
 import { renderVerboseRange } from "../../tools/ctx-expand/render";
 import { readSessionChunk, withRawMessageProvider } from "./read-session-chunk";
+import { estimateTokens } from "./read-session-formatting";
 
 const expandTools = {
     peer_send: "PM to ${input.agent}: ${input.message}",

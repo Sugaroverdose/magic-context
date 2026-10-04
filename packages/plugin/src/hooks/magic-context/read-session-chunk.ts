@@ -2,9 +2,9 @@ import {
     getCandidateToolOwners,
     pickNearestPriorOwner,
 } from "../../features/magic-context/storage-tags";
-import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import { expandToolPart } from "../../shared/historian-tool-expansions";
 import type { ToolExpansionMap } from "../../shared/historian-tool-template";
+import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import type { Database } from "../../shared/sqlite";
 import { isSystemDirective } from "../../shared/system-directive";
 import { isHostUnservedRow, markHostUnservedRow } from "./host-served-rows";

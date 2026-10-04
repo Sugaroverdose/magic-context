@@ -1,8 +1,8 @@
-import { expect, test, mock, spyOn } from "bun:test";
+import { expect, mock, spyOn, test } from "bun:test";
+import { join } from "node:path";
 import * as configLoader from "../../config";
 import { MagicContextConfigSchema } from "../../config/schema/magic-context";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage-db";
-import { join } from "node:path";
 import { resetCtxReduceRegisteredGloballyForTest } from "../../hooks/magic-context/ctx-reduce-availability";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import { registerContext } from "./context";
@@ -43,7 +43,7 @@ for (const compactionOff of [false, true]) {
                 get: async () => ({ location: { directory: dir } }),
             },
         } as unknown as V2Context;
-        let duties: Awaited<ReturnType<typeof registerContext>> = undefined;
+        let duties: Awaited<ReturnType<typeof registerContext>>;
         try {
             duties = await registerContext(host);
             expect(hook).toBeDefined();

@@ -21,8 +21,6 @@ import {
     thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
 import * as coordinateRebase from "../../features/magic-context/store-generation-rebase";
-import * as modeTransition from "./compaction-off-transition";
-import * as staleReduce from "./drop-stale-reduce-calls";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
@@ -30,10 +28,12 @@ import type { PluginContext } from "../../plugin/types";
 import { Database } from "../../shared/sqlite";
 import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-dir";
 import * as autoSearchRunner from "./auto-search-runner";
+import * as modeTransition from "./compaction-off-transition";
 import { DegradedPassRefusalError } from "./degraded-pass-refusal";
+import * as staleReduce from "./drop-stale-reduce-calls";
 import * as injectCompartments from "./inject-compartments";
-import * as noteNudger from "./note-nudger";
 import { dropSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
+import * as noteNudger from "./note-nudger";
 import { STORAGE_BUSY_MESSAGE } from "./storage-busy-refusal";
 import { createTransform } from "./transform";
 import * as transformOperations from "./transform-operations";
