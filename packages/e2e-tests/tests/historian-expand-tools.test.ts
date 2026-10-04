@@ -28,7 +28,9 @@ test("real OpenCode historian sees communication answers; expand stays cheap unl
         expect(dbPaths.every((path) => path.startsWith(`${root}/`))).toBe(true);
         writeFileSync(join(artifactDir, "host-lsof.txt"), files.stdout);
         const version = await fetch(`${h.serverUrl}/global/health`).then((r) => r.json()) as { version?: string };
-        expect(version.version).toBe("1.18.30");
+        // The OpenCode 1 lane installs the latest 1.x release, so pin the major
+        // version this test covers rather than one patch release.
+        expect(version.version).toMatch(/^1\./);
 
         h.mock.addMatcher((body) => {
             if (!JSON.stringify(body.system).includes("the hippocampus of a long-running coding agent")) return null;
