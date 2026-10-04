@@ -16,7 +16,10 @@ import {
 	type ManualRunResult,
 	runManualDream,
 } from "@magic-context/core/features/magic-context/dreamer/task-scheduler";
-import { DreamTokenBudgetExceeded } from "@magic-context/core/features/magic-context/dreamer/token-budget";
+import {
+	DreamTokenBudgetExceeded,
+	type DreamTokenBudgetState,
+} from "@magic-context/core/features/magic-context/dreamer/token-budget";
 import { isUsableProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import type { ContextDatabase } from "@magic-context/core/features/magic-context/storage";
 import { startDreamScheduleTimer as defaultStartDreamScheduleTimer } from "@magic-context/core/plugin/dream-timer";
@@ -514,12 +517,16 @@ function createPiDreamerClient(
 	readTokenBudget: (
 		task: string,
 	) => { spent: number; finalizeFired: boolean } | undefined;
+	readChildTokenBudget: (
+		sessionId: string,
+	) => DreamTokenBudgetState | undefined;
 } {
 	const runner = piSubagentRunnerFactory();
 	const budgetStates = new Map<
 		string,
 		{ spent: number; finalizeFired: boolean }
 	>();
+	const childBudgetStates = new Map<string, DreamTokenBudgetState>();
 	const assertRegistrationOwnerActive = (): void => {
 		if (!isRegistrationOwnerActive()) {
 			throw new Error(
@@ -606,8 +613,9 @@ function createPiDreamerClient(
 			try {
 				const result = await runPromise;
 				const budget = result.meta?.tokenBudget as
-					| { spent?: number; finalizeFired?: boolean }
+					| DreamTokenBudgetState
 					| undefined;
+				if (budget) childBudgetStates.set(sessionId, budget);
 				const budgetTask = accountingTaskFromTitle(dreamSession.title);
 				if (budgetTask && budget && typeof budget.spent === "number") {
 					const prior = budgetStates.get(budgetTask);
@@ -678,6 +686,7 @@ function createPiDreamerClient(
 		},
 		delete: async (args: SessionDeleteArgs) => {
 			sessionsById.delete(args.path.id);
+			childBudgetStates.delete(args.path.id);
 			return {};
 		},
 	};
@@ -688,11 +697,16 @@ function createPiDreamerClient(
 		backgroundSessionsAreHidden: true,
 		session,
 		readTokenBudget: (task: string) => budgetStates.get(task),
+		readChildTokenBudget: (sessionId: string) =>
+			childBudgetStates.get(sessionId),
 		resetDreamTokenBudget: (task: string) => budgetStates.delete(task),
 	} as unknown as DreamTimerClient & {
 		readTokenBudget: (
 			task: string,
 		) => { spent: number; finalizeFired: boolean } | undefined;
+		readChildTokenBudget: (
+			sessionId: string,
+		) => DreamTokenBudgetState | undefined;
 		resetDreamTokenBudget: (task: string) => void;
 	};
 }

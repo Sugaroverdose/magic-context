@@ -172,6 +172,38 @@ it("keeps accumulated tool results on the second step and releases the session b
     expect(() => hook.apply(next)).toThrow("hidden_prompt_unrecognized");
 });
 
+it("finalizes a mapper before its cap with its checked history and no further tools", () => {
+    const hook = new HiddenChildHook();
+    const states: unknown[] = [];
+    const attempt = {
+        childSessionId: "ses-child",
+        identity: {
+            directory: "/tmp",
+            agent: "dreamer-memory-mapper",
+            kind: "dreamer-task" as const,
+            system: "sys",
+            timeoutMs: 1000,
+            metadata: { onBudgetUpdate: (state: unknown) => states.push(state) },
+        },
+        request: { body: { parts: [{ type: "text", text: "calibrated" }] } },
+        shaped: false,
+    };
+    hook.registerAttempt("mc:hidden:mapper", attempt);
+    let candidate = draft({ role: "user", content: [{ type: "text", text: "mc:hidden:mapper" }] });
+    for (let step = 1; step <= 58; step++) {
+        candidate = {
+            ...draft({ role: "user", content: [{ type: "text", text: "mc:hidden:mapper" }] }),
+            sessionID: "ses-child",
+            tools: { read: { description: "read", input: {} } },
+        };
+        expect(hook.apply(candidate)).toBe(true);
+        if (step < 58) expect(Object.keys(candidate.tools)).toEqual(["read"]);
+    }
+    expect(Object.keys(candidate.tools)).toEqual([]);
+    expect(JSON.stringify(candidate.messages.at(-1))).toContain("no more tool calls");
+    expect(states).toContainEqual(expect.objectContaining({ finalizeFired: true }));
+});
+
 it("refuses a tool loop that exceeds its task's step budget", () => {
     const hook = new HiddenChildHook();
     const attempt = {

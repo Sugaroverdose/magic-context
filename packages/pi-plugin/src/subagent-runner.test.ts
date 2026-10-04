@@ -3543,7 +3543,7 @@ describe("Pi dreamer prompt-token budget", () => {
 		prefixArgs: [],
 		targetHarness: "pi" as const,
 	};
-	async function started() {
+	async function started(tokenBudget = 100) {
 		const child = createMockChild();
 		const { runner, spawnImpl } = runnerWith(child, {
 			invocation,
@@ -3552,7 +3552,7 @@ describe("Pi dreamer prompt-token budget", () => {
 		const run = runner.run({
 			...baseOptions,
 			agent: "dreamer-memory-mapper",
-			tokenBudget: 100,
+			tokenBudget,
 		});
 		for (
 			let i = 0;
@@ -3564,6 +3564,39 @@ describe("Pi dreamer prompt-token budget", () => {
 		expect(spawnImpl.mock.calls[0]?.[1]).toContain("rpc");
 		return { child, run, spawnImpl };
 	}
+
+	it("finalizes the mapper before its step cap and retains a partial manifest below token budget", async () => {
+		const { child, run } = await started(3_000_000);
+		for (let step = 1; step <= 58; step++)
+			child.writeStdoutLine({
+				type: "message_end",
+				message: {
+					role: "assistant",
+					usage: { input: 1 },
+					stopReason: "toolUse",
+					content: [{ type: "toolCall", id: `read-${step}`, name: "read" }],
+				},
+			});
+		const steered = child.stdinText.includes("dreamer-finalize");
+		child.writeStdoutLine({
+			type: "message_end",
+			message: {
+				role: "assistant",
+				usage: { input: 1 },
+				stopReason: "stop",
+				content: [
+					{ type: "text", text: '<verify><verified id="1"/></verify>' },
+				],
+			},
+		});
+		child.emitClose();
+		expect(await run).toMatchObject({
+			ok: true,
+			meta: { tokenBudget: { spent: 59, finalizeFired: true } },
+		});
+		expect(steered).toBe(true);
+		expect(child.stdinText.match(/dreamer-finalize/g)).toHaveLength(1);
+	});
 
 	it("does not steer a completed under-budget child", async () => {
 		const { child, run } = await started();

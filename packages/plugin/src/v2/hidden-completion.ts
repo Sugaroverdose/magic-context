@@ -567,6 +567,7 @@ export async function createV2HiddenCompletionExecutor(
                 identity: run.identity,
                 request,
                 shaped: false,
+                budget: run.budget,
             };
             options.hook.registerAttempt(marker, attempt);
             const deadline = Date.now() + run.identity.timeoutMs;

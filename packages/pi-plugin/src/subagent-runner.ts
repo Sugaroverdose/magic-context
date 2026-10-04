@@ -1674,13 +1674,26 @@ export class PiSubagentRunner implements SubagentRunner {
 										(part as { type?: string }).type === "toolCall",
 								)
 							);
-						const decision = budget.charge(
+						let decision = budget.charge(
 							usage?.input ?? 0,
 							usage?.cacheRead ?? 0,
 							usage?.cacheWrite ?? 0,
 							finished,
 							rpcBudget,
 						);
+						// Reserve two turns: one for a queued investigation/refusal and
+						// one for the manifest. Keep the 60-step runaway ceiling intact.
+						if (
+							decision === "continue" &&
+							!finished &&
+							rpcBudget &&
+							options.agent.replace(/^magic-context-/, "") ===
+								"dreamer-memory-mapper" &&
+							cap !== undefined &&
+							telemetry.steps >= cap - 2
+						) {
+							decision = budget.finalize();
+						}
 						if (
 							decision === "stop" ||
 							(decision === "finalize" && !rpcBudget)
