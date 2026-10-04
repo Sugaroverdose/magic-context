@@ -248,6 +248,10 @@ expiry and replays next. Its native usage hook
 does not bind the v1 delegate's pending `transform_decisions` row; that telemetry
 gap is recorded rather than fixed outside this change.
 
+The subsequent [Rust follow-up](issue-610-rust-idle-abort-system-hash.md) repairs
+and verifies the module path described below; the original investigation's
+unverified boundary is retained here for chronology.
+
 Rust's clock is forwarded by `rust-mode-transform.ts`, near 3375/3678, as
 `observed_last_response_at_ms`; the module constructs scheduler input from it
 (`crates/mc-module/src/transform.rs`, near 3052 and 4370). Its strict idle

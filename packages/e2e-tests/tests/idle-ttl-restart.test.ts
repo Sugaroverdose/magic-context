@@ -428,7 +428,11 @@ export default async (ctx) => {
 			expect(pendingCount(h, session)).toBe(1);
 		}
 		expire(h, session, abortAndChange);
-		if (restart) await h.restart();
+		if (restart) {
+			const dataDir = h.dataDir;
+			await h.restart();
+			expect(h.dataDir).toBe(dataDir);
+		}
 		inventories.push(assertContained(h));
 		let responseClockAfterAbort: unknown;
 		let preparedModuleMeta: unknown;
