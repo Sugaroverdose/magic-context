@@ -4097,7 +4097,9 @@ export function registerPiContextHandler(
 			}
 			// Fit is not enough: raw messages omit persisted decisions even when
 			// small. Only a validated last-good replay may serve a failed pass.
-			if (!lkgCompactionOff) {
+			// Without a resolved session there are no persisted decisions to omit
+			// (Pi's runtime manager is missing), so the host's input passes through.
+			if (!lkgCompactionOff && sessionIdForError) {
 				throw new PiStorageBusyError({
 					cause: err instanceof PiDegradedPassError ? err : new PiDegradedPassError("context-handler-failed", { cause: err }),
 				});
