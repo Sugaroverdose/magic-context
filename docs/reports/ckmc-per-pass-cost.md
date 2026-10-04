@@ -1,5 +1,23 @@
 # ck-mc per-pass cost: whole-session work behind a small served tail
 
+## Measured results (2026-10-04)
+
+The harness below ran on read-only copies of the live stores, with build `545d5f22`, release profile, 20 samples per mode, at load average 40–44. Values are the median per pass, given as thread CPU / wall ms. `warm_delta` is an ordinary acknowledged pass, `warm_full` is a full request with warm caches, and `evicted_full` is a full request after the projection and native caches are dropped.
+
+| Session (messages, frozen units) | warm_delta | warm_full | evicted_full |
+| --- | ---: | ---: | ---: |
+| ALF (7,501, 36,749) | 507 / 512 | 681 / 697 | 739 / 754 (max 2,887) |
+| CEREB-sized (1,876, 12,017) | 162 / 170 | 180 / 189 | 198 / 209 |
+| small (569, 878) | 62 / 62 | 97 / 99 | 96 / 98 |
+
+What the numbers say:
+
+- **Cost grows with session size, not with the work a pass does.** An ordinary pass costs about 0.07 ms per message in the session, even though it adds 2–4 messages. CPU and wall agree, so this is computation, not waiting.
+- **The module's own time explains about 0.5 s of ALF's live 1.2 s median.** The rest is outside the handler: transport, queueing behind other requests, and load.
+- **Losing the projection and native caches costs about 0.24 s on ALF, not seconds.** The 25.8 s and 8.5 s live spikes therefore did not come from re-projection work itself; they came from waiting (the live trace showed 8 s of queueing on the ALF spike).
+- **Where an ordinary ALF pass goes** (CPU ms): native attach 117 (inside post-attach 119), state evolution 69 (of which hygiene 60), build output 32, finalize 25, seed/sync 23, store commit 21, tag overlay about 20. About 150 ms inside `transform_execute` is not covered by any child span yet.
+- **Native attach is a bigger target than this report's ranking assumed.** It reuses 331 of 333 messages from its cache and encodes only 2, yet still costs 117 ms on a delta pass and 270 ms on a full one.
+
 ## Status and evidence boundary
 
 **Report/design only. No cache algorithm, persistence format, or production wire
