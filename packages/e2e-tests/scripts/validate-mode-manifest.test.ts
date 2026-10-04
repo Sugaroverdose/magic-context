@@ -21,7 +21,7 @@ describe("mode manifest validator", () => {
         // Bump this with the manifest whenever a tests/**/*.test.ts file is added or
         // removed. Moving a file between excluded and ts-only changes the invocation
         // counts and excluded list below, but not the total number of files.
-        expect(validation.files.length).toBe(164);
+        expect(validation.files.length).toBe(165);
         expect(validation.manifest.entries).toHaveLength(validation.files.length);
         expect(new Set(validation.manifest.entries.map((entry) => entry.path)).size).toBe(
             validation.files.length,
@@ -131,6 +131,7 @@ describe("mode manifest validator", () => {
             "tests/opencode2/ts-mode-on-migrated-real-store.test.ts",
             "tests/opencode2/v1-v2-reconversion.test.ts",
             "tests/rust-classify-host-runner.test.ts",
+            "tests/rust-full-sync-frame-cap.test.ts",
             "tests/window-overlay-reload.test.ts",
         ]);
         expect(new Set([...ts, ...rust]).size).toBe(validation.files.length - excluded.length);

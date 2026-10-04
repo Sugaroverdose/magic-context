@@ -2721,6 +2721,14 @@
             ]
         },
         {
+            "path": "tests/rust-full-sync-frame-cap.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual real-module probe with prebuilt ck-mc and ck-subc (MC_E2E_CK_MC_PREBUILT_BIN, MC_E2E_CK_SUBC_BIN): a 9,268-message paged full-sync retry above 48 MiB in total is admitted frame by frame, while an oversized single tool frame stays refused",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/dreamer-mapper-step-cap-pi.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },

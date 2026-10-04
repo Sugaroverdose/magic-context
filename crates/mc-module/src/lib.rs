@@ -16049,7 +16049,12 @@ fn invalid_params_error(message: impl Into<String>) -> HandlerOutcome {
 
 const MAX_FACADE_FRAME_BYTES: usize =
     subc_protocol::MAX_FRAME_BODY_LEN as usize - SUBC_FRAME_BODY_HEADROOM_BYTES;
-const MAX_TRANSFORM_FRAME_BYTES: usize = MAX_FACADE_FRAME_BYTES;
+/// Plugins size transform pages to the facade cap and the transport then appends a
+/// few capability bytes (`accept_reply_pages`), so a full page can arrive slightly
+/// over it. Transform-class frames get a 64 KiB allowance, still far inside the
+/// 16 MiB headroom below the real subc frame limit; agent tool calls keep the cap.
+const TRANSFORM_FRAME_ALLOWANCE_BYTES: usize = 64 * 1024;
+const MAX_TRANSFORM_FRAME_BYTES: usize = MAX_FACADE_FRAME_BYTES + TRANSFORM_FRAME_ALLOWANCE_BYTES;
 
 /// Minimal probe deserialized from an oversized body ONLY to pick the right byte
 /// cap. serde ignores every other field, so this stays cheap relative to a full
@@ -16066,12 +16071,17 @@ struct RequestMethodProbe {
     transform_page_index: Option<u64>,
     #[serde(default)]
     transform_page_total: Option<u64>,
+    #[serde(default)]
+    transform_page_id: Option<String>,
 }
 
 impl RequestMethodProbe {
     fn is_transform_class(&self) -> bool {
         let named = |value: &Option<String>, name: &str| value.as_deref() == Some(name);
         named(&self.kind, "transform")
+            // Non-final transform pages carry the page envelope but not `kind`,
+            // which travels with the scalar fields on the final page.
+            || self.transform_page_id.is_some()
             // A single state-sync row can exceed the facade cap, so this live module
             // path uses the transform-class ceiling as well.
             || named(&self.method, "state_sync")
@@ -20743,6 +20753,12 @@ mod tests {
         assert!(
             enforce_request_byte_cap(&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES)).is_err()
         );
+        // A full transform page plus the transport's late capability field is
+        // admitted, including a non-final page that only carries the page envelope.
+        let just_over_facade = MAX_FACADE_FRAME_BYTES + 32;
+        assert!(enforce_request_byte_cap(&pad("transform", "kind", just_over_facade)).is_ok());
+        assert!(enforce_request_byte_cap(&pad("abc", "transform_page_id", just_over_facade)).is_ok());
+        assert!(enforce_request_byte_cap(&pad("ctx_memory", "method", just_over_facade)).is_err());
         assert!(
             enforce_request_byte_cap(&pad("transform", "method", MAX_FACADE_FRAME_BYTES)).is_err()
         );
