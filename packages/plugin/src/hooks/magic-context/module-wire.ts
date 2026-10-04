@@ -448,6 +448,11 @@ export function buildPagedModuleTransformPayloads(
     pageMaxBytes = MODULE_PAGE_MAX_BYTES,
     forcePageEnvelope = false,
 ): ModuleTransformWirePage[] {
+    // SubcModuleTransport appends this capability after paging. The application
+    // cap applies to the transmitted frame, not just the page before that append.
+    // Reserve it even when a caller already supplied it; the small conservative
+    // allowance also keeps non-final pages (which omit scalars) within the cap.
+    pageMaxBytes -= Buffer.byteLength(',"accept_reply_pages":true');
     // The unpaged path must stringify once to know it fits. Return that length so
     // the transport telemetry does not serialize the same body a second time.
     const serializedBody = JSON.stringify(body);
@@ -484,7 +489,10 @@ export function buildPagedModuleTransformPayloads(
             transform_page_digest: transformPageDigest(pageContent),
             ...body,
         };
-        return [{ page, bytes: Buffer.byteLength(JSON.stringify(page)) }];
+        const bytes = Buffer.byteLength(JSON.stringify(page));
+        // A body can fit while its content-addressed envelope does not. In that
+        // case use the same bounded paging/continuation path as a larger body.
+        if (bytes <= pageMaxBytes) return [{ page, bytes }];
     }
 
     const arrayFields = [

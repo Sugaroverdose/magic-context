@@ -621,6 +621,43 @@ describe("resolveOrdinalsForModule bounded rebuild", () => {
 const TEST_PAGE_MAX_BYTES = 512 * 1024;
 
 describe("buildPagedModuleTransformPayloads byte reuse", () => {
+    it("bounds a forced one-page envelope including the transport reply capability", () => {
+        const body = { method: "transform", session_id: "boundary", input: [{ text: "" }] };
+        body.input[0]!.text = "x".repeat(
+            TEST_PAGE_MAX_BYTES - Buffer.byteLength(JSON.stringify(body)),
+        );
+        const pages = buildPagedModuleTransformPayloads(body, TEST_PAGE_MAX_BYTES, true);
+        expect(pages.length).toBeGreaterThan(1);
+        for (const { page, bytes } of pages) {
+            expect(bytes).toBe(Buffer.byteLength(JSON.stringify(page)));
+            expect(
+                Buffer.byteLength(JSON.stringify({ ...page, accept_reply_pages: true })),
+            ).toBeLessThanOrEqual(TEST_PAGE_MAX_BYTES);
+        }
+    });
+
+    it("reserves the late transport capability on a full non-final page", () => {
+        const body = {
+            method: "transform",
+            session_id: "boundary",
+            input: [
+                { text: "x".repeat(TEST_PAGE_MAX_BYTES - 2_000) },
+                { text: "x".repeat(TEST_PAGE_MAX_BYTES) },
+            ],
+        };
+        const initial = buildPagedModuleTransformPayloads(body, TEST_PAGE_MAX_BYTES, true);
+        // Fill the first page to ten bytes below the caller's cap, before the
+        // transport adds its 26-byte reply capability. This used to overrun it.
+        body.input[0]!.text += "x".repeat(TEST_PAGE_MAX_BYTES - initial[0]!.bytes - 10);
+        const pages = buildPagedModuleTransformPayloads(body, TEST_PAGE_MAX_BYTES, true);
+        expect(pages.length).toBeGreaterThan(1);
+        for (const { page } of pages) {
+            expect(
+                Buffer.byteLength(JSON.stringify({ ...page, accept_reply_pages: true })),
+            ).toBeLessThanOrEqual(TEST_PAGE_MAX_BYTES);
+        }
+    });
+
     it("pins the application page budget to the shared SUBC frame fixture", async () => {
         const fixture = (await Bun.file(
             new URL(
