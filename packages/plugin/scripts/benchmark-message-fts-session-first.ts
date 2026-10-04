@@ -96,7 +96,9 @@ function worker(): void {
 }
 
 function subprocess(command: string, argv: string[]): string {
-    const result = spawnSync(command, argv, { encoding: "utf8", timeout: 120000 });
+    // A multi-gigabyte backup can queue behind other disk users. Its time is not
+    // part of the SQL measurement; allow it more time than a query worker.
+    const result = spawnSync(command, argv, { encoding: "utf8", timeout: command === "sqlite3" ? 600000 : 120000 });
     if (result.error || result.status !== 0) {
         throw new Error(`${command} failed: ${result.error ?? result.stderr}`);
     }
@@ -134,6 +136,13 @@ function main(): void {
     const repeats = Number(option("repeats", "10"));
     if (!Number.isSafeInteger(repeats) || repeats < 2) throw new Error("repeats must be at least two");
     const samples: Record<string, Sample[]> = {};
+    const recordProgress = (key: string, values: Sample[]) => {
+        (samples[key] ??= []).push(...values);
+        writeFileSync(join(directory, "fts-benchmark-progress.json"), JSON.stringify({
+            inventory, sessionRows: selected.rows, cutoff: cutoffRow.cutoff, match, samples,
+        }, null, 2));
+        console.log(`[message-fts] ${key}: ${samples[key].length} samples`);
+    };
     const runChild = (copy: string, lane: Lane, arm: Arm, warm: boolean) => JSON.parse(subprocess(process.execPath, [
         process.argv[1], "--worker", "yes", "--copy", copy, "--lane", lane, "--arm", arm,
         "--session", selected.session, "--cutoff", String(cutoffRow.cutoff),
@@ -148,14 +157,14 @@ function main(): void {
                     // Backup is outside the timed lane. Every cold sample gets a
                     // new file AND process/SQLite cache; the OS cache is not purged.
                     subprocess("sqlite3", ["-readonly", `file:${source}?immutable=1`, `.backup ${copy}`]);
-                    (samples[`cold:${lane}:${arm}`] ??= []).push(...runChild(copy, lane, arm, false));
+                    recordProgress(`cold:${lane}:${arm}`, runChild(copy, lane, arm, false));
                 } finally {
                     for (const suffix of ["", "-wal", "-shm"]) rmSync(`${copy}${suffix}`, { force: true });
                 }
             }
         }
         for (const arm of ["global", "session"] as const) {
-            samples[`warm:${lane}:${arm}`] = runChild(source, lane, arm, true);
+            recordProgress(`warm:${lane}:${arm}`, runChild(source, lane, arm, true));
         }
     }
     for (const lane of ["auto", "diagnostic"] as const) {
