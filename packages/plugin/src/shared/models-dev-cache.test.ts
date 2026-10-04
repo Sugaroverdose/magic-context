@@ -647,3 +647,70 @@ describe("getSdkContextLimit prompt_only pre-carve arm", () => {
         ).toBe(167000);
     });
 });
+
+describe("prompt_only detected limit above a declared input cap", () => {
+    beforeEach(() => clearModelsDevCache());
+    afterEach(() => clearModelsDevCache());
+
+    const seed = () =>
+        refreshModelLimitsFromApi({
+            config: {
+                providers: async () => ({
+                    data: {
+                        providers: [
+                            {
+                                id: "anthropic",
+                                models: {
+                                    "capped-model": {
+                                        limit: { context: 400_000, input: 272_000, output: 128_000 },
+                                    },
+                                },
+                            },
+                        ],
+                    },
+                }),
+            },
+        });
+
+    test("baseline: no detection resolves to the declared cap", async () => {
+        await seed();
+        expect(getSdkContextLimit("anthropic", "capped-model")).toBe(272_000);
+    });
+
+    test("reservation none keeps the declared cap", async () => {
+        await seed();
+        expect(
+            getSdkContextLimit("anthropic", "capped-model", 1_000_000, {
+                detectedLimitProvenance: "prompt_only",
+                reservation: "none",
+            }),
+        ).toBe(272_000);
+    });
+
+    test("combined keeps the declared cap", async () => {
+        await seed();
+        expect(
+            getSdkContextLimit("anthropic", "capped-model", 1_000_000, {
+                detectedLimitProvenance: "combined",
+            }),
+        ).toBe(272_000);
+    });
+
+    test("default arm: prompt_only keeps the declared cap", async () => {
+        await seed();
+        expect(
+            getSdkContextLimit("anthropic", "capped-model", 1_000_000, {
+                detectedLimitProvenance: "prompt_only",
+            }),
+        ).toBe(272_000);
+    });
+
+    test("default arm: geometry usableSoft keeps the declared cap", async () => {
+        await seed();
+        const geometry = getSdkWindowGeometry("anthropic", "capped-model", 1_000_000, {
+            detectedLimitProvenance: "prompt_only",
+        });
+        expect(geometry?.usableSoft).toBe(272_000);
+        expect(geometry?.usableHard).toBeGreaterThanOrEqual(geometry?.usableSoft ?? 0);
+    });
+});

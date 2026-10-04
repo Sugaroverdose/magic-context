@@ -533,7 +533,11 @@ export function getSdkWindowGeometry(
         },
     );
     if (!result || promptOnlyDetected === undefined) return result;
-    const usableSoft = promptOnlyDetected;
+    // A declared input cap bounds the prompt wall; without one the wall is
+    // already pre-carved and may exceed the catalog-derived window.
+    const usableSoft = isFinitePositive(metadata.inputLimit)
+        ? Math.min(promptOnlyDetected, result.usableSoft)
+        : promptOnlyDetected;
     return {
         ...result,
         usableSoft,
