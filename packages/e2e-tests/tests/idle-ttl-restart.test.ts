@@ -25,6 +25,7 @@ import { PiTestHarness } from "../src/pi-harness";
 import { OpenCode } from "@opencode/client";
 
 const IDLE = 16.5 * 60 * 60 * 1000;
+const RUST_MODE = process.env.MC_E2E_MODE === "rust";
 const LOW_USAGE = {
 	input_tokens: 10_000,
 	output_tokens: 10,
@@ -146,7 +147,82 @@ function assertContained(h: ScenarioHarness) {
 	assertOpenPaths(paths, dirname(h.dataDir));
 	const databases = paths.filter((path) => /\.db(-wal|-shm)?$/.test(path));
 	expect(databases.length).toBeGreaterThan(0);
-	return { pid, inventory, databases };
+	const moduleInventories = RUST_MODE
+		? (JSON.parse(
+				readFileSync(join(h.dataDir, "cortexkit", "rust-e2e-pids.json"), "utf8"),
+			) as { pids: { pid: number; role: string }[] }).pids
+			.filter((entry) => entry.role === "module" || entry.role === "daemon")
+			.map((entry) => {
+				const inventory = execFileSync(
+					"timeout", ["10s", "lsof", "-p", String(entry.pid), "-Fn"],
+					{ encoding: "utf8" },
+				);
+				const paths = inventory.split("\n")
+					.filter((line) => line.startsWith("n"))
+					.map((line) => line.slice(1));
+				assertOpenPaths(paths, dirname(h.dataDir));
+				const databases = paths.filter((path) => /\.db(-wal|-shm)?$/.test(path));
+				if (entry.role === "module") {
+					expect(databases.length).toBeGreaterThan(0);
+				}
+				return { ...entry, inventory, databases };
+			})
+		: [];
+	return { pid, inventory, databases, moduleInventories };
+}
+
+function moduleDbPath(h: ScenarioHarness) {
+	return join(h.dataDir, "cortexkit", "magic-context", "store.db");
+}
+
+function moduleMeta(h: ScenarioHarness, session: string) {
+	const db = openTestDb(moduleDbPath(h), { readonly: true });
+	try {
+		const row = db.query("SELECT meta FROM mc_cache_state WHERE session_id = ?")
+			.get(session) as { meta: string };
+		return JSON.parse(row.meta) as {
+			expiry_cutoff_ms: number;
+			last_system_prompt_hash: string;
+			last_render_config: string;
+		};
+	} finally {
+		db.close();
+	}
+}
+
+async function queueDrop(h: ScenarioHarness, session: string, tag: number) {
+	if (RUST_MODE) {
+		if (!(h instanceof TestHarness) || !h.rustStack) {
+			throw new Error("Rust module stack unavailable");
+		}
+		const response = await h.rustStack.moduleRequest(session, h.workdir, {
+			name: "ctx_reduce", arguments: { drop: String(tag) },
+		});
+		expect(response.isError).not.toBe(true);
+	} else {
+		const db = openTestDb(h.contextDbPath());
+		try {
+			db.prepare(
+				"INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, ?, 'drop', ?, ?)",
+			).run(session, tag, Date.now(), h.harnessId);
+		} finally {
+			db.close();
+		}
+	}
+}
+
+function pendingCount(h: ScenarioHarness, session: string): number {
+	const db = openTestDb(RUST_MODE ? moduleDbPath(h) : h.contextDbPath(), {
+		readonly: true,
+	});
+	try {
+		return (db.query(RUST_MODE
+			? "SELECT COUNT(*) AS n FROM pending_agent_drops WHERE session_id = ?"
+			: "SELECT COUNT(*) AS n FROM pending_ops WHERE session_id = ?",
+		).get(session) as { n: number }).n;
+	} finally {
+		db.close();
+	}
 }
 
 function expire(h: ScenarioHarness, session: string, acrossMidnight = false) {
@@ -167,6 +243,16 @@ function expire(h: ScenarioHarness, session: string, acrossMidnight = false) {
 		expect(result.changes).toBe(1);
 	} finally {
 		db.close();
+	}
+	if (RUST_MODE) {
+		const moduleDb = openTestDb(moduleDbPath(h));
+		try {
+			expect(moduleDb.query(
+				"UPDATE mc_cache_state SET meta = json_set(meta, '$.expiry_cutoff_ms', json_extract(meta, '$.expiry_cutoff_ms') - ?) WHERE session_id = ?",
+			).run(idleOffset, session).changes).toBe(1);
+		} finally {
+			moduleDb.close();
+		}
 	}
 	if (h.host === "opencode2") {
 		// Native v2 re-reads the last accepted reply's completion time before
@@ -213,8 +299,11 @@ export default async (ctx) => {
         "experimental.chat.system.transform": async (input, output) => {
             if (!input.sessionID || output.system.join("\\n").includes("You are a title generator")) return system(input, output);
             const stage = await Bun.file(${JSON.stringify(systemEpochPath)}).text();
-            const date = stage === "old" ? "Fri Oct 02 2026" : "Sat Oct 03 2026";
+            const date = stage === "old" || stage === "aborted" ? "Fri Oct 02 2026" : "Sat Oct 03 2026";
             for (let i = 0; i < output.system.length; i++) output.system[i] = output.system[i].replace(/Today's date: [^\\n]+/g, "Today's date: " + date);
+            // Seed the actual system identity on both paths before delaying the
+            // returning request's observer into the reporter's messages-first order.
+            if (stage === "old") return system(input, output);
             // Render guidance before the host copies its system text, but delay
             // the real session's hash observation until its messages pass. The
             // reporter's Desktop used that order; the CLI can observe it earlier.
@@ -227,15 +316,7 @@ export default async (ctx) => {
             const next = pending.get(sid);
             if (next) {
                 pending.delete(sid);
-                if (next.stage === "old") {
-                    // Model a previous instance's durable hash with no live sticky
-                    // date in this instance, as Desktop's first-pass reset did.
-                    const { Database } = await import("bun:sqlite");
-                    const { createHash } = await import("node:crypto");
-                    const hash = createHash("md5").update(next.output.system.join("\\n")).digest("hex");
-                    const db = new Database(process.env.MAGIC_CONTEXT_STORAGE_DIR + "/context.db");
-                    try { db.query("UPDATE session_meta SET system_prompt_hash = ?, cached_m0_system_hash = ? WHERE session_id = ? AND harness = 'opencode'").run(hash, hash, sid); } finally { db.close(); }
-                } else if (next.stage !== "aborted") {
+                if (next.stage !== "aborted") {
                     await system(next.input, next.output);
                 }
             }
@@ -258,7 +339,7 @@ export default async (ctx) => {
 					}
 				: {}),
 			magicContextConfig: {
-				cache_ttl: { default: "1h" },
+				cache_ttl: { default: abortAndChange ? "15s" : "1h" },
 				execute_threshold_percentage: long ? 65 : 90,
 				protected_tokens: 4_000,
 				historian: { disable: true },
@@ -342,31 +423,20 @@ export default async (ctx) => {
 			);
 		inventories.push(assertContained(h));
 		if (queued) {
-			const db = openTestDb(h.contextDbPath());
-			try {
-				db.prepare(
-					"INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, 1, 'drop', ?, ?)",
-				).run(session, Date.now(), h.harnessId);
-			} finally {
-				db.close();
-			}
+			await queueDrop(h, session, 1);
 			await turn("warm with queued drop");
-			expect(
-				(
-					h
-						.contextDb()
-						.prepare(
-							"SELECT COUNT(*) AS n FROM pending_ops WHERE session_id = ? AND harness = ?",
-						)
-						.get(session, h.harnessId) as { n: number }
-				).n,
-			).toBe(1);
+			expect(pendingCount(h, session)).toBe(1);
 		}
 		expire(h, session, abortAndChange);
 		if (restart) await h.restart();
 		inventories.push(assertContained(h));
 		let responseClockAfterAbort: unknown;
+		let preparedModuleMeta: unknown;
 		if (abortAndChange) {
+			// Also cross a real TTL window: the old module's process-local prepare
+			// clock cannot be aged by editing the host's durable completion clock.
+			await Bun.sleep(16_000);
+			writeFileSync(systemEpochPath, "aborted");
 			const abortedStart = Date.now();
 			const count = h.requests().length;
 			h.mock.enqueue({
@@ -406,6 +476,7 @@ export default async (ctx) => {
 					"SELECT last_response_time FROM session_meta WHERE session_id = ? AND harness = ?",
 				)
 				.get(session, h.harnessId);
+			if (RUST_MODE) preparedModuleMeta = moduleMeta(h, session);
 			const hostMessages = (await (
 				await fetch(`${h.serverUrl}/session/${session}/message`)
 			).json()) as { info: { id: string; role: string } }[];
@@ -419,14 +490,7 @@ export default async (ctx) => {
 			});
 			expect(reverted.ok).toBe(true);
 			writeFileSync(systemEpochPath, "new");
-			const db = openTestDb(h.contextDbPath());
-			try {
-				db.prepare(
-					"INSERT INTO pending_ops (session_id, tag_id, operation, queued_at, harness) VALUES (?, 2, 'drop', ?, ?)",
-				).run(session, Date.now(), h.harnessId);
-			} finally {
-				db.close();
-			}
+			await queueDrop(h, session, 2);
 		}
 		if (long) {
 			// Two real bash tool calls in the returning turn. New provider usage
@@ -480,6 +544,8 @@ export default async (ctx) => {
 			queued,
 			abortAndChange,
 			responseClockAfterAbort,
+			preparedModuleMeta,
+			finalModuleMeta: RUST_MODE ? moduleMeta(h, session) : undefined,
 			release: process.env.IDLE_TTL_RELEASE ?? "worktree",
 			mode: process.env.MC_E2E_MODE ?? "ts",
 			session,
@@ -564,16 +630,13 @@ export default async (ctx) => {
 			).toHaveLength(0);
 		}
 		if (queued || abortAndChange) {
-			expect(
-				(
-					h
-						.contextDb()
-						.prepare(
-							"SELECT COUNT(*) AS n FROM pending_ops WHERE session_id = ? AND harness = ?",
-						)
-						.get(session, h.harnessId) as { n: number }
-				).n,
-			).toBe(0);
+			expect(pendingCount(h, session)).toBe(0);
+		}
+		if (RUST_MODE && abortAndChange) {
+			const meta = moduleMeta(h, session);
+			expect(meta.expiry_cutoff_ms).toBe((preparedModuleMeta as typeof meta).expiry_cutoff_ms);
+			const hostMeta = h.contextDb().query("SELECT system_prompt_hash FROM session_meta WHERE session_id = ? AND harness = ?").get(session, h.harnessId) as { system_prompt_hash: string };
+			expect(meta.last_system_prompt_hash).toBe(hostMeta.system_prompt_hash);
 		}
 	} finally {
 		await h?.dispose();
@@ -671,10 +734,10 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 				);
 			expect(
 				passLog.filter((line) =>
-					/(?:scheduler:|transform: usage=).*decision=execute/.test(line),
+					(RUST_MODE ? /rust pass:.*scheduler=execute/ : /(?:scheduler:|transform: usage=).*decision=execute/).test(line),
 				),
 			).toHaveLength(1);
-			expect(passLog.some((line) => /decision=defer/.test(line))).toBe(true);
+			expect(passLog.some((line) => (RUST_MODE ? /scheduler=defer/ : /decision=defer/).test(line))).toBe(true);
 			const beforeAbort = clock();
 			const count = h.requests().length;
 			// Hold an active stream so the abort precedes any clean terminal reply.
@@ -855,7 +918,7 @@ forEachHost(import.meta.url, "idle TTL head replay", (host) => {
 					if (evidence) {
 						mkdirSync(evidence, { recursive: true });
 						writeFileSync(
-							join(evidence, `${expired ? "idle" : "warm"}-midnight.json`),
+							join(evidence, `${RUST_MODE ? "rust" : "ts"}-${expired ? "idle" : "warm"}-midnight.json`),
 							JSON.stringify(
 								{
 									before,

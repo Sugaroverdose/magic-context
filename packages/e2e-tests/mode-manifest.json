@@ -4,9 +4,9 @@
     "entries": [
         {
             "path": "tests/idle-ttl-restart.test.ts",
-            "tier": "ts-only",
-            "invocation": { "ts": true, "rust": false },
-            "rationale": "TypeScript idle clock and late OpenCode 1 system-hook regression, including abort/resend and opt-in 240k tool loops; Pi/OMP and native OpenCode 2 cover shared idle behavior (v2 lacks the v1 decision-row binding); Rust has a separate module identity/fold path and is not claimed by this regression",
+            "tier": "both-modes",
+            "invocation": { "ts": true, "rust": true },
+            "rationale": "Shared served-completion idle clock and OpenCode 1 late-system abort/resend byte replay, including Rust module frozen identity, consumed-fold watermark and idle attribution; Pi/OMP and native OpenCode 2 cover the TS portable idle behavior (v2 lacks the v1 decision-row binding)",
             "contract_refs": ["S2-MIGRATION"],
             "hosts": ["opencode", "pi", "omp", "opencode2"],
             "behavior": true

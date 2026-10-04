@@ -3275,6 +3275,7 @@ mod tests {
             session_id: "ses".to_string(),
             render_config: "cfg".to_string(),
             system_prompt_hash: String::new(),
+            adopted_system_prompt_hash: None,
             upgrade_state: String::new(),
             is_subagent: false,
             protected_tags: 20,
