@@ -78,6 +78,16 @@ const defaultResolver: SmartNoteResolver = {
     },
 };
 
+/** Refuse endpoints that cannot work under the smart-note no-credentials policy. */
+export function assertSmartNotePublicEndpoint(url: URL): void {
+    if (url.hostname === "api.github.com" && /^\/search\/code\/?$/.test(url.pathname)) {
+        throw new SmartNoteNetworkError(
+            `SMART_NOTE_NETWORK: GitHub code search requires authentication at ${url.href}; use a public repository contents or commits check instead`,
+            { terminal: true, persistent: true, uncheckable: true },
+        );
+    }
+}
+
 export async function validateSmartNoteHttpUrl(
     input: string,
     options: { signal?: AbortSignal; resolver?: SmartNoteResolver } = {},
@@ -95,6 +105,7 @@ export async function validateSmartNoteHttpUrl(
     if (url.username || url.password) {
         throw new SmartNoteSecurityError("credentials in URLs are not allowed");
     }
+    assertSmartNotePublicEndpoint(url);
     if (url.hash) {
         // Fragment never reaches the server. Drop it so Host/path auditing is
         // canonical and deterministic.
@@ -213,7 +224,7 @@ export async function guardedSmartNoteHttpGet(
                         if (container.status < 200 || container.status >= 300) {
                             throw new SmartNoteNetworkError(
                                 `SMART_NOTE_NETWORK: source container is not publicly readable at ${parent} (HTTP ${container.status}); cannot check ${input}`,
-                                { terminal: true, persistent: true },
+                                { terminal: true, persistent: true, uncheckable: true },
                             );
                         }
                     }
@@ -260,7 +271,7 @@ function assertReadableHttpStatus(status: number, url: string): void {
     if (status === 401 || status === 403 || status === 451) {
         throw new SmartNoteNetworkError(
             `SMART_NOTE_NETWORK: source is not publicly readable at ${url} (HTTP ${status})`,
-            { terminal: true, persistent: true },
+            { terminal: true, persistent: true, uncheckable: true },
         );
     }
     if (status === 408 || status === 429 || status >= 500) {

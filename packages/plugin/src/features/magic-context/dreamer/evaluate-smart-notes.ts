@@ -300,6 +300,7 @@ async function compileNote(
                         result.persistent,
                         args.parentSessionId,
                         result.retryAt,
+                        result.uncheckable,
                     );
                 },
             });
@@ -392,6 +393,8 @@ async function runLivenessCheck(
                     result.error,
                     true,
                     args.parentSessionId,
+                    result.retryAt,
+                    result.uncheckable,
                 );
             } else if (!result.ok && result.retryAt !== undefined) {
                 markCompiledCheckNetworkFailure(

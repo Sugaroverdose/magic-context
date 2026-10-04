@@ -24,6 +24,8 @@ export interface GlanceNote {
     content: string;
     createdAt: number;
     updatedAt: number;
+    checkStatus?: string | null;
+    readyReason?: string | null;
 }
 
 export interface NoteBodySource extends GlanceNote {
@@ -64,6 +66,9 @@ export function formatGlanceRow(note: GlanceNote, nowMs: number): string {
     const touchedAt = noteTouchedAt(note);
     const markers: string[] = [];
     if (note.status !== "active") markers.push(note.status);
+    if (note.type === "smart" && note.status === "pending" && note.checkStatus === "parked") {
+        markers.push(`parked: ${note.readyReason ?? "Condition can't be checked"}`);
+    }
     if (nowMs - touchedAt >= STALE_AFTER_MS) markers.push("stale");
     const suffix = markers.length > 0 ? ` · ${markers.join(" · ")}` : "";
     const title = clipNoteTitle(note.content, GLANCE_TITLE_MAX);
@@ -115,7 +120,11 @@ export function formatNoteBody(note: NoteBodySource, nowMs: number): string {
             ? (note.readyReason ?? note.surfaceCondition ?? "Condition satisfied")
             : (note.surfaceCondition ?? "No condition recorded");
     const label = note.status === "ready" ? "Condition met" : "Condition";
-    return `${head}\n  ${label}: ${condition}`;
+    const failure =
+        note.status === "pending" && note.readyReason?.startsWith("Condition can't be checked:")
+            ? `\n  ${note.readyReason}`
+            : "";
+    return `${head}\n  ${label}: ${condition}${failure}`;
 }
 
 /** Bodies-by-id view. Ids that are unknown or owned by someone else render the

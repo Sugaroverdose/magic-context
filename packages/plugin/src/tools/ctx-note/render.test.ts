@@ -140,6 +140,22 @@ describe("ctx_note glance rendering", () => {
         ).toBe("- **#4** · 0m · ready: Ship it\n  Condition met: tag v2 exists");
     });
 
+    it("shows the parked reason in both the glance and full body", () => {
+        const parked = {
+            ...note({ type: "smart", status: "pending", content: "Watch schema" }),
+            checkStatus: "parked",
+            readyReason: "Condition can't be checked: source is not publicly readable; rewrite it",
+            surfaceCondition: "schema appears",
+            anchorOrdinal: null,
+        };
+        expect(formatGlanceRow(parked, NOW)).toBe(
+            "#1 · 0m · Watch schema · pending · parked: Condition can't be checked: source is not publicly readable; rewrite it",
+        );
+        expect(formatNoteBody(parked, NOW)).toBe(
+            "- **#1** · 0m · pending: Watch schema\n  Condition: schema appears\n  Condition can't be checked: source is not publicly readable; rewrite it",
+        );
+    });
+
     it("appends the tray line to a write reply only when the tray is non-empty", () => {
         expect(formatWriteReply(1, { activeCount: 0, oldestTouchedAt: null }, NOW)).toBe(
             "Saved session note #1.",

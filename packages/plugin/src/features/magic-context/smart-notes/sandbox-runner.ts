@@ -178,6 +178,7 @@ export interface RunCompiledSmartNoteCheckFailure {
     error: string;
     network: boolean;
     persistent: boolean;
+    uncheckable?: boolean;
     retryAt?: number;
 }
 
@@ -265,6 +266,7 @@ async function runCompiledSmartNoteCheckLocked(
     let externallyCancelled = false;
     let executionTimedOut = false;
     let persistentNetworkFailure = false;
+    let uncheckableNetworkFailure = false;
     let missingResource = false;
     let httpFailure: SmartNoteNetworkError | undefined;
     let httpRetryAt: number | undefined;
@@ -300,8 +302,9 @@ async function runCompiledSmartNoteCheckLocked(
                         // QuickJS turns host exceptions into guest errors, losing
                         // the typed failure metadata before the outer catch.
                         if (error instanceof SmartNoteNetworkError) {
-                            if (!httpFailure?.persistent) httpFailure = error;
+                            if (!httpFailure?.persistent || error.uncheckable) httpFailure = error;
                             persistentNetworkFailure ||= error.persistent;
+                            uncheckableNetworkFailure ||= error.uncheckable;
                             if (error.retryAt !== undefined) {
                                 httpRetryAt = Math.max(httpRetryAt ?? 0, error.retryAt);
                             }
@@ -334,6 +337,7 @@ async function runCompiledSmartNoteCheckLocked(
             isSmartNoteNetworkError(httpFailure ?? error),
             persistentNetworkFailure,
             httpRetryAt,
+            uncheckableNetworkFailure,
         );
     } finally {
         clearTimeout(timer);
@@ -346,6 +350,7 @@ function failureResult(
     network: boolean,
     persistent = false,
     retryAt?: number,
+    uncheckable = false,
 ): RunCompiledSmartNoteCheckFailure {
     return {
         ok: false,
@@ -353,6 +358,7 @@ function failureResult(
         error: truncate(error),
         network,
         persistent,
+        ...(uncheckable ? { uncheckable: true } : {}),
         ...(retryAt === undefined ? {} : { retryAt }),
     };
 }

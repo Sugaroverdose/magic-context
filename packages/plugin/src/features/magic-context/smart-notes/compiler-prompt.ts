@@ -19,6 +19,7 @@ Authoring constraints:
 - Return exactly { met: boolean }. Do not include a reason string.
 - Use only literal paths and literal https URLs for readFile/httpGet so the manifest can be checked.
 - Manifest must declare every capability, host, URL, and file path used by the code.
+- HTTP checks run without credentials. Never use GitHub /search/code: code search requires authentication even for public repositories and is refused at compile time. Use public /repos/OWNER/REPO/contents/PATH or bounded /commits checks only when they answer the same question; do not weaken a condition into a different question. Inaccessible sources park the note until its owner updates surface_condition.
 - HTTP bodies are streamed and capped at 1 MiB across redirects and readability probes; exceeding the cap means the condition cannot be checked. For GitHub release-version checks prefer /repos/OWNER/REPO/releases/latest; never fetch an unbounded /releases list. If a list is necessary, specify a small per_page and explicit page bounds. Tags use /tags?per_page=100 with pagination; an incomplete list cannot prove absence.
 - Compare version components numerically, not lexicographically. Parse GitHub tag arrays by each object's name; never compare the response body or the tag object to a name.
 - Set exclusion: use allowed.indexOf(name) === -1. Example: allowed = ["v0.1.0", "v0.1.1"]; neither allowed name satisfies "a tag other than these exists". Never use name !== A || name !== B: that is always true when A and B differ. Preserve genuine OR clauses independently.
