@@ -279,7 +279,9 @@ describe.skipIf(!rustPrereqs.ok)("rust adapter performance", () => {
                 expect(receiveSample.replyPages).toBeGreaterThan(1);
                 expect(receiveSample.frames).toBe(receiveSample.replyPages);
                 expect(output.messages).toHaveLength(messages.length + 2);
-                expect(output.messages.slice(0, previousMessages.length).map(message => JSON.stringify(message))).toEqual(previousMessages);
+                expect(
+                    output.messages.slice(0, previousMessages.length).map((message) => JSON.stringify(message)),
+                ).toEqual(previousMessages);
                 expect(Number.isFinite(moduleTimings.handler_total)).toBe(true);
                 expect(line).toContain("wire_messages:2");
             }
@@ -289,7 +291,7 @@ describe.skipIf(!rustPrereqs.ok)("rust adapter performance", () => {
             if (!line?.includes("applied=true")) console.log(logs.join("\n"));
             expect(line).toContain("applied=true");
             if (pass > 0) expect(line).toContain("decision=SOFT+");
-            previousMessages = output.messages.map(message => JSON.stringify(message));
+            previousMessages = output.messages.map((message) => JSON.stringify(message));
             await Bun.sleep(20);
         }
         console.log(

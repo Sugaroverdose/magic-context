@@ -395,13 +395,16 @@ export default async (ctx) => {
 						(line) =>
 							line.includes(session) && Date.parse(line.slice(1, 25)) >= start,
 					);
-			// Logs flush asynchronously. Require the last request's completed
-			// pass, not an early scheduler line flushed ahead of materialization.
+			// Logs flush asynchronously. Require a completed transform, not an
+			// early scheduler line flushed ahead of materialization. Channel 2
+			// nudges can send an extra provider request without another messages
+			// transform, so network request count is not a transform-log count.
+			// Keep every captured request below for the byte replay assertions.
 			await harness.waitFor(
 				() =>
 					currentLines().filter((line) =>
 						/transform completed|rust pass:/.test(line),
-					).length >= requests.length,
+					).length > 0,
 				{ timeoutMs: 5_000, label: "complete idle pass logs" },
 			);
 			const result = {

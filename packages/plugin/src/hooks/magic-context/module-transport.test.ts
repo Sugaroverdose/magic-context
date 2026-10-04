@@ -392,6 +392,7 @@ describe("SubcModuleTransport", () => {
                         },
                     };
                 throw Object.assign(new Error("route handle is stale"), {
+                    name: "StaleRouteHandleError",
                     code: "stale_route_handle",
                 });
             },
@@ -418,6 +419,39 @@ describe("SubcModuleTransport", () => {
             { method: "transform", accept_reply_pages: true },
             { method: "reply.page", reply_page_id: id, reply_page_index: 1 },
         ]);
+        expect(connects).toBe(1);
+    });
+
+    it("does not treat a remote stale-route code as proof the transform was unsent", async () => {
+        const transport = new SubcModuleTransport("unused-connection-file", "magic-context", 100);
+        let requests = 0;
+        let connects = 0;
+        const client = {
+            routeOpen: async () => ({ channel: 7, epoch: 77 }),
+            request: async () => {
+                requests += 1;
+                throw new SubcError("module returned stale-route code", "stale_route_handle");
+            },
+            close: () => undefined,
+        } as unknown as SubcClient;
+        const internals = transport as unknown as {
+            client: SubcClient | null;
+            ensureConnected(): Promise<SubcClient>;
+        };
+        internals.ensureConnected = async () => {
+            connects += 1;
+            internals.client = client;
+            return client;
+        };
+        await expect(
+            transport.call({
+                sessionId: "remote-stale",
+                projectRoot: "/workspace/project",
+                method: "transform",
+                body: { method: "transform" },
+            }),
+        ).rejects.toMatchObject({ code: "transform_transport_interrupted" });
+        expect(requests).toBe(1);
         expect(connects).toBe(1);
     });
 

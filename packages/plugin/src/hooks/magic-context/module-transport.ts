@@ -708,10 +708,12 @@ export class SubcModuleTransport {
                         // frame. Rebind that unsent request after a module restart. This is not
                         // permission to resend a dispatched transform or a partial reply: their
                         // outcome can already be committed, even when a later page is stale.
-                        const locallyUnsent = errorChainSome(
-                            error,
-                            (current) => current.code === "stale_route_handle",
-                        );
+                        // Remote error frames can reuse the code, but decode as SubcError,
+                        // not this SDK-local exception. A remote refusal is not unsent proof.
+                        const locallyUnsent =
+                            isRecord(error) &&
+                            error.name === "StaleRouteHandleError" &&
+                            error.code === "stale_route_handle";
                         if (
                             attempt === 0 &&
                             ensuredRoute &&
