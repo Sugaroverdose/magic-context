@@ -605,6 +605,24 @@ function resolveSubagentExtensionEntry(
 
 const PI_READ_ONLY_BUILTINS = ["read", "grep", "find", "ls"] as const;
 const PI_AFT_READ_TOOLS = ["aft_outline", "aft_zoom", "aft_search"] as const;
+const PI_BUILTIN_TOOL_NAMES: Readonly<Record<string, true>> = {
+	read: true,
+	grep: true,
+	find: true,
+	ls: true,
+	bash: true,
+	edit: true,
+	write: true,
+};
+let configuredHostToolNames: (() => readonly string[] | undefined) | undefined;
+const loggedUnavailableBuiltinTools = new Set<string>();
+
+/** Read the host's live tool registry when building each child invocation. */
+export function configurePiSubagentHostTools(
+	getToolNames: (() => readonly string[] | undefined) | undefined,
+): void {
+	configuredHostToolNames = getToolNames;
+}
 
 /**
  * Set of subagent agent ids that get ctx_memory in the lean child extension.
@@ -706,7 +724,8 @@ const ZERO_TOOL_PROMPT_REQUIRED_AGENTS: ReadonlySet<string> = new Set(
 /**
  * OMP validates `--tools` against built-in names before extensions register.
  * Translate Pi-only built-ins, discard extension tool names that cannot be
- * addressed by this flag, and deduplicate aliases.
+ * addressed by this flag, and deduplicate aliases. When the host registry is
+ * available, keep only built-ins that are registered in the current session.
  *
  * This narrows OMP's built-in surface only. OMP does not set
  * `restrictToolNames`, so discovered AFT/MCP/ctx tools remain available.
@@ -728,17 +747,41 @@ const OMP_ALLOWLISTABLE_TOOLS: Readonly<Record<string, true>> = {
 function resolveHostToolAllowlist(
 	tools: readonly string[],
 	ompHost: boolean = isOmpHostProcess(),
+	hostToolNames?: readonly string[],
 ): readonly string[] {
-	if (!ompHost) return tools;
-	const resolved: string[] = [];
+	return resolveHostToolAllowlistDetails(tools, ompHost, hostToolNames).tools;
+}
+
+function resolveHostToolAllowlistDetails(
+	tools: readonly string[],
+	ompHost: boolean,
+	hostToolNames?: readonly string[],
+): { tools: readonly string[]; dropped: readonly string[] } {
+	const candidates: string[] = [];
 	const seen = new Set<string>();
 	for (const tool of tools) {
-		const mapped = OMP_TOOL_ALIASES[tool] ?? tool;
-		if (OMP_ALLOWLISTABLE_TOOLS[mapped] !== true || seen.has(mapped)) continue;
+		const mapped = ompHost ? OMP_TOOL_ALIASES[tool] ?? tool : tool;
+		if (ompHost && OMP_ALLOWLISTABLE_TOOLS[mapped] !== true) continue;
+		if (seen.has(mapped)) continue;
 		seen.add(mapped);
-		resolved.push(mapped);
+		candidates.push(mapped);
 	}
-	return resolved;
+	if (hostToolNames === undefined) return { tools: candidates, dropped: [] };
+
+	const registered = new Set(hostToolNames);
+	const available: string[] = [];
+	const dropped: string[] = [];
+	for (const tool of candidates) {
+		const isBuiltin = ompHost
+			? OMP_ALLOWLISTABLE_TOOLS[tool] === true
+			: PI_BUILTIN_TOOL_NAMES[tool] === true;
+		if (isBuiltin && !registered.has(tool)) {
+			dropped.push(tool);
+			continue;
+		}
+		available.push(tool);
+	}
+	return { tools: available, dropped };
 }
 
 const KNOWN_PI_SUBAGENT_AGENTS = [
@@ -882,6 +925,9 @@ export class PiSubagentRunner implements SubagentRunner {
 	private readonly extraArgs: readonly string[];
 	/** `undefined` means preserve Pi's normal extension discovery behavior. */
 	private readonly subagentExtensions: readonly string[] | undefined;
+	private readonly getHostToolNames:
+		| (() => readonly string[] | undefined)
+		| undefined;
 
 	constructor(
 		options: {
@@ -892,6 +938,8 @@ export class PiSubagentRunner implements SubagentRunner {
 			extraArgs?: readonly string[];
 			/** User-tier explicit extension allowlist; an empty list disables all discovered extensions. */
 			subagentExtensions?: readonly string[];
+			/** Test override for the built-in tools exposed by the current host session. */
+			getHostToolNames?: () => readonly string[] | undefined;
 			/** Test seam for subprocess lifecycle tests. Production uses child_process.spawn. */
 			spawnImpl?: typeof childProcess.spawn;
 		} = {},
@@ -912,6 +960,7 @@ export class PiSubagentRunner implements SubagentRunner {
 		this.extraArgs = options.extraArgs ?? [];
 		this.subagentExtensions =
 			options.subagentExtensions ?? configuredSubagentExtensions;
+		this.getHostToolNames = options.getHostToolNames;
 	}
 
 	async run(options: SubagentRunOptions): Promise<SubagentRunResult> {
@@ -1288,6 +1337,8 @@ export class PiSubagentRunner implements SubagentRunner {
 			targetHarness: this.invocation.targetHarness,
 			disableDiscoveredExtensions: runMode.disableDiscoveredExtensions,
 			subagentExtensions: this.subagentExtensions,
+			hostToolNames:
+				this.getHostToolNames?.() ?? configuredHostToolNames?.(),
 			omitPositionalMessage: deliverViaStdin || rpcBudget,
 			systemPromptPath,
 			modelRef: modelRefOverride,
@@ -2378,6 +2429,7 @@ export function buildArgs(
 		modelRef?: string;
 		rpc?: boolean;
 		historianCalibrationEntryPath?: string | null;
+		hostToolNames?: readonly string[];
 	},
 ): string[] {
 	const targetHarness = opts?.targetHarness ?? resolvePiHarnessKind();
@@ -2410,7 +2462,8 @@ export function buildArgs(
 		...(ompTarget
 			? (["--no-rules"] as const)
 			: (["--no-prompt-templates", "--no-context-files"] as const)),
-		// --no-tools is applied below only for unknown or explicitly zero-tool agents.
+		// --no-tools is applied below for unknown, explicitly zero-tool, or fully
+		// filtered allow-lists.
 		// Every known Magic Context child gets an explicit --tools allow-list so Pi's
 		// discovered extension registry cannot leak unrelated tools into subagents.
 	];
@@ -2488,7 +2541,27 @@ export function buildArgs(
 		);
 		args.push("--no-tools");
 	} else {
-		const hostTools = resolveHostToolAllowlist(strictTools, ompTarget);
+		const resolution = resolveHostToolAllowlistDetails(
+			strictTools,
+			ompTarget,
+			opts?.hostToolNames,
+		);
+		const hostTools = resolution.tools;
+		for (const tool of resolution.dropped) {
+			const warningKey = `${options.agent}\u0000${tool}`;
+			if (loggedUnavailableBuiltinTools.has(warningKey)) continue;
+			loggedUnavailableBuiltinTools.add(warningKey);
+			const degradation =
+				tool === "read"
+					? "This source-inspection task cannot read local files without read."
+					: hostTools.includes("read")
+						? `The agent can still read files with read, but its ${tool} search capability is unavailable.`
+						: "The agent has no remaining built-in file-reading capability for this task.";
+			sessionLog(
+				options.accountingSessionId ?? "pi-subagent",
+				`Pi subagent "${options.agent}" is dropping unavailable built-in "${tool}". ${degradation}`,
+			);
+		}
 		if (hostTools.length > 0) {
 			args.push("--tools", hostTools.join(","));
 		} else {
@@ -2759,4 +2832,8 @@ export const __test = {
 	STRICT_TOOL_ALLOWLIST,
 	ZERO_TOOL_PROMPT_REQUIRED_AGENTS,
 	resetProviderFormCache: () => PI_PROVIDER_FORM_CACHE.clear(),
+	resetHostToolState: () => {
+		configuredHostToolNames = undefined;
+		loggedUnavailableBuiltinTools.clear();
+	},
 };

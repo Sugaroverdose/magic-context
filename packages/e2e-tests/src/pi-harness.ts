@@ -39,8 +39,6 @@ export interface PiTestHarnessOptions {
   workdir?: string;
   /** Start Pi in its (throwaway) HOME directory instead of a project folder. */
   workdirIsHome?: boolean;
-  /** Caller-owned throwaway root, used when a test must audit host file access. */
-  rootDir?: string;
 }
 
 const DEFAULT_MOCK_RESPONSE: MockResponse = {
@@ -221,7 +219,7 @@ export class PiTestHarness implements PiHostHarness {
     await mock.start();
     mock.setDefault(options.mockDefault ?? DEFAULT_MOCK_RESPONSE);
     const host = options.host ?? "pi";
-    const env = createPiIsolatedEnv(options.sharedDataDir, host, options.rootDir);
+    const env = createPiIsolatedEnv(options.sharedDataDir, host);
     if (options.workdir) env.workdir = options.workdir;
     if (options.workdirIsHome) env.workdir = env.baseDir;
     // A released plugin build under MC_E2E_PI_PLUGIN_ROOT owns an older schema

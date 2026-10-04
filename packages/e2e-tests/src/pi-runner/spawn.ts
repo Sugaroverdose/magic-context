@@ -129,9 +129,8 @@ export type PiSpawnOptions = PiRunnerOptions;
 export function createPiIsolatedEnv(
   sharedDataDir?: string,
   host: PiRunnerHost = "pi",
-  rootDir?: string,
 ): PiIsolatedEnv {
-  const baseDirRaw = rootDir ?? createE2ETempDir(`${host}-e2e-`);
+  const baseDirRaw = createE2ETempDir(`${host}-e2e-`);
   mkdirSync(baseDirRaw, { recursive: true });
   const baseDir = realpathSync(baseDirRaw);
   const configDir = join(baseDir, "config");
