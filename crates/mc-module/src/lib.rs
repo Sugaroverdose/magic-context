@@ -14750,6 +14750,10 @@ fn native_ingress_chunks(
 static NATIVE_ATTACHMENT_DIFFERENTIAL: OnceLock<bool> = OnceLock::new();
 
 fn native_attachment_differential_enabled() -> bool {
+    #[cfg(test)]
+    if tests::per_pass_differentials_disabled() {
+        return false;
+    }
     cfg!(test)
         || *NATIVE_ATTACHMENT_DIFFERENTIAL.get_or_init(|| {
             std::env::var("MC_NATIVE_ATTACHMENT_DIFFERENTIAL").as_deref() == Ok("1")
@@ -18713,6 +18717,11 @@ mod tests {
     mod gate_a2;
     mod guidance_get_golden;
     mod per_pass_cost;
+    // Only the profiling harness can construct the scoped override. Differential
+    // predicates can read it without exposing a switch to other test suites.
+    pub(crate) fn per_pass_differentials_disabled() -> bool {
+        per_pass_cost::differentials_disabled()
+    }
     mod single_store_drill;
     mod tool_catalog;
     mod tool_catalog_conformance;

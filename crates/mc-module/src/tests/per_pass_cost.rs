@@ -7,7 +7,87 @@
 
 use super::*;
 use crate::per_pass_profile;
+use std::cell::Cell;
+use std::marker::PhantomData;
 use std::process::Command;
+use std::rc::Rc;
+
+thread_local! {
+    static DIFFERENTIALS_DISABLED: Cell<bool> = const { Cell::new(false) };
+}
+
+pub(super) fn differentials_disabled() -> bool {
+    DIFFERENTIALS_DISABLED.get()
+}
+
+// A thread-bound guard covers normalization, warmups and measured passes on the
+// harness's current-thread runtime. Other tests keep their full references, even
+// when they run concurrently, and unwinding restores the prior setting.
+struct DifferentialOverride {
+    previous: bool,
+    _thread_bound: PhantomData<Rc<()>>,
+}
+
+impl DifferentialOverride {
+    fn new(references: bool) -> Self {
+        Self {
+            previous: DIFFERENTIALS_DISABLED.replace(!references),
+            _thread_bound: PhantomData,
+        }
+    }
+}
+
+impl Drop for DifferentialOverride {
+    fn drop(&mut self) {
+        DIFFERENTIALS_DISABLED.set(self.previous);
+    }
+}
+
+fn references_enabled(value: Option<&str>) -> bool {
+    match value {
+        None | Some("on") => true,
+        Some("off") => false,
+        Some(other) => panic!("MC_PER_PASS_REFERENCES must be on or off, got {other:?}"),
+    }
+}
+
+#[test]
+fn per_pass_differential_override_is_scoped_and_thread_local() {
+    let predicates = || {
+        (
+            crate::transform::prefix_projection_differential_enabled(),
+            native_attachment_differential_enabled(),
+        )
+    };
+    assert_eq!(predicates(), (true, true));
+    {
+        let _off = DifferentialOverride::new(false);
+        assert_eq!(predicates(), (false, false));
+        // The test default remains on on a separate worker thread.
+        assert_eq!(std::thread::spawn(predicates).join().unwrap(), (true, true));
+        {
+            let _on = DifferentialOverride::new(true);
+            assert_eq!(predicates(), (true, true));
+        }
+        assert_eq!(predicates(), (false, false));
+    }
+    assert_eq!(predicates(), (true, true));
+    let unwind = std::panic::catch_unwind(|| {
+        let _off = DifferentialOverride::new(false);
+        assert_eq!(predicates(), (false, false));
+        panic!("exercise scope cleanup");
+    });
+    assert!(unwind.is_err());
+    assert_eq!(predicates(), (true, true));
+}
+
+#[test]
+fn per_pass_reference_mode_defaults_on_and_rejects_unknown_values() {
+    assert!(references_enabled(None));
+    assert!(references_enabled(Some("on")));
+    assert!(!references_enabled(Some("off")));
+    assert!(std::panic::catch_unwind(|| references_enabled(Some("0"))).is_err());
+}
 
 fn immutable(path: &Path) -> rusqlite::Connection {
     rusqlite::Connection::open_with_flags(
@@ -202,13 +282,21 @@ async fn copied_sessions_per_pass_cost() {
     if cfg!(debug_assertions) {
         panic!("use --release for meaningful timings");
     }
+    let references = references_enabled(std::env::var("MC_PER_PASS_REFERENCES").ok().as_deref());
+    let _differentials = DifferentialOverride::new(references);
+    println!("COST_CONFIG {}", json!({"references": references}));
     let temp = std::env::temp_dir().canonicalize().unwrap();
-    let root = temp.join("magic-context/ckmc-perf").canonicalize().unwrap();
+    let root = temp.join("magic-context/ckmc-perf").canonicalize().expect(
+        "copy-only profile needs existing scrubbed backups; never recreate from live stores",
+    );
     assert!(
         root.starts_with(&temp),
         "scratch root must stay in the temporary directory"
     );
-    let backups = root.join("backups").canonicalize().unwrap();
+    let backups = root
+        .join("backups")
+        .canonicalize()
+        .expect("scrubbed backups are missing; do not copy live stores for this profile");
     assert!(backups.starts_with(&root));
     for name in ["context.db", "store.db"] {
         let path = backups.join(name).canonicalize().unwrap();
@@ -322,6 +410,7 @@ async fn copied_sessions_per_pass_cost() {
             println!(
                 "COST_RUN {}",
                 json!({"session":session,"mode":mode,"samples":samples,
+                "references":references,
                 "load":String::from_utf8_lossy(&load.stdout).trim(),
                 "messages":messages.len(),"original_frozen_units":normalized.core.frozen_units.len()})
             );
@@ -352,6 +441,13 @@ async fn copied_sessions_per_pass_cost() {
                 per_pass_profile::begin_pass();
                 let mut response = call_transform_request_on_channel(&handler, 7, request).await;
                 let costs = per_pass_profile::end_pass();
+                if !references {
+                    assert!(
+                        !costs.contains_key("projection_differential")
+                            && !costs.contains_key("native_differential"),
+                        "production-equivalent profile must not include correctness references"
+                    );
+                }
                 assert_ne!(response["status"], "need_full_sync", "delta must execute");
                 assert_ne!(response["action"], "NEED_FULL_SYNC", "delta must execute");
                 if pass >= 3 {
@@ -391,6 +487,7 @@ async fn copied_sessions_per_pass_cost() {
                 println!(
                     "COST_SAMPLE {}",
                     json!({"session":session,"mode":mode,"pass":pass-3,
+                    "references":references,
                     "costs":costs,"timings":response["timings"],"wire_sha256":sha256_hex(&bytes)})
                 );
                 for (stage, cost) in costs {
@@ -411,7 +508,7 @@ async fn copied_sessions_per_pass_cost() {
                 .collect();
             println!(
                 "COST_SUMMARY {}",
-                json!({"session":session,"mode":mode,"stages":summary})
+                json!({"session":session,"mode":mode,"references":references,"stages":summary})
             );
         }
     }
