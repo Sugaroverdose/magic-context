@@ -1030,7 +1030,9 @@ mod tests {
     #[test]
     #[ignore = "release-only signature checkpoint prototype; no production cache"]
     fn signature_checkpoint_prototype_matches_full_hash() {
-        assert!(!cfg!(debug_assertions), "run the prototype with --release");
+        if cfg!(debug_assertions) {
+            panic!("run the prototype with --release");
+        }
         let parts: Vec<_> = (0_u64..23_000)
             .map(|i| {
                 (

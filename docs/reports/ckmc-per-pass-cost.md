@@ -2,6 +2,8 @@
 
 ## Measured results (2026-10-04)
 
+> **Correction.** These numbers include two full-reference self-checks that only run in test builds: the prefix projection differential and the native attachment differential. Both turn on under `cfg(test)`, including a release `cargo test`. They account for about 150 ms of the unattributed transform time and about 113 ms of native attach on the ALF delta pass. Without them, the estimate for ALF's ordinary pass is about 258 ms, and native attach is about 6 ms. See [ckmc-per-pass-cost-plan.md](ckmc-per-pass-cost-plan.md) for the per-step breakdown. Read the table below as test-harness cost, not production cost.
+
 The harness below ran on read-only copies of the live stores, with build `545d5f22`, release profile, 20 samples per mode, at load average 40–44. Values are the median per pass, given as thread CPU / wall ms. `warm_delta` is an ordinary acknowledged pass, `warm_full` is a full request with warm caches, and `evicted_full` is a full request after the projection and native caches are dropped.
 
 | Session (messages, frozen units) | warm_delta | warm_full | evicted_full |
