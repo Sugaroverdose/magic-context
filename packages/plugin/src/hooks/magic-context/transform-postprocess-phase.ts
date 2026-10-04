@@ -3193,7 +3193,9 @@ export async function runPostTransformPhase(
             appendReminderToUserMessageById(args.messages, anchoredMessageId, noteInstruction);
             noteNudgeAppendedThisPass = true;
         } else if (anchoredMessageId && !outcome.ok) {
-            failPass("note-nudge-cas-failure");
+            // No reminder was appended to the fresh user turn; the managed
+            // history is intact, so an optional delivery failure must not block.
+            args.passOutcome?.record("note-nudge-cas-failure");
             sessionLog(args.sessionId, `note-nudge delivery skipped wire append: ${outcome.kind}`);
         }
     }
@@ -3309,7 +3311,9 @@ export async function runPostTransformPhase(
                 args.passOutcome?.record(`auto-search-${autoSearchOutcome.kind}`);
             }
         } catch (error) {
-            failPass("auto-search-internal-failure", error);
+            // Missing optional text on the fresh tail is safe to serve. Keep
+            // replaying the remaining persisted request decisions below.
+            args.passOutcome?.record("auto-search-internal-failure");
             sessionLog(args.sessionId, "auto-search runner failed:", error);
         }
         autoSearchHintAppendedThisPass =

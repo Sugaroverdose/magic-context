@@ -318,8 +318,6 @@ describe("postprocess replay-or-refuse", () => {
         "m0-m1-fold-preexecution-degradation",
         "m0-m1-injection-degradation",
         "compaction-marker-drain-failure",
-        "note-nudge-cas-failure",
-        "auto-search-internal-failure",
         "reasoning-removal-persistence-failure",
         "reasoning-removal-committed-read-failure",
         "thinking-binding-recovery-persistence-failure",
@@ -450,26 +448,6 @@ describe("postprocess replay-or-refuse", () => {
                             reconcile: () => {},
                         };
                         break;
-                    case "note-nudge-cas-failure":
-                        spies.push(
-                            spyOn(noteNudger, "peekNoteNudgeText").mockReturnValue("saved note"),
-                        );
-                        spies.push(
-                            spyOn(noteNudger, "markNoteNudgeDelivered").mockImplementation(() => {
-                                reached++;
-                                return { ok: false, kind: "cas-exhausted" };
-                            }),
-                        );
-                        break;
-                    case "auto-search-internal-failure":
-                        args.projectPath = "/throwaway-project";
-                        args.autoSearch = { enabled: true, scoreThreshold: 0, minPromptChars: 1 };
-                        spies.push(
-                            spyOn(autoSearchRunner, "runAutoSearchHint").mockImplementation(
-                                async () => throwAtSite(),
-                            ),
-                        );
-                        break;
                     case "reasoning-removal-persistence-failure":
                     case "reasoning-removal-committed-read-failure":
                         args.resolvedProviderID = "openai";
@@ -579,6 +557,133 @@ describe("postprocess replay-or-refuse", () => {
                                 : site),
                     ),
                 ).toBe(true);
+            } finally {
+                for (const spy of spies.reverse()) spy.mockRestore();
+            }
+        });
+    }
+});
+
+describe("optional fresh-tail additions", () => {
+    for (const site of ["note-nudge-cas-failure", "auto-search-internal-failure"] as const) {
+        it(`serves an under-limit pass at ${site} without changing the historical prefix`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `ses-optional-${site}`;
+            const source = [
+                {
+                    info: { id: "old-user", role: "user" },
+                    parts: [{ type: "text", text: "old question" }],
+                },
+                {
+                    info: { id: "old-answer", role: "assistant" },
+                    parts: [
+                        {
+                            type: "thinking",
+                            thinking: "persisted reasoning to strip",
+                            signature: "old-signature",
+                        },
+                        { type: "text", text: "old answer" },
+                    ],
+                },
+                {
+                    info: { id: "fresh-user", role: "user" },
+                    parts: [{ type: "text", text: "new question" }],
+                },
+            ] as unknown as MessageLike[];
+            expect(
+                addMergedReasoningStrippedIds(db, sessionId, [
+                    replayStorage.thinkingBindingRecoveryFrozenId("old-answer"),
+                ]),
+            ).toBe(true);
+            const savedReminder =
+                '\n\n<instruction name="deferred_notes">saved reminder</instruction>';
+            const savedHint = "\n\n<ctx-search-hint>saved fragment</ctx-search-hint>";
+            expect(
+                replayStorage.deliverNoteNudgeAtomic(db, sessionId, "old-user", savedReminder).ok,
+            ).toBe(true);
+            expect(
+                replayStorage.appendAutoSearchHintDecision(db, sessionId, {
+                    messageId: "old-user",
+                    decision: "hint",
+                    text: savedHint,
+                }).ok,
+            ).toBe(true);
+            const argsFor = (messages: MessageLike[], passOutcome = createPassOutcome()) =>
+                basePostTransformArgs(db, sessionId, messages, {
+                    resolvedProviderID: "anthropic",
+                    currentTurnId: "fresh-user",
+                    passOutcome,
+                    ...(site === "auto-search-internal-failure"
+                        ? {
+                              projectPath: "/throwaway-project",
+                              autoSearch: { enabled: true, scoreThreshold: 0, minPromptChars: 1 },
+                          }
+                        : {}),
+                });
+            const spies: Array<{ mockRestore(): void }> = [];
+            let failed = false;
+            let reached = 0;
+            const addition =
+                site === "note-nudge-cas-failure"
+                    ? '\n\n<instruction name="deferred_notes">optional reminder</instruction>'
+                    : "\n\n<ctx-search-hint>optional fragment</ctx-search-hint>";
+            try {
+                if (site === "note-nudge-cas-failure") {
+                    spies.push(
+                        spyOn(noteNudger, "peekNoteNudgeText").mockReturnValue("optional reminder"),
+                    );
+                    spies.push(
+                        spyOn(noteNudger, "markNoteNudgeDelivered").mockImplementation(() => {
+                            reached++;
+                            return failed
+                                ? { ok: false, kind: "cas-exhausted" }
+                                : { ok: true, kind: "appended" };
+                        }),
+                    );
+                } else {
+                    spies.push(
+                        spyOn(autoSearchRunner, "runAutoSearchHint").mockImplementation(
+                            async ({ messages }) => {
+                                reached++;
+                                if (failed) throw new Error("optional fresh-tail search failed");
+                                const part = messages.at(-1)!.parts[0] as { text: string };
+                                part.text += addition;
+                                return { ok: true };
+                            },
+                        ),
+                    );
+                }
+                const healthy = cloneMessages(source);
+                const healthyOutcome = createPassOutcome();
+                await runPostTransformPhase(argsFor(healthy, healthyOutcome));
+                expect(healthyOutcome.degradations).toEqual([]);
+                expect((healthy[0].parts[0] as { text: string }).text).toBe(
+                    `old question${savedReminder}${savedHint}`,
+                );
+                expect((healthy.at(-1)!.parts[0] as { text: string }).text).toBe(
+                    `new question${addition}`,
+                );
+                expect(JSON.stringify(healthy)).not.toContain("persisted reasoning to strip");
+                // Compare served arrays, not the raw input: the reasoning replay
+                // after these optional lanes must still complete on a failed pass.
+                const healthyMinusAddition = cloneMessages(healthy);
+                (healthyMinusAddition.at(-1)!.parts[0] as { text: string }).text = "new question";
+                failed = true;
+                for (let pass = 0; pass < 2; pass++) {
+                    const messages = cloneMessages(source);
+                    const passOutcome = createPassOutcome();
+                    await runPostTransformPhase(argsFor(messages, passOutcome));
+                    expect(passOutcome.degradations).toEqual([{ site, kind: "degraded" }]);
+                    expect(JSON.stringify(messages.slice(0, -1))).toBe(
+                        JSON.stringify(healthy.slice(0, -1)),
+                    );
+                    expect(JSON.stringify(messages)).toBe(JSON.stringify(healthyMinusAddition));
+                    expect(JSON.stringify(messages).length).toBeLessThan(
+                        JSON.stringify(healthy).length,
+                    );
+                }
+                expect(reached).toBe(3);
             } finally {
                 for (const spy of spies.reverse()) spy.mockRestore();
             }

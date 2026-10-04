@@ -32,6 +32,7 @@ import { cleanupTestTempDir, createTestTempDir } from "../../shared/test-temp-di
 import * as autoSearchRunner from "./auto-search-runner";
 import { DegradedPassRefusalError } from "./degraded-pass-refusal";
 import * as injectCompartments from "./inject-compartments";
+import * as noteNudger from "./note-nudger";
 import { dropSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import { STORAGE_BUSY_MESSAGE } from "./storage-busy-refusal";
 import { createTransform } from "./transform";
@@ -646,6 +647,64 @@ describe("the served-request size guard", () => {
             search.mockRestore();
         }
     }, 30_000);
+
+    for (const site of ["auto-search-internal-failure", "note-nudge-cas-failure"] as const) {
+        it(`does not size-guard an optional fresh-tail ${site}`, async () => {
+            const sessionId = `ses-size-guard-optional-${site}`;
+            const { client, directory } = resolvedProject();
+            const transform = smallWindowTransform(sessionId, client, {
+                directory,
+                autoSearch: site === "auto-search-internal-failure",
+            });
+            // Establish the managed prefix before the oversized new turn so the
+            // second pass is an ordinary replay, not the first-render path.
+            await transform({}, { messages: history(sessionId).slice(0, 1) });
+            const peek =
+                site === "note-nudge-cas-failure"
+                    ? spyOn(noteNudger, "peekNoteNudgeText").mockReturnValue("optional reminder")
+                    : null;
+            const failure =
+                site === "note-nudge-cas-failure"
+                    ? spyOn(noteNudger, "markNoteNudgeDelivered").mockReturnValue({
+                          ok: false,
+                          kind: "cas-exhausted",
+                      })
+                    : spyOn(autoSearchRunner, "runAutoSearchHint").mockRejectedValue(
+                          new Error("optional fresh-tail search failed"),
+                      );
+            try {
+                const messages: Message[] = [
+                    ...history(sessionId).slice(0, 1),
+                    {
+                        info: {
+                            id: "a-short",
+                            time: { created: 2 },
+                            role: "assistant",
+                            sessionID: sessionId,
+                            finish: "stop",
+                        },
+                        parts: [{ type: "text", text: "ok" }],
+                    },
+                    {
+                        info: {
+                            id: "u-bulky",
+                            time: { created: 3 },
+                            role: "user",
+                            sessionID: sessionId,
+                        },
+                        parts: [{ type: "text", text: BULKY }],
+                    },
+                ];
+                await transform({}, { messages });
+                expect(failure).toHaveBeenCalledTimes(1);
+                expect(JSON.stringify(messages)).toContain("BULKY-TOOL-OUTPUT");
+                expect(JSON.stringify(messages)).not.toContain("optional reminder");
+            } finally {
+                failure.mockRestore();
+                peek?.mockRestore();
+            }
+        }, 30_000);
+    }
 
     it("leaves a healthy pass of the same size to the existing emergency machinery", async () => {
         const sessionId = "ses-size-guard-healthy";

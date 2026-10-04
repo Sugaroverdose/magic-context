@@ -55,10 +55,12 @@ describe("pass degradation sites", () => {
             .sort();
         expect(served).toEqual([
             "auto-search-cas-exhaustion",
+            "auto-search-internal-failure",
             "auto-search-search-failure",
             "auto-search-timeout",
             "compartment-trigger-failure",
             "invalid-cache-ttl-fallback",
+            "note-nudge-cas-failure",
             "session-directory-fallback",
         ]);
     });

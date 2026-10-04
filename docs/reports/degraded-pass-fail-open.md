@@ -172,7 +172,27 @@ identity instead of being relabeled by an outer catch. A failed write returning
 false/null is a failed stage too: not applying the unpersisted decision is
 still necessary, but is no longer sufficient permission to serve the pass.
 
-Every changed site and its reason:
+Each retained replay-or-refuse site was rechecked against the same criterion:
+does the failed pass change anything already served, or leave a request larger
+than a healthy pass? Optional additions to the newest, never-served user turn
+do not qualify. After that review, the two sites below remain record-only;
+**no other site was moved back**.
+
+| Record-only site | Why it stays served |
+|---|---|
+| `note-nudge-cas-failure` | Failed delivery appends no reminder to the new user turn. Historical bytes are unchanged and the request is smaller than the healthy request with the reminder. |
+| `auto-search-internal-failure` | A failed optional fresh-tail hint skips that addition. It does not authorize a history mutation or stop the remaining persisted-decision replay. |
+
+Both are classified `served` in `PASS_DEGRADATION_EFFECTS`, including for the
+size-guard backstop. A recurring optional search/nudge bug must not refuse an
+otherwise valid transform. The previous claim that these two failures should
+refuse was too broad and is superseded by this review: `runPostTransformPhase`
+already replays both `replaySnapshot.noteNudgeAnchors` and
+`replaySnapshot.autoSearchHintDecisions` in its sticky-injection block **before**
+either optional append lane. The runner's later duplicate replay is not the
+only path preserving an already-served hint.
+
+Retained sites and the specific history/size reason:
 
 | Site | Why replay or refuse, even below the limit |
 |---|---|
@@ -182,18 +202,16 @@ Every changed site and its reason:
 | `image-strip-exception` | Persisted image strips can stop midway on a defer pass. |
 | `m0-m1-injection-degradation` | A legacy history fallback is not the persisted m[0]/m[1] representation. Clear the injection cache before stopping, so a retry cannot cut against an unserved prefix. |
 | `compaction-marker-drain-failure` | A retryable marker-write failure cannot publish a pass whose trim and host marker disagree. Keep the pending marker and refresh signals by stopping before their drains. |
-| `note-nudge-cas-failure` | Delivery and appended bytes must agree; a failed delivery commit is not a successful preparation. |
-| `auto-search-internal-failure` | Unlike the normal timeout/search/CAS outcomes, an exception may occur before a previously served hint is replayed. |
-| `reasoning-removal-persistence-failure` | A failed write can leave a pass with only part of the intended reasoning-removal set. Both thrown writes and false outcomes stop. |
+| `reasoning-removal-persistence-failure` | Leaving reasoning that a healthy pass removes makes the request larger and may affect historical assistants, not just the fresh user turn. Both thrown writes and false outcomes stop. |
 | `reasoning-removal-read-failure` (committed-set re-read) | After committing new removals, a failed re-read cannot safely omit a concurrent winner's ids. The initial unreadable-set lane was already a refusal and remains one. |
-| `thinking-binding-recovery-persistence-failure` | A recovery request must not send signed blocks it could not safely freeze and remove. |
-| `merged-reasoning-strip-persistence-failure` | A speculative new strip cannot be published when its frozen set did not commit. |
+| `thinking-binding-recovery-persistence-failure` | Keeping signed blocks that a healthy recovery removes makes the request larger and changes historical assistant bytes. |
+| `merged-reasoning-strip-persistence-failure` | Keeping newly selected historical reasoning makes the request larger than a healthy strip; this is a removal, not omission of a new user-turn addition. |
 | `merged-reasoning-strip-exception` | An exception in freezing/reading the set can leave replay incomplete. |
-| `trailing-blank-heal-persistence-failure` | Failed demotion cannot safely complete the intended shape repair. |
+| `trailing-blank-heal-persistence-failure` | Retaining a historical keep/count decision adds blank blocks a healthy demotion removes. |
 | `trailing-blank-heal-exception` | A heal can commit only part of a set before a subsequent operation throws. |
-| `trailing-blank-decision-persistence-failure` | A failed newest-shape or historical-shape commit is not permission to publish the partially prepared pass. |
-| `trailing-blank-decision-exception` | Freezing or re-reading shape decisions may stop before the committed choices were all adopted. |
-| `proactive-thinking-strip-persistence-failure` | A prefix-editing pass must not serve thinking whose binding it could not durably remove. |
+| `trailing-blank-decision-persistence-failure` | This lane can replace historical keep/count choices and demote a newest assistant from keep to strip. Failure can retain more blank blocks than the healthy pass; it is not restricted to omission of a new hint. |
+| `trailing-blank-decision-exception` | Freezing or re-reading shape decisions may stop before all committed choices were adopted, leaving a historical shape different or larger. |
+| `proactive-thinking-strip-persistence-failure` | A prefix-editing pass that keeps thinking a healthy pass removes is larger and leaves historical signed blocks bound to the wrong prefix. |
 
 Sites deliberately left:
 
@@ -217,10 +235,20 @@ Sites deliberately left:
 
 ### Tests and non-vacuity
 
-The under-limit postprocess table has 18 cases: each changed site above, with a
+The under-limit refusal table now has 16 cases: each retained site above, with a
 distinct committed-re-read case. Each injects an exception or false/null
 persistence result at a real stage seam, asserts that the seam ran, and asserts
 the refusal's site. Degradation recording is also checked.
+
+Two separate served cases compare a healthy request with its fresh-tail
+addition against two recurring failed passes. Each asserts no refusal, an
+identical historical prefix including a saved hint and reminder, completion of
+a persisted reasoning strip after the optional lane, and a request exactly equal to the healthy request minus
+the new hint/reminder. Both tests failed against the initial refusal code.
+The effect-classification test likewise failed until these sites were `served`.
+Full-transform cases also prove these optional failures do not trigger the
+degradation size guard when a new user turn is itself over the limit; normal
+overflow/emergency policy still owns that size, just as on a healthy pass.
 
 The seeded full-transform tests additionally verify byte-identical LKG replay
 and no-LKG refusal for stale-reduce and image exceptions, and add the missing
@@ -240,11 +268,17 @@ diff, apply a `NON-VACUITY BREAK`, capture a non-empty diff, run the named tests
 under `timeout`, restore from the index, touch the source, and capture an empty
 diff again. Selectively bypassing each postprocess refusal made exactly its
 named table case red; the mixed healthy pure-replay case stayed green on all
-18 runs. Rebase, mode-transition, wrapper, OpenCode 2, and Pi bypasses each
+18 initial runs. The 16 retained refusal proofs remain valid; the two optional
+addition refusal proofs are withdrawn because that refusal contract was
+incorrect. Rebase, mode-transition, wrapper, OpenCode 2, and Pi bypasses each
 made exactly their corresponding refusal case red, with the healthy/off-mode
 control green. Removing nested-refusal preservation made the merged-reasoning
 persistence case red on its site assertion, while healthy replay stayed green.
 Restoring the task-base production files also made the image refusal case red.
+The correction has four new mutation controls: reinstating each optional
+refusal makes only its served-prefix case red, and reclassifying each optional
+failure as `changes-request` makes only its full-transform size-guard case red.
+The healthy mixed pure-replay control remains green on all four runs.
 No mutation remains in the committed implementation.
 
 ### Pure replay: original versus fixed
@@ -269,8 +303,10 @@ byte changes on any non-failing pass: neither ordinary/defer passes nor existing
 successful rebuilding passes get new mutation or scheduling permissions. The
 existing first render, explicit flush, independently authorized fold/refresh,
 emergency work and new tail bytes remain owned by their existing rules. Only a
-**failing** managed pass changes disposition: validated LKG plus its admitted
-tail, or no provider request. Compaction-off failure passthrough is unchanged.
+**failing** managed pass changes disposition at a history/size-affecting stage:
+validated LKG plus its admitted tail, or no provider request. Optional
+fresh-tail search/nudge failures continue serving without that addition.
+Compaction-off failure passthrough is unchanged.
 
 ### Real host: two residual sites
 
