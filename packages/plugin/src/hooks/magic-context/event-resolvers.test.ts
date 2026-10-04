@@ -275,6 +275,55 @@ describe("event-resolvers", () => {
                 closeQuietly(db);
             }
         });
+
+        it("bounds a stored prompt-only limit by the declared input cap", async () => {
+            const db = new Database(":memory:");
+            initializeDatabase(db);
+            runMigrations(db);
+            const sessionId = "ses-prompt-only-over-input-cap";
+            try {
+                clearModelsDevCache();
+                await refreshModelLimitsFromApi({
+                    config: {
+                        providers: async () => ({
+                            data: {
+                                providers: [
+                                    {
+                                        id: "anthropic",
+                                        models: {
+                                            "capped-model": {
+                                                limit: {
+                                                    context: 400_000,
+                                                    input: 272_000,
+                                                    output: 128_000,
+                                                },
+                                            },
+                                        },
+                                    },
+                                ],
+                            },
+                        }),
+                    },
+                });
+                recordDetectedContextLimit(
+                    db,
+                    sessionId,
+                    1_000_000,
+                    "anthropic/capped-model",
+                    "prompt_only",
+                );
+
+                expect(
+                    resolveContextLimit("anthropic", "capped-model", {
+                        db,
+                        sessionID: sessionId,
+                    }),
+                ).toBe(272_000);
+            } finally {
+                clearModelsDevCache();
+                closeQuietly(db);
+            }
+        });
     });
 
     describe("resolveTrustedContextLimit", () => {
