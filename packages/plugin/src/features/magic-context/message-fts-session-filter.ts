@@ -69,33 +69,35 @@ export function withMessageFtsSessionFilter<T>(
         coverageCaches.delete(db);
     }
 
-    return db.transaction(() => {
-        let sessionFirst = false;
-        try {
-            const cache = getCoverageCache(db);
-            cache.pin.get();
-            const stamp = cache.stamp.get() as { version: number; changes: number };
-            let incomplete = cache.incompleteSessions;
-            if (
-                !cacheable ||
-                !incomplete ||
-                cache.version !== stamp.version ||
-                cache.changes !== stamp.changes
-            ) {
-                const rows = cache.missing.all() as Array<{ sessionId: string }>;
-                incomplete = new Set(rows.map((row) => row.sessionId));
-                if (cacheable) {
-                    cache.version = stamp.version;
-                    cache.changes = stamp.changes;
-                    cache.incompleteSessions = incomplete;
+    return db
+        .transaction(() => {
+            let sessionFirst = false;
+            try {
+                const cache = getCoverageCache(db);
+                cache.pin.get();
+                const stamp = cache.stamp.get() as { version: number; changes: number };
+                let incomplete = cache.incompleteSessions;
+                if (
+                    !cacheable ||
+                    !incomplete ||
+                    cache.version !== stamp.version ||
+                    cache.changes !== stamp.changes
+                ) {
+                    const rows = cache.missing.all() as Array<{ sessionId: string }>;
+                    incomplete = new Set(rows.map((row) => row.sessionId));
+                    if (cacheable) {
+                        cache.version = stamp.version;
+                        cache.changes = stamp.changes;
+                        cache.incompleteSessions = incomplete;
+                    }
                 }
+                sessionFirst = !incomplete.has(sessionId);
+            } catch {
+                // Older/nonstandard FTS tables may omit docsize. Without a physical
+                // coverage proof, the global query remains the completeness authority.
+                coverageCaches.delete(db);
             }
-            sessionFirst = !incomplete.has(sessionId);
-        } catch {
-            // Older/nonstandard FTS tables may omit docsize. Without a physical
-            // coverage proof, the global query remains the completeness authority.
-            coverageCaches.delete(db);
-        }
-        return read(sessionFirst);
-    }).deferred();
+            return read(sessionFirst);
+        })
+        .deferred();
 }
