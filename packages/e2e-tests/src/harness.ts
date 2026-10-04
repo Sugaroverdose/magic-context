@@ -24,6 +24,8 @@ import { MockProvider, type MockResponse } from "./mock-provider/server";
 import { spawnOpencode, type SpawnedOpencode, type SpawnOptions } from "./opencode-runner/spawn";
 
 export interface TestHarnessOptions {
+    /** Use a canonical provider id when testing provider-specific replay lanes. */
+    mockProviderID?: string;
     /** magic-context config overrides. Merged onto test defaults. */
     magicContextConfig?: Record<string, unknown>;
     /** Extra opencode.json config. Merged onto test defaults. */
@@ -145,6 +147,7 @@ export class TestHarness implements HostHarness {
         const expectMagicContext = expectedMagicContextState === "enabled";
         const spawnOpts: SpawnOptions = {
             mockProviderURL: baseURL,
+            mockProviderID: options.mockProviderID,
             magicContextConfig: options.magicContextConfig,
             openCodeConfigExtra: options.openCodeConfigExtra,
             openCodeGlobalConfigExtra: options.openCodeGlobalConfigExtra,
@@ -379,7 +382,7 @@ export class TestHarness implements HostHarness {
             path: { id: sessionId },
             body: {
                 model: {
-                    providerID: options.providerID ?? "mock-anthropic",
+                    providerID: options.providerID ?? this.spawnOptions.mockProviderID ?? "mock-anthropic",
                     modelID: options.modelID ?? "mock-sonnet",
                 },
                 parts: [{ type: "text", text }],

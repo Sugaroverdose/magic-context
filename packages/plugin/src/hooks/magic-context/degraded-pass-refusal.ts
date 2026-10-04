@@ -44,6 +44,8 @@ export class DegradedPassRefusalError extends Error {
  * except for the message shown to the user.
  */
 export function degradedPassError(site: string, error: unknown): Error {
+    // Nested replay stages must keep the first failed stage's refusal intact.
+    if (error instanceof DegradedPassRefusalError) return error;
     if (isTransientSqliteError(error) && error instanceof Error) return error;
     return new DegradedPassRefusalError(site, { cause: error });
 }

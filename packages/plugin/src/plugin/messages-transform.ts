@@ -21,7 +21,6 @@ import {
     noteExternalLkgReplay,
     type RustLkgReplayParticipant,
     resolveRustLkgReplayParticipant,
-    rustAdapterHasRunSession,
 } from "../hooks/magic-context/rust-lkg-freeze-registry";
 import { StorageBusyRefusalError } from "../hooks/magic-context/storage-busy-refusal";
 import type { MessageLike } from "../hooks/magic-context/transform-operations";
@@ -216,8 +215,8 @@ function preserveUserTerminatedTail(
 }
 
 /**
- * Top-level transform wrapper. Ordinary bugs remain fail-open, but unsafe
- * storage failures deliberately refuse the turn after trying LKG. See issue #23:
+ * Top-level transform wrapper. Every failed managed pass replays LKG or
+ * refuses the turn. See issue #23:
  * https://github.com/cortexkit/magic-context/issues/23
  *
  * Error handling is tiered:
@@ -243,15 +242,9 @@ function preserveUserTerminatedTail(
  *        for errors that reach it, and an error thrown early enough bypasses
  *        it entirely. Writing it here at the outer boundary guarantees
  *        observability.
- *     3. Return with messages unmodified for this pass.
- *
- * Ordinary transform failures are not rethrown because OpenCode's Effect pipeline
- * turns thrown errors into user-visible prompt failures. FailClosedBlockingError,
- * EmergencyFailClosedError, RawFallbackContextLimitError, and AssistantTerminalRetryError
- * are intentional exceptions.
- * We accept degraded behavior (no injection / no drops this turn) rather than
- * blocking the user for ordinary bugs — but deterministic inoperability and an unsafe
- * assistant-terminal retry must block loudly.
+ *     3. Refuse if LKG could not replay. A small raw request is still unsafe:
+ *        it omits persisted decisions and changes the provider's cached prefix.
+ *        Only compaction-off mode passes the input through on failure.
  *
  * The transform is not assumed idempotent: only transaction acquisition retries.
  */
@@ -274,8 +267,6 @@ export function createMessagesTransformHandler(args: {
      * error it raises is converted to passthrough here.
      */
     compactionOff?: boolean;
-    /** Let the v2 hook decide whether an ordinary error needs post-fold refusal or passthrough. */
-    propagateUnexpectedErrors?: boolean;
     onStorageBusyRefusal?: (sessionId: string, message: string) => Promise<void>;
     /** Validate and restore host-owned prompt segments before adopting replayed messages. */
     onLkgReplay?: () => void;
@@ -533,24 +524,6 @@ export function createMessagesTransformHandler(args: {
             const message = error instanceof Error ? error.message : String(error);
             const isTransient =
                 isTransientSqliteError(error) || error instanceof StorageBusyRefusalError;
-            if (
-                !args.compactionOff &&
-                !isTransient &&
-                sessionId &&
-                (args.rustReplayParticipant
-                    ? resolveRust(sessionId) !== undefined
-                    : rustAdapterHasRunSession(sessionId))
-            ) {
-                // A Rust-mode session whose pass failed and whose last-known-good replay
-                // could not serve. Passing the input through unchanged would send the
-                // raw history, which can be far larger than the window and, while the
-                // adapter is frozen, rewrites bytes the provider holds. Refuse instead.
-                // TypeScript-mode sessions keep their fail-open handling below.
-                throw new DegradedPassRefusalError("rust-mode-transform-failed", {
-                    cause: error,
-                });
-            }
-
             if (isTransient) {
                 if (!args.compactionOff) {
                     const refusal =
@@ -573,13 +546,11 @@ export function createMessagesTransformHandler(args: {
                 return output.messages;
             }
 
-            if (args.propagateUnexpectedErrors) throw error;
-
             // Persistent non-transient errors are the real risk: silent forever
             // disable unless we surface them. Persist to session_meta so the
             // sidebar shows an obvious failure indicator.
             log(
-                `[magic-context] transform FAILED code=${code ?? "none"} name=${name ?? "none"}: ${message}. Continuing with unmodified messages for this pass.`,
+                `[magic-context] transform FAILED code=${code ?? "none"} name=${name ?? "none"}: ${message}. ${args.compactionOff ? "Compaction-off: passing through input." : "No last-good replay; refusing the turn."}`,
                 error,
             );
 
@@ -612,6 +583,9 @@ export function createMessagesTransformHandler(args: {
                     // can't recover. Next pass may succeed.
                     log("[magic-context] failed to persist transform error:", persistError);
                 }
+            }
+            if (!args.compactionOff) {
+                throw new DegradedPassRefusalError("messages-transform-failed", { cause: error });
             }
         }
         restoreCompactionOffInput();

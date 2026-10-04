@@ -49,6 +49,8 @@ import {
     setPersistedTodoSyntheticAnchor,
 } from "../../features/magic-context/storage-meta-persisted";
 import { getRemovedReasoningIds } from "../../features/magic-context/storage-reasoning-removal";
+import * as reasoningStorage from "../../features/magic-context/storage-reasoning-removal";
+import * as replayStorage from "../../features/magic-context/storage-meta-persisted";
 import * as storageTags from "../../features/magic-context/storage-tags";
 import {
     markWhitespaceAssistantTagInert,
@@ -62,6 +64,11 @@ import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { registerActiveCompartmentRun } from "./compartment-runner";
 import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
+import * as autoSearchRunner from "./auto-search-runner";
+import * as staleReduce from "./drop-stale-reduce-calls";
+import * as noteNudger from "./note-nudger";
+import * as operations from "./transform-operations";
+import { createPassOutcome } from "./pass-outcome";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
 import * as compartmentInjection from "./inject-compartments";
 import {
@@ -302,6 +309,387 @@ function basePostTransformArgs(
 function cloneMessages(messages: MessageLike[]): MessageLike[] {
     return structuredClone(messages);
 }
+
+describe("postprocess replay-or-refuse", () => {
+    const sites = [
+        "pending-operation-failure",
+        "stale-reduce-strip-exception",
+        "image-strip-exception",
+        "m0-m1-fold-preexecution-degradation",
+        "m0-m1-injection-degradation",
+        "compaction-marker-drain-failure",
+        "reasoning-removal-persistence-failure",
+        "reasoning-removal-committed-read-failure",
+        "thinking-binding-recovery-persistence-failure",
+        "merged-reasoning-strip-persistence-failure",
+        "merged-reasoning-strip-exception",
+        "trailing-blank-heal-persistence-failure",
+        "trailing-blank-heal-exception",
+        "trailing-blank-decision-persistence-failure",
+        "trailing-blank-decision-exception",
+        "proactive-thinking-strip-persistence-failure",
+    ] as const;
+
+    for (const site of sites) {
+        it(`refuses an under-limit pass at ${site}`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `ses-refuse-${site}`;
+            const messages = [
+                { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "question" }] },
+                ...["a1", "a2", "a3"].map((id) => ({
+                    info: { id, role: "assistant" },
+                    parts: [
+                        { type: "thinking", thinking: `signed ${id}`, signature: `sig-${id}` },
+                        { type: "text", text: `answer ${id}` },
+                    ],
+                })),
+                { info: { id: "u2", role: "user" }, parts: [{ type: "text", text: "next" }] },
+            ] as unknown as MessageLike[];
+            const passOutcome = createPassOutcome();
+            const args = basePostTransformArgs(db, sessionId, messages, {
+                resolvedProviderID: "anthropic",
+                passOutcome,
+            });
+            const error = new Error(`injected ${site}`);
+            const fail = () => {
+                throw error;
+            };
+            const spies: Array<{ mockRestore(): void }> = [];
+            let reached = 0;
+            const throwAtSite = () => {
+                reached++;
+                return fail();
+            };
+            const falseAtSite = () => {
+                reached++;
+                return false;
+            };
+            try {
+                switch (site) {
+                    case "pending-operation-failure":
+                        args.batch = {
+                            finalize: () => {
+                                // Model a stage that edits some bytes before failing.
+                                messages[1].parts.splice(0, 1);
+                                throwAtSite();
+                            },
+                        };
+                        break;
+                    case "stale-reduce-strip-exception":
+                        spies.push(
+                            spyOn(staleReduce, "dropStaleReduceCalls").mockImplementation(
+                                throwAtSite,
+                            ),
+                        );
+                        break;
+                    case "image-strip-exception":
+                        spies.push(
+                            spyOn(operations, "stripProcessedImages").mockImplementation(
+                                throwAtSite,
+                            ),
+                        );
+                        break;
+                    case "m0-m1-fold-preexecution-degradation":
+                    case "m0-m1-injection-degradation":
+                        args.m0M1 = {
+                            projectDirectory: "/throwaway-project",
+                            injectDocs: false,
+                            memoryEnabled: false,
+                            historyBudgetTokens: 1000,
+                        };
+                        if (site === "m0-m1-injection-degradation") {
+                            args.pendingCompartmentInjection = {
+                                compartmentEndMessage: 1,
+                                compartmentEndMessageId: "u1",
+                                compartmentCount: 1,
+                                renderedText: "history",
+                                skippedVisibleMessages: 0,
+                            } as PostTransformArgs["pendingCompartmentInjection"];
+                            const legacy = spyOn(
+                                compartmentInjection,
+                                "renderCompartmentInjection",
+                            );
+                            spies.push(legacy);
+                        }
+                        spies.push(
+                            spyOn(compartmentInjection, "mustMaterialize").mockReturnValue({
+                                value: site === "m0-m1-fold-preexecution-degradation",
+                                reason: null,
+                            }),
+                        );
+                        spies.push(
+                            spyOn(compartmentInjection, "injectM0M1").mockImplementation(
+                                throwAtSite,
+                            ),
+                        );
+                        break;
+                    case "compaction-marker-drain-failure":
+                        setPendingCompactionMarkerState(db, sessionId, {
+                            ordinal: 1,
+                            endMessageId: "u1",
+                            publishedAt: 1,
+                        });
+                        args.historyRebuiltThisPass = true;
+                        args.canConsumeDeferredLate = true;
+                        args.deferredHistoryWasPendingAtPassStart = true;
+                        args.pendingCompartmentInjection = {
+                            compartmentEndMessage: 1,
+                            compartmentEndMessageId: "u1",
+                            compartmentCount: 1,
+                            renderedText: "history",
+                            skippedVisibleMessages: 0,
+                        } as PostTransformArgs["pendingCompartmentInjection"];
+                        args.compactionMarkerStrategy = {
+                            applyDeferred: () => {
+                                reached++;
+                                return { kind: "retryable-failure", error };
+                            },
+                            reconcile: () => {},
+                        };
+                        break;
+                    case "reasoning-removal-persistence-failure":
+                    case "reasoning-removal-committed-read-failure":
+                        args.resolvedProviderID = "openai";
+                        args.pendingMaterializationSessions.add(sessionId);
+                        args.clearReasoningAge = 0;
+                        messages.forEach((message, index) => {
+                            args.messageTagNumbers.set(message, index + 1);
+                        });
+                        if (site === "reasoning-removal-persistence-failure")
+                            spies.push(
+                                spyOn(
+                                    reasoningStorage,
+                                    "addRemovedReasoningIds",
+                                ).mockImplementation(falseAtSite),
+                            );
+                        else {
+                            const read = reasoningStorage.getReasoningRemovalState;
+                            spies.push(
+                                spyOn(reasoningStorage, "getReasoningRemovalState")
+                                    .mockImplementationOnce(read)
+                                    .mockImplementationOnce(throwAtSite),
+                            );
+                        }
+                        break;
+                    case "thinking-binding-recovery-persistence-failure":
+                        armThinkingBindingRecovery(db, sessionId);
+                        args.thinkingBindingRecoveryEnabledForModel = true;
+                        spies.push(
+                            spyOn(
+                                replayStorage,
+                                "addMergedReasoningStrippedIds",
+                            ).mockImplementation(falseAtSite),
+                        );
+                        break;
+                    case "merged-reasoning-strip-persistence-failure":
+                    case "merged-reasoning-strip-exception":
+                        args.pendingMaterializationSessions.add(sessionId);
+                        spies.push(
+                            spyOn(
+                                replayStorage,
+                                "addMergedReasoningStrippedIds",
+                            ).mockImplementation(
+                                site.endsWith("exception") ? throwAtSite : falseAtSite,
+                            ),
+                        );
+                        break;
+                    case "trailing-blank-heal-persistence-failure":
+                    case "trailing-blank-heal-exception":
+                        expect(addTrailingBlankDecisions(db, sessionId, [["a1", "keep:2"]])).toBe(
+                            true,
+                        );
+                        args.pendingMaterializationSessions.add(sessionId);
+                        args.trailingBlankSourceDecisions = new Map([["a1", "strip"]]);
+                        spies.push(
+                            spyOn(
+                                replayStorage,
+                                "demoteTrailingBlankKeepDecisions",
+                            ).mockImplementation(() => {
+                                reached++;
+                                if (site.endsWith("exception")) fail();
+                                return null;
+                            }),
+                        );
+                        break;
+                    case "trailing-blank-decision-persistence-failure":
+                    case "trailing-blank-decision-exception":
+                        spies.push(
+                            spyOn(replayStorage, "addTrailingBlankDecisions").mockImplementation(
+                                site.endsWith("exception") ? throwAtSite : falseAtSite,
+                            ),
+                        );
+                        break;
+                    case "proactive-thinking-strip-persistence-failure":
+                        args.pendingMaterializationSessions.add(sessionId);
+                        args.thinkingBindingRecoveryEnabledForModel = true;
+                        // Isolate the proactive lane from merged-run detection.
+                        messages.splice(2, 0, {
+                            info: { id: "separator", role: "user" },
+                            parts: [{ type: "text", text: "another question" }],
+                        } as unknown as MessageLike);
+                        messages.splice(4, 0, {
+                            info: { id: "separator2", role: "user" },
+                            parts: [{ type: "text", text: "another question" }],
+                        } as unknown as MessageLike);
+                        spies.push(
+                            spyOn(
+                                replayStorage,
+                                "addMergedReasoningStrippedIds",
+                            ).mockImplementation(falseAtSite),
+                        );
+                        break;
+                }
+                await expect(runPostTransformPhase(args)).rejects.toMatchObject({
+                    name: "DegradedPassRefusalError",
+                    site:
+                        site === "reasoning-removal-committed-read-failure"
+                            ? "reasoning-removal-read-failure"
+                            : site,
+                });
+                expect(reached).toBeGreaterThan(0);
+                expect(
+                    passOutcome.degradations.some(
+                        (degradation) =>
+                            degradation.site ===
+                            (site === "reasoning-removal-committed-read-failure"
+                                ? "reasoning-removal-read-failure"
+                                : site),
+                    ),
+                ).toBe(true);
+            } finally {
+                for (const spy of spies.reverse()) spy.mockRestore();
+            }
+        });
+    }
+});
+
+describe("optional fresh-tail additions", () => {
+    for (const site of ["note-nudge-cas-failure", "auto-search-internal-failure"] as const) {
+        it(`serves an under-limit pass at ${site} without changing the historical prefix`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `ses-optional-${site}`;
+            const source = [
+                {
+                    info: { id: "old-user", role: "user" },
+                    parts: [{ type: "text", text: "old question" }],
+                },
+                {
+                    info: { id: "old-answer", role: "assistant" },
+                    parts: [
+                        {
+                            type: "thinking",
+                            thinking: "persisted reasoning to strip",
+                            signature: "old-signature",
+                        },
+                        { type: "text", text: "old answer" },
+                    ],
+                },
+                {
+                    info: { id: "fresh-user", role: "user" },
+                    parts: [{ type: "text", text: "new question" }],
+                },
+            ] as unknown as MessageLike[];
+            expect(
+                addMergedReasoningStrippedIds(db, sessionId, [
+                    replayStorage.thinkingBindingRecoveryFrozenId("old-answer"),
+                ]),
+            ).toBe(true);
+            const savedReminder =
+                '\n\n<instruction name="deferred_notes">saved reminder</instruction>';
+            const savedHint = "\n\n<ctx-search-hint>saved fragment</ctx-search-hint>";
+            expect(
+                replayStorage.deliverNoteNudgeAtomic(db, sessionId, "old-user", savedReminder).ok,
+            ).toBe(true);
+            expect(
+                replayStorage.appendAutoSearchHintDecision(db, sessionId, {
+                    messageId: "old-user",
+                    decision: "hint",
+                    text: savedHint,
+                }).ok,
+            ).toBe(true);
+            const argsFor = (messages: MessageLike[], passOutcome = createPassOutcome()) =>
+                basePostTransformArgs(db, sessionId, messages, {
+                    resolvedProviderID: "anthropic",
+                    currentTurnId: "fresh-user",
+                    passOutcome,
+                    ...(site === "auto-search-internal-failure"
+                        ? {
+                              projectPath: "/throwaway-project",
+                              autoSearch: { enabled: true, scoreThreshold: 0, minPromptChars: 1 },
+                          }
+                        : {}),
+                });
+            const spies: Array<{ mockRestore(): void }> = [];
+            let failed = false;
+            let reached = 0;
+            const addition =
+                site === "note-nudge-cas-failure"
+                    ? '\n\n<instruction name="deferred_notes">optional reminder</instruction>'
+                    : "\n\n<ctx-search-hint>optional fragment</ctx-search-hint>";
+            try {
+                if (site === "note-nudge-cas-failure") {
+                    spies.push(
+                        spyOn(noteNudger, "peekNoteNudgeText").mockReturnValue("optional reminder"),
+                    );
+                    spies.push(
+                        spyOn(noteNudger, "markNoteNudgeDelivered").mockImplementation(() => {
+                            reached++;
+                            return failed
+                                ? { ok: false, kind: "cas-exhausted" }
+                                : { ok: true, kind: "appended" };
+                        }),
+                    );
+                } else {
+                    spies.push(
+                        spyOn(autoSearchRunner, "runAutoSearchHint").mockImplementation(
+                            async ({ messages }) => {
+                                reached++;
+                                if (failed) throw new Error("optional fresh-tail search failed");
+                                const part = messages.at(-1)!.parts[0] as { text: string };
+                                part.text += addition;
+                                return { ok: true };
+                            },
+                        ),
+                    );
+                }
+                const healthy = cloneMessages(source);
+                const healthyOutcome = createPassOutcome();
+                await runPostTransformPhase(argsFor(healthy, healthyOutcome));
+                expect(healthyOutcome.degradations).toEqual([]);
+                expect((healthy[0].parts[0] as { text: string }).text).toBe(
+                    `old question${savedReminder}${savedHint}`,
+                );
+                expect((healthy.at(-1)!.parts[0] as { text: string }).text).toBe(
+                    `new question${addition}`,
+                );
+                expect(JSON.stringify(healthy)).not.toContain("persisted reasoning to strip");
+                // Compare served arrays, not the raw input: the reasoning replay
+                // after these optional lanes must still complete on a failed pass.
+                const healthyMinusAddition = cloneMessages(healthy);
+                (healthyMinusAddition.at(-1)!.parts[0] as { text: string }).text = "new question";
+                failed = true;
+                for (let pass = 0; pass < 2; pass++) {
+                    const messages = cloneMessages(source);
+                    const passOutcome = createPassOutcome();
+                    await runPostTransformPhase(argsFor(messages, passOutcome));
+                    expect(passOutcome.degradations).toEqual([{ site, kind: "degraded" }]);
+                    expect(JSON.stringify(messages.slice(0, -1))).toBe(
+                        JSON.stringify(healthy.slice(0, -1)),
+                    );
+                    expect(JSON.stringify(messages)).toBe(JSON.stringify(healthyMinusAddition));
+                    expect(JSON.stringify(messages).length).toBeLessThan(
+                        JSON.stringify(healthy).length,
+                    );
+                }
+                expect(reached).toBe(3);
+            } finally {
+                for (const spy of spies.reverse()) spy.mockRestore();
+            }
+        });
+    }
+});
 
 describe("postprocess replay snapshot", () => {
     it("preparing an execute request does not refresh the provider response clock", async () => {
@@ -6970,7 +7358,7 @@ describe("final message representation", () => {
         expect(getTrailingBlankDecisions(db, sessionId).get("assistant-target")).toBe("strip");
     });
 
-    it("serves the frozen keep count when a live refresh loses its persistence race", async () => {
+    it("refuses when a live trailing-blank refresh loses its persistence race", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-trailing-refresh-cas-failure";
@@ -6996,19 +7384,17 @@ describe("final message representation", () => {
             },
         ] as unknown as MessageLike[];
 
-        await runPostTransformPhase(
-            basePostTransformArgs(db, sessionId, messages, {
-                schedulerDecision: "defer",
-                resolvedProviderID: "anthropic",
-            }),
-        );
-
-        expect(messages[0].parts).toEqual([
-            { type: "text", text: "answer" },
-            { type: "text", text: "" },
-            { type: "text", text: "" },
-            { type: "text", text: "" },
-        ]);
+        await expect(
+            runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: "defer",
+                    resolvedProviderID: "anthropic",
+                }),
+            ),
+        ).rejects.toMatchObject({
+            name: "DegradedPassRefusalError",
+            site: "trailing-blank-decision-persistence-failure",
+        });
         expect(getTrailingBlankDecisions(db, sessionId).get("assistant-target")).toBe("keep:3");
     });
 
@@ -9457,7 +9843,7 @@ describe("proactive strip of thinking on busting passes", () => {
         );
     });
 
-    it("strips nothing and remembers nothing when the frozen set cannot be written", async () => {
+    it("refuses and remembers nothing when the proactive frozen set cannot be written", async () => {
         openDb();
         const sessionId = "ses-proactive-persist-failure";
         await serve(sessionId, buildSession(sessionId), { busting: false });
@@ -9466,8 +9852,10 @@ describe("proactive strip of thinking on busting passes", () => {
         );
         const failed = buildSession(sessionId, "re-rendered first user message");
         const before = JSON.stringify(failed);
-        const result = await serve(sessionId, failed, { busting: true });
-        expect(result.proactiveThinkingStrip).toBeNull();
+        await expect(serve(sessionId, failed, { busting: true })).rejects.toMatchObject({
+            name: "DegradedPassRefusalError",
+            site: "proactive-thinking-strip-persistence-failure",
+        });
         expect(JSON.stringify(failed)).toBe(before);
         expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(new Set());
 

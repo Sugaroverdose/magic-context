@@ -22,6 +22,8 @@ import { openTestDb } from "../src/test-db";
 const enabled = /\/magic-context\/degraded-pass(?:\/|$)/.test(
 	resolve(tmpdir()),
 );
+const residualEnabled = process.env.MC_DEGRADED_RESIDUALS_HOST === "1" &&
+	/\/magic-context\/degraded-residuals-[^/]+(?:\/|$)/.test(resolve(tmpdir()));
 const BALLAST_MARKER = "BALLAST-DEGRADED-PASS";
 const LIVE_STORE =
 	/\/Users\/[^/]+\/(\.local\/share\/(opencode|cortexkit)|\.config\/(opencode|cortexkit))\//;
@@ -267,3 +269,124 @@ export default {
 	},
 	300_000,
 );
+
+// Exceptions inside replay-only lanes used to be swallowed whenever the size
+// guard admitted the partially replayed array. Inject at the actual message read,
+// not at the wrapper: both lanes run on an ordinary, under-limit defer pass.
+for (const [stage, fn, lkg] of [
+	["stale-reduce-strip-exception", "dropStaleReduceCalls", true],
+	["image-strip-exception", "stripProcessedImages", false],
+] as const) {
+	(residualEnabled ? test : test.skip)(
+		`OpenCode 1.18.30: ${stage} ${lkg ? "replays LKG" : "refuses without LKG"} and never sends raw`,
+		async () => {
+			expect(execFileSync("opencode", ["--version"], { encoding: "utf8" }).trim()).toBe("1.18.30");
+			const root = resolve(tmpdir());
+			const probeRoot = join(root, `${stage}-${Date.now()}`);
+			mkdirSync(probeRoot, { recursive: true });
+			const arm = join(probeRoot, "arm");
+			const fired = join(probeRoot, `fired-${Date.now()}`);
+			const wrapper = join(probeRoot, "plugin.ts");
+			const entry = resolve(import.meta.dir, "../../plugin/src/index.ts");
+			writeFileSync(wrapper, `import mc from ${JSON.stringify(entry)};
+import { dropSlot } from ${JSON.stringify(join(dirname(entry), "hooks/magic-context/lkg-slot.ts"))};
+import { existsSync, writeFileSync } from "node:fs";
+export default {
+    id: mc.id,
+    server: async (input, options) => {
+        const hooks = await mc.server(input, options);
+        const transform = hooks["experimental.chat.messages.transform"];
+        let injected = false;
+        hooks["experimental.chat.messages.transform"] = async (input, output) => {
+            if (existsSync(${JSON.stringify(arm)}) && !injected) {
+                ${lkg ? "" : "dropSlot(output.messages.find(m => m.info.sessionID)?.info.sessionID);"}
+                for (const message of output.messages) {
+                  for (const [target, key] of [[message, "parts"], [message.info, "id"]]) {
+                    let value = target[key];
+                    Object.defineProperty(target, key, {
+                        enumerable: true, configurable: true,
+                        get() {
+                            const stack = new Error().stack ?? "";
+                            if (!injected && stack.includes(${JSON.stringify(fn)})) {
+                                injected = true;
+                                writeFileSync(${JSON.stringify(fired)}, stack);
+                                throw new Error(${JSON.stringify(`injected ${stage}`)});
+                            }
+                            return value;
+                        },
+                        set(next) { value = next; },
+                    });
+                  }
+                }
+            }
+            return transform(input, output);
+        };
+        return hooks;
+    },
+};`);
+			const previous = process.env.MC_E2E_PLUGIN_ENTRY;
+			process.env.MC_E2E_PLUGIN_ENTRY = wrapper;
+			const h = await TestHarness.create({ mockProviderID: "anthropic", magicContextConfig: {
+				historian: { disable: true }, dreamer: { disable: true }, memory: { enabled: false, auto_search: { enabled: false } },
+			} });
+			try {
+				const sessionId = await h.createSession();
+				const mainRequests = () => h.mock.requests().filter(request => Array.isArray(request.body.messages));
+				await h.sendPrompt(sessionId, `${BALLAST_MARKER} ${h.ballast(6000)}`);
+				await h.waitForMockQuiescence();
+				const raw = JSON.stringify(mainRequests().at(-1)?.body.messages);
+				expect(raw).toContain(BALLAST_MARKER);
+				const writable = openTestDb(h.contextDbPath());
+				try {
+					const changed = writable.prepare("UPDATE tags SET status = 'dropped' WHERE session_id = ? AND harness = 'opencode' AND tag_number = (SELECT MIN(tag_number) FROM tags WHERE session_id = ? AND harness = 'opencode')").run(sessionId, sessionId);
+					expect(changed.changes).toBeGreaterThan(0);
+				} finally { writable.close(); }
+				await h.sendPrompt(sessionId, "managed turn two");
+				await h.waitForMockQuiescence();
+				const managed = JSON.stringify(mainRequests().at(-1)?.body.messages);
+				expect(managed).not.toContain(BALLAST_MARKER);
+				const beforeDbs = assertIsolated(h.opencode.pid, root, `${stage}-before`);
+				expect(beforeDbs.some(path => path.endsWith("/context.db"))).toBe(true);
+				expect(beforeDbs.some(path => path.endsWith("/opencode.db"))).toBe(true);
+				const before = h.mock.requests().length;
+				const logPath = join(h.dataDir, "cortexkit", "magic-context-e2e.log");
+				const offset = readFileSync(logPath, "utf8").length;
+				writeFileSync(arm, "armed");
+				const outcome = await h.sendPrompt(sessionId, "failed turn three", { timeoutMs: 30_000 }).then(() => "answered", error => `refused: ${String(error).slice(0, 300)}`);
+				await h.waitForMockQuiescence();
+				// Diagnostics flush asynchronously; wait for the failed stage's
+				// record rather than treating an unflushed log as a served pass.
+				const deadline = Date.now() + 10_000;
+				while (!readFileSync(logPath, "utf8").slice(offset).includes(`site=${stage}`) && Date.now() < deadline) await Bun.sleep(100);
+				writeFileSync(join(probeRoot, "diagnostic.log"), readFileSync(logPath, "utf8").slice(offset));
+				expect(existsSync(fired)).toBe(true);
+				const stack = readFileSync(fired, "utf8");
+				expect(stack).toContain(fn);
+				const log = readFileSync(logPath, "utf8").slice(offset);
+				expect(log).toContain(`site=${stage}`);
+				const after = h.mock.requests().slice(before).filter(request => Array.isArray(request.body.messages)).map(request => JSON.stringify(request.body.messages));
+				const afterDbs = assertIsolated(h.opencode.pid, root, `${stage}-after`);
+				if (lkg) {
+					expect(log).toContain("lkg_replay_served");
+					expect(after.length).toBeGreaterThan(0);
+				} else {
+					expect(outcome).toContain("MC-S06");
+					expect(after).toEqual([]);
+				}
+				for (const body of after) {
+					expect(body).not.toContain(BALLAST_MARKER);
+					expect(body.length).toBeLessThan(managed.length + 2000);
+					expect(body.length).toBeLessThan(raw.length);
+				}
+				const evidence = { stage, lkg, outcome, rawBytes: raw.length, managedBytes: managed.length, afterBytes: after.map(body => body.length), beforeDbs, afterDbs };
+				writeFileSync(join(probeRoot, "result.json"), JSON.stringify(evidence, null, 2));
+				writeFileSync(join(probeRoot, "pass.log"), log);
+				console.info(`degraded residual host ${JSON.stringify(evidence)}`);
+			} finally {
+				await h.dispose();
+				if (previous === undefined) delete process.env.MC_E2E_PLUGIN_ENTRY;
+				else process.env.MC_E2E_PLUGIN_ENTRY = previous;
+			}
+		}, 120_000,
+	);
+}

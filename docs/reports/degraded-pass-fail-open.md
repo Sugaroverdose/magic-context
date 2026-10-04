@@ -1,5 +1,9 @@
 # A degraded transform pass must never be served
 
+The incident and initial fix below describe the original change. The
+[follow-up](#remaining-fail-open-gaps-closed) supersedes the record-only
+postprocess verdicts, ordinary wrapper fallback, and Pi raw-fallthrough claims.
+
 ## The incident
 
 A busy database made one pass send a request 2.5 times larger than the previous one. Session `ses_110d87916ffeDbfbAjhUgyL8Ps`, OpenCode 1, TypeScript mode, `anthropic/claude-opus-5-5`. The lines below are copied from the live diagnostic log (`magic-context.log.1` under `$(getconf DARWIN_USER_TEMP_DIR)opencode/magic-context/`), which was only read:
@@ -132,3 +136,203 @@ Isolation: `lsof -p <pid> -Fn` on the host before the lock, on the host while lo
 - A deterministic, non-transient failure at a replay-or-refuse site refuses every turn until it is fixed, or until LKG replay stops validating. That trade is the rule's intent: a refused turn is visible, and an unreduced request is not.
 - The OpenCode wrapper still serves the raw input after an ordinary (non-storage, non-degraded) transform exception when no LKG replays (`messages-transform.ts`, "Continuing with unmodified messages"). It has no context limit at hand. Pi now size-guards its equivalent path.
 - On a directory fallback, historian scheduling and memory promotion in that pass still use the launch directory's identity. Only m[0]/m[1] is frozen.
+
+## Remaining fail-open gaps closed
+
+### Recovery boundary
+
+With compaction enabled, every ordinary exception reaching the OpenCode 1
+messages wrapper now attempts the existing validated last-known-good (LKG)
+replay and, if it cannot replay, throws `DegradedPassRefusalError` (`MC-S06`,
+site `messages-transform-failed`). The wrapper does not know the context limit,
+but fit would not make raw or partially replayed history safe anyway. Error
+diagnostics still persist best-effort. Transient storage failures keep their
+existing storage-busy refusal and host notice.
+
+OpenCode 2 uses that same wrapper and no longer propagates ordinary errors into
+a raw-fallthrough branch. Errors in the surrounding context setup also become
+`MC-S06` (`v2-context-failed`), toast, and interrupt before the provider. The
+test exercises the registered context hook, poisons a tool-definition read,
+and verifies a confirmed host interrupt, not merely an error classifier.
+
+Pi now attempts its existing fit-validated LKG replay for **every** managed
+failure, not just storage/tagging/drop failures. If none validates, it uses the
+existing `PiStorageBusyError` host-abort path with a `PiDegradedPassError` cause.
+It no longer returns `undefined` after an ordinary failure, even when the raw
+messages fit. The installed-host test verifies the abort. Compaction-off mode
+retains raw passthrough on all three adapters; the OpenCode 1 wrapper retains
+its exact-input restoration, and OpenCode 2/Pi retain their native ownership.
+
+### Postprocess verdicts
+
+`runPostTransformPhase` now has a local `failPass` with the same policy as
+`transform.ts`: record the site, stop a managed pass, and preserve a busy/locked
+exception for storage recovery. Nested refusals preserve the **first** site's
+identity instead of being relabeled by an outer catch. A failed write returning
+false/null is a failed stage too: not applying the unpersisted decision is
+still necessary, but is no longer sufficient permission to serve the pass.
+
+Each retained replay-or-refuse site was rechecked against the same criterion:
+does the failed pass change anything already served, or leave a request larger
+than a healthy pass? Optional additions to the newest, never-served user turn
+do not qualify. After that review, the two sites below remain record-only;
+**no other site was moved back**.
+
+| Record-only site | Why it stays served |
+|---|---|
+| `note-nudge-cas-failure` | Failed delivery appends no reminder to the new user turn. Historical bytes are unchanged and the request is smaller than the healthy request with the reminder. |
+| `auto-search-internal-failure` | A failed optional fresh-tail hint skips that addition. It does not authorize a history mutation or stop the remaining persisted-decision replay. |
+
+Both are classified `served` in `PASS_DEGRADATION_EFFECTS`, including for the
+size-guard backstop. A recurring optional search/nudge bug must not refuse an
+otherwise valid transform. The previous claim that these two failures should
+refuse was too broad and is superseded by this review: `runPostTransformPhase`
+already replays both `replaySnapshot.noteNudgeAnchors` and
+`replaySnapshot.autoSearchHintDecisions` in its sticky-injection block **before**
+either optional append lane. The runner's later duplicate replay is not the
+only path preserving an already-served hint.
+
+Retained sites and the specific history/size reason:
+
+| Site | Why replay or refuse, even below the limit |
+|---|---|
+| `m0-m1-fold-preexecution-degradation` | A failed fold can leave a different prefix or partially committed materialization. A cached-prefix substitute is not proof the complete pass replayed. |
+| `pending-operation-failure` | Earlier mutations in the batch can remain while later operations or finalization were skipped. The test edits a reasoning part before throwing. |
+| `stale-reduce-strip-exception` | Persisted id-keyed strips can stop midway on a defer pass. |
+| `image-strip-exception` | Persisted image strips can stop midway on a defer pass. |
+| `m0-m1-injection-degradation` | A legacy history fallback is not the persisted m[0]/m[1] representation. Clear the injection cache before stopping, so a retry cannot cut against an unserved prefix. |
+| `compaction-marker-drain-failure` | A retryable marker-write failure cannot publish a pass whose trim and host marker disagree. Keep the pending marker and refresh signals by stopping before their drains. |
+| `reasoning-removal-persistence-failure` | Leaving reasoning that a healthy pass removes makes the request larger and may affect historical assistants, not just the fresh user turn. Both thrown writes and false outcomes stop. |
+| `reasoning-removal-read-failure` (committed-set re-read) | After committing new removals, a failed re-read cannot safely omit a concurrent winner's ids. The initial unreadable-set lane was already a refusal and remains one. |
+| `thinking-binding-recovery-persistence-failure` | Keeping signed blocks that a healthy recovery removes makes the request larger and changes historical assistant bytes. |
+| `merged-reasoning-strip-persistence-failure` | Keeping newly selected historical reasoning makes the request larger than a healthy strip; this is a removal, not omission of a new user-turn addition. |
+| `merged-reasoning-strip-exception` | An exception in freezing/reading the set can leave replay incomplete. |
+| `trailing-blank-heal-persistence-failure` | Retaining a historical keep/count decision adds blank blocks a healthy demotion removes. |
+| `trailing-blank-heal-exception` | A heal can commit only part of a set before a subsequent operation throws. |
+| `trailing-blank-decision-persistence-failure` | This lane can replace historical keep/count choices and demote a newest assistant from keep to strip. Failure can retain more blank blocks than the healthy pass; it is not restricted to omission of a new hint. |
+| `trailing-blank-decision-exception` | Freezing or re-reading shape decisions may stop before all committed choices were adopted, leaving a historical shape different or larger. |
+| `proactive-thinking-strip-persistence-failure` | A prefix-editing pass that keeps thinking a healthy pass removes is larger and leaves historical signed blocks bound to the wrong prefix. |
+
+Sites deliberately left:
+
+- `m0-m1-fallback-failure`: unchanged, reachable only in compaction-off mode
+  after the new injection refusal. A managed pass can no longer reach the
+  legacy fallback at all.
+- The initial `reasoning-removal-read-failure` was already a loud refusal;
+  its existing `EmergencyFailClosedError` behavior is retained.
+- `session-directory-fallback`: retains the previously adjudicated frozen
+  m[0]/m[1] replay and pending rebuild signals.
+- `compartment-trigger-failure`: scheduling only; persisted request decisions
+  still replay. `invalid-cache-ttl-fallback`: deterministic valid-default TTL.
+- `auto-search-timeout`, `auto-search-search-failure`,
+  `auto-search-cas-exhaustion`: a previously served hint has already replayed;
+  these omit only a new, never-served tail hint.
+- Best-effort channel-2 cycle reset, permission diagnostics, metrics,
+  recovery-flag cleanup and timing logs are not persisted-decision replay
+  lanes. They remain observational/bookkeeping. Uncaught exceptions still
+  reach the now-fail-closed wrapper. Rust module-output publication paths are
+  outside this TypeScript postprocess change.
+
+### Tests and non-vacuity
+
+The under-limit refusal table now has 16 cases: each retained site above, with a
+distinct committed-re-read case. Each injects an exception or false/null
+persistence result at a real stage seam, asserts that the seam ran, and asserts
+the refusal's site. Degradation recording is also checked.
+
+Two separate served cases compare a healthy request with its fresh-tail
+addition against two recurring failed passes. Each asserts no refusal, an
+identical historical prefix including a saved hint and reminder, completion of
+a persisted reasoning strip after the optional lane, and a request exactly equal to the healthy request minus
+the new hint/reminder. Both tests failed against the initial refusal code.
+The effect-classification test likewise failed until these sites were `served`.
+Full-transform cases also prove these optional failures do not trigger the
+degradation size guard when a new user turn is itself over the limit; normal
+overflow/emergency policy still owns that size, just as on a healthy pass.
+
+The seeded full-transform tests additionally verify byte-identical LKG replay
+and no-LKG refusal for stale-reduce and image exceptions, and add the missing
+direct tests for `store-generation-rebase-failure` and
+`compaction-mode-transition-failure`. An ordinary wrapper exception after a
+partial edit also replays LKG, and an id-less failing request refuses.
+
+Old tests that explicitly claimed failed marker persistence, failed
+trailing-blank persistence, failed proactive stripping, or ordinary Pi errors
+could still serve were changed deliberately to assert refusal. Their durable
+state/retry assertions remain. The reasoning-watermark tests still pin that
+age cleanup cannot advance the watermark; their injected failing writes now
+also assert refusal instead of awaiting a served pass.
+
+Mutation procedure: stage the live implementation, verify an empty worktree
+diff, apply a `NON-VACUITY BREAK`, capture a non-empty diff, run the named tests
+under `timeout`, restore from the index, touch the source, and capture an empty
+diff again. Selectively bypassing each postprocess refusal made exactly its
+named table case red; the mixed healthy pure-replay case stayed green on all
+18 initial runs. The 16 retained refusal proofs remain valid; the two optional
+addition refusal proofs are withdrawn because that refusal contract was
+incorrect. Rebase, mode-transition, wrapper, OpenCode 2, and Pi bypasses each
+made exactly their corresponding refusal case red, with the healthy/off-mode
+control green. Removing nested-refusal preservation made the merged-reasoning
+persistence case red on its site assertion, while healthy replay stayed green.
+Restoring the task-base production files also made the image refusal case red.
+The correction has four new mutation controls: reinstating each optional
+refusal makes only its served-prefix case red, and reclassifying each optional
+failure as `changes-request` makes only its full-transform size-guard case red.
+The healthy mixed pure-replay control remains green on all four runs.
+No mutation remains in the committed implementation.
+
+### Pure replay: original versus fixed
+
+The same deterministic session geometry was seeded into isolated stores with a
+persisted tool drop, stale-reduce id, processed-image id, binding-recovery
+reasoning id, and trailing-blank decision. `transform-postprocess-phase.ts`,
+`messages-transform.ts`, and `degraded-pass-refusal.ts` were restored exactly to
+base commit `545d5f229f136e2f9e6b7803efd1021011312379` for the before capture
+(verified against that commit before adding a non-vacuity marker comment).
+The after capture used the fixed sources. Both independently captured the
+entire messages arrays actually served by the wrapper, not raw inputs or an
+estimator. The comparison did not compute expected bytes using transform code.
+
+| Served request | JSON bytes | SHA-256, identical before and after |
+|---|---:|---|
+| Seeded replay and three repeated ordinary defers | 841 each | `012f2e18bfd1a9d95fe54af03ab7f74421738e663c577811aa54f3dc6aff77ae` |
+| Ordinary defer with the new tail appended | 1,161 | `571c41d9d6662c5e32bf1bf4ffd96255d8d8b3873fae400056c0dd0126d14a92` |
+
+**Five served requests compared; zero changed bytes.** This fix introduces no
+byte changes on any non-failing pass: neither ordinary/defer passes nor existing
+successful rebuilding passes get new mutation or scheduling permissions. The
+existing first render, explicit flush, independently authorized fold/refresh,
+emergency work and new tail bytes remain owned by their existing rules. Only a
+**failing** managed pass changes disposition at a history/size-affecting stage:
+validated LKG plus its admitted tail, or no provider request. Optional
+fresh-tail search/nudge failures continue serving without that addition.
+Compaction-off failure passthrough is unchanged.
+
+### Real host: two residual sites
+
+The additional opt-in cases in `degraded-pass-lock.test.ts` run a real
+**OpenCode 1.18.30** process and mock Anthropic endpoint under an isolated root
+named `magic-context/degraded-residuals-…`. `TestHarness` can now select the
+canonical `anthropic` provider id, so these provider-specific lanes actually
+run. Memory auto-search is disabled to prevent a fresh search hint from
+reintroducing a ballast fragment. The plugin source is loaded unchanged. A
+wrapper adds message-property getters armed only on turn three; the getter
+throws only when the stack names the selected replay function. Captured stacks
+prove the exception executed inside that function and its postprocess catch.
+
+| Injection | LKG state | Raw turn 1 | Managed turn 2 | Turn 3 |
+|---|---|---:|---:|---|
+| `dropStaleReduceCalls` | Present | 24,502 bytes | 458 bytes | LKG replay, 590 bytes; ballast absent |
+| `stripProcessedImages` | Deliberately removed | 24,502 bytes | 458 bytes | `MC-S06` in the assistant error; **zero provider requests** |
+
+The tests assert stage execution, replay/refusal, and request contents/counts;
+an empty capture is not accepted as replay success. `lsof -p <pid> -Fn` before
+and after each fault listed only databases under that run's throwaway root,
+including `data/opencode/opencode.db`,
+`data/cortexkit/magic-context/context.db`, and any ONNX telemetry database
+inside the throwaway home. The assertions require both host/plugin databases
+and reject live or out-of-root paths. `HOME`, `XDG_DATA_HOME`,
+`XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_RUNTIME_DIR`, `OPENCODE_DB`, and
+`MAGIC_CONTEXT_STORAGE_DIR` were all throwaway. No live store was opened or
+modified. No schema/migration change was made; only fresh test schemas were
+initialized by the existing harness.
