@@ -3496,10 +3496,20 @@ impl NativeAttachmentCache {
         stats: &mut NativeAttachmentCacheStats,
         served_bytes: usize,
     ) {
+        profile_start!(_perf_replace, "native_cache_replace");
+        profile_start!(perf_requested_charge, "native_cache_requested_charge");
         let requested_bytes = snapshot.retained_bytes(served_bytes);
+        profile_end!(perf_requested_charge);
+        profile_start!(perf_core_clone, "native_cache_core_clone");
         let mut core_snapshot = snapshot.clone();
+        profile_end!(perf_core_clone);
+        profile_start!(perf_degrade, "native_cache_degrade");
         let dropped_sidecar_trees = core_snapshot.discard_optional_sidecar_trees();
+        profile_end!(perf_degrade);
+        profile_start!(perf_core_charge, "native_cache_core_charge");
         let core_bytes = core_snapshot.retained_bytes(served_bytes);
+        profile_end!(perf_core_charge);
+        profile_start!(_perf_admit, "native_cache_admit");
 
         // The current session's old generation cannot compete with its replacement. Evict other
         // sessions before considering the optional sidecar so the structures that expand the next
@@ -10208,6 +10218,7 @@ impl McHandler {
         // handler entry. The snapshot is initialized only if neither in-memory fast path answers.
         let handler_entry_state = OnceLock::new();
         let run_transform = || {
+            profile_start!(perf_context, "transform_context");
             let resolved_cache_ttl = parsed.cache_ttl.clone().map_or_else(
                 || {
                     binding
@@ -10285,6 +10296,7 @@ impl McHandler {
                     .remove(&parsed.session_id)
                     .unwrap_or_default(),
             };
+            profile_end!(perf_context);
             transform_with_projection_cached(
                 &store,
                 &parsed,
@@ -14586,12 +14598,15 @@ fn encode_full_native_messages(
 ) -> Vec<Value> {
     let served = response.messages();
     let native_reasoning_keep_mids = &response.native_reasoning_keep_mids;
+    profile_start!(perf_decode, "native_reference_decode");
     let sidecar = request
         .native_messages
         .as_deref()
         .map(codec::decode_opencode)
         .map(|decoded| decoded.sidecar)
         .unwrap_or_else(|| codec::DecodeSidecar::new("opencode"));
+    profile_end!(perf_decode);
+    profile_start!(perf_prepare, "native_reference_prepare");
     let served_messages = served
         .iter()
         .map(|message| message.deref().clone())
@@ -14602,6 +14617,8 @@ fn encode_full_native_messages(
         .collect::<Vec<_>>();
     let reasoning_exempt_mid =
         transform::latest_assistant_reasoning_mutation_exempt_mid(&request.messages);
+    profile_end!(perf_prepare);
+    profile_start!(perf_encode, "native_reference_encode");
     let mut native_messages =
         codec::opencode::encode_opencode_with_transition_state_and_reasoning_exemption(
             &served_messages,
@@ -14611,6 +14628,8 @@ fn encode_full_native_messages(
             reasoning_exempt_mid,
             transition_consumed,
         );
+    profile_end!(perf_encode);
+    profile_start!(_perf_reasoning, "native_reference_reasoning");
     if let Some(profile) = SerializerProfile::parse(&request.serializer_profile) {
         transform::clear_served_native_reasoning_with_tags(
             profile,
@@ -14720,6 +14739,7 @@ fn attach_native_messages_incremental(
         return NativeAttachmentCacheStats::default();
     }
 
+    profile_start!(perf_snapshot, "native_snapshot_validate");
     let mut cached = cache
         .lock()
         .expect("native attachment cache mutex")
@@ -14728,7 +14748,11 @@ fn attach_native_messages_incremental(
         .as_ref()
         .map(|snapshot| validated_native_prefix(request, snapshot, native_delta_frontier))
         .unwrap_or(0);
+    profile_end!(perf_snapshot);
+    profile_start!(perf_decode, "native_sidecar_decode");
     let mut sidecar = native_sidecar(request, cached.as_ref(), trusted_prefix);
+    profile_end!(perf_decode);
+    profile_start!(perf_indexes, "native_indexes");
     let sidecar_positions = sidecar
         .order
         .iter()
@@ -14776,6 +14800,8 @@ fn attach_native_messages_incremental(
         .map(|snapshot| std::mem::take(&mut snapshot.sidecar_sizes))
         .unwrap_or_default();
     let cleared_mids = transform::reasoning_native_clear_mids(reasoning_clear_units);
+    profile_end!(perf_indexes);
+    profile_start!(perf_keys, "native_message_keys");
     let mut message_keys = Vec::with_capacity(response.messages().len());
     for (position, served) in response.messages().iter().enumerate() {
         let meta = codec::sidecar::meta_for_ck(&sidecar, served, position);
@@ -14845,6 +14871,8 @@ fn attach_native_messages_incremental(
             mode,
         ));
     }
+    profile_end!(perf_keys);
+    profile_start!(perf_remaining_hashes, "native_remaining_hashes");
     for (slot, meta) in &sidecar.messages {
         if sidecar_sizes.contains_key(slot) {
             continue;
@@ -14855,6 +14883,8 @@ fn attach_native_messages_incremental(
     }
     sidecar_hashes.retain(|slot, _| sidecar_positions.contains_key(slot.as_str()));
     sidecar_sizes.retain(|slot, _| sidecar_positions.contains_key(slot.as_str()));
+    profile_end!(perf_remaining_hashes);
+    profile_start!(perf_frontier, "native_reuse_frontier");
 
     let cache_compatible = cached
         .as_ref()
@@ -14893,6 +14923,8 @@ fn attach_native_messages_incremental(
             })
             .unwrap_or(0)
     };
+    profile_end!(perf_frontier);
+    profile_start!(perf_suffix_prepare, "native_suffix_prepare");
 
     let mut chunks = if cache_compatible {
         cached
@@ -14924,6 +14956,8 @@ fn attach_native_messages_incremental(
             sidecar_sizes.insert(slot, retained_bytes);
         }
     }
+    profile_end!(perf_suffix_prepare);
+    profile_start!(perf_encode, "native_suffix_encode");
     let encoded_suffix = codec::opencode::encode_opencode_chunks_with_transition_state(
         &served_suffix,
         &sidecar,
@@ -14936,6 +14970,8 @@ fn attach_native_messages_incremental(
         transition_consumed,
         suffix_start,
     );
+    profile_end!(perf_encode);
+    profile_start!(perf_reasoning, "native_suffix_reasoning");
     let mut suffix_values = encoded_suffix
         .iter()
         .map(|chunk| chunk.value.clone())
@@ -14957,6 +14993,8 @@ fn attach_native_messages_incremental(
         &sidecar,
         &response.native_reasoning_keep_mids,
     );
+    profile_end!(perf_reasoning);
+    profile_start!(perf_drift, "native_reencode_drift");
     let reencode_drift = if cache_compatible {
         let previous = cached
             .as_ref()
@@ -14980,6 +15018,8 @@ fn attach_native_messages_incremental(
             first.1,
         );
     }
+    profile_end!(perf_drift);
+    profile_start!(perf_assemble, "native_output_assemble_validate");
     chunks.extend(
         encoded_suffix
             .into_iter()
@@ -14996,10 +15036,14 @@ fn attach_native_messages_incremental(
         .iter()
         .map(|chunk| Arc::clone(&chunk.value))
         .collect::<Vec<_>>();
+    profile_end!(perf_assemble);
+    profile_start!(perf_ingress, "native_ingress_chunks");
     let (ingress_chunks, ingress_chunk_retained_bytes) =
         native_ingress_chunks(request, &chunks, native_delta_frontier);
+    profile_end!(perf_ingress);
 
     if native_attachment_differential_enabled() {
+        profile_start!(_perf_differential, "native_differential");
         let full = encode_full_native_messages(
             response,
             request,
@@ -15009,6 +15053,7 @@ fn attach_native_messages_incremental(
             lineage_anchor_mid,
             transition_consumed,
         );
+        profile_start!(_perf_bytes, "native_differential_bytes");
         let full_bytes = serde_json::to_vec(&full).expect("full native output must serialize");
         let incremental_bytes =
             serde_json::to_vec(&native_messages).expect("incremental native output must serialize");
@@ -15018,6 +15063,7 @@ fn attach_native_messages_incremental(
         );
     }
 
+    profile_start!(perf_publish, "native_publish");
     let request_native_retained_bytes = request.native_messages.as_ref().map_or(0, |messages| {
         messages
             .capacity()
@@ -15061,6 +15107,7 @@ fn attach_native_messages_incremental(
             served_bytes,
         );
     response.native_messages = Some(native_messages);
+    profile_end!(perf_publish);
     stats
 }
 

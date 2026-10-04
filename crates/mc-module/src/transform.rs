@@ -2244,6 +2244,7 @@ fn record_stable_pass_trace(
     ctx: &ProducerContext<'_>,
     result: &Result<TransformWithProjection, TransformError>,
 ) {
+    profile_start!(_perf_trace, "stable_pass_trace");
     if let Some(pass) = result.as_ref().ok().filter(|pass| {
         pass.response.status == TransformStatus::Ok
             && pass.response.ck_messages.is_some()
@@ -2439,6 +2440,7 @@ fn apply_once_with_estimator_and_projection(
     projection_cache: Option<&ProjectionCacheInput>,
     incremental_history: bool,
 ) -> Result<TransformWithProjection, TransformError> {
+    profile_start!(perf_wrapper_prepare, "transform_wrapper_prepare");
     emit_protected_tags_deprecation_once(req);
     let mut attempt = 0;
     let mut boundary_divergence_retry = false;
@@ -2455,6 +2457,7 @@ fn apply_once_with_estimator_and_projection(
         .map(|(_, ingress)| ingress.mid.clone())
         .collect();
     let mut replay_legacy_treatment = legacy_req.is_some();
+    profile_end!(perf_wrapper_prepare);
     loop {
         let mut boundary_divergence_detected = false;
         let pass_req = if replay_legacy_treatment {
@@ -2550,12 +2553,18 @@ pub(crate) fn assert_prefix_projection_equivalent(
     incremental: &FlatProjection,
     messages: &[CkIngressMessage],
 ) -> Result<(), CkWireError> {
+    profile_start!(_perf_differential, "projection_differential");
+    profile_start!(perf_project, "projection_differential_project");
     let full = project_messages(messages)?;
+    profile_end!(perf_project);
+    profile_start!(perf_bytes, "projection_differential_bytes");
     assert_eq!(
         incremental.differential_bytes(),
         full.differential_bytes(),
         "incremental prefix projection byte drift"
     );
+    profile_end!(perf_bytes);
+    profile_start!(_perf_state, "projection_differential_state");
     assert_eq!(
         incremental, &full,
         "incremental prefix projection state drift"
@@ -3557,6 +3566,8 @@ fn apply_once(
     replay_legacy_treatment: bool,
     reclassified_on_bust: &BTreeSet<String>,
 ) -> Result<TransformWithProjection, TransformError> {
+    // Keep this span alive through local destruction, which the wall `total` omits.
+    profile_start!(_perf_apply, "apply_once");
     *boundary_divergence_detected = false;
     if !ctx.compaction_enabled {
         return apply_additive_only(store, req, ctx, estimate_tokens);
@@ -3597,6 +3608,7 @@ fn apply_once(
         .messages
         .len()
         .saturating_sub(timings.projection_reused_messages);
+    profile_start!(perf_ingress_validation, "ingress_validation");
     if reusable_projection.is_some() && prefix_projection_differential_enabled() {
         assert_prefix_projection_equivalent(&initial_projection, &ingress_req.messages)?;
     }
@@ -3719,16 +3731,20 @@ fn apply_once(
     let cc_u1_active = crate::cc_u1_active(serializer_profile, req.tool_present);
     let tagging_surface_requested =
         crate::tagging_surface_active(serializer_profile, req.tool_present);
+    profile_end!(perf_ingress_validation);
     let seed_or_sync_started_at = Instant::now();
     profile_start!(perf_seed, "seed_or_sync");
     let transform_snapshot = store.load_transform_snapshot(&req.session_id)?;
     timings.seed_or_sync = elapsed_ms(seed_or_sync_started_at);
     profile_end!(perf_seed);
     timings.store_cache_state = transform_snapshot.timings.cache_state_ms;
+    profile_start!(perf_tags, "store_tags");
     let tag_hydration_started_at = Instant::now();
     let mut tag_rows = load_cached_tags(store, &req.session_id)?;
     let hydrated_tag_count = tag_rows.len();
     timings.store_tags = elapsed_ms(tag_hydration_started_at);
+    profile_end!(perf_tags);
+    profile_start!(perf_transition_pre, "transition_pre");
     timings.store_temporal = transform_snapshot.timings.temporal_ms;
     timings.store_user_hints = transform_snapshot.timings.user_hints_ms;
     timings.store_channel1 = transform_snapshot.timings.channel1_ms;
@@ -3803,6 +3819,8 @@ fn apply_once(
         && !req.is_subagent
         && !detected_transition_classes.is_subset(&consumed_transition_classes);
     timings.transition_detection = elapsed_ms(transition_detection_started_at);
+    profile_end!(perf_transition_pre);
+    profile_start!(perf_lineage_validation, "lineage_validation");
     if let Some(base) = loaded.meta.ordinal_continuation_base {
         let expected_boundary = base.checked_add(1).ok_or_else(|| {
             TransformError::LineageProtocol(
@@ -3848,6 +3866,8 @@ fn apply_once(
     } else {
         SurfaceState::Inactive
     };
+    profile_end!(perf_lineage_validation);
+    profile_start!(perf_render_context, "render_context");
 
     // Apply every module-owned change that affects serialized bytes before activation. When tags
     // are requested, generate them during the HARD pass that records the new render configuration;
@@ -3880,6 +3900,7 @@ fn apply_once(
     let suppress_bootstrap_reduction_tag_overlay = bootstrap_tagging_active
         && serializer_profile == Some(SerializerProfile::ClaudeCodeAnthropic);
     let tagging_active = tagging_surface_requested;
+    profile_end!(perf_render_context);
     // Previously stored overlay rows may still replay when boundary-lineage validation
     // later forces pass-through. Decisions from this request stay in memory until the
     // final cache-state compare-and-swap accepts the pass.
@@ -3891,6 +3912,7 @@ fn apply_once(
     let mut tag_numbers = tag_number_by_message(&tag_rows);
     timings.tag_overlay += elapsed_ms(tag_overlay_started_at);
     profile_end!(perf_tag_numbers);
+    profile_start!(perf_overlay_inputs, "overlay_inputs");
     let legacy_channel1_appends = if tagging_active {
         transform_snapshot.channel1_appends
     } else {
@@ -3909,6 +3931,8 @@ fn apply_once(
     } else {
         Vec::new()
     };
+    profile_end!(perf_overlay_inputs);
+    profile_start!(perf_coverage, "coverage_and_reconciliation");
 
     // Check whether the boundary is present in the live messages, or through a stored
     // trim record that matches durable coverage and the first untrimmed message. A failed
@@ -4180,6 +4204,8 @@ fn apply_once(
         loaded.meta.pending_rewrite.is_some() && boundary_present;
 
     let provisional_tail_mid = provisional_tail_mid(req);
+    profile_end!(perf_coverage);
+    profile_start!(perf_identity, "identity_enforce");
     let identity_enforce_started_at = Instant::now();
     let tail_identity_re_adoptions = enforce_block_identity(
         &loaded.meta,
@@ -4190,6 +4216,7 @@ fn apply_once(
         lineage_anchor_mid,
     )?;
     timings.identity_enforce = elapsed_ms(identity_enforce_started_at);
+    profile_end!(perf_identity);
     let mut pending_overlays = PendingOverlayDecisions::default();
     // When caveman tagging is requested, compute tag rows from the persisted tag order even if
     // the provider response has no visible §N§ tags. Creating these rows does not change rendered
@@ -6151,8 +6178,11 @@ fn apply_once(
 
     profile_end!(perf_overlay_maps);
     profile_start!(perf_hygiene, "evolution_hygiene");
+    profile_start!(perf_hygiene_tags, "hygiene_tag_rows");
     let hygiene_tag_rows =
         tag_rows_for_hygiene(&projection, &tag_rows, &tag_overlay, !tagging_active);
+    profile_end!(perf_hygiene_tags);
+    profile_start!(perf_hygiene_measure, "hygiene_measure");
     let hygiene_measurement = measure_tail_hygiene_with_pending_drops(
         &projection,
         &core,
@@ -6162,6 +6192,8 @@ fn apply_once(
         &protected_block_ids,
         &pending_drop_target_ids,
     );
+    profile_end!(perf_hygiene_measure);
+    profile_start!(perf_hygiene_refresh, "hygiene_refresh");
     let mut current_hygiene_baseline = if is_bust_pass {
         let refreshed = refresh_tail_hygiene_baseline_calibrated(
             hygiene_measurement,
@@ -6225,6 +6257,7 @@ fn apply_once(
                 refreshed.baseline
             })
     };
+    profile_end!(perf_hygiene_refresh);
     profile_end!(perf_hygiene);
     let refreshed_coverage = meta.coverage_ordinal;
     rearm_channel2_after_hard_fold(
@@ -6641,7 +6674,9 @@ fn apply_once(
         .filter(|message| !message.meta.synthetic)
         .count();
     timings.frozen_units = core.frozen_units.len();
+    profile_start!(perf_tail_match, "tail_match_diagnostics");
     timings.tail_units_matched = frozen_units_matched_to_tail(&core, req, meta.coverage_ordinal);
+    profile_end!(perf_tail_match);
 
     let finalize_started_at = Instant::now();
     profile_start!(perf_finalize, "finalize");
@@ -6856,6 +6891,7 @@ fn apply_once(
     timings.finalize = elapsed_ms(finalize_started_at);
     profile_end!(perf_finalize);
     timings.total = elapsed_ms(total_started_at);
+    profile_start!(_perf_result, "apply_result_build");
     Ok(TransformWithProjection {
         historian_tags: Some(tag_rows),
         tag_numbers,
