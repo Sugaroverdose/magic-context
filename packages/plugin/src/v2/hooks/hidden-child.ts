@@ -7,6 +7,10 @@ import {
     DREAMER_RETROSPECTIVE_AGENT,
 } from "../../agents/dreamer";
 import {
+    createDreamTokenBudget,
+    TOKEN_BUDGET_FINALIZE_MESSAGE,
+} from "../../features/magic-context/dreamer/token-budget";
+import {
     HiddenCompletionRefusal,
     type HiddenRunIdentity,
 } from "../../hooks/magic-context/compartment-runner-types";
@@ -101,6 +105,7 @@ export interface HiddenChildAttempt {
     stepLimit?: HiddenAgentStepLimit;
     refusal?: HiddenCompletionRefusal;
     budgetExceeded?: Error;
+    budget?: ReturnType<typeof createDreamTokenBudget>;
     observedMessages?: SessionContext["messages"];
     marker?: string;
 }
@@ -479,6 +484,27 @@ export class HiddenChildHook {
         draft.tools = Object.fromEntries(
             allowed.flatMap((id) => (draft.tools[id] ? [[id, draft.tools[id]]] : [])),
         );
+        // Leave room for the closed manifest before the host's hard ceiling. The
+        // context hook can remove tools synchronously, so no further investigation
+        // executes while the model is asked to return only its checked subset.
+        if (selected.identity.agent === DREAMER_MEMORY_MAPPER_AGENT && steps >= cap - 2) {
+            selected.budget ??= createDreamTokenBudget(
+                typeof selected.identity.metadata?.tokenBudget === "number"
+                    ? selected.identity.metadata.tokenBudget
+                    : Number.MAX_SAFE_INTEGER,
+            );
+            const decision = selected.budget.finalize();
+            draft.tools = {};
+            draft.messages.push({
+                role: "user",
+                content: [{ type: "text", text: TOKEN_BUDGET_FINALIZE_MESSAGE }],
+            });
+            if (decision === "finalize") {
+                const onBudgetUpdate = selected.identity.metadata?.onBudgetUpdate;
+                if (typeof onBudgetUpdate === "function")
+                    onBudgetUpdate({ ...selected.budget.snapshot(), sessionId: draft.sessionID });
+            }
+        }
         selected.observedMessages = draft.messages;
         selected.shaped = true;
         return true;

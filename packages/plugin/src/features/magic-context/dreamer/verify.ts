@@ -378,7 +378,9 @@ async function verifyOneBatch(
             client,
             db: args.db,
             parentSessionId: args.parentSessionId,
-            title: "magic-context-dream-verify",
+            title: args.forceBroad
+                ? "magic-context-dream-verify-broad"
+                : "magic-context-dream-verify",
             directory: args.sessionDirectory,
         });
         const created = shared.normalizeSDKResponse(

@@ -191,6 +191,96 @@ describe("promptAsyncAndWaitForIdle", () => {
 });
 
 describe("dreamer budget on an async child", () => {
+    test("forwards Pi's finalized per-child budget before manifest application", async () => {
+        let ready = false;
+        const states: unknown[] = [];
+        const client = {
+            session: {
+                prompt: async () => {
+                    ready = true;
+                },
+            },
+            readChildTokenBudget: (id: string) => {
+                expect(id).toBe("ses-child");
+                expect(ready).toBe(true);
+                return { spent: 58, finalizeFired: true };
+            },
+        };
+        const transport = createPromptAsyncTransport(client as never, "ses-child", {
+            onBudgetUpdate: (state) => states.push(state),
+        });
+        expect(transport).toBeDefined();
+        await transport?.(request());
+        expect(states).toEqual([{ spent: 58, finalizeFired: true, sessionId: "ses-child" }]);
+    });
+    test("finalizes a zero-usage OpenCode mapper at 58 steps, before the hard ceiling", async () => {
+        const messages: unknown[] = [];
+        let sends = 0;
+        let aborted = false;
+        const states: unknown[] = [];
+        const client = {
+            session: {
+                messages: async () => ({ data: [...messages] }),
+                promptAsync: async (req: { body: { parts: unknown[] } }) => {
+                    sends++;
+                    if (sends === 2)
+                        expect(JSON.stringify(req.body.parts)).toContain("no more tool calls");
+                    messages.push({
+                        info: { id: `u${sends}`, role: "user" },
+                        parts: req.body.parts,
+                    });
+                },
+                abort: async () => {
+                    aborted = true;
+                },
+                status: async () => {
+                    if (sends === 1 && messages.length === 1) {
+                        for (let step = 1; step <= 58; step++)
+                            messages.push({
+                                info: {
+                                    id: `a${step}`,
+                                    role: "assistant",
+                                    finish: "tool-calls",
+                                    tokens: { input: 0 },
+                                    time: { completed: 1 },
+                                },
+                                parts: [{ type: "tool" }],
+                            });
+                    }
+                    if (sends === 2 && messages.length === 60)
+                        messages.push({
+                            info: {
+                                id: "final",
+                                role: "assistant",
+                                finish: "stop",
+                                tokens: { input: 1 },
+                                time: { completed: 2 },
+                            },
+                            parts: [{ type: "text", text: "<verify/>" }],
+                        });
+                    return {
+                        data: sends === 1 && !aborted ? { "ses-child": { type: "busy" } } : {},
+                    };
+                },
+            },
+        };
+        await promptAsyncAndWaitForIdle(
+            client as never,
+            {
+                ...request(),
+                signal: AbortSignal.timeout(200),
+                body: { ...request().body, agent: "dreamer-memory-mapper" },
+            },
+            {
+                tokenBudget: 3_000_000,
+                pollIntervalMs: 1,
+                startGraceMs: 100,
+                onBudgetUpdate: (state) => states.push(state),
+            },
+        );
+        expect(sends).toBe(2);
+        expect(states).toContainEqual(expect.objectContaining({ finalizeFired: true, spent: 0 }));
+    });
     test("sums prompt usage across validation retries in the same child", async () => {
         const messages: unknown[] = [];
         const states: Array<{ spent: number }> = [];

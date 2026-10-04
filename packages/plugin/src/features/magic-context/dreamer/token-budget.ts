@@ -18,6 +18,7 @@ export const TOKEN_BUDGET_TOOL_REFUSAL =
 export interface DreamTokenBudgetState {
     readonly budget: number;
     readonly spent: number;
+    /** Investigation ended early, either for tokens or the mapper's step ceiling. */
     readonly finalizeFired: boolean;
     readonly refusedCalls: number;
     readonly hardStopped: boolean;
@@ -58,6 +59,12 @@ export function createDreamTokenBudget(budget: number) {
     });
     return {
         snapshot,
+        /** Step ceilings use the same tool refusal and partial-result path as tokens. */
+        finalize(): "continue" | "finalize" {
+            if (finalizeFired) return "continue";
+            finalizeFired = true;
+            return "finalize";
+        },
         /** Call once per provider usage report; a host must deduplicate message IDs. */
         charge(
             input: number,

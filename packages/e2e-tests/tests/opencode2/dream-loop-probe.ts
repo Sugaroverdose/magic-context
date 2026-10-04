@@ -30,6 +30,8 @@ import {
 	mapMemories,
 	MAP_BATCH_FLOOR_MS,
 } from "../../../plugin/src/features/magic-context/dreamer/map-memories";
+import { runVerify } from "../../../plugin/src/features/magic-context/dreamer/verify";
+import { recordMemoryVerifications } from "../../../plugin/src/features/magic-context/memory/storage-memory-verifications";
 import {
 	applyRetrospectiveLearnings,
 	parseRetrospectiveLearnings,
@@ -121,6 +123,26 @@ export default {
 				let handle: any = null;
 				let settled = false;
 				try {
+                    if (command.agent === "verify-step-runner") {
+                        const ids = Array.from({ length: 20 }, (_, index) => {
+                            const memory = insertMemory(db, { projectPath: root, category: "ARCHITECTURE", content: `Fixture claim ${index}.` });
+                            recordMemoryVerifications(db, memory.id, ["fact.txt"], 1000);
+                            return memory.id;
+                        });
+                        writeFileSync(join(root, "fact.txt"), "Fixture evidence");
+                        const args = {
+                            db, hiddenCompletionExecutor: executor, projectIdentity: root,
+                            parentSessionId: command.parent, sessionDirectory: root,
+                            holderId: "verify-step", leaseKey: "verify-step", forceBroad: true,
+                            deadline: Date.now() + 300000, model: "openai/mock-model",
+                            tokenBudget: 3000000, onProgress: () => { args.deadline = Date.now(); },
+                        };
+                        if (!acquireLease(db, args.holderId, args.leaseKey)) throw new Error("No verify lease");
+                        const outcome = await runVerify(args);
+                        const banked = ids.filter((id) => (getMemoryVerifications(db, ids).get(id)?.verifiedAt ?? 0) > 1000);
+                        writeFileSync(join(root, `dream-loop-result-${command.seq}.json`), JSON.stringify({ outcome, banked }));
+                        continue;
+                    }
                     if (command.agent === "step-cap-runner") {
                         insertMemory(db, { projectPath: root, category: "ARCHITECTURE", content: "A fixture memory to curate." });
                         const execute = createDreamTaskExecutor({ sessionDirectory: root, parentSessionId: command.parent, hiddenCompletionExecutor: executor, openOpenCodeDb: () => null });
