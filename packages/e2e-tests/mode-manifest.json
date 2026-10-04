@@ -2719,6 +2719,22 @@
             "hosts": [
                 "opencode2"
             ]
+        },
+        {
+            "path": "tests/dreamer-mapper-step-cap-pi.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual regression probe on a real Pi host (MC_E2E_MAPPER_STEP_PROBE=1): a 20-memory verify-broad batch that needs more than 60 mapper calls finalizes before the step cap and keeps a partial manifest instead of failing MC-D10; throwaway root with host PID lsof containment",
+            "contract_refs": ["FOLD-UNDER-PRESSURE"],
+            "hosts": ["pi"]
+        },
+        {
+            "path": "tests/opencode2/mapper-step-finalize.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual regression probe on a real OpenCode 2.0.22 host (MC_E2E_MAPPER_STEP_PROBE=1): before the native 60-step ceiling the mapper is asked for its manifest with tools removed, so a verify-broad batch keeps a partial result; throwaway root with host PID lsof containment",
+            "contract_refs": ["OC2-S1"],
+            "hosts": ["opencode2"]
         }
     ]
 }
