@@ -1445,11 +1445,11 @@ const STATE_IMPORT_MAX_PENDING: usize = 64;
 const STATE_IMPORT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
 const TRANSFORM_SNAPSHOT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const BOUNDARY_TOKEN_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
-// Sized from the ASTRO-scale fixture (4,600 messages / 15,000 blocks): that
-// FlatProjection retains ~156 MiB, so one such session plus a smaller neighbor
-// fit without the native-attach 192 MiB entry cap evicting the projection.
-const PROJECTION_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
-const PROJECTION_CACHE_ENTRY_BUDGET_BYTES: usize = 192 * 1024 * 1024;
+// A 9,268-message full sync can retain ~208 MiB of projection even when its wire request is
+// ~116 MB. Allow that entry and its measured ~73 MiB neighbor to coexist, with growth headroom,
+// rather than alternating full syncs. Keep the native cache's independent budgets unchanged.
+const PROJECTION_CACHE_BUDGET_BYTES: usize = 320 * 1024 * 1024;
+const PROJECTION_CACHE_ENTRY_BUDGET_BYTES: usize = 224 * 1024 * 1024;
 const ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES: usize = TRANSFORM_SNAPSHOT_BUDGET_BYTES;
 const MAX_ACTIVE_SNAPSHOT_LEASES: usize = 8;
 /// InFlight snapshot markers have no byte charge, so they need their own count bound:
@@ -3149,7 +3149,7 @@ const NATIVE_ATTACHMENT_CACHE_ENTRY_BUDGET_BYTES: usize = 192 * 1024 * 1024;
 // the adapter for a full request. No cache may interpret another cache's presence as authority.
 // Keep the ordinary aggregate admission target explicit when any individual budget changes; an
 // oversized native delta core is the documented exception and remains honestly charged.
-const TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES: usize = 768 * 1024 * 1024;
+const TRANSFORM_SERVE_CACHE_COMBINED_BUDGET_BYTES: usize = 832 * 1024 * 1024;
 const _: () = assert!(
     transform::SERIALIZED_OUTPUT_CACHE_BUDGET_BYTES
         + NATIVE_ATTACHMENT_CACHE_BUDGET_BYTES
@@ -3627,6 +3627,9 @@ struct ProjectionCacheSession {
 struct ProjectionCache {
     sessions: HashMap<String, ProjectionCacheSession>,
     lru: VecDeque<String>,
+    // Admission failures can recur every pass. Remember the warning until the last route closes,
+    // not until an LRU eviction or revert, so an uncacheable session cannot flood the fleet log.
+    admission_warned_sessions: HashSet<String>,
     retained_bytes: usize,
     max_retained_bytes: usize,
     max_entry_retained_bytes: usize,
@@ -3651,6 +3654,7 @@ impl ProjectionCache {
         Self {
             sessions: HashMap::new(),
             lru: VecDeque::new(),
+            admission_warned_sessions: HashSet::new(),
             retained_bytes: 0,
             max_retained_bytes,
             max_entry_retained_bytes: max_entry_retained_bytes.min(max_retained_bytes),
@@ -3662,6 +3666,11 @@ impl ProjectionCache {
             self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
         }
         self.lru.retain(|candidate| candidate != session_id);
+    }
+
+    fn forget_session(&mut self, session_id: &str) {
+        self.remove(session_id);
+        self.admission_warned_sessions.remove(session_id);
     }
 
     fn snapshot(&mut self, session_id: &str, revert_epoch: u64) -> Option<ProjectionCacheSnapshot> {
@@ -3701,11 +3710,16 @@ impl ProjectionCache {
             || retained_bytes > self.max_entry_retained_bytes
             || retained_bytes > self.max_retained_bytes
         {
-            tracing::info!(
-                "projection-cache admission-rejected session={} byte_charge={} entry_budget={} total_budget={} previous_entry_kept={}",
-                session_id, retained_bytes, self.max_entry_retained_bytes, self.max_retained_bytes,
-                self.sessions.contains_key(session_id),
-            );
+            if self
+                .admission_warned_sessions
+                .insert(session_id.to_string())
+            {
+                tracing::warn!(
+                    "projection-cache admission-rejected session={} byte_charge={} entry_budget={} total_budget={} previous_entry_kept={} consequence=full_sync_each_pass_unless_request_snapshot_available fallback=need_full_sync_then_full_request",
+                    session_id, retained_bytes, self.max_entry_retained_bytes, self.max_retained_bytes,
+                    self.sessions.contains_key(session_id),
+                );
+            }
             return;
         }
         self.remove(session_id);
@@ -5323,7 +5337,7 @@ impl McHandler {
             self.projections
                 .lock()
                 .expect("projection cache mutex")
-                .remove(&session);
+                .forget_session(&session);
             self.boundary_tokens
                 .lock()
                 .expect("boundary token cache mutex")
@@ -20757,7 +20771,9 @@ mod tests {
         // admitted, including a non-final page that only carries the page envelope.
         let just_over_facade = MAX_FACADE_FRAME_BYTES + 32;
         assert!(enforce_request_byte_cap(&pad("transform", "kind", just_over_facade)).is_ok());
-        assert!(enforce_request_byte_cap(&pad("abc", "transform_page_id", just_over_facade)).is_ok());
+        assert!(
+            enforce_request_byte_cap(&pad("abc", "transform_page_id", just_over_facade)).is_ok()
+        );
         assert!(enforce_request_byte_cap(&pad("ctx_memory", "method", just_over_facade)).is_err());
         assert!(
             enforce_request_byte_cap(&pad("transform", "method", MAX_FACADE_FRAME_BYTES)).is_err()
@@ -23802,6 +23818,215 @@ mod tests {
             .expect("the over-ceiling core must remain available for delta reattachment");
         assert_eq!(prefix.len(), request_b.messages.len());
         assert_eq!(charges.len(), request_b.messages.len());
+    }
+
+    #[test]
+    fn projection_admission_rejection_warns_once_per_session_at_warn_level() {
+        use tracing_subscriber::prelude::*;
+
+        let logs = tempfile::tempdir().unwrap();
+        let mut config = cortexkit_log::Config::in_dir("magic-context", logs.path());
+        config.spec = Some("warn".to_string());
+        let (layer, log) = cortexkit_log::layer(config).unwrap();
+        let subscriber = tracing_subscriber::registry().with(layer);
+        let request = native_cache_request("uncacheable", vec![ck("m1", 1, "one")], vec![], "fp");
+        let snapshot = ProjectionCacheSnapshot {
+            context: projection_cache_context(&request),
+            full_array_fingerprint: request.full_array_fingerprint.clone(),
+            projection: Arc::new(crate::ck_wire::project_messages(&request.messages).unwrap()),
+            message_retained_bytes: Arc::new(vec![0]),
+        };
+        let mut cache = ProjectionCache::with_limits(1, 1);
+        tracing::subscriber::with_default(subscriber, || {
+            cache.replace("uncacheable", 0, snapshot.clone());
+            cache.replace("uncacheable", 0, snapshot.clone());
+            assert!(cache.snapshot("uncacheable", 1).is_none());
+            cache.replace("uncacheable", 1, snapshot.clone());
+            cache.replace("other-session", 0, snapshot.clone());
+        });
+        let lines = std::fs::read_to_string(log.path()).unwrap();
+        assert_eq!(
+            lines.matches("projection-cache admission-rejected").count(),
+            2
+        );
+        assert_eq!(lines.matches("session=uncacheable ").count(), 1);
+        assert_eq!(lines.matches("session=other-session ").count(), 1);
+        assert_eq!(lines.matches(" WARN ").count(), 2);
+        assert!(lines.contains("byte_charge="));
+        assert!(lines.contains("entry_budget=1 total_budget=1 previous_entry_kept=false"));
+        assert!(lines.contains("fallback=need_full_sync_then_full_request"));
+        assert!(lines.contains("consequence=full_sync_each_pass_unless_request_snapshot_available"));
+        assert_eq!(cache.retained_bytes, 0);
+        assert_eq!(cache.admission_warned_sessions.len(), 2);
+        cache.forget_session("uncacheable");
+        assert!(!cache.admission_warned_sessions.contains("uncacheable"));
+        assert!(cache.admission_warned_sessions.contains("other-session"));
+    }
+
+    #[test]
+    fn projection_entry_ceiling_still_enforces_total_lru_budget() {
+        let request = native_cache_request("large", vec![ck("m1", 1, "one")], vec![], "fp");
+        let snapshot = ProjectionCacheSnapshot {
+            context: projection_cache_context(&request),
+            full_array_fingerprint: request.full_array_fingerprint.clone(),
+            projection: Arc::new(crate::ck_wire::project_messages(&request.messages).unwrap()),
+            message_retained_bytes: Arc::new(vec![0]),
+        };
+        let charge = snapshot.retained_bytes("large");
+        let mut cache = ProjectionCache::with_limits(charge * 2 - 1, charge);
+        cache.replace("small", 0, snapshot.clone());
+        cache.replace("large", 0, snapshot.clone());
+        assert!(!cache.sessions.contains_key("small"));
+        assert!(cache.sessions.contains_key("large"));
+        assert_eq!(cache.retained_bytes, charge);
+        assert!(cache.retained_bytes <= cache.max_retained_bytes);
+
+        // An oversized replacement must not eject an unrelated admitted entry or erase its own
+        // last usable generation. A later fingerprint mismatch still asks for full sync.
+        let mut oversized = snapshot;
+        oversized.message_retained_bytes = Arc::new(vec![0; charge]);
+        cache.replace("large", 0, oversized);
+        assert_eq!(cache.sessions["large"].retained_bytes, charge);
+        assert_eq!(cache.retained_bytes, charge);
+    }
+
+    #[test]
+    fn alf_scale_projection_is_retained_and_next_pass_accepts_tail_delta() {
+        const SESSION: &str = "alf-projection";
+        const MESSAGES: usize = 9_268;
+        // Unlike the frame-cap sidecar fixture, put the bulk in canonical blocks. Deserialization
+        // also retains lossless block JSON, as it does for a real full-sync request.
+        let (typed, served) = native_cache_fixture(SESSION, MESSAGES, 30_000, 57_000_000);
+        drop(served);
+        let wire = serde_json::to_vec(&typed).unwrap();
+        drop(typed);
+        let request: TransformRequest = serde_json::from_slice(&wire).unwrap();
+        let wire_bytes = wire.len();
+        drop(wire);
+        let projection = Arc::new(crate::ck_wire::project_messages(&request.messages).unwrap());
+        // These are three real, independently allocated payload copies, not three estimates of
+        // the request tree: canonical bytes, typed wire text, and lossless original block JSON.
+        let mut payload_allocations = 0;
+        for block in &projection.blocks {
+            let CkKind::Text { text } = &block.wire.kind else {
+                panic!("text fixture");
+            };
+            let original = block.wire.retained_original_json().unwrap()["kind"]["text"]
+                .as_str()
+                .unwrap();
+            assert_ne!(text.as_ptr(), original.as_ptr());
+            assert_ne!(text.as_ptr(), block.bytes.as_ptr());
+            assert_ne!(original.as_ptr(), block.bytes.as_ptr());
+            payload_allocations += text.capacity() + original.len() + block.bytes.len();
+        }
+        let charge = ProjectionCacheSnapshot {
+            context: projection_cache_context(&request),
+            full_array_fingerprint: request.full_array_fingerprint.clone(),
+            message_retained_bytes: Arc::new(vec![0; MESSAGES]),
+            projection: Arc::clone(&projection),
+        }
+        .retained_bytes(SESSION);
+        eprintln!("alf-projection messages={MESSAGES} blocks=30000 request_wire_bytes={wire_bytes} projection_byte_charge={charge}");
+        assert!(charge >= payload_allocations);
+        assert!(
+            charge - payload_allocations < 40 * 1024 * 1024,
+            "structural overhead is bounded"
+        );
+        assert!(
+            charge > 192 * 1024 * 1024,
+            "fixture must exercise the old ceiling"
+        );
+        assert!(
+            charge <= 224 * 1024 * 1024,
+            "fixture must fit the bounded larger ceiling"
+        );
+
+        let (handler, _store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        handler.bind_route(7, binding(project.to_str().unwrap(), SESSION));
+        // The live cache also held a ~73 MiB neighbor. Increasing only the entry ceiling would
+        // admit this session but evict that neighbor, making alternating passes miss each other.
+        let neighbor = native_cache_request(
+            "neighbor",
+            vec![ck("neighbor-1", 1, &"n".repeat(36 * 1024 * 1024))],
+            vec![],
+            "neighbor-fp",
+        );
+        handler.store_projection_cache(
+            &neighbor,
+            0,
+            Arc::new(crate::ck_wire::project_messages(&neighbor.messages).unwrap()),
+            None,
+        );
+        drop(neighbor);
+        handler.store_projection_cache(&request, 0, Arc::clone(&projection), None);
+        assert!(
+            handler
+                .projections
+                .lock()
+                .unwrap()
+                .sessions
+                .contains_key(SESSION),
+            "ALF-size projection must survive admission"
+        );
+        assert!(
+            handler
+                .projections
+                .lock()
+                .unwrap()
+                .sessions
+                .contains_key("neighbor"),
+            "the measured large-session working set must coexist rather than alternate evictions"
+        );
+        // Keep only ingress native state: the served-output cache is not a delta authority.
+        let (response, _) = run_native_cache_pass(
+            &handler.native_attachments,
+            &request,
+            Vec::new(),
+            &BTreeMap::new(),
+            false,
+            0,
+            NativeCacheKeyMode::Normal,
+        );
+        drop(response);
+        assert!(handler
+            .transform_snapshots
+            .lock()
+            .unwrap()
+            .ready_delta_request(SESSION)
+            .is_none());
+
+        let after = request.full_array_fingerprint.clone().unwrap();
+        drop(request);
+        let tail = ck("alf-tail", (MESSAGES + 1) as u64, "new tail");
+        let mut delta = native_cache_request(
+            SESSION,
+            vec![tail],
+            vec![native_text_message("alf-tail", "user", "new tail")],
+            "alf-next",
+        );
+        delta.tail_delta = Some(json!({
+            "after": after, "replace_from": MESSAGES, "native_replace_from": MESSAGES,
+        }));
+        let frontier = handler
+            .expand_transform_tail_delta(&mut delta)
+            .expect("next ordinary tail delta must not require full sync");
+        let cached = frontier
+            .projection_cache
+            .expect("delta must reuse the projection core");
+        assert_eq!(cached.replace_from, MESSAGES);
+        assert_eq!(delta.messages.len(), MESSAGES + 1);
+        assert_eq!(delta.native_messages.as_ref().unwrap().len(), MESSAGES + 1);
+        let incremental = crate::ck_wire::project_messages_incremental(
+            &delta.messages,
+            &cached.projection,
+            cached.replace_from,
+        )
+        .unwrap();
+        assert!(Arc::ptr_eq(
+            &incremental.blocks[0].wire,
+            &projection.blocks[0].wire
+        ));
     }
 
     #[test]
