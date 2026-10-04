@@ -620,7 +620,7 @@ interface RustSpawnResources {
  * decision here means a suite body never needs a mode branch: the same harness
  * creates either a regular isolated process or the real ck-subc + ck-mc path.
  */
-async function provisionRustMode(): Promise<RustSpawnResources> {
+async function provisionRustMode(existingEnv?: IsolatedEnv): Promise<RustSpawnResources> {
     const prereqs = detectRustModePrereqs();
     if (!prereqs.ok || !prereqs.subconsciousRoot) {
         throw new Error(
@@ -628,7 +628,9 @@ async function provisionRustMode(): Promise<RustSpawnResources> {
         );
     }
     const { ckMcBin, ckSubcBin } = await buildHermeticBinaries(prereqs.subconsciousRoot);
-    const env = createIsolatedEnv();
+    // A host restart must reconnect to the same isolated databases and session.
+    // The daemon/module are new processes, not a reason to allocate a new root.
+    const env = existingEnv ?? createIsolatedEnv();
     try {
         const stack = await HermeticSubcStack.start({ dataDir: env.dataDir, ckMcBin, ckSubcBin });
         return { env, connectionFile: stack.connectionFile, stack };
@@ -642,7 +644,9 @@ export async function spawnOpencode(opts: SpawnOptions): Promise<SpawnedOpencode
     // suites that already supplied a daemon connection keep their existing
     // stack; ordinary suites get one provisioned here for the rust invocation.
     const rustMode = process.env.MC_E2E_MODE === "rust";
-    const resources = rustMode && !opts.userSubcConnectionFile ? await provisionRustMode() : null;
+    const resources = rustMode && !opts.userSubcConnectionFile
+        ? await provisionRustMode(opts.existingEnv)
+        : null;
     const resolvedOpts: SpawnOptions = resources
         ? {
               ...opts,

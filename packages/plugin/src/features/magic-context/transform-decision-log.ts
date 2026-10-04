@@ -188,7 +188,9 @@ export function writeRustTransformDecision(args: {
     const mapped =
         decisionUpper === "HARD" || decisionUpper === "MIGRATE_HARD"
             ? { decision: "execute" as const, materialized: true, bustedThisPass: true }
-            : decisionUpper === "SOFT" || decisionUpper === "EXECUTE"
+            : decisionUpper === "SOFT" ||
+                decisionUpper === "EXECUTE" ||
+                args.materializeReason === "ttl_idle"
               ? { decision: "execute" as const, materialized: false, bustedThisPass: true }
               : decisionUpper === "SOFT+"
                 ? { decision: "defer" as const, materialized: false, bustedThisPass: false }

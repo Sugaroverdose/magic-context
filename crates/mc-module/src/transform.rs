@@ -697,6 +697,11 @@ pub struct TransformRequest {
     /// without forcing a fold on legacy sessions.
     #[serde(default)]
     pub system_prompt_hash: String,
+    /// Host acknowledgement that this external system identity was already adopted on
+    /// an idle-expired request (or the first system observation after bootstrap).
+    /// It can acknowledge only a system-only identity delta, never other render inputs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adopted_system_prompt_hash: Option<String>,
     /// Identity of the materializer's upgrade state, stored so a change is detected as a
     /// render-configuration change consistently with the TypeScript materializer.
     #[serde(default)]
@@ -1078,6 +1083,8 @@ struct TransformRequestWire {
     #[serde(default)]
     prev_response_completed_at_ms: Option<u64>,
     #[serde(default)]
+    adopted_system_prompt_hash: Option<String>,
+    #[serde(default)]
     request_observed_at_ms: Option<u64>,
     #[serde(default)]
     channel2_nudge_state: String,
@@ -1185,6 +1192,7 @@ impl<'de> Deserialize<'de> for TransformRequest {
             provider_error: wire.provider_error.or(wire.overflow_error_text),
             mid_turn: wire.mid_turn,
             prev_response_completed_at_ms: wire.prev_response_completed_at_ms,
+            adopted_system_prompt_hash: wire.adopted_system_prompt_hash,
             request_observed_at_ms: wire.request_observed_at_ms,
             channel2_nudge_state: wire.channel2_nudge_state,
             channel2_delivered_id: wire.channel2_delivered_id,
@@ -3086,9 +3094,21 @@ fn apply_additive_only(
     }
     timings.decide = elapsed_ms(decide_scheduler_started_at);
 
-    let hard_fold_requested = scheduler_outcome.idle_ttl_fired
-        || external_revision_changed
-        || project_memory_epoch_hard_due;
+    let idle_fold_due = scheduler_outcome.idle_ttl_fired
+        && ctx
+            .observed_last_response_at_ms
+            .is_some_and(|response| response > loaded.meta.expiry_cutoff_ms);
+    let system_identity_adopted = can_adopt_system_identity(
+        &loaded.meta,
+        req,
+        &content_epoch,
+        &persisted_mural_hash,
+        true,
+        scheduler_outcome.idle_ttl_fired,
+    );
+    let render_config_changed = render_config_changed && !system_identity_adopted;
+    let hard_fold_requested =
+        idle_fold_due || external_revision_changed || project_memory_epoch_hard_due;
     let ordinary_historian_veto = ctx.historian_active
         && m1_signal.revision == applied_m1_revision
         && scheduler_outcome.pass == scheduler::PassDecision::Execute
@@ -3154,6 +3174,10 @@ fn apply_additive_only(
     // Persist an equivalent revision written by an older digest format. This changes only
     // stored metadata; the served bytes are decided by the plan above.
     meta.m1_revision = applied_m1_revision;
+    if system_identity_adopted {
+        meta.last_system_prompt_hash = req.system_prompt_hash.clone();
+        meta.last_render_config = effective_render_config.clone();
+    }
     if !identity_observed && coordinator_identity {
         meta.last_provider_id = req.provider_id.clone().unwrap_or_default();
         meta.last_model_key = req.model_key.clone().unwrap_or_default();
@@ -3446,6 +3470,7 @@ fn apply_additive_only(
             }
             .to_string(),
         ),
+        _ if scheduler_outcome.idle_ttl_fired => Some("ttl_idle".to_string()),
         PassPlan::Soft => Some("m1_delta".to_string()),
         PassPlan::Defer | PassPlan::Reject(_) => None,
     };
@@ -4460,6 +4485,21 @@ fn apply_once(
     // without folding; only a change from a non-empty durable value is a HARD trigger.
     let (render_config_changed, identity_observed, coordinator_identity) =
         render_config_change(&loaded.meta, req, &effective_render_config, transition_due);
+    // The provider may still be cold after an aborted prepared fold. Consume the
+    // head fold once, but leave expiry available to price work queued on the resend.
+    let idle_fold_due = scheduler_outcome.idle_ttl_fired
+        && ctx
+            .observed_last_response_at_ms
+            .is_some_and(|response| response > loaded.meta.expiry_cutoff_ms);
+    let system_identity_adopted = can_adopt_system_identity(
+        &loaded.meta,
+        req,
+        &content_epoch,
+        &persisted_mural_hash,
+        false,
+        scheduler_outcome.idle_ttl_fired,
+    );
+    let render_config_changed = render_config_changed && !system_identity_adopted;
     let reconcile_hard_due = loaded.core.reconcile_pending && !boundary_present;
     // If Claude-code coverage advances over system messages, force a HARD render so the
     // messages move into the m0 prefix before the byte-splice profile suppresses their
@@ -4520,7 +4560,7 @@ fn apply_once(
         || pre_snapshot_inputs_changed
         || first_fold_due
         || boundary_divergence_recut.is_some()
-        || scheduler_outcome.idle_ttl_fired
+        || idle_fold_due
         || system_absorb_hard_due
         || external_revision_changed
         || project_memory_epoch_hard_due;
@@ -4540,10 +4580,11 @@ fn apply_once(
         || profile_transition
         || identity_changed(&loaded.meta.last_provider_id, req.provider_id.as_deref())
         || identity_changed(&loaded.meta.last_model_key, req.model_key.as_deref())
-        || identity_changed(
-            &loaded.meta.last_system_prompt_hash,
-            Some(req.system_prompt_hash.as_str()),
-        );
+        || (!system_identity_adopted
+            && identity_changed(
+                &loaded.meta.last_system_prompt_hash,
+                Some(req.system_prompt_hash.as_str()),
+            ));
     // A marker trigger (a project-memory epoch, an external memory revision, or changed
     // protection-floor inputs) asks for a HARD because rendered content MAY have changed,
     // not because the provider cache died. Such a HARD prices automatic reductions only when
@@ -4611,7 +4652,8 @@ fn apply_once(
             || lineage_state.force_hard
             || (scheduler_outcome.pass != scheduler::PassDecision::Defer
                 && current_m1_digest != applied_m1_revision)))
-        || loaded.meta.soft_refresh_pending;
+        || loaded.meta.soft_refresh_pending
+        || (prefix_materialization_enabled && scheduler_outcome.idle_ttl_fired);
     let supersession_ride_available = independent_rebuild
         || force_episode_available
         || scheduler_outcome.pass == scheduler::PassDecision::Emergency95;
@@ -4887,12 +4929,11 @@ fn apply_once(
         // published prefix work, an explicit flush, force, or actual reductions.
         bust_opportunity,
     });
-    // A todo-only delta does not need a coverage anchor: it inserts a frozen pair between the
-    // existing prefix and tail without moving the m0/m1 boundary. The generic classifier blocks
-    // boundaryless m1 deltas because they cannot splice safely, so promote only its ordinary
-    // defer result when an independent bust opportunity already exists. Reconcile defers remain
-    // untouched because they must clear or rebuild the boundary state first.
-    if todo_injection_pending
+    // Todo insertion and an expired retry's new tail reductions do not need a coverage
+    // anchor: neither moves the frozen m0/m1 boundary. The generic classifier requires
+    // an anchor for history deltas, so promote only an ordinary defer here, after the
+    // independent bust gate has priced the work. Reconcile defers remain untouched.
+    if (todo_injection_pending || (scheduler_outcome.idle_ttl_fired && reclaim_pending_now))
         && bust_opportunity
         && !loaded.core.reconcile_pending
         && matches!(plan, PassPlan::Defer)
@@ -4957,6 +4998,11 @@ fn apply_once(
     if reasoning_exemption_repair {
         materialize_reason = Some("reasoning_exemption_repair".to_string());
     }
+    // Attribution belongs to this expired provider request, even if the head was
+    // already prepared by an aborted attempt and the materializer only replays it.
+    if scheduler_outcome.idle_ttl_fired && !matches!(plan, PassPlan::Hard | PassPlan::MigrateHard) {
+        materialize_reason = Some("ttl_idle".to_string());
+    }
 
     timings.planning = elapsed_ms(planning_started_at);
     profile_end!(perf_planning);
@@ -4968,6 +5014,10 @@ fn apply_once(
     // Persist an equivalent revision written by an older digest format. This changes only
     // stored metadata; the served bytes are decided by the plan above.
     meta.m1_revision = applied_m1_revision;
+    if system_identity_adopted {
+        meta.last_system_prompt_hash = req.system_prompt_hash.clone();
+        meta.last_render_config = effective_render_config.clone();
+    }
     if pass_already_busting {
         if calibration_changed {
             if let Some(previous) = loaded.meta.decision_calibration.as_ref() {
@@ -7349,10 +7399,30 @@ fn cache_relevant_render_config<'a>(req: &'a TransformRequest) -> Cow<'a, str> {
 }
 
 fn render_identity_base(req: &TransformRequest, prompt_surface_epoch: &str) -> String {
+    render_identity_base_with_system_hash(req, prompt_surface_epoch, &req.system_prompt_hash)
+}
+
+fn render_identity_base_with_system_hash(
+    req: &TransformRequest,
+    prompt_surface_epoch: &str,
+    system_hash: &str,
+) -> String {
     let mut parts = Vec::new();
     let render_config = cache_relevant_render_config(req);
     if !render_config.is_empty() {
-        parts.push(render_config.into_owned());
+        parts.push(
+            render_config
+                .split('|')
+                .filter_map(|part| {
+                    if part == format!("system:{}", req.system_prompt_hash) {
+                        (!system_hash.is_empty()).then(|| format!("system:{system_hash}"))
+                    } else {
+                        Some(part.to_string())
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("|"),
+        );
     }
     if let Some(provider) = req.provider_id.as_deref().filter(|value| !value.is_empty()) {
         parts.push(format!("provider:{provider}"));
@@ -7360,10 +7430,49 @@ fn render_identity_base(req: &TransformRequest, prompt_surface_epoch: &str) -> S
     if let Some(model) = req.model_key.as_deref().filter(|value| !value.is_empty()) {
         parts.push(format!("model:{model}"));
     }
-    if prompt_surface_epoch.is_empty() && !req.system_prompt_hash.is_empty() {
-        parts.push(format!("system:{}", req.system_prompt_hash));
+    if prompt_surface_epoch.is_empty() && !system_hash.is_empty() {
+        parts.push(format!("system:{system_hash}"));
     }
     parts.join("|")
+}
+
+/// Acknowledgement changes metadata, not the frozen prefix. Rebuild the comparison
+/// identity with only the previous external system hash: equality proves no model,
+/// prompt-surface, serializer, workspace or renderer change is being waived.
+fn can_adopt_system_identity(
+    meta: &ModuleMeta,
+    req: &TransformRequest,
+    epoch: &M0ContentEpoch,
+    mural_hash: &str,
+    additive: bool,
+    idle_expired: bool,
+) -> bool {
+    if req.serializer_profile != "opencode-aisdk"
+        || !meta.initialized
+        || req.system_prompt_hash.is_empty()
+        || req.system_prompt_hash == meta.last_system_prompt_hash
+        || !(idle_expired
+            || req.adopted_system_prompt_hash.as_deref() == Some(req.system_prompt_hash.as_str()))
+    {
+        return false;
+    }
+    let mut previous_epoch = epoch.clone();
+    previous_epoch.prompt_surface_epoch = crate::prompt_surface::unified_content_epoch(
+        &meta.last_system_prompt_hash,
+        &prompt_surface_selection(req),
+    );
+    let base = render_identity_base_with_system_hash(
+        req,
+        &previous_epoch.prompt_surface_epoch,
+        &meta.last_system_prompt_hash,
+    );
+    let base = if additive {
+        format!("additive-only-v2|{base}")
+    } else {
+        base
+    };
+    fold_mural_content_identity(&fold_m0_content_epoch(&base, &previous_epoch), mural_hash)
+        == meta.last_render_config
 }
 
 fn m0_mural_input(
@@ -18194,6 +18303,7 @@ pub(crate) mod tests {
             session_id: session.to_string(),
             render_config: cfg.to_string(),
             system_prompt_hash: String::new(),
+            adopted_system_prompt_hash: None,
             upgrade_state: String::new(),
             is_subagent: false,
             protected_tags: 20,
@@ -22539,12 +22649,14 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn ttl_hard_requires_in_process_observation_not_durable_anchor_alone() {
+    fn ttl_hard_requires_served_response_observation_not_durable_anchor_alone() {
         let dir = tempfile::tempdir().unwrap();
         let s = store(dir.path());
         bootstrap_covering_a(&s);
         let mut loaded = s.load("ses").unwrap();
         loaded.meta.last_committed_pass_at_ms = 1;
+        // This fixture represents a reply after the last materialization.
+        loaded.meta.expiry_cutoff_ms = 0;
         s.commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
             .unwrap();
 
@@ -22559,6 +22671,107 @@ pub(crate) mod tests {
         ctx.observed_last_response_at_ms = Some(1);
         let observed = transform(&s, &req("ses", "cfg0", vec![item("a", 1, "raw")]), &ctx).unwrap();
         assert_eq!(observed.action, "HARD");
+    }
+
+    #[test]
+    fn issue_610_expired_retry_replays_one_fold_and_adopts_only_the_late_system_identity() {
+        for compaction_enabled in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let s = store(dir.path());
+            let mut request = with_usage(
+                req("idle-retry", "system:oct02", vec![item("a", 1, "raw")]),
+                10,
+                100,
+            );
+            request.serializer_profile = "opencode-aisdk".into();
+            request.system_prompt_hash = "oct02".into();
+            let mut ctx = pctx("git:proj", "/nonexistent-docs", 1_000);
+            ctx.compaction_enabled = compaction_enabled;
+            ctx.cache_ttl = "5m".into();
+            transform(&s, &request, &ctx).unwrap();
+            ctx.observed_last_response_at_ms = Some(1_001);
+            ctx.now_ms = 301_001;
+            assert_eq!(transform(&s, &request, &ctx).unwrap().action, "SOFT+");
+            ctx.now_ms += 1;
+            let prepared = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(prepared.action, "HARD");
+            assert_eq!(prepared.materialize_reason.as_deref(), Some("ttl_expiry"));
+            let folded_at = s.load("idle-retry").unwrap().meta.expiry_cutoff_ms;
+            // Aborting leaves the last served completion unchanged.
+            ctx.now_ms += 1;
+            let retry = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(retry.action, "SOFT+");
+            assert_eq!(retry.scheduler_decision.as_deref(), Some("execute"));
+            assert_eq!(retry.materialize_reason.as_deref(), Some("ttl_idle"));
+            assert_eq!(retry.ck_messages, prepared.ck_messages);
+            assert_eq!(
+                s.load("idle-retry").unwrap().meta.expiry_cutoff_ms,
+                folded_at
+            );
+            // The system hook ran after messages on that expired resend. Its
+            // durable acknowledgement reaches the module on the next tool step.
+            request.system_prompt_hash = "oct03".into();
+            request.render_config = "system:oct03".into();
+            request.adopted_system_prompt_hash = Some("oct03".into());
+            ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+            ctx.now_ms += 1;
+            let next = transform(&s, &request, &ctx).unwrap();
+            assert_eq!(next.action, "SOFT+");
+            assert_eq!(next.ck_messages, retry.ck_messages);
+            let adopted = s.load("idle-retry").unwrap();
+            assert_eq!(adopted.meta.last_system_prompt_hash, "oct03");
+            assert_eq!(adopted.meta.expiry_cutoff_ms, folded_at);
+            // A warm content change has no acknowledgement and retains its fold.
+            request.system_prompt_hash = "new-instructions".into();
+            request.render_config = "system:new-instructions".into();
+            assert_eq!(transform(&s, &request, &ctx).unwrap().action, "HARD");
+            // An acknowledgement cannot suppress another changed render input.
+            request.system_prompt_hash = "oct04".into();
+            request.adopted_system_prompt_hash = Some("oct04".into());
+            request.render_config = "system:oct04|changed-tools".into();
+            assert_eq!(transform(&s, &request, &ctx).unwrap().action, "HARD");
+        }
+    }
+
+    #[test]
+    fn issue_610_still_expired_retry_prices_newly_queued_drops_without_refolding() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = store(dir.path());
+        s.replace_compartments("idle-drop", &[comp(1, 1, 1, "a", "SUMMARY")])
+            .unwrap();
+        let request = with_usage(
+            req(
+                "idle-drop",
+                "cfg",
+                vec![item("a", 1, "old text"), item("tail", 2, "tail")],
+            ),
+            10,
+            100,
+        );
+        let mut ctx = pctx("git:proj", "/nonexistent-docs", 1_000);
+        transform(&s, &request, &ctx).unwrap();
+        ctx.observed_last_response_at_ms = Some(1_001);
+        ctx.now_ms = 600_000;
+        let prepared = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(prepared.action, "HARD");
+        let folded_at = s.load("idle-drop").unwrap().meta.expiry_cutoff_ms;
+        s.append_pending_agent_drops("idle-drop", &["tail#0".into()], ctx.now_ms)
+            .unwrap();
+        ctx.now_ms += 1;
+        let retry = transform(&s, &request, &ctx).unwrap();
+        assert_eq!(retry.action, "SOFT");
+        assert_eq!(retry.materialize_reason.as_deref(), Some("ttl_idle"));
+        assert!(s.load_pending_agent_drops("idle-drop").unwrap().is_empty());
+        assert_eq!(
+            s.load("idle-drop").unwrap().meta.expiry_cutoff_ms,
+            folded_at
+        );
+        ctx.observed_last_response_at_ms = Some(ctx.now_ms);
+        ctx.now_ms += 1;
+        assert_eq!(
+            transform(&s, &request, &ctx).unwrap().ck_messages,
+            retry.ck_messages
+        );
     }
 
     fn assert_advisory_without_prefix_materialization(reconcile: bool) {

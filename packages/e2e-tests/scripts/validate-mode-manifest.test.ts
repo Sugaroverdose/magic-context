@@ -33,7 +33,8 @@ describe("mode manifest validator", () => {
         const ts = filesForMode(validation, "ts");
         const rust = filesForMode(validation, "rust");
         expect(ts).toHaveLength(51);
-        expect(rust).toHaveLength(56);
+        expect(rust).toHaveLength(57);
+        expect(rust).toContain("tests/idle-ttl-restart.test.ts");
         expect(rust).toContain("tests/subagent-behavior.test.ts");
         expect(ts.filter((path) => path.startsWith("tests/pi-")).length).toBe(3);
         expect(filesForMode(validation, "ts", "opencode")).toHaveLength(37);

@@ -352,8 +352,6 @@ function rustWireCacheEstimatedBytes(cache: RustWireCache): number {
 
 interface RustSessionState extends ModuleStateSyncState {
     initialized: boolean;
-    /** Preserve an empty first-render hash until the host's recorded system prompt changes. */
-    baselineSystemHashOmitted: boolean;
     todoProbeIdentity?: string;
     todoProbeNextPass?: boolean;
     /** Last seen compartment `max_sequence:count` for this session; a change re-arms auto-embed. */
@@ -1027,7 +1025,6 @@ function ensureState(states: Map<string, RustSessionState>, sessionId: string): 
     if (!state) {
         state = {
             initialized: false,
-            baselineSystemHashOmitted: false,
             consecutiveFailures: 0,
             passCount: 0,
             parked: false,
@@ -1531,6 +1528,7 @@ function buildTransformBody(args: {
             .filter(Boolean)
             .join("|"),
         system_prompt_hash: args.systemPromptHash,
+        adopted_system_prompt_hash: args.passInputs.adopted_system_prompt_hash,
         upgrade_state: args.upgradeState,
         is_subagent: args.passInputs.is_subagent === true,
         messages: args.input,
@@ -2924,16 +2922,11 @@ export function createRustModeTransform(
             }
             const effectiveFloor = protectionFloorResolution.floor;
             const historianRun = deps.resolveHistorianRun?.();
-            // OpenCode can run the messages hook before the system hook on the first turn.
-            // The latter records the exact hash of the system text already served on that
-            // turn. Keep the module's provisional empty identity until that text changes;
-            // otherwise its first steady defer would pay a spurious HARD.
+            // The system hook acknowledges its first hash and idle-expired changes in
+            // the durable cached marker. Forward that acknowledgement separately from
+            // the actual identity so the module can adopt only a system-only delta.
             const observedSystemHash = sessionMeta.systemPromptHash ?? "";
-            const rustSystemHash =
-                state.baselineSystemHashOmitted &&
-                sessionMeta.cachedM0SystemHash === observedSystemHash
-                    ? ""
-                    : observedSystemHash;
+            const rustSystemHash = observedSystemHash;
             const historianChain = resolvedHistorianModelChain({
                 historianModel: historianRun?.model ?? deps.historianModel,
                 fallbackModels: historianRun?.fallbackModels ?? deps.fallbackModels,
@@ -2965,6 +2958,10 @@ export function createRustModeTransform(
                 cache_ttl: sessionMeta.cacheTtl,
                 is_subagent: sessionMeta.isSubagent,
                 system_prompt_hash: rustSystemHash,
+                adopted_system_prompt_hash:
+                    observedSystemHash && sessionMeta.cachedM0SystemHash === observedSystemHash
+                        ? observedSystemHash
+                        : undefined,
                 upgrade_state: readUpgradeState(deps.db, sessionId),
                 tool_present: toolPresent,
                 todo_tool_present: false,
@@ -4144,9 +4141,6 @@ export function createRustModeTransform(
                 state.ordinalContinuationBase = ordinalContinuationBase;
             }
             if (!stateSyncRetryBusy) {
-                if (!state.initialized && !observedSystemHash) {
-                    state.baselineSystemHashOmitted = true;
-                }
                 state.initialized = true;
                 state.seedPassPending = false;
             }

@@ -3754,7 +3754,6 @@ pub struct McHandler {
     native_attachments: Mutex<NativeAttachmentCache>,
     projections: Mutex<ProjectionCache>,
     boundary_tokens: Mutex<BoundaryTokenCache>,
-    scheduler_observations: Mutex<HashMap<String, SchedulerObservation>>,
     guidance_dates: Mutex<HashMap<String, String>>,
     prompt_surface_epochs: Mutex<HashMap<String, PromptSurfaceSelection>>,
     /// Route channels whose consumer declared it speaks `tool-provider/v1` at bind
@@ -4318,12 +4317,6 @@ struct HistorianFiringTask {
     publication_fence: Option<Arc<dyn historian::HistorianPublicationFence>>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct SchedulerObservation {
-    last_response_at_ms: i64,
-    observed_in_process: bool,
-}
-
 #[async_trait]
 impl HistorianProducerFactory for MissingProducerFactory {
     async fn connect(
@@ -4393,7 +4386,6 @@ impl McHandler {
             native_attachments: Mutex::new(NativeAttachmentCache::default()),
             projections: Mutex::new(ProjectionCache::default()),
             boundary_tokens: Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES)),
-            scheduler_observations: Mutex::new(HashMap::new()),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             tool_provider_v1_channels: Mutex::new(HashSet::new()),
@@ -4775,7 +4767,6 @@ impl McHandler {
             native_attachments: Mutex::new(NativeAttachmentCache::default()),
             projections: Mutex::new(ProjectionCache::default()),
             boundary_tokens: Mutex::new(BoundaryTokenCache::new(BOUNDARY_TOKEN_CACHE_BUDGET_BYTES)),
-            scheduler_observations: Mutex::new(HashMap::new()),
             guidance_dates: Mutex::new(HashMap::new()),
             prompt_surface_epochs: Mutex::new(HashMap::new()),
             tool_provider_v1_channels: Mutex::new(HashSet::new()),
@@ -5275,10 +5266,6 @@ impl McHandler {
             if session.starts_with("mc-dreamer:") {
                 self.unregister_dreamer_run(&session);
             }
-            self.scheduler_observations
-                .lock()
-                .expect("scheduler observations mutex")
-                .remove(&session);
             self.runtime_store_errors
                 .lock()
                 .expect("runtime store errors mutex")
@@ -5655,47 +5642,6 @@ impl McHandler {
             .lock()
             .expect("wrapup sessions mutex")
             .contains_key(session_id)
-    }
-
-    fn observed_last_response_at_ms(
-        &self,
-        store: &McStore,
-        session_id: &str,
-        entry_snapshot: &OnceLock<Option<mc_store::MetaSnapshot>>,
-    ) -> Option<i64> {
-        let mut observations = self
-            .scheduler_observations
-            .lock()
-            .expect("scheduler observations mutex");
-        if let Some(observation) = observations.get(session_id) {
-            return observation
-                .observed_in_process
-                .then_some(observation.last_response_at_ms);
-        }
-        let anchor = Self::handler_entry_state(store, session_id, entry_snapshot)
-            .map(|state| state.meta.last_committed_pass_at_ms)
-            .unwrap_or(0);
-        observations.insert(
-            session_id.to_string(),
-            SchedulerObservation {
-                last_response_at_ms: anchor,
-                observed_in_process: false,
-            },
-        );
-        None
-    }
-
-    fn record_response_observation(&self, session_id: &str, now: i64) {
-        self.scheduler_observations
-            .lock()
-            .expect("scheduler observations mutex")
-            .insert(
-                session_id.to_string(),
-                SchedulerObservation {
-                    last_response_at_ms: now,
-                    observed_in_process: true,
-                },
-            );
     }
 
     fn guidance_now_ms(&self) -> i64 {
@@ -10315,11 +10261,12 @@ impl McHandler {
                 cache_ttl: resolved_cache_ttl.value,
                 cache_ttl_provenance: resolved_cache_ttl.provenance,
                 model_key: binding.model_key.clone(),
-                observed_last_response_at_ms: self.observed_last_response_at_ms(
-                    &store,
-                    &parsed.session_id,
-                    &handler_entry_state,
-                ),
+                // Only the host knows whether the provider actually completed a reply.
+                // A local transform response merely prepares the next provider request.
+                observed_last_response_at_ms: parsed
+                    .prev_response_completed_at_ms
+                    .filter(|timestamp| *timestamp > 0)
+                    .and_then(|timestamp| i64::try_from(timestamp).ok()),
                 guidance_date: Some(self.guidance_date_for_transform(&parsed.session_id, pass_now)),
                 historian_active: self.historian_active(
                     &store,
@@ -10688,10 +10635,7 @@ impl McHandler {
         let trace_complete_started_at = Instant::now();
         let _ = store.trace_pass_completed(&parsed.session_id, &request_attempt_id, now_ms());
         let trace_complete_ms = trace_complete_started_at.elapsed().as_secs_f64() * 1_000.0;
-        let response_observation_started_at = Instant::now();
-        self.record_response_observation(&parsed.session_id, now_ms());
-        let response_observation_ms =
-            response_observation_started_at.elapsed().as_secs_f64() * 1_000.0;
+        // Preparing this request cannot refresh the provider's idle cache clock.
         // Tail deltas have already been expanded at this point. Charge the retained request tree,
         // not the much smaller inbound suffix, so the ready LRU and active-lease budget describe
         // the same object their `Arc`s keep alive.
@@ -10728,7 +10672,7 @@ impl McHandler {
             timings.projection_cache_store = projection_cache_store_ms;
             timings.native_attach = native_attach_ms;
             timings.trace_complete = trace_complete_ms;
-            timings.response_observation = response_observation_ms;
+            timings.response_observation = 0.0;
             timings.retained_size = retained_size_ms;
             timings.snapshot_store = snapshot_store_ms;
             timings.trigger_ms = trigger_timings.elapsed_ms;
@@ -21262,7 +21206,7 @@ mod tests {
             let mut wire = request(vec![ck("tail", 1, "raw tail")]);
             wire["serializer_profile"] = json!("claude-code-anthropic");
             wire["model_key"] = json!(model);
-            handler.record_response_observation("ses", now_ms());
+            wire["prev_response_completed_at_ms"] = json!(now_ms());
             wire["usage"] =
                 json!({"current_total_input_tokens": usage, "context_limit_tokens": 100_000});
             if let Some(host) = host {
@@ -21274,6 +21218,31 @@ mod tests {
         assert!(handler.threshold_logged_routes.lock().unwrap().contains(&7));
         handler.bind_route(7, route);
         assert!(!handler.threshold_logged_routes.lock().unwrap().contains(&7));
+    }
+
+    #[tokio::test]
+    async fn issue_610_preparation_does_not_spend_host_completion_clock() {
+        let (handler, store, _dir, _project) =
+            handler_with_store(Arc::new(ProducerState::default()), default_test_config());
+        let mut wire = request_with_usage(vec![ck("tail", 1, "raw tail")], 1_000, 50_000);
+        call_transform_request(&handler, wire.clone()).await;
+        let mut loaded = store.load("ses").unwrap();
+        loaded.meta.expiry_cutoff_ms = 1;
+        store
+            .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+            .unwrap();
+        wire["prev_response_completed_at_ms"] = json!(2);
+        let expired = call_transform_request(&handler, wire.clone()).await;
+        assert_eq!(expired["action"], "HARD");
+        let retry = call_transform_request(&handler, wire.clone()).await;
+        assert_eq!(retry["action"], "SOFT+");
+        assert_eq!(retry["scheduler_decision"], "execute");
+        assert_eq!(retry["materialize_reason"], "ttl_idle");
+        // Usage-less served completion is still supplied by the host clock owner.
+        wire["prev_response_completed_at_ms"] = json!(now_ms());
+        wire.as_object_mut().unwrap().remove("usage");
+        let served = call_transform_request(&handler, wire).await;
+        assert_eq!(served["scheduler_decision"], "defer");
     }
 
     #[test]
@@ -37625,6 +37594,8 @@ mod tests {
         );
 
         let mut defer_request = request_with_usage(messages, 1_000, 50_000);
+        // The preceding provider reply was served; preparation alone is not a clock source.
+        defer_request["prev_response_completed_at_ms"] = json!(now_ms());
         defer_request["todo_verdict_probed"] = json!(true);
         defer_request["todo_tool_present"] = json!(true);
         let defer = call_transform_request(&soft_handler, defer_request).await;
@@ -37688,8 +37659,9 @@ mod tests {
         assert_eq!(after.meta.coverage_ordinal, Some(0));
         assert!(!after.meta.bootstrap_seed_fold_pending);
 
-        let replay =
-            call_transform_request(&handler, request_with_usage(live, 1_000, 50_000)).await;
+        let mut replay_request = request_with_usage(live, 1_000, 50_000);
+        replay_request["prev_response_completed_at_ms"] = json!(now_ms());
+        let replay = call_transform_request(&handler, replay_request).await;
         assert_eq!(replay["scheduler_decision"], json!("defer"), "{replay}");
         assert_eq!(replay["decision"], json!("SOFT+"));
         assert_eq!(replay["ck_messages"], folded["ck_messages"]);

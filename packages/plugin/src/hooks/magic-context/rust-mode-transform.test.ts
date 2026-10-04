@@ -2688,6 +2688,44 @@ describe("Rust mode authority adapter", () => {
         expect(output.messages).toEqual(native);
     });
 
+    it("forwards the served response clock and adopted system identity without hiding an omitted bootstrap hash", async () => {
+        const sessionId = `rust-idle-system-${Date.now()}`;
+        sessions.push(sessionId);
+        const db = makeDb();
+        installAvailabilityDb(sessionId, {});
+        installRawProvider(sessionId);
+        const bodies: Array<Record<string, unknown>> = [];
+        const moduleClient: RustModeModuleClient = {
+            invalidateStateSyncCapabilities: () => undefined,
+            call: async ({ method, body }) => {
+                if (method !== "transform") return { ok: true };
+                bodies.push(body as Record<string, unknown>);
+                return {
+                    decision: "SOFT+",
+                    native_messages: [
+                        { role: "assistant", parts: [{ type: "text", text: "stable" }] },
+                    ],
+                };
+            },
+        };
+        const transform = createRustModeTransform(makeDeps(db, moduleClient), { moduleClient });
+        for (const hash of ["", "oct02", "oct03"]) {
+            const meta = makeMeta(db, sessionId);
+            meta.systemPromptHash = hash;
+            meta.cachedM0SystemHash = hash;
+            meta.lastResponseTime = 123;
+            const messages = makeMessages(sessionId);
+            await transform.run(sessionId, messages, { messages: messages as unknown[] }, meta);
+        }
+        expect(bodies.map((body) => body.system_prompt_hash)).toEqual(["", "oct02", "oct03"]);
+        expect(bodies.map((body) => body.adopted_system_prompt_hash)).toEqual([
+            undefined,
+            "oct02",
+            "oct03",
+        ]);
+        expect(bodies.map((body) => body.prev_response_completed_at_ms)).toEqual([123, 123, 123]);
+    });
+
     it("sends the same render identity on the need_full_sync full-array retry", async () => {
         // The module HARD-renders whenever the render identity changes. A retry that
         // drops a field (the reasoning variant) records a different identity, and the
@@ -2736,6 +2774,7 @@ describe("Rust mode authority adapter", () => {
                 "model_key",
                 "provider_id",
                 "system_prompt_hash",
+                "adopted_system_prompt_hash",
                 "upgrade_state",
             ]) {
                 expect(body?.[field]).toEqual(steady?.[field]);
