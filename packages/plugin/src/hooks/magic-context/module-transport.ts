@@ -567,6 +567,7 @@ export class SubcModuleTransport {
         try {
             for (let attempt = 0; attempt < 2; attempt += 1) {
                 let ensuredRoute: EnsuredRoute | null = null;
+                let initialResponseReceived = false;
                 try {
                     if (args.signal?.aborted) {
                         throw args.signal.reason ?? new Error("module transport call aborted");
@@ -615,6 +616,7 @@ export class SubcModuleTransport {
                         "waiting for the module response",
                     );
                     timings.responseWait += performance.now() - waitStartedAt;
+                    initialResponseReceived = true;
                     if (
                         this.client !== ensuredRoute.client ||
                         this.connectionGeneration !== ensuredRoute.generation
@@ -701,6 +703,25 @@ export class SubcModuleTransport {
                             this.invalidateConnection(ensuredRoute.client);
                         } else {
                             this.invalidateConnection();
+                        }
+                        // The SDK rejects a stale handle locally, before emitting any request
+                        // frame. Rebind that unsent request after a module restart. This is not
+                        // permission to resend a dispatched transform or a partial reply: their
+                        // outcome can already be committed, even when a later page is stale.
+                        // Remote error frames can reuse the code, but decode as SubcError,
+                        // not this SDK-local exception. A remote refusal is not unsent proof.
+                        const locallyUnsent =
+                            isRecord(error) &&
+                            error.name === "StaleRouteHandleError" &&
+                            error.code === "stale_route_handle";
+                        if (
+                            attempt === 0 &&
+                            ensuredRoute &&
+                            !initialResponseReceived &&
+                            locallyUnsent &&
+                            !args.generationSensitive
+                        ) {
+                            continue;
                         }
                         // A disconnected transform may already have committed. Never resend
                         // its history automatically, including after a partial reply download.

@@ -295,6 +295,7 @@ export default async (ctx) => {
     const system = hooks["experimental.chat.system.transform"];
     const messages = hooks["experimental.chat.messages.transform"];
     const pending = new Map();
+    const transformed = new Set();
     return { ...hooks,
         "experimental.chat.system.transform": async (input, output) => {
             if (!input.sessionID || output.system.join("\\n").includes("You are a title generator")) return system(input, output);
@@ -303,19 +304,31 @@ export default async (ctx) => {
             for (let i = 0; i < output.system.length; i++) output.system[i] = output.system[i].replace(/Today's date: [^\\n]+/g, "Today's date: " + date);
             // Seed the actual system identity on both paths before delaying the
             // returning request's observer into the reporter's messages-first order.
-            if (stage === "old") return system(input, output);
+            if (stage === "old") {
+                transformed.delete(input.sessionID);
+                return system(input, output);
+            }
             // Render guidance before the host copies its system text, but delay
             // the real session's hash observation until its messages pass. The
             // reporter's Desktop used that order; the CLI can observe it earlier.
             await system({ ...input, sessionID: input.sessionID + ":render:" + Date.now() }, output);
+            // OpenCode 1.18.32 runs messages before system. In that order the
+            // current request is already transformed, so observe it now, before
+            // its reply completes, rather than on the next warm tool step.
+            if (transformed.delete(input.sessionID)) {
+                if (stage !== "aborted") await system(input, output);
+                return;
+            }
             pending.set(input.sessionID, { input, output, stage });
         },
         "experimental.chat.messages.transform": async (input, output) => {
             const sid = output.messages.find((message) => message.info?.sessionID)?.info.sessionID;
             await messages(input, output);
+            transformed.add(sid);
             const next = pending.get(sid);
             if (next) {
                 pending.delete(sid);
+                transformed.delete(sid);
                 if (next.stage !== "aborted") {
                     await system(next.input, next.output);
                 }
@@ -382,13 +395,16 @@ export default async (ctx) => {
 						(line) =>
 							line.includes(session) && Date.parse(line.slice(1, 25)) >= start,
 					);
-			// Logs flush asynchronously. Require the last request's completed
-			// pass, not an early scheduler line flushed ahead of materialization.
+			// Logs flush asynchronously. Require a completed transform, not an
+			// early scheduler line flushed ahead of materialization. Channel 2
+			// nudges can send an extra provider request without another messages
+			// transform, so network request count is not a transform-log count.
+			// Keep every captured request below for the byte replay assertions.
 			await harness.waitFor(
 				() =>
 					currentLines().filter((line) =>
 						/transform completed|rust pass:/.test(line),
-					).length >= requests.length,
+					).length > 0,
 				{ timeoutMs: 5_000, label: "complete idle pass logs" },
 			);
 			const result = {

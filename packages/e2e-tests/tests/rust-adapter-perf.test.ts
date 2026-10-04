@@ -169,6 +169,8 @@ describe.skipIf(!rustPrereqs.ok)("rust adapter performance", () => {
         console.log(
             `adapter-loopback bytes=${loopbackBody.length} tcp_echo_p50_ms=${(await measureLoopback(loopbackBody)).toFixed(3)} sdk_status_p50_ms=${median(sdkSamples).toFixed(3)} adapter_status_p50_ms=${median(adapterSamples).toFixed(3)}`,
         );
+        expect(receive.sample().frames).toBe(42);
+        expect(receive.sample().replyPages).toBe(1);
         let receiveSample = receive.sample();
         let replayReadMs = 0;
         const readReplay = persisted.getTrailingBlankDecisions;
@@ -232,6 +234,7 @@ describe.skipIf(!rustPrereqs.ok)("rust adapter performance", () => {
         cleanups.push(() => transform.clearSession(sessionId));
         const overheads: number[] = [];
         const hashes: string[] = [];
+        let previousMessages: string[] = [];
         for (let pass = 0; pass < 5; pass++) {
             if (pass > 0) {
                 const i = messages.length;
@@ -271,7 +274,14 @@ describe.skipIf(!rustPrereqs.ok)("rust adapter performance", () => {
                 hashes.push(
                     createHash("sha256").update(JSON.stringify(output.messages)).digest("hex"),
                 );
-                expect(receiveSample.frames).toBe(1);
+                // This 1500-message response is larger than a unary frame. The
+                // profiler counts decoded physical pages, not logical transforms.
+                expect(receiveSample.replyPages).toBeGreaterThan(1);
+                expect(receiveSample.frames).toBe(receiveSample.replyPages);
+                expect(output.messages).toHaveLength(messages.length + 2);
+                expect(
+                    output.messages.slice(0, previousMessages.length).map((message) => JSON.stringify(message)),
+                ).toEqual(previousMessages);
                 expect(Number.isFinite(moduleTimings.handler_total)).toBe(true);
                 expect(line).toContain("wire_messages:2");
             }
@@ -281,6 +291,7 @@ describe.skipIf(!rustPrereqs.ok)("rust adapter performance", () => {
             if (!line?.includes("applied=true")) console.log(logs.join("\n"));
             expect(line).toContain("applied=true");
             if (pass > 0) expect(line).toContain("decision=SOFT+");
+            previousMessages = output.messages.map((message) => JSON.stringify(message));
             await Bun.sleep(20);
         }
         console.log(

@@ -371,6 +371,90 @@ describe("SubcModuleTransport", () => {
         expect(connects).toBe(1);
     });
 
+    it("does not rebind a stale reply page after the transform already answered", async () => {
+        const transport = new SubcModuleTransport("unused-connection-file", "magic-context", 100);
+        const original = JSON.stringify({ messages: ["x".repeat(100_000)] });
+        const id = createHash("sha256").update(original).digest("hex");
+        const requests: unknown[] = [];
+        let connects = 0;
+        const client = {
+            routeOpen: async () => ({ channel: 7, epoch: 77 }),
+            request: async (_route: RouteHandle, body: unknown) => {
+                requests.push(decodedBody(body));
+                if (requests.length === 1)
+                    return {
+                        reply_page: {
+                            id,
+                            index: 0,
+                            total: 2,
+                            bytes: Buffer.byteLength(original),
+                            data: original.slice(0, 65_536),
+                        },
+                    };
+                throw Object.assign(new Error("route handle is stale"), {
+                    name: "StaleRouteHandleError",
+                    code: "stale_route_handle",
+                });
+            },
+            close: () => undefined,
+        } as unknown as SubcClient;
+        const internals = transport as unknown as {
+            client: SubcClient | null;
+            ensureConnected(): Promise<SubcClient>;
+        };
+        internals.ensureConnected = async () => {
+            connects += 1;
+            internals.client = client;
+            return client;
+        };
+        await expect(
+            transport.call({
+                sessionId: "stale-page",
+                projectRoot: "/workspace/project",
+                method: "transform",
+                body: { method: "transform" },
+            }),
+        ).rejects.toMatchObject({ code: "transform_transport_interrupted" });
+        expect(requests).toEqual([
+            { method: "transform", accept_reply_pages: true },
+            { method: "reply.page", reply_page_id: id, reply_page_index: 1 },
+        ]);
+        expect(connects).toBe(1);
+    });
+
+    it("does not treat a remote stale-route code as proof the transform was unsent", async () => {
+        const transport = new SubcModuleTransport("unused-connection-file", "magic-context", 100);
+        let requests = 0;
+        let connects = 0;
+        const client = {
+            routeOpen: async () => ({ channel: 7, epoch: 77 }),
+            request: async () => {
+                requests += 1;
+                throw new SubcError("module returned stale-route code", "stale_route_handle");
+            },
+            close: () => undefined,
+        } as unknown as SubcClient;
+        const internals = transport as unknown as {
+            client: SubcClient | null;
+            ensureConnected(): Promise<SubcClient>;
+        };
+        internals.ensureConnected = async () => {
+            connects += 1;
+            internals.client = client;
+            return client;
+        };
+        await expect(
+            transport.call({
+                sessionId: "remote-stale",
+                projectRoot: "/workspace/project",
+                method: "transform",
+                body: { method: "transform" },
+            }),
+        ).rejects.toMatchObject({ code: "transform_transport_interrupted" });
+        expect(requests).toBe(1);
+        expect(connects).toBe(1);
+    });
+
     it("turns a store-ahead error frame into one typed refusal and does not retry it", async () => {
         const transport = new SubcModuleTransport("unused-connection-file", "magic-context", 100);
         const route = { channel: 7, epoch: 77 } as RouteHandle;
@@ -715,7 +799,10 @@ describe("SubcModuleTransport", () => {
         expect(internals.client).toBe(client);
     });
 
-    it("reopens a route and retries when a restarted module leaves a stale route token", async () => {
+    it.each([
+        "session.status",
+        "transform",
+    ] as const)("rebinds an unsent %s when a restarted module leaves a stale route token", async (method) => {
         const tempDir = createTestTempDirFromPath(join(tmpdir(), "module-subc-restart-"));
         const key = Uint8Array.from({ length: 32 }, (_, index) => index + 1);
         const daemonId = Uint8Array.from({ length: 16 }, (_, index) => 100 + index);
@@ -786,8 +873,8 @@ describe("SubcModuleTransport", () => {
             const args = {
                 sessionId: "session-restart",
                 projectRoot: "/workspace/project",
-                method: "session.status" as const,
-                body: { method: "session.status", v: 1 },
+                method,
+                body: { method, v: 1 },
             };
             await expect(transport.call(args)).resolves.toEqual({ result: { requestCount: 1 } });
 
@@ -800,6 +887,8 @@ describe("SubcModuleTransport", () => {
 
             await expect(transport.call(args)).resolves.toEqual({ result: { requestCount: 2 } });
             expect(routeOpenCount).toBe(2);
+            // Only the two intended requests reached the peer; the stale handle
+            // rejection never emitted a frame or executed a transform.
             expect(requestCount).toBe(2);
             expect(serverError).toBeUndefined();
         } finally {
