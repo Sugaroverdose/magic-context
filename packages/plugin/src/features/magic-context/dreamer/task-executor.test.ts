@@ -1501,11 +1501,7 @@ describe("createDreamTaskExecutor — parent session resolution", () => {
             timeoutMinutes: 5,
         };
         const now = Date.now();
-        seedTaskScheduleState(db, project, config.task, config.schedule, now - 1000);
-        writeTaskScheduleState(db, {
-            ...getTaskScheduleState(db, project, config.task)!,
-            nextDueAt: now - 1000,
-        });
+        seedTaskScheduleState(db, project, config.task, now - 1000, null, config.schedule);
         const lastRunBefore = getTaskScheduleState(db, project, config.task)!.lastRunAt;
         expect(
             await runDueTasksForProject({
@@ -1583,6 +1579,44 @@ describe("createDreamTaskExecutor — parent session resolution", () => {
         expect((await run()).status).toBe("completed");
         expect(client.session.list).toHaveBeenCalledTimes(2);
         expect(client.session.create).toHaveBeenCalledTimes(1);
+    });
+
+    test("does not require a parent for explicitly hidden process-local sessions", async () => {
+        db = freshDb();
+        const project = "/repo/process-local";
+        insertMemory(db, { projectPath: project, category: "ARCHITECTURE", content: "A fact." });
+        const client = {
+            backgroundSessionsAreHidden: true,
+            session: {
+                list: mock(async () => ({ data: [] })),
+                create: mock(async () => ({ data: { id: "process-local-child" } })),
+                prompt: mock(async () => ({})),
+                messages: mock(async () => ({
+                    data: assistantMessages("No duplicates in this snapshot."),
+                })),
+                delete: mock(async () => ({})),
+            },
+        };
+        const executor = createDreamTaskExecutor({
+            client: client as never,
+            sessionDirectory: project,
+            openOpenCodeDb: () => null,
+        });
+        const outcome = await executor(
+            { task: "curate", schedule: "0 3 * * *", timeoutMinutes: 5 },
+            {
+                db,
+                projectIdentity: project,
+                holderId: "holder",
+                leaseKey: leaseKeyFor("curate", project),
+            },
+        );
+        expect(outcome.status).toBe("completed");
+        expect(client.session.list).not.toHaveBeenCalled();
+        expect(client.session.create).toHaveBeenCalledWith({
+            body: expect.not.objectContaining({ parentID: expect.any(String) }),
+            query: { directory: project },
+        });
     });
 
     test("concurrent tasks share parent resolution while docs without a git repo skip model invocation", async () => {
