@@ -302,6 +302,61 @@ impl Serialize for CkWireBlock {
 }
 
 impl CkWireBlock {
+    /// Internal projection replay constructor. The receiver is an already-validated typed
+    /// shell together with its own original JSON, not independently supplied parts. Replacing
+    /// scalar text updates both views; all other fields, including unknown JSON, are cloned
+    /// unchanged. This is not a way to bypass deserialization validation of a new block.
+    /// `None` replays the shell unchanged; an unsupported or missing text field returns `None`.
+    #[doc(hidden)]
+    pub fn replay_validated_shell(&self, scalar_text: Option<String>) -> Option<Self> {
+        let Some(text) = scalar_text else {
+            return Some(self.clone());
+        };
+        let path = match &self.kind {
+            CkKind::Text { .. } | CkKind::Reasoning { .. } => "/kind/text",
+            CkKind::RedactedReasoning { .. } => "/kind/data",
+            CkKind::ToolResult { output, .. } => match &output.kind {
+                CkOutputKind::Text { .. } | CkOutputKind::ErrorText { .. } => {
+                    "/kind/output/kind/text"
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let original_text = |value: &Value| {
+            path.split('/')
+                .skip(1)
+                .try_fold(value, |v, key| v.get(key))
+                .is_some_and(Value::is_string)
+        };
+        if self.original.as_ref().is_some_and(|v| !original_text(v)) {
+            return None;
+        }
+        let mut replay = self.clone();
+        if let Some(original) = &mut replay.original {
+            // These fixed schema keys contain no JSON-pointer escaping. Direct key lookup
+            // avoids allocating decoded pointer tokens for every message in a warm delta.
+            let field = path
+                .split('/')
+                .skip(1)
+                .try_fold(original, |v, key| v.get_mut(key))?;
+            *field = Value::String(text.clone());
+        }
+        match &mut replay.kind {
+            CkKind::Text { text: field }
+            | CkKind::Reasoning { text: field, .. }
+            | CkKind::RedactedReasoning { data: field } => *field = text,
+            CkKind::ToolResult { output, .. } => match &mut output.kind {
+                CkOutputKind::Text { text: field } | CkOutputKind::ErrorText { text: field } => {
+                    *field = text
+                }
+                _ => unreachable!("validated scalar output"),
+            },
+            _ => unreachable!("validated scalar kind"),
+        }
+        Some(replay)
+    }
+
     pub fn bare(kind: CkKind) -> Self {
         Self {
             kind,
@@ -17402,6 +17457,81 @@ fn capped_trace_error(error: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn projection_replay_constructor_matches_serde_for_validated_shells() {
+        let cases = [
+            (
+                serde_json::json!({"kind":{"type":"text","text":"雪\n\"text\"","future":17},"future_block":{"keep":true}}),
+                Some("/kind/text"),
+            ),
+            (
+                serde_json::json!({"kind":{"type":"reasoning","text":"think","signature":"signed","future":"kept"}}),
+                Some("/kind/text"),
+            ),
+            (
+                serde_json::json!({"kind":{"type":"redacted_reasoning","data":"redacted"}}),
+                Some("/kind/data"),
+            ),
+            (
+                serde_json::json!({"kind":{"type":"tool_call","id":"c","name":"work","input":{"x":1.5,"future":[true,"a"]}},"provider_extras":{"future":{"keep":7}}}),
+                None,
+            ),
+            (
+                serde_json::json!({"kind":{"type":"tool_result","id":"c","tool_name":"work","output":{"kind":{"type":"text","text":"done","future":7}},"provider_executed":false}}),
+                Some("/kind/output/kind/text"),
+            ),
+            (
+                serde_json::json!({"kind":{"type":"tool_result","id":"c","tool_name":"work","output":{"kind":{"type":"error_text","text":"failed"}}}}),
+                Some("/kind/output/kind/text"),
+            ),
+            (
+                serde_json::json!({"kind":{"type":"media","kind":"image","media_type":"image/png","source":{"type":"url","url":"https://example.invalid/image.png"},"future":9},"future_block":"kept"}),
+                None,
+            ),
+        ];
+        for (original, path) in cases {
+            let expected: CkWireBlock = serde_json::from_value(original.clone()).unwrap();
+            let mut shell_json = original;
+            let text = path.map(|path| {
+                let text = shell_json
+                    .pointer(path)
+                    .unwrap()
+                    .as_str()
+                    .unwrap()
+                    .to_string();
+                *shell_json.pointer_mut(path).unwrap() = Value::String(String::new());
+                text
+            });
+            // Independently deserialize the empty shell; the constructor does not create its
+            // own oracle. Unknown fields and omitted defaults must survive in the original.
+            let shell: CkWireBlock = serde_json::from_value(shell_json).unwrap();
+            let replay = shell.replay_validated_shell(text).unwrap();
+            assert_eq!(replay, expected);
+            assert_eq!(
+                serde_json::to_vec(&replay).unwrap(),
+                serde_json::to_vec(&expected).unwrap()
+            );
+            assert_eq!(
+                replay.retained_original_json(),
+                expected.retained_original_json()
+            );
+        }
+    }
+
+    #[test]
+    fn projection_replay_constructor_rejects_non_scalar_replacement() {
+        let shell = CkWireBlock::bare(CkKind::ToolCall {
+            id: "c".into(),
+            name: "work".into(),
+            input: serde_json::json!({"text":"argument"}),
+            provider_executed: false,
+        });
+        assert!(shell
+            .replay_validated_shell(Some("replacement".into()))
+            .is_none());
+        assert_eq!(shell.replay_validated_shell(None).unwrap(), shell);
+    }
+
     #[test]
     fn attachment_stripped_drop_modes_seed_the_existing_canonical_reductions() {
         let skeleton = super::seeded_drop_unit("m1#0", "skeleton_stripped", None, false).unwrap();

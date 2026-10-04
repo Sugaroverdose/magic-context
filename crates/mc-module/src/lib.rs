@@ -1445,11 +1445,11 @@ const STATE_IMPORT_MAX_PENDING: usize = 64;
 const STATE_IMPORT_STALE_AFTER: Duration = Duration::from_secs(5 * 60);
 const TRANSFORM_SNAPSHOT_BUDGET_BYTES: usize = 64 * 1024 * 1024;
 const BOUNDARY_TOKEN_CACHE_BUDGET_BYTES: usize = 16 * 1024 * 1024;
-// A 9,268-message full sync can retain ~208 MiB of projection even when its wire request is
-// ~116 MB, and that session grew to ~224 MiB within five hours. Allow such an entry and its
-// measured ~73 MiB neighbor to coexist, with growth headroom, rather than alternating full syncs.
-// This is a ceiling, not the fix: the projection retains several copies of each message's text,
-// so its size should shrink instead. Keep the native cache's independent budgets unchanged.
+// Single-copy scalar text brings the 9,268-message / 118.8 MB synthetic fixture to 93 MiB
+// retained (formerly 201 MiB). Real sessions also carry JSON tool arguments and results,
+// which still keep their typed trees, so the ceilings stay at the levels that admitted the
+// largest live session before compaction (~224 MiB). Lower them once live admission
+// charges under compact retention have been measured. Native/output budgets are independent.
 const PROJECTION_CACHE_BUDGET_BYTES: usize = 384 * 1024 * 1024;
 const PROJECTION_CACHE_ENTRY_BUDGET_BYTES: usize = 288 * 1024 * 1024;
 const ACTIVE_SNAPSHOT_LEASE_BUDGET_BYTES: usize = TRANSFORM_SNAPSHOT_BUDGET_BYTES;
@@ -18132,7 +18132,7 @@ fn boundary_block_tokens(
     block: &crate::ck_wire::FlatBlock,
     cache_snapshot: &mut BoundaryTokenCacheSnapshot,
 ) -> usize {
-    if let crate::ck_wire::CkKind::Media(media) = &block.wire.kind {
+    if let crate::ck_wire::CkKind::Media(media) = &block.wire_shape().kind {
         if let Some(tokens) = crate::image_tokens::media_image_tokens(media) {
             return tokens;
         }
@@ -23906,20 +23906,23 @@ mod tests {
         let wire_bytes = wire.len();
         drop(wire);
         let projection = Arc::new(crate::ck_wire::project_messages(&request.messages).unwrap());
-        // These are three real, independently allocated payload copies, not three estimates of
-        // the request tree: canonical bytes, typed wire text, and lossless original block JSON.
+        // Only canonical bytes own the scalar payload. The lossless and typed wire shells
+        // retain empty strings, and the payload view shares that canonical allocation.
         let mut payload_allocations = 0;
         for block in &projection.blocks {
-            let CkKind::Text { text } = &block.wire.kind else {
+            let CkKind::Text { text } = &block.wire_shape().kind else {
                 panic!("text fixture");
             };
-            let original = block.wire.retained_original_json().unwrap()["kind"]["text"]
+            let original = block.wire_shape().retained_original_json().unwrap()["kind"]["text"]
                 .as_str()
                 .unwrap();
-            assert_ne!(text.as_ptr(), original.as_ptr());
-            assert_ne!(text.as_ptr(), block.bytes.as_ptr());
-            assert_ne!(original.as_ptr(), block.bytes.as_ptr());
-            payload_allocations += text.capacity() + original.len() + block.bytes.len();
+            assert_eq!(text.capacity(), 0);
+            assert!(original.is_empty());
+            let payload = block.scalar_text().unwrap();
+            assert!(matches!(payload, std::borrow::Cow::Borrowed(_)));
+            assert!(payload.as_ptr() >= block.bytes.as_ptr());
+            assert!(payload.as_ptr() < block.bytes.as_ptr().wrapping_add(block.bytes.len()));
+            payload_allocations += block.bytes.len();
         }
         let charge = ProjectionCacheSnapshot {
             context: projection_cache_context(&request),
@@ -23929,25 +23932,65 @@ mod tests {
         }
         .retained_bytes(SESSION);
         eprintln!("alf-projection messages={MESSAGES} blocks=30000 request_wire_bytes={wire_bytes} projection_byte_charge={charge}");
+        let canonical = projection
+            .blocks
+            .iter()
+            .map(|b| b.bytes.len())
+            .sum::<usize>();
+        let wire_charge = projection
+            .blocks
+            .iter()
+            .map(|b| b.wire.retained_bytes())
+            .sum::<usize>();
+        let original = projection
+            .blocks
+            .iter()
+            .map(|b| {
+                b.wire_shape()
+                    .retained_original_json()
+                    .map_or(0, crate::retained_size::value_retained_bytes)
+            })
+            .sum::<usize>();
+        eprintln!(
+            "alf-breakdown canonical={canonical} typed_wire={} original={original} other={}",
+            wire_charge - original,
+            charge - canonical - wire_charge
+        );
+        let mut delta_times = Vec::new();
+        for _ in 0..9 {
+            let started = Instant::now();
+            let mut messages = projection.reattach_messages_prefix(MESSAGES).unwrap();
+            messages.push(ck("benchmark-tail", (MESSAGES + 1) as u64, "new tail"));
+            let next =
+                crate::ck_wire::project_messages_incremental(&messages, &projection, MESSAGES)
+                    .unwrap();
+            std::hint::black_box(&next);
+            delta_times.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+        delta_times.sort_by(f64::total_cmp);
+        eprintln!(
+            "alf-delta reattach_and_project_median_ms={:.3} samples={delta_times:?}",
+            delta_times[4]
+        );
         assert!(charge >= payload_allocations);
         assert!(
             charge - payload_allocations < 40 * 1024 * 1024,
             "structural overhead is bounded"
         );
         assert!(
-            charge > 192 * 1024 * 1024,
-            "fixture must exercise the old ceiling"
+            charge <= wire_bytes * 11 / 10,
+            "text-heavy projection must stay below 1.1x wire"
         );
         assert!(
             charge <= PROJECTION_CACHE_ENTRY_BUDGET_BYTES,
-            "fixture must fit the bounded larger ceiling"
+            "fixture must fit the entry ceiling"
         );
 
         let (handler, _store, _dir, project) =
             handler_with_store(Arc::new(ProducerState::default()), default_test_config());
         handler.bind_route(7, binding(project.to_str().unwrap(), SESSION));
-        // The live cache also held a ~73 MiB neighbor. Increasing only the entry ceiling would
-        // admit this session but evict that neighbor, making alternating passes miss each other.
+        // The former ~73 MiB constructed-text neighbor is now ~36 MiB. The compact budget
+        // must still admit both sessions so alternating passes do not force full syncs.
         let neighbor = native_cache_request(
             "neighbor",
             vec![ck("neighbor-1", 1, &"n".repeat(36 * 1024 * 1024))],
@@ -26178,6 +26221,171 @@ mod tests {
     /// provider verbatim, signed reasoning included, but the module never saw it as newest and so
     /// never registered a keep for it. The next deferred passes, where that assistant is already
     /// demoted, must still replay the bytes the provider cached, until a priced pass.
+    #[tokio::test(flavor = "current_thread")]
+    async fn compact_projection_multi_pass_served_bytes_match_baseline() {
+        let mut config = default_test_config();
+        config.temporal_awareness = false;
+        config.inject_docs = false;
+        config.memory_enabled = false;
+        let (handler, store, _dir, project) =
+            handler_with_store(Arc::new(ProducerState::default()), config.clone());
+        let (reference, reference_store, _reference_dir, reference_project) =
+            handler_with_store(Arc::new(ProducerState::default()), config);
+        let mut native = vec![
+            json!({"info":{"id":"u0","role":"user"},"parts":[{"type":"text","text":"start \"quoted\" \\ path\n雪"}]}),
+            json!({"info":{"id":"a0","role":"assistant"},"parts":[{"type":"text","text":"first answer"}]}),
+        ];
+        for pass in 0..5 {
+            if pass == 4 {
+                for (store, project) in [(&store, &project), (&reference_store, &reference_project)]
+                {
+                    let mut loaded = store.load("ses").unwrap();
+                    let selected = ["u0", "a0"]
+                        .into_iter()
+                        .map(|mid| mc_store::HistorianSelectedMessageIdentity {
+                            mid: mid.into(),
+                            block_identities: loaded.meta.block_identity_by_mid[mid].clone(),
+                        })
+                        .collect::<Vec<_>>();
+                    let predicate = mc_store::HistorianPublishPredicate {
+                        firing_seq: 1,
+                        producer_run_id: "compact-replay-run".into(),
+                        producer_attempt: 0,
+                        chunk_fingerprint: "compact-replay-chunk".into(),
+                        selected_range_identities: selected.clone(),
+                        compartment_set_generation: mc_store::CompartmentSetGeneration::default(),
+                    };
+                    loaded.meta.historian = HistorianDurableState {
+                        state: HistorianPhase::Publishing,
+                        firing_seq: 1,
+                        producer_run_id: Some(predicate.producer_run_id.clone()),
+                        producer_session_id: Some("compact-replay-producer".into()),
+                        chunk_range: Some(HistorianChunkRange {
+                            from_ordinal: 1,
+                            to_ordinal: 2,
+                        }),
+                        chunk_fingerprint: predicate.chunk_fingerprint.clone(),
+                        selected_range_identities: selected,
+                        expected_revert_epoch: loaded.meta.revert_epoch,
+                        ..Default::default()
+                    };
+                    store
+                        .commit("ses", loaded.row_version, &loaded.core, &loaded.meta)
+                        .unwrap();
+                    let loaded = store.load("ses").unwrap();
+                    store
+                        .publish_historian_chunk(mc_store::HistorianPublishRequest {
+                            harness: None,
+                            session_id: "ses",
+                            expected_row_version: loaded.row_version,
+                            expected_revert_epoch: loaded.meta.revert_epoch,
+                            predicate: &predicate,
+                            project_path: project.to_str().unwrap(),
+                            compartments: &[stored_comp(
+                                1,
+                                1,
+                                2,
+                                "a0",
+                                "compact replay published summary",
+                            )],
+                            facts: &[],
+                            promote_facts: false,
+                            events: &[],
+                            primer_candidates: &[],
+                            user_memory_candidates: &[],
+                            publication_floor_ordinal: 2,
+                            chunk_transcript: None,
+                            raw_chunk_messages: None,
+                        })
+                        .unwrap();
+                    assert_eq!(store.load_compartments("ses").unwrap().len(), 1);
+                }
+            }
+            if pass > 0 {
+                native.push(json!({"info":{"id":format!("step-{pass}"),"role":"assistant"},"parts":[
+                    {"type":"reasoning","text":format!("adaptive step {pass}\n雪"),"metadata":{"anthropic":{"signature":format!("signature-{pass}")}}},
+                    {"type":"tool","tool":"work","callID":format!("call-{pass}"),"state":{"status":"completed","input":{"action":"show","path":"a\\b"},"output":format!("done {pass}\n\"quoted\"")}},
+                    {"type":"text","text":format!("answer {pass}")}
+                ]}));
+            }
+            let decoded = codec::decode_opencode(&native);
+            let mut req = request(decoded.messages);
+            req["serializer_profile"] = json!("opencode-aisdk");
+            req["serve_native"] = json!(true);
+            req["tool_present"] = json!(true);
+            req["provider_id"] = json!("anthropic");
+            req["model_key"] = json!("claude-fable-5-1");
+            req["mid_turn"] = json!(false);
+            req["native_messages"] = json!(native);
+            req["historian_model_chain"] = json!([]);
+            req["full_array_fingerprint"] = json!(format!("compact-pass-{pass}"));
+            if pass > 0 && pass < 3 {
+                let prefix = native.len() - 1;
+                req["messages"] = json!([req["messages"].as_array().unwrap().last().unwrap()]);
+                req["native_messages"] = json!([native.last().unwrap()]);
+                req["tail_delta"] = json!({"after":format!("compact-pass-{}", pass - 1),"replace_from":prefix,"native_replace_from":prefix});
+            }
+            if pass >= 3 {
+                req["render_config"] = json!("priced-config-change");
+            }
+            let reference_served = {
+                let _guard = crate::ck_wire::UncompactedProjectionGuard::enter();
+                call_transform_request(&reference, req.clone()).await
+            };
+            let served = call_transform_request(&handler, req).await;
+            assert_eq!(served["status"], "ok", "{served}");
+            assert_eq!(
+                served["action"],
+                if pass == 0 || pass >= 3 {
+                    "HARD"
+                } else {
+                    "SOFT+"
+                }
+            );
+            if pass == 1 || pass == 2 {
+                assert_eq!(
+                    served["timings"]["projection_reused_messages"],
+                    native.len() - 1
+                );
+            }
+            let bytes =
+                serde_json::to_vec(&(&served["ck_messages"], &served["native_messages"])).unwrap();
+            let reference_bytes = serde_json::to_vec(&(
+                &reference_served["ck_messages"],
+                &reference_served["native_messages"],
+            ))
+            .unwrap();
+            assert_eq!(
+                bytes, reference_bytes,
+                "retention differential on pass {pass}"
+            );
+            if pass == 4 {
+                assert!(
+                    String::from_utf8_lossy(&bytes).contains("compact replay published summary")
+                );
+            }
+            eprintln!(
+                "compact-replay pass={pass} bytes={} sha256={:x}",
+                bytes.len(),
+                Sha256::digest(&bytes)
+            );
+            // Captured on the pre-compaction implementation with the identical fixture.
+            let baseline = [
+                "44e6c96da02972ffb728ac3e84cbcc7367e7cc907a80dc348bfb520f5b1d2ee3",
+                "48be75604d237c4c5d166ce849670b9c6ca0f1441349e403b9bf74bd4bf3b789",
+                "0545fea19343e3bb11358897ff80fa974b5b37992515617423c22b6493e87e15",
+                "b7405b3032dd3b08e721edc579173ac316385a80d626f7937173a9b084cbe217",
+            ];
+            if pass < 4 {
+                assert_eq!(
+                    format!("{:x}", Sha256::digest(&bytes)),
+                    baseline[pass],
+                    "served byte drift on pass {pass}"
+                );
+            }
+        }
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn defer_after_failed_pass_holds_fallback_served_signed_reasoning_until_priced_pass() {
         let producer = Arc::new(ProducerState::default());

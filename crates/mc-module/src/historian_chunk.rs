@@ -185,7 +185,7 @@ impl Builder {
                 if let Some(expansion) = self.tool_expansions.get(&block.id) {
                     return vec![format!("TC: {expansion}")];
                 }
-                if let CkKind::ToolCall { name, input, .. } = &block.wire.kind {
+                if let CkKind::ToolCall { name, input, .. } = &block.wire_shape().kind {
                     return if has_text {
                         Vec::new()
                     } else {
@@ -1542,10 +1542,11 @@ fn text_parts(message: &FlatMessage<'_>) -> Vec<String> {
     message
         .blocks
         .iter()
-        .filter_map(|block| match &block.wire.kind {
-            CkKind::Text { text } => {
+        .filter_map(|block| match &block.wire_shape().kind {
+            CkKind::Text { .. } => {
+                let text = block.scalar_text().expect("text payload");
                 let cleaned = if message.role == "user" {
-                    clean_user_text(text)
+                    clean_user_text(&text)
                 } else {
                     text.trim().to_string()
                 };
@@ -1586,7 +1587,7 @@ fn tool_result_body_tokens(message: &FlatMessage<'_>) -> usize {
     message
         .blocks
         .iter()
-        .filter(|block| matches!(&block.wire.kind, CkKind::ToolResult { .. }))
+        .filter(|block| block.kind_tag == "tool_result")
         .map(|block| block.bytes.len().div_ceil(4))
         .sum()
 }
@@ -1597,7 +1598,7 @@ fn extract_tool_result_summaries(
 ) -> Vec<String> {
     let mut summaries = Vec::new();
     for block in &message.blocks {
-        let CkKind::ToolResult { tool_name, .. } = &block.wire.kind else {
+        let CkKind::ToolResult { tool_name, .. } = &block.wire_shape().kind else {
             continue;
         };
         summaries.push(
@@ -1615,7 +1616,7 @@ fn extract_tool_result_summaries(
 fn build_tool_call_summary_lookup(blocks: &[FlatBlock]) -> HashMap<String, String> {
     let mut out = HashMap::new();
     for block in blocks.iter().filter(|block| !block.synthetic) {
-        let CkKind::ToolCall { name, input, .. } = &block.wire.kind else {
+        let CkKind::ToolCall { name, input, .. } = &block.wire_shape().kind else {
             continue;
         };
         out.insert(block.id.clone(), format_tool_summary(name, input));
@@ -1634,7 +1635,8 @@ fn build_tool_expansion_lookup(
         .iter()
         .filter(|b| !b.synthetic && b.ordinal < eligible_end)
     {
-        if let (Some(arc), CkKind::ToolResult { output, .. }) = (&block.arc_id, &block.wire.kind) {
+        if let (Some(arc), CkKind::ToolResult { output, .. }) = (&block.arc_id, &block.wire().kind)
+        {
             let value = match &output.kind {
                 CkOutputKind::Text { text } | CkOutputKind::ErrorText { text } => {
                     Value::String(text.clone())
@@ -1666,7 +1668,7 @@ fn build_tool_expansion_lookup(
         .iter()
         .filter(|b| !b.synthetic)
         .filter_map(|block| {
-            let CkKind::ToolCall { name, input, .. } = &block.wire.kind else {
+            let CkKind::ToolCall { name, input, .. } = &block.wire_shape().kind else {
                 return None;
             };
             crate::historian_tool_template::expand(name, input, results.get(&block.id), overrides)

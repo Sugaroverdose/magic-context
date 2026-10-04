@@ -526,10 +526,13 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
         .blocks
         .iter()
         .filter_map(|block| {
-            let mc_store::CkKind::ToolResult { output, .. } = &block.wire.kind else {
+            let mc_store::CkKind::ToolResult { output, .. } = &block.wire_shape().kind else {
                 return None;
             };
-            if is_drop_sentinel(&tool_output_content(&output.kind)) {
+            let text = block
+                .scalar_text()
+                .unwrap_or_else(|| std::borrow::Cow::Owned(tool_output_content(&output.kind)));
+            if is_drop_sentinel(&text) {
                 block.arc_id.as_deref()
             } else {
                 None
@@ -566,11 +569,10 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
             &protected_arc_ids,
         );
         let queued_for_drop = tag_number.is_some_and(|number| queued_numbers.contains(&number));
-        let measured = match &block.wire.kind {
-            mc_store::CkKind::Text { text }
-                if block.role == "user" || block.role == "assistant" =>
-            {
-                let content = caveman_content(&caveman_payloads, block).unwrap_or(text);
+        let measured = match &block.wire_shape().kind {
+            mc_store::CkKind::Text { .. } if block.role == "user" || block.role == "assistant" => {
+                let text = block.scalar_text().expect("text payload");
+                let content = caveman_content(&caveman_payloads, block).unwrap_or(&text);
                 let content = strip_channel1_reminder_spans(content);
                 if content.is_empty() || is_drop_sentinel(content) {
                     excluded_part(key, content)
@@ -599,7 +601,9 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
                 )
             }
             mc_store::CkKind::ToolResult { output, .. } => {
-                let raw_content = tool_output_content(&output.kind);
+                let raw_content = block
+                    .scalar_text()
+                    .unwrap_or_else(|| std::borrow::Cow::Owned(tool_output_content(&output.kind)));
                 let content = strip_channel1_reminder_spans(&raw_content);
                 if content.is_empty() || is_drop_sentinel(content) {
                     excluded_part(key, content)

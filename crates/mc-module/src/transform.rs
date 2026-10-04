@@ -202,10 +202,7 @@ impl ServedMessage {
                         .copied()
                         .or_else(|| {
                             // Full-drop paths compact content indexes; match by wire value.
-                            blocks
-                                .iter()
-                                .copied()
-                                .find(|flat| flat.wire.as_ref() == block)
+                            blocks.iter().copied().find(|flat| flat.wire.matches(block))
                         })
                 });
                 if let Some(fp) = ck_wire::fingerprint_from_projected_wire(block, projected) {
@@ -7890,7 +7887,7 @@ fn new_caveman_units(
                 || !is_tail(block.ordinal, coverage)
                 || frozen_red.contains(&block.id)
                 || !matches!(block.role.as_str(), "user" | "assistant")
-                || !matches!(&block.wire.kind, ck_wire::CkKind::Text { .. })
+                || block.kind_tag != "text"
             {
                 return None;
             }
@@ -8357,7 +8354,7 @@ fn frozen_red_targets(core: &CoreState) -> std::collections::HashSet<String> {
 fn log_reasoning_drop_seed_skips(core: &CoreState, live: &[&FlatBlock], session_id: &str) {
     let reasoning: HashSet<&str> = live
         .iter()
-        .filter(|block| is_reasoning_block(&block.wire))
+        .filter(|block| is_reasoning_block(block.wire_shape()))
         .map(|block| block.id())
         .collect();
     for unit in &core.frozen_units {
@@ -8435,7 +8432,7 @@ fn consumed_pending_drop_ids(
     let reasoning = projection
         .blocks
         .iter()
-        .filter(|block| is_reasoning_block(&block.wire))
+        .filter(|block| is_reasoning_block(block.wire_shape()))
         .map(|block| block.id.as_str())
         .collect::<HashSet<_>>();
 
@@ -8539,7 +8536,7 @@ fn new_reduction_units(
     // Anthropic, permanently fencing the session to raw.
     let reasoning_targets: std::collections::HashSet<&str> = live
         .iter()
-        .filter(|i| is_reasoning_block(&i.wire))
+        .filter(|i| is_reasoning_block(i.wire_shape()))
         .map(|i| i.id())
         .collect();
     let mut by_target: BTreeMap<String, FrozenUnit> = BTreeMap::new();
@@ -8856,7 +8853,7 @@ fn sel_item_from_flat_with_estimator(
     tag_tokens_by_block: &HashMap<&str, usize>,
     estimate: impl FnOnce(&str) -> usize,
 ) -> SelItem {
-    let kind = match &block.wire.kind {
+    let kind = match &block.wire_shape().kind {
         ck_wire::CkKind::ToolCall { name, input, .. } => SelKind::ToolCall {
             name: name.clone(),
             input: input.clone(),
@@ -9780,7 +9777,7 @@ fn tag_mint_inputs_from(
         work.inputs.push(TagMintInput {
             block_id: block.id.clone(),
             kind: kind.as_store_kind().to_string(),
-            token_count: mc_tokenizer::estimate_tokens(source) as i64,
+            token_count: mc_tokenizer::estimate_tokens(&source) as i64,
             source_bytes: source.as_bytes().to_vec(),
         });
     }
@@ -9925,24 +9922,27 @@ fn append_tag_mint_rows(
 
 /// Return exactly the span the overlay can prefix. Mint scope and overlay scope share
 /// this predicate so every visible tag number has a renderable §N§ carrier.
-fn taggable_source(block: &FlatBlock) -> Option<(TaggableKind, &str)> {
+fn taggable_source(block: &FlatBlock) -> Option<(TaggableKind, std::borrow::Cow<'_, str>)> {
     if block.synthetic || block.role == "system" {
         return None;
     }
-    match &block.wire.kind {
-        ck_wire::CkKind::Text { text }
-            if block.role == "user" || (block.role == "assistant" && !text.trim().is_empty()) =>
-        {
-            Some((TaggableKind::Message, text))
+    match &block.wire_shape().kind {
+        ck_wire::CkKind::Text { .. } => {
+            let text = block.scalar_text()?;
+            (block.role == "user" || (block.role == "assistant" && !text.trim().is_empty()))
+                .then_some((TaggableKind::Message, text))
         }
         ck_wire::CkKind::ToolResult { output, .. } => match &output.kind {
-            ck_wire::CkOutputKind::Text { text } | ck_wire::CkOutputKind::ErrorText { text } => {
-                Some((TaggableKind::ToolResult, text))
+            ck_wire::CkOutputKind::Text { .. } | ck_wire::CkOutputKind::ErrorText { .. } => {
+                Some((TaggableKind::ToolResult, block.scalar_text()?))
             }
             ck_wire::CkOutputKind::Content { blocks }
             | ck_wire::CkOutputKind::ErrorContent { blocks } => blocks.iter().find_map(|block| {
                 if let ck_wire::ResultBlockKind::Text { text } = &block.kind {
-                    Some((TaggableKind::ToolResult, text.as_str()))
+                    Some((
+                        TaggableKind::ToolResult,
+                        std::borrow::Cow::Borrowed(text.as_str()),
+                    ))
                 } else {
                     None
                 }
@@ -10077,7 +10077,7 @@ fn timestamp_temporal_marks(
 fn first_text_block_by_message(projection: &FlatProjection) -> HashMap<&str, &str> {
     let mut first = HashMap::new();
     for block in &projection.blocks {
-        if matches!(&block.wire.kind, ck_wire::CkKind::Text { .. }) {
+        if block.kind_tag == "text" {
             first.entry(block.mid.as_str()).or_insert(block.id.as_str());
         }
     }
@@ -10523,7 +10523,7 @@ fn user_hint_target_was_served(meta: &ModuleMeta, block_id: &str) -> bool {
 fn text_blocks_by_message_id(projection: &FlatProjection) -> HashMap<&str, Vec<&FlatBlock>> {
     let mut by_message = HashMap::<&str, Vec<&FlatBlock>>::new();
     for block in &projection.blocks {
-        if matches!(&block.wire.kind, ck_wire::CkKind::Text { .. }) {
+        if block.kind_tag == "text" {
             by_message
                 .entry(block.mid.as_str())
                 .or_default()
@@ -10776,8 +10776,7 @@ fn compute_active_overlay_decisions(
             continue;
         }
         let Some(block_id) = projection.blocks.iter().find_map(|block| {
-            (block.mid == message.mid && matches!(&block.wire.kind, ck_wire::CkKind::Text { .. }))
-                .then_some(block.id.as_str())
+            (block.mid == message.mid && block.kind_tag == "text").then_some(block.id.as_str())
         }) else {
             break;
         };
@@ -10832,11 +10831,11 @@ fn maybe_decide_live_user_hint(
     else {
         return Ok(None);
     };
-    let Some(block) = projection.blocks.iter().find(|block| {
-        block.mid == message.mid
-            && block.role == "user"
-            && matches!(block.wire.kind, ck_wire::CkKind::Text { .. })
-    }) else {
+    let Some(block) = projection
+        .blocks
+        .iter()
+        .find(|block| block.mid == message.mid && block.role == "user" && block.kind_tag == "text")
+    else {
         return Ok(None);
     };
     if user_hint_rows.iter().any(|row| row.block_id == block.id)
@@ -11583,7 +11582,7 @@ fn active_tags_for_nudge(
                 tag_number: row.tag_number,
                 kind: row.kind.clone(),
                 token_count: row.token_count.max(0),
-                tool_name: match &block.wire.kind {
+                tool_name: match &block.wire_shape().kind {
                     ck_wire::CkKind::ToolResult { tool_name, .. } => tool_name.clone(),
                     _ => String::new(),
                 },
@@ -11623,8 +11622,8 @@ fn active_tags_for_channel2(
         derived.push(ActiveTagForNudge {
             tag_number: next_tag,
             kind: kind.as_store_kind().to_string(),
-            token_count: mc_tokenizer::estimate_tokens(source) as i64,
-            tool_name: match &block.wire.kind {
+            token_count: mc_tokenizer::estimate_tokens(&source) as i64,
+            tool_name: match &block.wire_shape().kind {
                 ck_wire::CkKind::ToolResult { tool_name, .. } => tool_name.clone(),
                 _ => String::new(),
             },
@@ -12470,7 +12469,7 @@ fn newest_tool_result_for_channel1(
                 && is_tail(block.ordinal, meta.coverage_ordinal)
                 && !frozen_targets.contains(block.id())
                 && mutation_exempt_mid != Some(block.mid.as_str())
-                && tool_result_can_carry_channel1(&block.wire)
+                && tool_result_can_carry_channel1(block.wire_shape())
         })
         .max_by_key(|block| (block.ordinal, block.block_index))?;
     if existing_blocks.contains(block.id.as_str()) {
@@ -13365,29 +13364,34 @@ fn apply_surface_strips(
             }
         }
 
-        let should_strip =
-            (request_accepts_empty_content(req) && stale_reduce && is_reduce_block(&block.wire))
-                || ((image_seed
-                    && request_accepts_empty_content(req)
-                    && image_block_is_large(&block.wire))
-                    || (request_accepts_empty_content(req)
-                        && frozen_units
-                            .red_by_block_id(block.id())
-                            .is_some_and(|unit| unit.kind == "image")))
-                || (request_accepts_empty_content(req) && is_structural_noise(&block.wire));
+        let should_strip = (request_accepts_empty_content(req)
+            && stale_reduce
+            && is_reduce_block(&message.ck.content[index]))
+            || ((image_seed
+                && request_accepts_empty_content(req)
+                && image_block_is_large(block.wire_shape()))
+                || (request_accepts_empty_content(req)
+                    && frozen_units
+                        .red_by_block_id(block.id())
+                        .is_some_and(|unit| unit.kind == "image")))
+            || (request_accepts_empty_content(req)
+                && is_structural_noise(&message.ck.content[index]));
         if should_strip {
             replace_with_sentinel(&mut rebuilt.content[index], &sentinel);
             touched = true;
             continue;
         }
-        if !reasoning_policy.exempt && message.ck.role == "assistant" && aged {
-            if let ck_wire::CkKind::Text { text } = &block.wire.kind {
-                let replacement = inline_thinking_replacement(text);
-                if replacement != *text {
-                    rebuilt.content[index].kind = ck_wire::CkKind::Text { text: replacement };
-                    rebuilt.content[index].mark_modified();
-                    touched = true;
-                }
+        if !reasoning_policy.exempt
+            && message.ck.role == "assistant"
+            && aged
+            && block.kind_tag == "text"
+        {
+            let text = block.scalar_text().expect("text payload");
+            let replacement = inline_thinking_replacement(&text);
+            if replacement != *text {
+                rebuilt.content[index].kind = ck_wire::CkKind::Text { text: replacement };
+                rebuilt.content[index].mark_modified();
+                touched = true;
             }
         }
     }
@@ -13453,7 +13457,7 @@ fn projection_reasoning_ineligible_arc_ids(projection: &FlatProjection) -> HashS
         .filter(|block| block.role == "assistant")
     {
         let message = messages.entry(block.mid.as_str()).or_default();
-        match &block.wire.kind {
+        match &block.wire_shape().kind {
             ck_wire::CkKind::Reasoning { .. } | ck_wire::CkKind::RedactedReasoning { .. } => {
                 message.has_reasoning = true;
             }
@@ -13673,7 +13677,7 @@ fn renderer_transition_shapes(
         .blocks
         .iter()
         .filter(|block| reduced_call_targets.contains(block.id.as_str()))
-        .filter(|block| matches!(&block.wire.kind, ck_wire::CkKind::ToolCall { .. }))
+        .filter(|block| block.kind_tag == "tool_call")
         .map(|block| block.id.clone())
         .collect();
     if frozen_targets.is_empty() {
@@ -13710,7 +13714,7 @@ fn renderer_transition_shapes(
             let (
                 ck_wire::CkKind::ToolCall { id: call_id, .. },
                 ck_wire::CkKind::ToolResult { id: result_id, .. },
-            ) = (&call.wire.kind, &result.wire.kind)
+            ) = (&call.wire_shape().kind, &result.wire_shape().kind)
             else {
                 return None;
             };
@@ -13719,7 +13723,7 @@ fn renderer_transition_shapes(
             }
             let rewritten_block_is_unmatched = [call, result].into_iter().any(|block| {
                 frozen_targets.contains(block.id.as_str())
-                    && !crate::codec::sidecar::has_stamped_block_identity(&block.wire)
+                    && !crate::codec::sidecar::has_stamped_block_identity(block.wire_shape())
             });
             rewritten_block_is_unmatched.then(|| call_id.clone())
         })
@@ -13815,7 +13819,7 @@ fn full_drop_tool_ids(
     // the full projection for every result; long sessions contain thousands of tool blocks.
     let mut call_kind_by_id = HashMap::new();
     for block in &projection.blocks {
-        let ck_wire::CkKind::ToolCall { id, .. } = &block.wire.kind else {
+        let ck_wire::CkKind::ToolCall { id, .. } = &block.wire_shape().kind else {
             continue;
         };
         call_kind_by_id
@@ -13826,7 +13830,7 @@ fn full_drop_tool_ids(
     let mut remove = HashSet::new();
     for block in &projection.blocks {
         let (ck_wire::CkKind::ToolCall { id, .. } | ck_wire::CkKind::ToolResult { id, .. }) =
-            &block.wire.kind
+            &block.wire_shape().kind
         else {
             continue;
         };
@@ -13843,7 +13847,7 @@ fn full_drop_tool_ids(
         // A seed containing only a tool result is a complete pair, but a skeleton or edit-marker
         // tool call also carries the newest-window message. Keep that call paired with its result
         // shell so the canonical message representation is preserved.
-        if matches!(&block.wire.kind, ck_wire::CkKind::ToolCall { .. }) {
+        if block.kind_tag == "tool_call" {
             remove.insert(id.clone());
             continue;
         }
@@ -14108,7 +14112,7 @@ fn message_output_identity(
         ] {
             digest_field(&mut hasher, value.as_deref().unwrap_or_default().as_bytes());
         }
-        let full_drop = match &block.wire.kind {
+        let full_drop = match &block.wire_shape().kind {
             ck_wire::CkKind::ToolCall { id, .. } | ck_wire::CkKind::ToolResult { id, .. } => {
                 full_drop_ids.contains(id)
             }
@@ -15277,7 +15281,7 @@ fn build_output_with_tags_inner(
                 } else {
                     blocks
                         .iter()
-                        .filter(|block| !is_reasoning_block(&block.wire))
+                        .filter(|block| !is_reasoning_block(block.wire_shape()))
                         .filter(|block| {
                             block
                                 .arc_id
@@ -15338,7 +15342,7 @@ fn build_output_with_tags_inner(
                                     .flatten()
                             };
                             rebuilt.content[block.block_index] = reduced_block(
-                                &block.wire,
+                                &msg.ck.content[block.block_index],
                                 display_payload
                                     .as_deref()
                                     .unwrap_or(unit.frozen_payload.as_str()),
@@ -15352,7 +15356,7 @@ fn build_output_with_tags_inner(
                 {
                     for block in blocks {
                         if reduced.contains_key(&block.block_index)
-                            || is_reasoning_block(&block.wire)
+                            || is_reasoning_block(block.wire_shape())
                         {
                             continue;
                         }
@@ -15360,7 +15364,7 @@ fn build_output_with_tags_inner(
                         let Some(unit) = frozen_units.by_key(&unit_key) else {
                             continue;
                         };
-                        if !matches!(&block.wire.kind, ck_wire::CkKind::Text { .. }) {
+                        if block.kind_tag != "text" {
                             continue;
                         }
                         rebuilt.content[block.block_index].kind = ck_wire::CkKind::Text {
@@ -15388,7 +15392,7 @@ fn build_output_with_tags_inner(
                     );
                     let drop_indexes: HashSet<usize> = blocks
                         .iter()
-                        .filter(|block| match &block.wire.kind {
+                        .filter(|block| match &block.wire_shape().kind {
                             ck_wire::CkKind::ToolCall { id, .. }
                             | ck_wire::CkKind::ToolResult { id, .. } => full_drop_ids.contains(id),
                             _ => false,
@@ -17648,7 +17652,7 @@ pub(crate) mod tests {
             let tags = projection
                 .blocks
                 .iter()
-                .filter(|block| matches!(block.wire.kind, ck_wire::CkKind::Text { .. }))
+                .filter(|block| block.kind_tag == "text")
                 .map(|block| (block.id.as_str(), 3))
                 .collect::<HashMap<_, _>>();
             let calls = std::cell::Cell::new(0);
@@ -17839,9 +17843,8 @@ pub(crate) mod tests {
                 });
                 if let Some(marker_text) = marker_text {
                     if let Some(block_id) = projection.blocks.iter().find_map(|block| {
-                        (block.mid == message.mid
-                            && matches!(&block.wire.kind, ck_wire::CkKind::Text { .. }))
-                        .then(|| block.id.clone())
+                        (block.mid == message.mid && block.kind_tag == "text")
+                            .then(|| block.id.clone())
                     }) {
                         marks.push(TemporalMarkInput {
                             ordinal: message.ordinal,
@@ -17975,7 +17978,7 @@ pub(crate) mod tests {
                 .iter()
                 .filter(|block| block.mid == message.mid)
                 .find_map(|block| {
-                    matches!(&block.wire.kind, ck_wire::CkKind::Text { .. })
+                    (block.kind_tag == "text")
                         .then(|| {
                             minted
                                 .get(block.id.as_str())
@@ -18034,7 +18037,7 @@ pub(crate) mod tests {
             let carriers = projection
                 .blocks
                 .iter()
-                .filter(|b| matches!(b.wire.kind, ck_wire::CkKind::Media(_)))
+                .filter(|b| b.kind_tag == "media")
                 .collect::<Vec<_>>();
             let bytes: usize = carriers.iter().map(|b| b.bytes.len()).sum();
             let started = Instant::now();
@@ -32741,7 +32744,7 @@ pub(crate) mod tests {
             let input = TagMintInput {
                 block_id: block.id.clone(),
                 kind: kind.as_store_kind().to_string(),
-                token_count: mc_tokenizer::estimate_tokens(source) as i64,
+                token_count: mc_tokenizer::estimate_tokens(&source) as i64,
                 source_bytes: source.as_bytes().to_vec(),
             };
             if !existing_tag_ids.contains(input.block_id.as_str()) {
