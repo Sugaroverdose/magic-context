@@ -3668,11 +3668,15 @@ impl ProjectionCache {
         // TODO(memory-accounting): add an active-clone budget for this `Arc`, as identified by
         // the module-memory audit. A running transform can retain it after LRU eviction, so the
         // cache-only charge cannot bound that in-flight allocation.
-        if self
+        let reverted = self
             .sessions
             .get(session_id)
-            .is_some_and(|session| session.revert_epoch != revert_epoch)
-        {
+            .is_some_and(|session| session.revert_epoch != revert_epoch);
+        if reverted {
+            tracing::info!(
+                "projection-cache miss session={} reason=revert_epoch cached_epoch={} current_epoch={}",
+                session_id, self.sessions[session_id].revert_epoch, revert_epoch,
+            );
             self.remove(session_id);
         }
         let snapshot = self
@@ -3682,6 +3686,11 @@ impl ProjectionCache {
         if snapshot.is_some() {
             self.lru.retain(|candidate| candidate != session_id);
             self.lru.push_back(session_id.to_string());
+        } else if !reverted {
+            tracing::info!(
+                "projection-cache miss session={} reason=missing current_epoch={} retained_bytes={} entries={} total_budget={}",
+                session_id, revert_epoch, self.retained_bytes, self.sessions.len(), self.max_retained_bytes,
+            );
         }
         snapshot
     }
@@ -3692,6 +3701,11 @@ impl ProjectionCache {
             || retained_bytes > self.max_entry_retained_bytes
             || retained_bytes > self.max_retained_bytes
         {
+            tracing::info!(
+                "projection-cache admission-rejected session={} byte_charge={} entry_budget={} total_budget={} previous_entry_kept={}",
+                session_id, retained_bytes, self.max_entry_retained_bytes, self.max_retained_bytes,
+                self.sessions.contains_key(session_id),
+            );
             return;
         }
         self.remove(session_id);
@@ -3715,6 +3729,11 @@ impl ProjectionCache {
             }
             if let Some(session) = self.sessions.remove(&oldest) {
                 self.retained_bytes = self.retained_bytes.saturating_sub(session.retained_bytes);
+                tracing::info!(
+                    "projection-cache evicted session={} byte_charge={} retained_bytes={} total_budget={} admitted_session={} admitted_charge={} reason=projection_admission",
+                    oldest, session.retained_bytes, self.retained_bytes, self.max_retained_bytes,
+                    session_id, retained_bytes,
+                );
             }
         }
     }
@@ -16041,6 +16060,12 @@ struct RequestMethodProbe {
     method: Option<String>,
     #[serde(default)]
     kind: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default)]
+    transform_page_index: Option<u64>,
+    #[serde(default)]
+    transform_page_total: Option<u64>,
 }
 
 impl RequestMethodProbe {
@@ -16061,9 +16086,20 @@ fn enforce_request_byte_cap(body: &[u8]) -> Result<(), HandlerOutcome> {
     if body.len() <= MAX_FACADE_FRAME_BYTES {
         return Ok(());
     }
-    let transform_class = serde_json::from_slice::<RequestMethodProbe>(body)
-        .map(|probe| probe.is_transform_class())
-        .unwrap_or(false);
+    let probe = serde_json::from_slice::<RequestMethodProbe>(body).ok();
+    // Record only envelope metadata, never message or tool content. A late
+    // transport field can overrun a page by just a few bytes; log the actual
+    // received length and zero-based index to distinguish that from assembly.
+    tracing::warn!(
+        "mc-request-byte-cap refused bytes={} cap={} method={:?} kind={:?} session={:?} page_index={:?} page_total={:?}",
+        body.len(), MAX_FACADE_FRAME_BYTES,
+        probe.as_ref().and_then(|p| p.method.as_deref()),
+        probe.as_ref().and_then(|p| p.kind.as_deref()),
+        probe.as_ref().and_then(|p| p.session_id.as_deref()),
+        probe.as_ref().and_then(|p| p.transform_page_index),
+        probe.as_ref().and_then(|p| p.transform_page_total),
+    );
+    let transform_class = probe.is_some_and(|probe| probe.is_transform_class());
     if transform_class {
         if body.len() <= MAX_TRANSFORM_FRAME_BYTES {
             return Ok(());
@@ -20693,6 +20729,12 @@ mod tests {
         assert!(enforce_request_byte_cap(&vec![b'x'; two_mib]).is_ok());
         assert!(
             enforce_request_byte_cap(&pad("transform", "kind", MAX_TRANSFORM_FRAME_BYTES)).is_err()
+        );
+        assert!(
+            enforce_request_byte_cap(&pad("transform", "method", MAX_FACADE_FRAME_BYTES)).is_err()
+        );
+        assert!(
+            enforce_request_byte_cap(&pad("ctx_memory", "name", MAX_FACADE_FRAME_BYTES)).is_err()
         );
     }
 
