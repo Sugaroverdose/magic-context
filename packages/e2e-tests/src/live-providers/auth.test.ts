@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../../plugin/src/shared/test-temp-dir";
 import { assertThrowawayRoot, authPluginPath, oauthSlot, writeAuthConfig } from "./auth";
 import { databaseFilesFromLsof, startHost } from "./host";
 import { startRecorder } from "./recorder";
@@ -35,7 +36,7 @@ describe("disposable subscription auth", () => {
     });
 
     it("writes only a disposable login slot and points both plugins at disposable files", () => {
-        const root = mkdtempSync(join(tempBase, "auth-"));
+        const root = createTestTempDirFromPath(join(tempBase, "auth-"));
         mkdirSync(join(root, "config"));
         try {
             const env = writeAuthConfig(root, claudeOAuth, "sk-ant-oat-fixture", "http://127.0.0.1:1234/v1");
@@ -57,7 +58,7 @@ describe("disposable subscription auth", () => {
     });
 
     it("lsof isolation rejects missing, external and prefix-lookalike database handles", () => {
-        const root = mkdtempSync(join(tempBase, "lsof-"));
+        const root = createTestTempDirFromPath(join(tempBase, "lsof-"));
         const row = (path: string) => `opencode 123 user 4u REG 1,1 0 1 ${path}`;
         try {
             const inside = row(join(realpathSync(root), "data", "live.db"));

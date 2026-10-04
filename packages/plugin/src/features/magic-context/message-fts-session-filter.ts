@@ -97,5 +97,5 @@ export function withMessageFtsSessionFilter<T>(
             coverageCaches.delete(db);
         }
         return read(sessionFirst);
-    })();
+    }).deferred();
 }

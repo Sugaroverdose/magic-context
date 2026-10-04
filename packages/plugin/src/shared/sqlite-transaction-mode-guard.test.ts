@@ -23,6 +23,8 @@ const READ_ONLY_DEFERRED_TRANSACTIONS: Record<string, string> = {
         "reads the latest compaction and the rows after it as one consistent snapshot of the OpenCode 2 store; never writes",
     "packages/pi-plugin/src/inject-compartments-pi.ts#readFrozenM0InputsPi":
         "reads the m[0] render sources and their watermarks as one consistent snapshot; never writes",
+    "packages/plugin/src/features/magic-context/message-fts-session-filter.ts#withMessageFtsSessionFilter":
+        "pins one read snapshot so the session's rowid coverage proof and the filtered message search see the same rows; never writes (read-only connections use it too)",
     "packages/plugin/src/hooks/magic-context/lkg-persist.ts#loadPersistedLkgSlot":
         "reads an LKG slot row and its prefix slices as one consistent snapshot; never writes (a failed verification clears the slot afterwards, outside this transaction)",
 };
