@@ -34,8 +34,8 @@ A 404/410 container response is indistinguishable from a nonexistent container;
 both are reported as **not publicly readable**, not claimed to be private or
 permanently nonexistent. This is deliberate: missing repositories/packages require
 owner repair or a different data source, whereas missing releases/files/versions
-inside readable containers are normal waiting states. They can be retried after
-the existing week-long persistent-failure backoff.
+inside readable containers are normal waiting states. Inaccessible containers and
+non-rate-limited 401/403/451 responses park the note rather than retrying forever.
 
 Generic document origins have no universal container-metadata API, so their
 404/410 responses indicate absence without a probe. This cannot detect arbitrary
@@ -52,7 +52,13 @@ failures/timeouts retry later. None constitutes evidence that a condition is met
 Persistent failures in compilation, scheduled checks and liveness checks use the
 same stored, deduplicated owner notice, keyed by note and condition. Dismissal of
 the notice does not cause another alert for an unchanged condition. The smart note
-itself stays pending.
+itself stays pending and visible in `ctx_note read`. Uncheckable sources store
+`check_status = 'parked'` and the reason in `ready_reason`; compilation, scheduled
+checks, liveness checks and fallback evaluation all skip them. Updating the note's
+`surface_condition` to a different condition clears the parked state and reason
+and schedules compilation again. Content-only edits do not un-park a note.
+Other persistent failures, such as oversized responses after bounded-endpoint
+repair, retain the existing week-long recompilation backoff.
 
 ## GitHub authentication
 
@@ -63,3 +69,9 @@ unauthenticated quota. Adding authenticated requests needs a separate explicit
 credential policy so redirect targets and unrelated note URLs cannot receive a
 token. Header hints prevent quota failures from becoming permanent owner alerts,
 but do not increase that quota or coalesce requests from different notes.
+
+GitHub `/search/code` requires authentication even for public repositories. The
+compiler refuses literal code-search endpoints before its dry run, and the HTTP
+guard refuses them at runtime (including redirects and older compiled checks).
+The compiler is instructed to use public contents or bounded commits endpoints
+only if they answer the same question, not to silently weaken the condition.

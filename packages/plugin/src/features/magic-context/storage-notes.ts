@@ -4,7 +4,7 @@ import { managedAuthorityNoteRow } from "./migrations";
 
 export type NoteType = "session" | "smart";
 export type NoteStatus = "active" | "pending" | "ready" | "dismissed";
-export type NoteCheckStatus = "uncompiled" | "compiled" | "failing" | "fallback";
+export type NoteCheckStatus = "uncompiled" | "compiled" | "failing" | "fallback" | "parked";
 export type ConditionCompileStatus = "compiled" | "plain" | "refused";
 
 export interface Note {
@@ -139,6 +139,7 @@ const NOTE_CHECK_STATUSES = new Set<NoteCheckStatus>([
     "compiled",
     "failing",
     "fallback",
+    "parked",
 ]);
 const CONDITION_COMPILE_STATUSES = new Set<ConditionCompileStatus>([
     "compiled",

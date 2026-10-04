@@ -17216,6 +17216,19 @@ fn format_glance_row(note: &StoredNote, now_ms: i64) -> String {
     if note.status != "active" {
         markers.push(note.status.as_str());
     }
+    let parked;
+    if note.type_name == "smart"
+        && note.status == "pending"
+        && note.check_status.as_deref() == Some("parked")
+    {
+        parked = format!(
+            "parked: {}",
+            note.ready_reason
+                .as_deref()
+                .unwrap_or("Condition can't be checked")
+        );
+        markers.push(parked.as_str());
+    }
     if now_ms - touched_at >= STALE_AFTER_MS {
         markers.push("stale");
     }
@@ -28666,6 +28679,38 @@ mod tests {
             })
             .unwrap()
             .id
+    }
+
+    #[test]
+    fn note_facade_parked_reason_is_visible_in_glance_and_body() {
+        let producer = Arc::new(ProducerState::default());
+        let resolver =
+            FakeSessionResolver::with(&[("token", FakeResolve::Hit("session".to_string()))]);
+        let (_handler, store, _dir, _project) =
+            handler_with_store_and_resolver(producer, default_test_config(), resolver);
+        let now = now_ms();
+        let mut note = store
+            .insert_project_note(NoteWriteInput {
+                project_path: "/repo",
+                route_project_root: None,
+                session_id: Some("session"),
+                content: "Watch schema",
+                surface_condition: Some("schema appears"),
+                compiled_provider: None,
+                compiled_config: None,
+                compiled_at: None,
+                compile_status: None,
+                anchor_block_id: None,
+                anchor_ordinal: None,
+                now_ms: now,
+            })
+            .unwrap();
+        note.check_status = Some("parked".to_string());
+        note.ready_reason = Some(
+            "Condition can't be checked: source is not publicly readable; rewrite it".to_string(),
+        );
+        assert_eq!(format_glance_row(&note, now), "#1 · 0m · Watch schema · pending · parked: Condition can't be checked: source is not publicly readable; rewrite it");
+        assert_eq!(format_note_body(&note, now), "- **#1** · 0m · pending: Watch schema\n  Condition: schema appears\n  Condition can't be checked: source is not publicly readable; rewrite it");
     }
 
     #[tokio::test(flavor = "current_thread")]

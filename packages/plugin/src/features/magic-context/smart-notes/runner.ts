@@ -155,6 +155,9 @@ export async function runDueCompiledSmartNoteChecks(
                                 MAX_FAILURES_BEFORE_REAUTHOR,
                                 result.error,
                                 true,
+                                undefined,
+                                result.retryAt,
+                                result.uncheckable,
                             );
                         } else {
                             markCompiledCheckNetworkFailure(
