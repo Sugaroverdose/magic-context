@@ -1,12 +1,10 @@
 //! Probes that are deliberately written against the pre-A1 API surface so the
 //! SAME file compiles and runs on the base commit `991046ca` as well as here.
 //!
-//! The acceptance bar for the host-runner slice is "with the default runner,
-//! nothing changed". That is a claim about two different byte streams, and a
-//! test that only runs on the new tree cannot check either of them: it would
-//! assert that today's bytes equal today's bytes. So these probes reduce each
-//! stream to one digest, and the gate runs the identical file on both trees and
-//! compares the digests.
+//! The acceptance bar for the host-runner slice was "with the default runner,
+//! nothing changed". The shared historian prompt now intentionally asks for
+//! subjectless user observations, so its request digest is pinned to the current
+//! prompt while the served-byte digest remains the base-tree comparison.
 //!
 //! - The historian request digest covers exactly what leaves the module for the
 //!   completion provider: the system prompt, the user prompt, and the model.
@@ -21,10 +19,10 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
-/// The historian request bytes recorded on the base tree at `991046ca`, by running
-/// this same file there against a read-only extraction of that commit.
-const BASELINE_REQUEST_DIGEST: &str =
-    "6471eca0a44ddebe29cefcec06b6e71fd17d8eca646819ceed176bfa60ed12b4";
+/// The historian request bytes pinned after the shared prompt switched to
+/// subjectless, verb-first user-observation examples.
+const EXPECTED_REQUEST_DIGEST: &str =
+    "85aaf981b26d8f720ee76c91ddea59b003cf619fbfb353ff1e40cb337f7fbca5";
 
 /// The array a fold pass serves, recorded the same way.
 const BASELINE_SERVED_DIGEST: &str =
@@ -37,8 +35,8 @@ const BASELINE_SERVED_DIGEST: &str =
 ///
 /// Re-recorded against master at `981c746b` when the slice was integrated there:
 /// master's own later work had already grown the blob from the 22,027 bytes
-/// recorded at `991046ca`. The request and served digests above were identical on
-/// both bases, so they were left as recorded.
+/// recorded at `991046ca`. The request digest above tracks the current shared
+/// historian prompt; the served digest below remains the base-tree comparison.
 const BASELINE_META_DIGEST: &str =
     "6d9f28bd0253565e8175ad3d26a4f7e490b01d577f188c8299b0321ee502caeb";
 // One byte more than the base tree's 22_403: the single-store move folds two more
@@ -120,8 +118,8 @@ async fn gate_probe_default_runner_request_and_meta_digests() {
     );
 
     assert_eq!(
-        request_digest, BASELINE_REQUEST_DIGEST,
-        "the default runner's completion request must be byte-identical to the base tree's"
+        request_digest, EXPECTED_REQUEST_DIGEST,
+        "the default runner's completion request must match its pinned prompt bytes"
     );
 
     // The durable blob is the one stream that does move, and it moves by exactly

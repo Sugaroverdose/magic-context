@@ -665,6 +665,50 @@ describe("prepareCompartmentInjection — transition from empty to compartment",
     });
 });
 
+describe("user-profile baseline and delta rendering", () => {
+    it("normalizes subject prefixes in both m[0] and the new-profile delta", () => {
+        db = makeDb();
+        createUserMemoryTable();
+        const projectDirectory = makeProjectDir();
+        insertUserMemory(db, "User strongly pushes back on untested changes.", []);
+        setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
+        const options = {
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            injectDocs: false,
+            userProfileBudgetTokens: 10_000,
+        };
+
+        const baseline = materializeM0(options);
+        expect(baseline.m0Text).toContain(
+            "<user-profile>\n- Strongly pushes back on untested changes.\n</user-profile>",
+        );
+
+        insertUserMemory(db, "User expects changes to be tested.", []);
+        setProjectState(db, "__global__", { projectUserProfileVersion: 2 });
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state: readStateFromMeta(),
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }),
+        ).toEqual({ value: false, reason: null });
+        const delta = renderM1(
+            { ...options, state: readStateFromMeta() },
+            baseline.snapshotMarkers,
+            baseline.renderedMemoryIds,
+        );
+        expect(delta).toContain("<new-user-profile>");
+        expect(delta).toContain("- Strongly pushes back on untested changes.");
+        expect(delta).toContain("- Expects changes to be tested.");
+    });
+});
+
 describe("prepared prefix source-order trimming", () => {
     const message = (id: string, role: "user" | "assistant"): MessageLike => ({
         info: { id, role, sessionID: SESSION_ID },

@@ -151,7 +151,8 @@ ${candidateList}
 4. Do NOT promote: project-specific preferences, framework choices, one-off moods, task-local frustrations.
 5. If a candidate is semantically equivalent to an existing stable memory, mark it as already covered.
 6. If multiple candidates describe the same trait, merge them into one clean statement.
-7. If an existing stable memory should be updated based on new evidence, include the update.
+7. Phrase every promoted or updated memory as a concise, present-tense verb-first statement without a subject (for example, "Prefers concise explanations" or "Expects changes to be tested").
+8. If an existing stable memory should be updated based on new evidence, include the update and keep the same verb-first, subjectless phrasing.
 
 ### Output Format
 

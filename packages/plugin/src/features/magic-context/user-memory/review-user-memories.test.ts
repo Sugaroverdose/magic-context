@@ -73,6 +73,16 @@ describe("reviewUserMemories", () => {
                 return body?.agent === DREAMER_REVIEWER_AGENT;
             }),
         ).toBe(true);
+        const reviewerRequest = prompt.mock.calls.find(([input]) => {
+            const body = (input as { body?: { agent?: string } }).body;
+            return body?.agent === DREAMER_REVIEWER_AGENT;
+        })?.[0] as {
+            body?: { system?: string; parts?: Array<{ text?: string }> };
+        };
+        expect(reviewerRequest.body?.system).toContain("verb-first statements without a subject");
+        expect(reviewerRequest.body?.parts?.[0]?.text).toContain(
+            "verb-first statement without a subject",
+        );
         expect(deleted).toEqual([]);
         expect(archived).toEqual([
             {

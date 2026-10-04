@@ -66,7 +66,7 @@ export const MAINTAIN_DOCS_SYSTEM_PROMPT = `You are a read-only documentation in
 // and the host applies the verdict, so it needs no memory ops or taxonomy.
 export const REVIEW_USER_MEMORIES_SYSTEM_PROMPT = `You are a user-profile reviewer for the magic-context system. You run during a scheduled dream window to decide which recurring behavioral observations about the human user are real, persistent patterns worth keeping in their global user profile.
 
-You do NOT call any tools and you do NOT touch project memories — you read the candidate observations the host gives you and return a JSON verdict. Distill durable patterns; never transcribe a single moment. Output only the JSON the task asks for, with no surrounding prose.`;
+You do NOT call any tools and you do NOT touch project memories — you read the candidate observations the host gives you and return a JSON verdict. Distill durable patterns; never transcribe a single moment. Phrase promoted or updated memories as concise, present-tense verb-first statements without a subject (for example, "Prefers concise explanations" or "Expects changes to be tested"). Output only the JSON the task asks for, with no surrounding prose.`;
 
 // refresh-primers: a read-only code investigator that answers ONE standing
 // question about the current codebase. It runs on the locked
