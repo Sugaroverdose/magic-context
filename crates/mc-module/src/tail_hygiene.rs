@@ -505,6 +505,7 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
     protected_block_ids: &HashSet<String>,
     pending_drop_target_ids: &HashSet<String>,
 ) -> TailHygieneMeasurement {
+    profile_start!(perf_indexes, "hygiene_indexes");
     let (tags_by_block, tags_by_arc) = tag_numbers_by_block_and_arc(projection, tag_rows);
     let queued_numbers = queued_tag_numbers(tag_rows, pending_drop_target_ids);
     let protected_arc_ids = projection
@@ -535,7 +536,9 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
             }
         })
         .collect::<HashSet<_>>();
+    profile_end!(perf_indexes);
 
+    profile_start!(perf_parts, "hygiene_parts");
     let mut parts = Vec::with_capacity(projection.blocks.len());
     let mut u = 0i64;
     let mut t = 0i64;
@@ -637,6 +640,8 @@ pub(crate) fn measure_tail_hygiene_with_pending_drops(
         u = u.saturating_add(measured.u_tokens.max(0));
         parts.push(measured);
     }
+    profile_end!(perf_parts);
+    profile_start!(_perf_signature, "hygiene_signature");
     let mut signature_input = String::new();
     for part in &parts {
         let _ = write!(signature_input, "{}:{}\0", part.key, part.content_hash);
@@ -842,6 +847,7 @@ pub(crate) fn refresh_tail_hygiene_baseline_calibrated(
     now_ms: i64,
     calibration: HygieneCalibration,
 ) -> TailHygieneRefresh {
+    profile_start!(perf_buckets, "hygiene_refresh_buckets");
     let TailHygieneMeasurement {
         content_signature,
         parts,
@@ -858,17 +864,21 @@ pub(crate) fn refresh_tail_hygiene_baseline_calibrated(
         calibration
     };
     let effective_token_buckets = token_buckets(&parts);
+    profile_end!(perf_buckets);
     // A defer pass cannot attribute an unexplainable change to an append, and this
     // walk measures the rendered tail rather than producing wire bytes, so it
     // re-measures instead of holding the stale baseline until the next cache-busting
     // pass. Holding left the reclaim reminders unevaluable for as long as the session
     // went without a bust.
+    profile_start!(perf_compare, "hygiene_refresh_compare");
     let comparison = match previous {
         Some(previous) if !cache_busting => {
             Some(same_measured_prefix(&previous.baseline_parts, &parts))
         }
         _ => None,
     };
+    profile_end!(perf_compare);
+    profile_start!(_perf_baseline, "hygiene_refresh_baseline");
     let (valid_delta, mismatch) = match comparison {
         Some(PrefixComparison::Valid {
             boundary_advance_u,
@@ -1016,6 +1026,67 @@ mod tests {
     };
     use serde::{Deserialize, Serialize};
     use serde_json::{json, Value};
+
+    #[test]
+    #[ignore = "release-only signature checkpoint prototype; no production cache"]
+    fn signature_checkpoint_prototype_matches_full_hash() {
+        assert!(!cfg!(debug_assertions), "run the prototype with --release");
+        let parts: Vec<_> = (0_u64..23_000)
+            .map(|i| {
+                (
+                    format!("recorded-shape-{i}#0\0text"),
+                    hex_digest(i.to_le_bytes()),
+                )
+            })
+            .collect();
+        // SHA-256 continuation preserves the existing ordered byte stream. A
+        // tree/Merkle digest would not be a substitute for this content signature.
+        let mut prefix = Sha256::new();
+        let mut prefix_bytes = 0;
+        for (key, hash) in &parts[..parts.len() - 1] {
+            let bytes = format!("{key}:{hash}\0");
+            prefix_bytes += bytes.len();
+            prefix.update(bytes.as_bytes());
+        }
+        let mut full_costs = Vec::new();
+        let mut checkpoint_costs = Vec::new();
+        for pass in 0..23 {
+            let hash = hex_digest(format!("streaming-{pass}"));
+            crate::per_pass_profile::begin_pass();
+            profile_start!(perf_full, "full_signature");
+            let mut input = String::new();
+            for (key, content_hash) in &parts[..parts.len() - 1] {
+                let _ = write!(input, "{}:{}\0", key, content_hash);
+            }
+            let key = &parts.last().unwrap().0;
+            let _ = write!(input, "{}:{}\0", key, hash);
+            let full = hex_digest(input);
+            profile_end!(perf_full);
+            profile_start!(perf_checkpoint, "checkpoint_signature");
+            let mut candidate = prefix.clone();
+            candidate.update(format!("{key}:{hash}\0").as_bytes());
+            let checkpoint = format!("{:x}", candidate.finalize());
+            profile_end!(perf_checkpoint);
+            let costs = crate::per_pass_profile::end_pass();
+            assert_eq!(checkpoint, full, "signature bytes differ on pass {pass}");
+            if pass >= 3 {
+                full_costs.push(costs["full_signature"].thread_cpu_ms);
+                checkpoint_costs.push(costs["checkpoint_signature"].thread_cpu_ms);
+            }
+        }
+        let median = |mut costs: Vec<f64>| {
+            costs.sort_by(f64::total_cmp);
+            (costs[9] + costs[10]) / 2.0
+        };
+        println!(
+            "SIGNATURE_PROTOTYPE {}",
+            json!({"parts":parts.len(), "stable_prefix_bytes":prefix_bytes,
+                "samples":20, "byte_comparisons":23,
+                "checkpoint_bytes":std::mem::size_of::<Sha256>(),
+                "full_cpu_p50_ms":median(full_costs),
+                "checkpoint_cpu_p50_ms":median(checkpoint_costs)})
+        );
+    }
 
     fn message(mid: &str, ordinal: u64, role: &str, blocks: Vec<CkKind>) -> CkIngressMessage {
         CkIngressMessage {
