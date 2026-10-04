@@ -705,11 +705,16 @@ export function createDreamTaskExecutor(deps: DreamTaskExecutorDeps): TaskExecut
             // scheduled task before opening batches or advancing task cursors;
             // the scheduler moves skipped work to its next cron without retries.
             // Hidden carriers and Pi's process-local sessions need no parent.
+            // Tasks that may finish without any child session keep running:
+            // host-only database work, and smart-note evaluation, whose compiled
+            // checks run in the local sandbox (or defer to the wake plane).
             if (
                 deps.client &&
                 !deps.hiddenCompletionExecutor &&
                 !backgroundSessionsAreHidden &&
-                !parent
+                !parent &&
+                DREAM_TASK_CAPABILITIES[config.task].transport !== "host-only" &&
+                config.task !== "evaluate-smart-notes"
             )
                 return skip("no ordinary parent session is available on this host");
             if (
