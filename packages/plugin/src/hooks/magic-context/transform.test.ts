@@ -67,6 +67,7 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import type { MarkerUpdateOutcome } from "./compaction-marker-manager";
 import { registerActiveCompartmentRun } from "./compartment-runner";
+import { deriveKey, renderDropToken } from "./fpe";
 import { createToolExecuteAfterHook } from "./hook-handlers";
 import { injectM0M1 } from "./inject-compartments";
 import { captureSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
@@ -256,7 +257,9 @@ describe("createTransform", () => {
         updateTagStatus(db, sessionId, tool!.tagNumber, "dropped");
         updateTagDropMode(db, sessionId, tool!.tagNumber, "full");
         const legacy = await run();
-        expect(legacy.some((message) => message.info.id === "sweep-thinking")).toBe(false);
+        // Nothing is swept any more: the released pair stays, so the legacy
+        // defer sweep no longer prunes the reasoning-only row with it.
+        expect(legacy.some((message) => message.info.id === "sweep-thinking")).toBe(true);
         const sha = (value: unknown) =>
             createHash("sha256").update(JSON.stringify(value)).digest("hex");
         const capture = (label: string, messages: TestMessage[], previous: TestMessage[]) => {
@@ -355,7 +358,12 @@ describe("createTransform", () => {
         });
         const replay = await run();
         expect(sha(replay.slice(0, priced.length))).toBe(sha(priced));
-        expect(replay.some((message) => message.info.id === "sweep-tool")).toBe(false);
+        // The dropped tool row keeps its place on the wire as the skeleton —
+        // the published-history arm no longer serves it only because
+        // compaction covers the opening rows, not because the drop removed it.
+        expect(replay.some((message) => message.info.id === "sweep-tool")).toBe(
+            kind !== "published-history",
+        );
     });
     it("pre-adoption defer serves the sweep variant each session was last served", async () => {
         useTempDataHome("context-transform-sweep-lkg-");
@@ -436,7 +444,7 @@ describe("createTransform", () => {
             ).includes("@tool-sweep-scoped");
         // Both arms replay the same history on a pass that may not change bytes.
         // They differ only in what the durable snapshot says was served last.
-        const runArm = async (sessionId: string, lastServedKeepsReasoning: boolean) => {
+        const runArm = async (sessionId: string) => {
             const source = sourceFor(sessionId);
             const transform = makeTransform(sessionId);
             const run = async () => {
@@ -450,21 +458,11 @@ describe("createTransform", () => {
             updateTagStatus(db, sessionId, tool!.tagNumber, "dropped");
             updateTagDropMode(db, sessionId, tool!.tagNumber, "full");
             const legacy = await run();
-            expect(legacy.some((message) => message.info.id === "lkg-thinking")).toBe(false);
+            // The released pair is never swept away, so both sweep variants now
+            // keep the reasoning-only row and render identical rows.
+            expect(legacy.some((message) => message.info.id === "lkg-thinking")).toBe(true);
             expect(marker(sessionId)).toBe(false);
-            const lastServed = lastServedKeepsReasoning
-                ? legacy.flatMap((message) =>
-                      message.info.id === "lkg-notice"
-                          ? [
-                                {
-                                    info: { id: "lkg-thinking", role: "assistant" },
-                                    parts: [{ type: "reasoning", text: "signed reasoning only" }],
-                                },
-                                message,
-                            ]
-                          : [message],
-                  )
-                : legacy;
+            const lastServed = legacy;
             expect(
                 captureSlot(sessionId, {
                     jsonPrefix: JSON.stringify(lastServed),
@@ -479,22 +477,27 @@ describe("createTransform", () => {
             return { legacy, replay: await run() };
         };
 
-        const old = await runArm("ses-sweep-lkg-old", false);
-        const scoped = await runArm("ses-sweep-lkg-scoped", true);
+        const old = await runArm("ses-sweep-lkg-old");
+        const scoped = await runArm("ses-sweep-lkg-scoped");
         console.log(`SCOPED_GATE lkg replay old=${sha(old.replay)} scoped=${sha(scoped.replay)}`);
-        // Served-under-legacy session keeps being served the legacy array.
+        // Both arms reproduce their own snapshot: the released pair makes the
+        // two sweep candidates the same rows, so the snapshot is no evidence
+        // for changing behavior and neither session adopts on a defer pass.
         expect(sha(old.replay)).toBe(sha(old.legacy));
-        expect(old.replay.some((message) => message.info.id === "lkg-thinking")).toBe(false);
+        expect(old.replay.some((message) => message.info.id === "lkg-thinking")).toBe(true);
         expect(marker("ses-sweep-lkg-old")).toBe(false);
-        // Served-under-scoped session gets its reasoning-only turn back — that
-        // is a replay of its own bytes — and records the adoption.
+        expect(sha(scoped.replay)).toBe(sha(scoped.legacy));
         expect(
             scoped.replay
                 .find((message) => message.info.id === "lkg-thinking")
                 ?.parts.some((part) => part.type === "reasoning"),
         ).toBe(true);
-        expect(marker("ses-sweep-lkg-scoped")).toBe(true);
-        expect(sha(old.replay)).not.toBe(sha(scoped.replay));
+        expect(marker("ses-sweep-lkg-scoped")).toBe(false);
+        // Same rows in the same order in both arms (raw shas differ only
+        // because each session's carrier tokens are keyed to its own id).
+        expect(old.replay.map((message) => message.info.id)).toEqual(
+            scoped.replay.map((message) => message.info.id),
+        );
     });
     async function runMarkerBoundaryFixture(options: {
         name: string;
@@ -1055,11 +1058,13 @@ describe("createTransform", () => {
         updateTagStatus(db, sessionId, compactedTag!.tagNumber, "compacted");
         const served = structuredClone(input);
         await transform({}, { messages: served });
-        expect(served.some((message) => message.info.id === "tool-full")).toBe(false);
-        for (const mode of ["truncated", "edit_marker"]) {
+        // Every released mode now keeps its row: `full` renders the carrier
+        // skeleton instead of erasing the message.
+        expect(served.some((message) => message.info.id === "tool-full")).toBe(true);
+        for (const mode of ["full", "truncated", "edit_marker"]) {
             const message = served.find((message) => message.info.id === `tool-${mode}`);
             expect(message).toBeDefined();
-            expect(toolOutput(message!, 0)).toContain("[dropped");
+            expect(toolOutput(message!, 0)).toBe("...");
         }
         const compressed = served.find((message) => message.info.id === "compressed");
         expect(compressed).toBeDefined();
@@ -1068,7 +1073,9 @@ describe("createTransform", () => {
         const digest = createHash("sha256").update(JSON.stringify(served)).digest("hex");
         // Pinned from the full-target reader before narrowing the replay query:
         // the optimization must retain every served byte, including caveman text.
-        expect(digest).toBe("0e3b74f2fc4379eeb93244788f0eb21920ac7892570303858c64cd2a19d810b0");
+        // Re-pinned for the released tool shape (carrier args + `...`, no
+        // removal — the `full` row now rides the wire as a skeleton).
+        expect(digest).toBe("cfbe96321d6d9e9e2aa20a133bc0cbe41b5b0d0415634dce784d0691f4ee4312");
     });
 
     it("serves byte-identical hot passes while coalescing state and skipping all-hit token SQL", async () => {
@@ -1883,12 +1890,24 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then — absolute emergency pressure yields the token window, so the
-        // tool-only assistant shell is removed by the full-drop path.
-        expect(messages.map((message) => message.info.id)).toEqual(["m-user", "m-next"]);
+        //#then — absolute emergency pressure yields the token window: the
+        // full-drop path releases the call in place, so the shell stays on the
+        // wire carrying the carrier + `...` skeleton.
+        expect(messages.map((message) => message.info.id)).toEqual([
+            "m-user",
+            "m-assistant",
+            "m-next",
+        ]);
         const tags = getTagsBySession(db, "ses-force-materialize");
-        expect(tags.find((tag) => tag.type === "tool")?.status).toBe("dropped");
-        expect(tags.find((tag) => tag.type === "tool")?.dropMode).toBe("full");
+        const toolTag = tags.find((tag) => tag.type === "tool");
+        expect(toolTag?.status).toBe("dropped");
+        expect(toolTag?.dropMode).toBe("full");
+        const releasedTool = messages[1]!.parts[0] as { state: Record<string, unknown> };
+        expect(releasedTool.state).toEqual({
+            output: "...",
+            attachments: [],
+            input: { d: renderDropToken(toolTag!.tagNumber, deriveKey("ses-force-materialize")) },
+        });
     });
 
     it("strips structural noise even when scheduler defers", async () => {
@@ -2255,16 +2274,26 @@ describe("createTransform", () => {
 
         //#then — user message shell is preserved (turn boundary) as the canonical
         // [dropped §N§] placeholder; the tool tag is padded OUT of the newest-20
-        // skeleton window above, so the tool-only assistant takes the legacy
-        // FULL-removal path and its shell is stripped. (The in-window skeleton path
-        // is covered in apply-operations.tool-drop.test.ts.)
-        expect(secondPass.map((message) => message.info.id)).toEqual(["m-user", "m-next"]);
+        // skeleton window above, so the tool-only assistant takes the deep-history
+        // FULL path: the carrier skeleton in place, the shell never stripped.
+        // (The in-window skeleton path is covered in apply-operations.tool-drop.test.ts.)
+        expect(secondPass.map((message) => message.info.id)).toEqual([
+            "m-user",
+            "m-assistant",
+            "m-next",
+        ]);
         expect(secondPass[0]?.info.role).toBe("user");
         const userShellText = (secondPass[0]?.parts[0] as { text: string }).text;
         expect(userShellText).toBe("[dropped \u00a71\u00a7]");
         expect(getTagById(db, "ses-1", 1)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.dropMode).toBe("full");
+        const flushedTool = secondPass[1]?.parts[0] as { state: Record<string, unknown> };
+        expect(flushedTool?.state).toEqual({
+            output: "...",
+            attachments: [],
+            input: { d: renderDropToken(2, deriveKey("ses-1")) },
+        });
         expect(channel1StateBySession.get("ses-1")?.agentDropsAppliedThisPass).toBe(true);
         expect(clearPendingOps(db, "ses-1")).toBeUndefined();
     });
@@ -3413,7 +3442,7 @@ describe("createTransform", () => {
         // tool ends the conversation, so the drop keeps its skeleton: removing it
         // would leave a text-only assistant as the last message, which providers
         // without assistant prefill support reject.
-        expect(toolOutput(messages[1], 1)).toBe(`[dropped \u00a7${toolTag?.tagNumber}\u00a7]`);
+        expect(toolOutput(messages[1], 1)).toBe("...");
     });
 });
 

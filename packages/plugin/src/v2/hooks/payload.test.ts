@@ -3,6 +3,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { Message } from "@opencode/ai/schema/messages";
 import { estimateMessageTokens } from "../../hooks/magic-context/final-wire-token-estimate";
+import { deriveKey, renderDropToken } from "../../hooks/magic-context/fpe";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import {
     createToolDropTarget,
@@ -15,6 +16,9 @@ import * as logger from "../../shared/logger";
 import { rememberHostMedia, resetHostMediaForTests } from "../fold/host-media";
 import { adaptPayload } from "./payload";
 import type { SessionContext, V2Message } from "./types";
+
+// Drafts carry sessionID "ses-1"; drop targets render tokens under its key.
+const sessionKey = deriveKey("ses-1");
 
 // Content part types the OpenCode 2 request schema accepts (LLM.Content.*).
 const V2_CONTENT_TYPES = new Set([
@@ -98,6 +102,7 @@ describe("adaptPayload", () => {
                 indexMessage(owner),
                 new ToolMutationBatch(payload.messages),
                 7,
+                sessionKey,
             );
 
             expect(target.truncate()).toBe("truncated");
@@ -107,19 +112,21 @@ describe("adaptPayload", () => {
             for (const message of context.messages)
                 expect(() => Message.make(message)).not.toThrow();
             const { calls, results } = callsAndResults(context.messages);
+            // Released pair: the call survives with the token in the first
+            // string-valued argument seat ("command"), the result is `...`.
             expect(calls).toEqual([
                 {
                     type: "tool-call",
                     id: "call-1",
                     name: "shell",
-                    input: { dropped: "[dropped §7§]" },
+                    input: { command: renderDropToken(7, sessionKey) },
                 },
             ]);
             expect(results).toHaveLength(1);
             expect(results[0]).toMatchObject({
                 type: "tool-result",
                 id: "call-1",
-                result: { type: "text", value: "[dropped §7§]" },
+                result: { type: "text", value: "..." },
             });
             // The result stays in its own tool-role carrier after the assistant row.
             expect(context.messages.map((message) => message.role)).toEqual(["assistant", "tool"]);
@@ -136,6 +143,7 @@ describe("adaptPayload", () => {
                 indexMessage(payload.messages[0]),
                 new ToolMutationBatch(payload.messages),
                 9,
+                sessionKey,
             );
 
             expect(target.editMarker()).toBe("truncated");
@@ -145,7 +153,7 @@ describe("adaptPayload", () => {
             for (const message of context.messages)
                 expect(() => Message.make(message)).not.toThrow();
             const { results } = callsAndResults(context.messages);
-            expect(results[0]).toMatchObject({ result: { type: "text", value: "[dropped §9§]" } });
+            expect(results[0]).toMatchObject({ result: { type: "text", value: "..." } });
         });
     });
 
@@ -163,6 +171,7 @@ describe("adaptPayload", () => {
                 indexMessage(first),
                 new ToolMutationBatch(payload.messages),
                 3,
+                sessionKey,
             );
 
             expect(target.truncate()).toBe("truncated");
@@ -173,7 +182,7 @@ describe("adaptPayload", () => {
                 expect(() => Message.make(message)).not.toThrow();
             const { calls } = callsAndResults(context.messages);
             expect(calls.map((call) => [call.name, call.input])).toEqual([
-                ["first_tool", { dropped: "[dropped §3§]" }],
+                ["first_tool", { command: renderDropToken(3, sessionKey) }],
                 ["second_tool", { command: "second_tool --all" }],
             ]);
         });
@@ -189,6 +198,7 @@ describe("adaptPayload", () => {
                 indexMessage(payload.messages[0]),
                 new ToolMutationBatch(payload.messages),
                 5,
+                sessionKey,
             );
             expect(target.truncate()).toBe("truncated");
             // strip-content's trailing-blank normalization copies a message (and its parts
@@ -205,8 +215,11 @@ describe("adaptPayload", () => {
                 [undefined, "tool"],
             ]);
             const { calls, results } = callsAndResults(context.messages);
-            expect(calls[0]).toMatchObject({ id: "call-1", input: { dropped: "[dropped §5§]" } });
-            expect(results[0]).toMatchObject({ result: { type: "text", value: "[dropped §5§]" } });
+            expect(calls[0]).toMatchObject({
+                id: "call-1",
+                input: { command: renderDropToken(5, sessionKey) },
+            });
+            expect(results[0]).toMatchObject({ result: { type: "text", value: "..." } });
         });
     });
 
@@ -242,6 +255,7 @@ describe("adaptPayload", () => {
                 indexMessage(owner),
                 new ToolMutationBatch(payload.messages),
                 11,
+                sessionKey,
             );
 
             expect(target.truncate()).toBe("truncated");
@@ -251,13 +265,13 @@ describe("adaptPayload", () => {
                 type: "tool-call",
                 id: "call-converted",
                 name: "read",
-                input: { dropped: "[dropped §11§]" },
+                input: { path: renderDropToken(11, sessionKey) },
             });
             expect(context.messages[1]?.content[0]).toMatchObject({
                 type: "tool-result",
                 id: "call-converted",
                 name: "read",
-                result: { type: "text", value: "[dropped §11§]" },
+                result: { type: "text", value: "..." },
             });
             for (const message of context.messages)
                 expect(() => Message.make(message)).not.toThrow();
@@ -293,6 +307,7 @@ describe("adaptPayload", () => {
                 indexMessage(payload.messages[0]),
                 new ToolMutationBatch(payload.messages),
                 11,
+                sessionKey,
             );
             expect(target.truncate()).toBe("truncated");
             payload.commit();
@@ -315,7 +330,14 @@ describe("adaptPayload", () => {
             const payload = adaptPayload(context);
             const owner = payload.messages[1];
             const batch = new ToolMutationBatch(payload.messages);
-            const target = createToolDropTarget("call-old", [], indexMessage(owner), batch, 4);
+            const target = createToolDropTarget(
+                "call-old",
+                [],
+                indexMessage(owner),
+                batch,
+                4,
+                sessionKey,
+            );
             expect(target.drop()).toBe("removed");
             batch.finalize();
             payload.messages.splice(0, 1);
@@ -624,11 +646,14 @@ describe("adaptPayload", () => {
                 indexMessage(owner),
                 new ToolMutationBatch(payload.messages),
                 6,
+                sessionKey,
             );
             expect(target.truncate()).toBe("truncated");
             payload.commit();
 
-            expect(resultOf(context)?.result).toEqual({ type: "text", value: "[dropped §6§]" });
+            // The released shape drops the attachment with the text: the result
+            // is the plain `...` sentinel, no image content remains.
+            expect(resultOf(context)?.result).toEqual({ type: "text", value: "..." });
         });
 
         it("#then the token estimate counts the image by its pixels, not its base64 length", () => {
@@ -662,9 +687,12 @@ it("OpenCode 2 question fallback vetoes automatic drops but preserves explicit r
         indexMessage(message),
         new ToolMutationBatch(mapped.messages),
         1,
+        sessionKey,
     );
     expect(target.canDrop()).toBe(false);
     expect(target.skeletonReal()).toBe("truncated");
     mapped.commit();
-    expect(JSON.stringify(payload.messages)).toContain("[dropped §1§]");
+    // The question's answer is preserved by veto; the explicit reduction still
+    // renders the released skeleton (`...`) into the result.
+    expect(JSON.stringify(payload.messages)).toContain('"value":"..."');
 });

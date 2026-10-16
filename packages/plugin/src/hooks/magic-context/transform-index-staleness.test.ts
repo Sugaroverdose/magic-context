@@ -159,7 +159,12 @@ describe("createTransform index staleness regressions", () => {
 
         await transform({}, { messages: secondPass });
 
-        const keepToolPart = secondPass[2].parts[0] as ToolPart;
+        // The dropped pair is no longer pruned out of the array, so the kept
+        // errored part stays at its original index.
+        expect(secondPass).toHaveLength(5);
+        const dropToolPart = secondPass[2]!.parts[0] as ToolPart;
+        expect(dropToolPart.state.output).toBe("...");
+        const keepToolPart = secondPass[4]!.parts[0] as ToolPart;
         expect(keepToolPart.state.error).toBe("x".repeat(150));
     });
 
@@ -242,7 +247,10 @@ describe("createTransform index staleness regressions", () => {
 
         await transform({}, { messages: secondPass });
 
-        expect(secondPass[2].parts.some((part) => part.type === "file")).toBe(true);
+        // The dropped tool pair survives in place, so the image row keeps its
+        // original index; the processed image must still be intact there.
+        expect(secondPass[2]!.parts[0]!.type).toBe("tool");
+        expect(secondPass[4]!.parts.some((part) => part.type === "file")).toBe(true);
     });
 
     it("replays processed-image stripping on defer passes (errored-tool truncation removed)", async () => {
