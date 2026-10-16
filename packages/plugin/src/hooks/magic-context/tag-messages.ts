@@ -22,7 +22,7 @@ import {
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { neutralizeDroppedReasoningPart } from "./sentinel";
-import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
+import { byteSize, isThinkingPart } from "./tag-content-primitives";
 import { createExistingTagResolver } from "./tag-id-fallback";
 import {
     buildFileSourceContent,
