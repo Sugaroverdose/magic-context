@@ -43,19 +43,18 @@ function servedToolOutput(messages: MessageLike[]): string {
 }
 
 describe("dangling-tag prefix strip stays byte-stable on a defer pass", () => {
-    // The leading strip (DANGLING_TAG_PREFIX_REGEX) makes the improvised closer
-    // optional, so "§5 of ..." loses "§5". OpenCode re-prefixes a tool output from
-    // the host's own text on every pass (tag-messages.ts:
-    // `toolPart.state.output = prependTag(tagId, output)`), with no saved source
-    // and no epoch, so any change to that rule would first apply on whatever pass
-    // comes first after deploy, a defer pass included, and bust the cache.
-    it("an already-tagged tool output serves the bytes the previous release served", () => {
+    // ctx_reduce v1: the wire path no longer prepends a tag, so the dangling
+    // strip that lived inside prependTag no longer runs on it — a host output
+    // that itself starts with "§5 of ..." now rides the wire verbatim. OpenCode
+    // feeds that host text back on every pass, so any change here would apply on
+    // whatever pass comes first after deploy, a defer pass included, and bust the
+    // cache: the property that must keep holding is pass-to-pass byte-stability.
+    it("an already-tagged tool output serves the host's own bytes, stable across passes", () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);
             runMigrations(db);
-            const hostOutput = "\u00a75 of the contract applies to every tenant";
-            const previousReleaseServed = "\u00a72\u00a7 of the contract applies to every tenant";
+            const hostOutput = "\\u00a75 of the contract applies to every tenant";
 
             // The pass the previous release served: it created the tool tag (tag
             // rows record no output bytes, so the row is the same either way).
@@ -70,7 +69,7 @@ describe("dangling-tag prefix strip stays byte-stable on a defer pass", () => {
             const deferPass = toolTurn(hostOutput);
             tagMessages(SESSION_ID, deferPass, restarted, db);
 
-            expect(servedToolOutput(deferPass)).toBe(previousReleaseServed);
+            expect(servedToolOutput(deferPass)).toBe(hostOutput);
         } finally {
             db.close();
         }

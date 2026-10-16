@@ -125,7 +125,7 @@ Every user message, every text you write and every tool result in this conversat
 
 ## 2. Tool surface (description + parameters as serialized to the provider)
 
-### ctx_reduce — description ~302 tokens, params ~115 tokens (total ~417)
+### ctx_reduce — description ~302 tokens, params ~77 tokens (total ~379)
 
 **Description:**
 
@@ -142,10 +142,6 @@ Look at each tag before stamping it; never blanket-stamp a range like "1-50". Ma
 
 ```json
 {
-  "drop": {
-    "description": "Tag IDs to drop: \"3-5\", \"1,2,9\", \"1-5,8,12-15\".",
-    "type": "string"
-  },
   "ids": {
     "description": "Call ids of tool calls to release, copied exactly from the calls as they appear in context.",
     "type": "array",
@@ -163,7 +159,7 @@ Look at each tag before stamping it; never blanket-stamp a range like "1-50". Ma
 }
 ```
 
-### ctx_expand — description ~377 tokens, params ~178 tokens (total ~555)
+### ctx_expand — description ~377 tokens, params ~167 tokens (total ~544)
 
 **Description:**
 
@@ -185,17 +181,6 @@ Finer recovery:
 
 ```json
 {
-  "tag": {
-    "description": "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
-    "anyOf": [
-      {
-        "type": "number"
-      },
-      {
-        "type": "string"
-      }
-    ]
-  },
   "start": {
     "description": "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
     "type": "number"
@@ -211,6 +196,10 @@ Finer recovery:
   "message": {
     "description": "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
     "type": "number"
+  },
+  "message_id": {
+    "description": "Message id from a ctx_reduce release echo. Returns that message in full. Use alone.",
+    "type": "string"
   }
 }
 ```

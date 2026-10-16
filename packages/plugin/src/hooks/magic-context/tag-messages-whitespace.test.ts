@@ -45,7 +45,7 @@ describe("whitespace-only assistant tag transition", () => {
             inputTokenCount: null,
             reasoningTokenCount: null,
         });
-        const previousServe = "§1§  \t";
+        const previousServe = " \t";
 
         for (const passClass of ["defer", "bust"] as const) {
             const tagger = createTagger();
@@ -59,6 +59,11 @@ describe("whitespace-only assistant tag transition", () => {
 
             expect(passClass).toMatch(/^(defer|bust)$/);
             expect(textOf(message)).toBe(previousServe);
+            // Tagging still ran: the whitespace transition retires the row to
+            // its inert pin without minting or rebinding anything.
+            expect(
+                getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.messageId,
+            ).toBe("__mc_whitespace_assistant_inert__:1");
         }
     });
 
@@ -88,7 +93,7 @@ describe("whitespace-only assistant tag transition", () => {
             expect(getActiveTagsBySession(db, sessionId)).toEqual([]);
         }
 
-        expect(served).toEqual(["§7§  ", "§7§  "]);
+        expect(served).toEqual([" ", " "]);
         expect(getTagsBySession(db, sessionId)).toMatchObject([
             { tagNumber: 7, status: "compacted" },
         ]);
@@ -100,7 +105,7 @@ describe("whitespace-only assistant tag transition", () => {
         insertTag(db, sessionId, "assistant-remap:p0", "message", 1, 1);
         markWhitespaceAssistantTagInert(db, sessionId, 1, "assistant-remap:p0");
         insertTag(db, sessionId, "assistant-other:p0", "message", 1, 2);
-        const previousServe = "§1§  ";
+        const previousServe = " ";
 
         for (let pass = 0; pass < 2; pass += 1) {
             const tagger = createTagger();
@@ -119,7 +124,11 @@ describe("whitespace-only assistant tag transition", () => {
             tagMessages(sessionId, [message], tagger, db);
 
             expect(textOf(message, 1)).toBe(previousServe);
-            expect(textOf(message, 1)).not.toContain("§2§");
+            // The stale binding never pulls tag 2 onto this part: its row stays
+            // bound to its own message.
+            expect(
+                getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 2)?.messageId,
+            ).toBe("assistant-other:p0");
         }
 
         const rows = getTagsBySession(db, sessionId);
@@ -161,10 +170,17 @@ describe("whitespace-only assistant tag transition", () => {
 
             tagMessages(sessionId, [message], tagger, db);
 
-            expect(textOf(message, 1)).toBe("§4§  ");
-            expect(textOf(message, 3)).toBe("§5§  ");
-            expect(textOf(message, 0)).not.toContain("§4§");
-            expect(textOf(message, 0)).not.toContain("§5§");
+            expect(textOf(message, 1)).toBe(" ");
+            expect(textOf(message, 3)).toBe(" ");
+            // Each inert row keeps its own identity across the remap: the real
+            // part cannot steal either ordinal, and the blanks rebind nothing.
+            const rows = getTagsBySession(db, sessionId);
+            expect(rows.find((tag) => tag.tagNumber === 4)?.messageId).toBe(
+                "__mc_whitespace_assistant_inert__:4",
+            );
+            expect(rows.find((tag) => tag.tagNumber === 5)?.messageId).toBe(
+                "__mc_whitespace_assistant_inert__:5",
+            );
         }
     });
 
@@ -212,7 +228,7 @@ describe("whitespace-only assistant tag transition", () => {
         );
         tagMessages(sessionId, [real], createTagger(), db);
 
-        expect(textOf(real, 1)).toBe("§2§ real answer");
+        expect(textOf(real, 1)).toBe("real answer");
         expect(
             getTagsBySession(db, sessionId).map((tag) => ({
                 tagNumber: tag.tagNumber,
@@ -235,7 +251,7 @@ describe("whitespace-only assistant tag transition", () => {
 
         const blank = assistant("assistant-changing", [{ type: "text", text: " " }], sessionId);
         tagMessages(sessionId, [blank], createTagger(), db);
-        expect(textOf(blank)).toBe("§1§  ");
+        expect(textOf(blank)).toBe(" ");
 
         for (let pass = 0; pass < 2; pass += 1) {
             const tagger = createTagger();
@@ -246,7 +262,7 @@ describe("whitespace-only assistant tag transition", () => {
                 sessionId,
             );
             tagMessages(sessionId, [real], tagger, db);
-            expect(textOf(real)).toBe("§2§ real answer");
+            expect(textOf(real)).toBe("real answer");
         }
 
         expect(

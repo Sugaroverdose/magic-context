@@ -59,10 +59,9 @@ function formatRawDropForAck(rawDrop: string): string {
 }
 
 const ctxReduceArgsShape = {
-    drop: tool.schema
-        .string()
-        .optional()
-        .describe('Tag IDs to drop: "3-5", "1,2,9", "1-5,8,12-15".'),
+    // ctx_reduce v1: the numeric 'drop' parameter is no longer advertised to
+    // the model. The schema below is passthrough, so old-shaped or imitated
+    // calls still reach execute() and the upstream numeric path stays intact.
     ids: tool.schema
         .array(tool.schema.string())
         .optional()

@@ -87,7 +87,7 @@ const textOf = (message: MessageLike): string =>
 const reasoningOf = (message: MessageLike): unknown => message.parts[0];
 
 describe("caveman compression on the wire", () => {
-    it("keeps the tag prefix on compressed text, on the compressing pass and on replay", () => {
+    it("serves compressed text without a tag prefix, on the compressing pass and on replay", () => {
         const db = openTestDb();
         const sessionId = "ses-caveman-prefix";
         runPass(db, sessionId);
@@ -98,13 +98,14 @@ describe("caveman compression on the wire", () => {
         // Positions 0, 1, 2 of five eligible tags compress to ultra, full, lite.
         const levels = ["ultra", "full", "lite"] as const;
         levels.forEach((level, index) => {
-            const expected = `\u00a7${index + 1}\u00a7 ${cavemanCompress(TEXTS[index], level)}`;
+            const expected = cavemanCompress(TEXTS[index], level);
             expect(textOf(rebuilt.messages[index])).toBe(expected);
         });
         // Words next to accented letters survive: the final "a" of "Mar\u00eda" is not an article.
         expect(textOf(rebuilt.messages[1])).toBe(
-            "\u00a72\u00a7 cache invalidated and then session reloaded. Ask Mar\u00eda about d\u00eda para fix.",
+            "cache invalidated and then session reloaded. Ask Mar\u00eda about d\u00eda para fix.",
         );
+        expect(wire(rebuilt.messages)).not.toContain("\u00a7");
         expect(wire(replayed.messages)).toBe(wire(rebuilt.messages));
     });
 
@@ -145,12 +146,8 @@ describe("caveman compression on the wire", () => {
             englishWordRules: true,
             legacyReasoningTags: new Set([1, 2]),
         });
-        expect(textOf(switched.messages[0])).toBe(
-            `\u00a71\u00a7 ${cavemanCompress(TEXTS[0], "ultra")}`,
-        );
-        expect(textOf(switched.messages[1])).toBe(
-            `\u00a72\u00a7 ${cavemanCompress(TEXTS[1], "full")}`,
-        );
+        expect(textOf(switched.messages[0])).toBe(cavemanCompress(TEXTS[0], "ultra"));
+        expect(textOf(switched.messages[1])).toBe(cavemanCompress(TEXTS[1], "full"));
         // Reasoning that already left stays gone; the newly compressed tag 4
         // is not compressed (position 3 of 5), and tag 3 is a user text.
         expect(reasoningOf(switched.messages[1])).toEqual({ type: "text", text: "" });
@@ -165,9 +162,7 @@ describe("caveman compression on the wire", () => {
         const sessionId = "ses-caveman-language";
         runPass(db, sessionId);
         const english = runRebuildingPass(db, sessionId);
-        expect(textOf(english.messages[0])).toBe(
-            `\u00a71\u00a7 ${cavemanCompress(TEXTS[0], "ultra")}`,
-        );
+        expect(textOf(english.messages[0])).toBe(cavemanCompress(TEXTS[0], "ultra"));
 
         // The setting changed to Spanish: passes that only replay keep the English bytes.
         const replayed = runPass(db, sessionId);
@@ -177,7 +172,7 @@ describe("caveman compression on the wire", () => {
         expect(getCavemanReplayState(db, sessionId).englishWordRules).toBe(false);
         for (let index = 0; index < 3; index += 1) {
             expect(textOf(switched.messages[index])).toBe(
-                `\u00a7${index + 1}\u00a7 ${cavemanCompress(TEXTS[index], "lite", undefined, "none")}`,
+                cavemanCompress(TEXTS[index], "lite", undefined, "none"),
             );
         }
         expect(textOf(switched.messages[0])).toContain("I think we should really refactor");
@@ -231,7 +226,7 @@ describe("caveman compression on the wire", () => {
         );
         const later = serve();
 
-        expect(textOf(stripPass.messages[1])).toBe("\u00a72\u00a7 Deploy finished.");
+        expect(textOf(stripPass.messages[1])).toBe("Deploy finished.");
         expect(reasoningOf(stripPass.messages[1])).toEqual({ type: "reasoning", text: REASONING });
         expect(wire(later.messages)).toBe(wire(stripPass.messages));
     });

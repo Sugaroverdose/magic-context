@@ -17,12 +17,9 @@ export interface CtxExpandToolDeps {
 }
 
 const ctxExpandArgsShape = {
-    tag: tool.schema
-        .union([tool.schema.number(), tool.schema.string()])
-        .optional()
-        .describe(
-            "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
-        ),
+    // ctx_reduce v1: the numeric 'tag' parameter is no longer advertised to
+    // the model. The schema below is passthrough, so old-shaped or imitated
+    // calls still reach execute() and the upstream tag path stays intact.
     start: tool.schema
         .number()
         .optional()

@@ -82,8 +82,10 @@ describe("createToolRegistry — memory gating", () => {
         isolateDb();
         const tools = buildRegistry({});
         const expectedFields: Record<string, string[]> = {
-            ctx_reduce: ["drop", "ids", "samples"],
-            ctx_expand: ["start", "end", "verbose", "message", "tag"],
+            // ctx_reduce v1: `drop`/`tag` are retired from the advertised
+            // shape; the passthrough engine path still accepts them.
+            ctx_reduce: ["ids", "samples"],
+            ctx_expand: ["start", "end", "verbose", "message", "message_id"],
             ctx_note: [
                 "action",
                 "content",
@@ -390,13 +392,23 @@ describe("createToolRegistry — prompt-surface registration", () => {
             );
             const lightParameters = providerParameters(light[toolId]);
             const fullParameters = providerParameters(full[toolId]);
-            expect(lightParameters).not.toEqual(fullParameters);
+            if (toolId === "ctx_reduce") {
+                // ctx_reduce v1: `drop` was the only preset-specific parameter
+                // description; with it retired, light and full serialize the
+                // same ids/samples schema.
+                expect(lightParameters).toEqual(fullParameters);
+            } else {
+                expect(lightParameters).not.toEqual(fullParameters);
+            }
             expect(withoutDescriptions(lightParameters)).toEqual(
                 withoutDescriptions(fullParameters),
             );
             for (const [name, description] of Object.entries(
                 LIGHT_PARAMETER_DESCRIPTIONS[toolId as keyof typeof LIGHT_PARAMETER_DESCRIPTIONS],
             )) {
+                // Retired advertised fields (drop, tag) still carry mapping
+                // rows but no longer reach the provider schema.
+                if (!(name in lightParameters)) continue;
                 expect((lightParameters[name] as { description?: string }).description).toBe(
                     description,
                 );

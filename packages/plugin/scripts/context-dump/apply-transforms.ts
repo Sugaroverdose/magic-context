@@ -7,6 +7,7 @@ import {
 	type ToolCallIndex,
 	type ToolDropResult,
 } from "../../src/hooks/magic-context/tool-drop-target"
+import { deriveKey } from "../../src/hooks/magic-context/fpe"
 import { stripStructuralNoise } from "../../src/hooks/magic-context/strip-structural-noise"
 import { stripClearedReasoning } from "../../src/hooks/magic-context/strip-content"
 import type { MessageLike } from "../../src/hooks/magic-context/tag-messages"
@@ -71,6 +72,7 @@ export function applyTransforms(
 		ordinalFallbackCount: 0,
 		missingDroppedTags: [],
 	},
+	sessionId = "",
 ): TransformDiagnostics {
 	const matcher = createTagMatcher(tags)
 	const targets = new Map<number, TagTarget>()
@@ -204,9 +206,20 @@ export function applyTransforms(
 		}
 	}
 
+	const sessionKey = deriveKey(sessionId)
 	for (const [callId, tagNumber] of toolTagByCallId) {
 		const thinkingParts = toolThinkingByCallId.get(callId) ?? []
-		targets.set(tagNumber, createToolDropTarget(callId, thinkingParts, toolCallIndex, batch, tagNumber))
+		targets.set(
+			tagNumber,
+			createToolDropTarget(
+				callId,
+				thinkingParts,
+				toolCallIndex,
+				batch,
+				tagNumber,
+				sessionKey,
+			),
+		)
 	}
 
 	const missingDroppedTags = tags.filter(

@@ -407,8 +407,8 @@ describe("tag-messages composite-key collision handling (v3.3.1 Layer C)", () =>
         //#when
         tagMessages("ses-1", messages, tagger, db);
 
-        //#then — the #2 fix rebound the EXACT persisted number (byte-identical
-        // §N§), and created no duplicate row.
+        //#then — the #2 fix rebound the EXACT persisted number, and created
+        // no duplicate row.
         expect(tagger.getToolTag("ses-1", "read:50", "m-asst-old")).toBe(2);
         const toolTags = getTagsBySession(db, "ses-1").filter((t) => t.type === "tool");
         expect(toolTags).toHaveLength(1);
@@ -443,7 +443,7 @@ describe("tag-messages composite-key collision handling (v3.3.1 Layer C)", () =>
 
             expect(tagger.getToolTag("ses-1", "call-steady", "m-asst-steady")).toBe(1);
             expect(tagger.getToolTag("ses-1", "call-steady", "m-tool-steady")).toBeUndefined();
-            expect(toolOutput(messages[1])).toBe("§1§ steady output");
+            expect(toolOutput(messages[1])).toBe("steady output");
             expect(recorder.candidateCalls.size).toBe(0);
             expect(recorder.messageTimeCalls.size).toBe(0);
         });
@@ -477,7 +477,7 @@ describe("tag-messages composite-key collision handling (v3.3.1 Layer C)", () =>
             expect(existingTag).toBe(1);
             expect(tagger.getToolTag("ses-1", "call-open", "m-old-asst")).toBe(existingTag);
             expect(tagger.getToolTag("ses-1", "call-open", "m-new-result")).toBeUndefined();
-            expect(toolOutput(messages[1])).toBe("§1§ new result for old invocation");
+            expect(toolOutput(messages[1])).toBe("new result for old invocation");
             expect(recorder.candidateCalls.size).toBe(0);
             expect(recorder.messageTimeCalls.size).toBe(0);
         });
@@ -519,8 +519,8 @@ describe("tag-messages composite-key collision handling (v3.3.1 Layer C)", () =>
 
             expect(tagger.getToolTag("ses-1", "dup-call", "m-asst-one")).toBe(1);
             expect(tagger.getToolTag("ses-1", "dup-call", "m-asst-two")).toBe(2);
-            expect(toolOutput(messages[1])).toBe("§1§ first dup result");
-            expect(toolOutput(messages[3])).toBe("§2§ second dup result");
+            expect(toolOutput(messages[1])).toBe("first dup result");
+            expect(toolOutput(messages[3])).toBe("second dup result");
             expect(recorder.candidateCalls.size).toBe(0);
             expect(recorder.messageTimeCalls.size).toBe(0);
         });
@@ -560,8 +560,8 @@ describe("tag-messages composite-key collision handling (v3.3.1 Layer C)", () =>
             expect(ownerBTag).toBe(2);
             expect(tagger.getToolTag("ses-1", callId, "m-result-between")).toBeUndefined();
             expect(tagger.getToolTag("ses-1", callId, "m-result-after")).toBeUndefined();
-            expect(toolOutput(messages[0])).toBe("§1§ between owners");
-            expect(toolOutput(messages[1])).toBe("§2§ after second owner");
+            expect(toolOutput(messages[0])).toBe("between owners");
+            expect(toolOutput(messages[1])).toBe("after second owner");
             expect(recorder.candidateCalls.get(callId)).toBe(1);
             expect(recorder.messageTimeCalls.size).toBe(4);
             expect(recorder.messageTimeCalls.get("m-owner-A")).toBe(1);
