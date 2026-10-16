@@ -1,5 +1,6 @@
 import { refuseBudgetedToolCall } from "../../features/magic-context/dreamer/token-budget";
 import { sessionLog } from "../../shared/logger";
+import { deriveKey, fpeGate, isFpeTokenCandidate } from "./fpe";
 
 // The pre-fix truncated render kept at most five characters of the original
 // value before the sentinel, so a copied placeholder always has that exact
@@ -249,23 +250,79 @@ export function assertExecutableToolInput(guard: DroppedInputGuard, call: Droppe
     if (refusal !== undefined) throw new Error(refusal);
 }
 
-export function createDroppedInputToolExecuteBeforeHook() {
+/**
+ * FPE resolution deps: given a decrypted tag id, return the value a resolved
+ * token is replaced with. Under the released-shape table the token's seat is
+ * a string value inside the call's arguments (the `full`-mode carrier), so
+ * the lookup returns the ORIGINAL value that sat in that seat.
+ */
+export interface FpeResolveDeps {
+    lookupOriginal: (sessionId: string, tagId: number) => unknown | undefined;
+}
+
+function resolveFpeInValue(
+    value: unknown,
+    key: bigint,
+    currentL: number,
+    lookup: (tagId: number) => unknown | undefined,
+): unknown {
+    if (typeof value === "string") {
+        if (!isFpeTokenCandidate(value)) return value;
+        const result = fpeGate(value, key, currentL);
+        if (!result.matched || result.tagId === undefined) return value;
+        const original = lookup(result.tagId);
+        return original !== undefined ? original : value;
+    }
+    if (Array.isArray(value)) {
+        return value.map((v) => resolveFpeInValue(v, key, currentL, lookup));
+    }
+    if (isRecord(value)) {
+        const out: Record<string, unknown> = {};
+        for (const [k, v] of Object.entries(value)) {
+            out[k] = resolveFpeInValue(v, key, currentL, lookup);
+        }
+        return out;
+    }
+    return value;
+}
+
+export interface DroppedInputToolExecuteBeforeHookOptions {
+    fpeResolve?: FpeResolveDeps;
+}
+
+export function createDroppedInputToolExecuteBeforeHook(
+    options: DroppedInputToolExecuteBeforeHookOptions = {},
+) {
     const guard = createDroppedInputGuard();
     return async (input: unknown, output: unknown): Promise<void> => {
         const call = isRecord(input) ? (input as { tool?: unknown; sessionID?: unknown }) : {};
         const args = isRecord(output) ? (output as { args?: unknown }).args : undefined;
-        if (typeof call.sessionID === "string") {
-            const refusal = refuseBudgetedToolCall(call.sessionID);
+        const sessionId = typeof call.sessionID === "string" ? call.sessionID : undefined;
+        if (sessionId) {
+            const refusal = refuseBudgetedToolCall(sessionId);
             if (refusal) {
-                sessionLog(call.sessionID, "dreamer token budget: tool call refused", {
+                sessionLog(sessionId, "dreamer token budget: tool call refused", {
                     tool: call.tool,
                     hardStopped: refusal.hardStopped,
                 });
                 throw new Error(refusal.message);
             }
         }
+        if (sessionId && args && options.fpeResolve) {
+            const key = deriveKey(sessionId);
+            const resolved = resolveFpeInValue(args, key, 8, (tagId) =>
+                options.fpeResolve?.lookupOriginal(sessionId, tagId),
+            );
+            if (resolved !== args) {
+                sessionLog(sessionId, "fpe: resolved dropped token in tool call args", {
+                    tool: call.tool,
+                });
+                (output as { args: unknown }).args = resolved;
+                return;
+            }
+        }
         assertExecutableToolInput(guard, {
-            sessionID: typeof call.sessionID === "string" ? call.sessionID : undefined,
+            sessionID: sessionId,
             toolName: typeof call.tool === "string" ? call.tool : undefined,
             input: args,
         });
