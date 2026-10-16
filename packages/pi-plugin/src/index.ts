@@ -181,6 +181,7 @@ import {
 	observePiMessageActivity,
 } from "./dreamer/session-activity-pi";
 import { registerPiDroppedInputGuard } from "./dropped-input-guard-pi";
+import { lookupReleasedToolInputPi } from "./fpe-resolve-pi";
 import {
 	ensureProjectRegisteredFromPiDirectory,
 	unregisterPiProjectEmbeddings,
@@ -1797,7 +1798,10 @@ async function startPiMagicContextRuntime(
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
 	}
-	registerPiDroppedInputGuard(pi);
+	registerPiDroppedInputGuard(pi, {
+		fpeLookup: (ctx, sessionId, tagNumber) =>
+			lookupReleasedToolInputPi(db, ctx?.sessionManager, sessionId, tagNumber),
+	});
 	const todowriteEnabled = bootProjectDeps.config.todowrite.enabled;
 	const todowriteOverlayEnabled =
 		todowriteEnabled && bootProjectDeps.config.todowrite.overlay;
