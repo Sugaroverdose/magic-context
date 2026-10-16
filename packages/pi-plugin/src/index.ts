@@ -180,7 +180,7 @@ import {
 	backfillPiSessionActivity,
 	observePiMessageActivity,
 } from "./dreamer/session-activity-pi";
-import { registerPiDroppedInputGuard } from "./dropped-input-guard-pi";
+import { registerPiFpeResolution } from "./fpe-resolution-pi";
 import { lookupReleasedToolInputPi } from "./fpe-resolve-pi";
 import {
 	ensureProjectRegisteredFromPiDirectory,
@@ -1798,7 +1798,7 @@ async function startPiMagicContextRuntime(
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
 	}
-	registerPiDroppedInputGuard(pi, {
+	registerPiFpeResolution(pi, {
 		fpeLookup: (ctx, sessionId, tagNumber) =>
 			lookupReleasedToolInputPi(db, ctx?.sessionManager, sessionId, tagNumber),
 	});
