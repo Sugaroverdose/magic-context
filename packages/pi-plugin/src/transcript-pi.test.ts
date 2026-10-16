@@ -69,7 +69,25 @@ describe("createPiTranscript", () => {
 			expect([...targets.values()][0]?.drop()).toBe("removed");
 			transcript.commit();
 			transcript.finalizeToolRemovals();
-			expect(transcript.getOutputMessages()).toEqual([reasoning]);
+			// The released pair survives the scoped sweep: the call row keeps
+			// its block with a token carrier in the args seat, the result row
+			// keeps the `...` slot, and the unrelated reasoning-only assistant
+			// is still preserved.
+			const output = transcript.getOutputMessages();
+			expect(output).toHaveLength(3);
+			const call = (
+				output[0] as {
+					content: Array<{ type: string; arguments?: Record<string, unknown> }>;
+				}
+			).content.find((p) => p.type === "toolCall")!;
+			expect(Object.keys(call.arguments!)).toEqual(["path"]);
+			expect(call.arguments!.path).not.toBe("x");
+			expect(typeof call.arguments!.path).toBe("string");
+			expect((call.arguments!.path as string).length).toBeLessThan(64);
+			expect(
+				(output[1] as { content: Array<{ text: string }> }).content[0].text,
+			).toBe("...");
+			expect(output[2]).toEqual(reasoning);
 			console.log(
 				"SCOPED_GATE Pi removed tool arc; unrelated reasoning retained",
 			);
@@ -525,12 +543,33 @@ describe("createPiTranscript", () => {
 			transcript.commit();
 
 			const output = transcript.getOutputMessages() as Array<{
-				content?: Array<{ type: string; text?: string }>;
+				content?: Array<{ type: string; text?: string; arguments?: unknown }>;
 			}>;
-			expect(output[0]?.content).toEqual([]);
-			expect(output[1]?.content).toEqual([]);
+			// The dropped pair is never removed: the image call keeps its row
+			// with a token carrier in the args seat, and its multi-block
+			// result collapses to the `...` released slot.
+			const droppedCall = output[0]?.content?.find(
+				(p) => p.type === "toolCall",
+			);
+			expect(droppedCall).toBeDefined();
+			const args = droppedCall?.arguments as Record<string, unknown>;
+			expect(Object.keys(args)).toEqual(["path"]);
+			expect(args.path).not.toBe("image.png");
+			expect(typeof args.path).toBe("string");
+			expect((args.path as string).length).toBeLessThan(64);
+			// every block of the multi-block result takes the released slot
+			expect(output[1]?.content).toEqual([
+				{ type: "text", text: "..." },
+				{ type: "text", text: "..." },
+				{ type: "text", text: "..." },
+			]);
 			transcript.finalizeToolRemovals();
-			expect(output).toHaveLength(2);
+			expect(output).toHaveLength(4);
+			// The later completed call was never dropped and keeps real bytes.
+			expect(
+				output[2]?.content?.find((p) => p.type === "toolCall")?.arguments,
+			).toEqual({ path: "next.txt" });
+			expect(output[3]?.content?.[0]?.text).toBe("§2§ next");
 		} finally {
 			closeQuietly(db);
 		}

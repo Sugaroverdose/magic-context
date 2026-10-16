@@ -124,9 +124,18 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 			expect(modes.get(small)).toBe("skeleton_real");
 			expect(modes.get(large)).toBe("full");
 			expect(callArguments(served, "call-1024")).toEqual(at);
-			expect(resultText(served, "call-1024")).toBe(`[dropped §${small}§]`);
-			expect(callArguments(served, "call-1025")).toBeUndefined();
-			expect(resultText(served, "call-1025")).toBeUndefined();
+			expect(resultText(served, "call-1024")).toBe("...");
+			// `full` keeps the pair on the wire: the args carry an opaque FPE
+			// token in the copy-source seat, the result slot holds `...`.
+			const largeArgs = callArguments(served, "call-1025") as Record<
+				string,
+				unknown
+			>;
+			expect(Object.keys(largeArgs)).toEqual(["content"]);
+			expect(largeArgs.content).not.toBe("a".repeat(1025));
+			expect(typeof largeArgs.content).toBe("string");
+			expect((largeArgs.content as string).length).toBeLessThan(64);
+			expect(resultText(served, "call-1025")).toBe("...");
 		} finally {
 			db.close();
 		}
@@ -147,7 +156,7 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 					?.dropMode,
 			).toBe("skeleton_real");
 			expect(callArguments(served, "call-end")).toEqual(large);
-			expect(resultText(served, "call-end")).toBe(`[dropped §${tag}§]`);
+			expect(resultText(served, "call-end")).toBe("...");
 			expect(JSON.stringify(served)).not.toContain('"dropped":');
 		} finally {
 			db.close();
@@ -168,8 +177,18 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 			];
 			const passA = serve(db, base, ["call-small", "call-mid", "call-large"]);
 			// Rule 1 (small), rule 2 (large, removed), rule 3 (large, ends the request).
+			// Rule 2 no longer erases the pair: `call-mid` renders the `full`
+			// shape — token carrier in the args, `...` in the result slot.
 			expect(callArguments(passA, "call-small")).toEqual({ command: "ls -la" });
-			expect(callArguments(passA, "call-mid")).toBeUndefined();
+			const midArgs = callArguments(passA, "call-mid") as Record<
+				string,
+				unknown
+			>;
+			expect(Object.keys(midArgs)).toEqual(["content"]);
+			expect(midArgs.content).not.toBe("m".repeat(2000));
+			expect(typeof midArgs.content).toBe("string");
+			expect((midArgs.content as string).length).toBeLessThan(64);
+			expect(resultText(passA, "call-mid")).toBe("...");
 			expect(callArguments(passA, "call-large")).toEqual({
 				content: "c".repeat(3000),
 			});

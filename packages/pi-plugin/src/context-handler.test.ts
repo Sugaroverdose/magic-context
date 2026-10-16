@@ -1777,8 +1777,6 @@ describe("registerPiContextHandler", () => {
 			const output = result.messages as unknown as ReturnType<
 				typeof buildMessages
 			>;
-			const truncatedSentinel = `[dropped §${truncatedTool.tagNumber}§]`;
-			const editSentinel = `[dropped §${editTool.tagNumber}§]`;
 			const toolArguments = (index: number): Record<string, unknown> => {
 				const content = (output[index] as { content?: unknown }).content;
 				if (!Array.isArray(content))
@@ -1792,14 +1790,30 @@ describe("registerPiContextHandler", () => {
 				return call?.arguments ?? {};
 			};
 
-			expect(textOf(output[0])).toBe(`[dropped §${droppedText.tagNumber}§]`);
-			expect(output).toHaveLength(6);
-			expect(toolArguments(1)).toEqual({ dropped: truncatedSentinel });
-			expect(textOf(output[2])).toBe(truncatedSentinel);
-			expect(toolArguments(3).filePath).toBe("/tmp/edit.ts");
-			expect(String(toolArguments(3).oldString)).toEndWith("...[truncated]");
-			expect(textOf(output[4])).toBe(editSentinel);
-			expect(textOf(output[5])).toBe(
+			// Dropped text renders the constant placeholder; released pairs
+			// keep their rows. `full`/`truncated` put an opaque session-keyed
+			// FPE token in the copy-source seat (pinned as shape, never as
+			// literal bytes) and `...` in the result slot.
+			expect(textOf(output[0])).toBe("...");
+			expect(output).toHaveLength(8);
+			expect(textOf(output[2])).toBe("...");
+			expect(textOf(output[4])).toBe("...");
+			expect(textOf(output[6])).toBe("...");
+			for (const [callIndex, original] of [
+				[1, "/tmp/full.ts"],
+				[3, "/tmp/truncated.ts"],
+			] as const) {
+				const args = toolArguments(callIndex);
+				expect(Object.keys(args)).toEqual(["filePath"]);
+				expect(typeof args.filePath).toBe("string");
+				expect((args.filePath as string).length).toBeLessThan(64);
+				expect(args.filePath).not.toBe(original);
+			}
+			// `edit_marker` keeps the truncated edit args verbatim.
+			expect(toolArguments(5).filePath).toBe("/tmp/edit.ts");
+			expect(String(toolArguments(5).oldString)).toEndWith("...[truncated]");
+			expect(String(toolArguments(5).newString)).toEndWith("...[truncated]");
+			expect(textOf(output[7])).toBe(
 				`§${activeText.tagNumber}§ keep this active`,
 			);
 		} finally {
@@ -3167,7 +3181,9 @@ describe("registerPiContextHandler", () => {
 		});
 		await expect(runProviderScenario("anthropic", "openai")).resolves.toEqual({
 			reduceStatus: "dropped",
-			replayedToolResult: "",
+			// The released pair replays: the result slot carries the constant
+			// released placeholder instead of the old emptied row.
+			replayedToolResult: "...",
 		});
 	});
 
@@ -4844,11 +4860,38 @@ describe("registerPiContextHandler", () => {
 					lastInputTokens: 4_000,
 				});
 
-				// Defer passes replay the legacy marker byte-identically.
+				// Legacy stored markers replay through the shape-table renderers:
+				// the released pair keeps its rows, the copy-source seat holds an
+				// opaque session-keyed FPE token (pinned as shape and compared
+				// across passes — never as a literal), and the result slot the
+				// constant `...`.
+				const wire = (bytes: string) =>
+					JSON.parse(bytes) as Array<Record<string, any>>;
+				const argsOf = (bytes: string, callId: string) => {
+					for (const m of wire(bytes))
+						for (const p of (m.content ?? []) as Array<Record<string, any>>)
+							if (p.type === "toolCall" && p.id === callId)
+								return p.arguments as Record<string, string>;
+					return undefined;
+				};
+				const resultOf = (bytes: string, callId: string) => {
+					for (const m of wire(bytes))
+						if (m.role === "toolResult" && m.toolCallId === callId)
+							return textOf(m as never);
+					return undefined;
+				};
 				const deferA = await pass();
 				const deferB = await pass();
-				expect(deferA).toContain(`{"dropped":"[dropped §${small}§]"}`);
-				expect(deferA).toContain(`{"dropped":"[dropped §${large}§]"}`);
+				expect(argsOf(deferA, "call-small")).toEqual({
+					command: expect.any(String),
+				});
+				expect(argsOf(deferA, "call-small")!.command).not.toBe("ls -la");
+				expect(argsOf(deferA, "call-large")).toEqual({
+					filePath: expect.any(String),
+				});
+				expect(argsOf(deferA, "call-large")!.filePath).not.toBe("/tmp/a.txt");
+				expect(resultOf(deferA, "call-small")).toBe("...");
+				expect(resultOf(deferA, "call-large")).toBe("...");
 				expect(deferB).toBe(deferA);
 				expect(modeOf(small)).toBe("truncated");
 
@@ -4872,15 +4915,23 @@ describe("registerPiContextHandler", () => {
 				expect(modeOf(small)).toBe("truncated");
 				expect(modeOf(large)).toBe("truncated");
 
-				// The executed HARD fold converts them to real-or-absent.
+				// The executed HARD fold converts them to real-or-absent: the small
+				// pair serves its real arguments, the large pair stays released —
+				// the same session-keyed token it carried on the defer passes.
 				recordPiLiveModel(sessionId, HARD_MODEL);
 				const hard = await pass();
 				expect(modeOf(small)).toBe("skeleton_real");
 				expect(modeOf(large)).toBe("full");
 				expect(hard).not.toContain('"dropped":');
 				expect(hard).toContain('"arguments":{"command":"ls -la"}');
-				expect(hard).toContain(`[dropped §${small}§]`);
-				expect(hard).not.toContain("call-large");
+				expect(resultOf(hard, "call-small")).toBe("...");
+				expect(argsOf(hard, "call-large")).toEqual({
+					filePath: expect.any(String),
+				});
+				expect(argsOf(hard, "call-large")!.filePath).toBe(
+					argsOf(deferA, "call-large")!.filePath,
+				);
+				expect(resultOf(hard, "call-large")).toBe("...");
 
 				// The following defer pass replays the converted bytes identically.
 				updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });

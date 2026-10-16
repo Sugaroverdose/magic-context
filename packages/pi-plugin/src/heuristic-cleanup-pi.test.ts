@@ -486,13 +486,22 @@ describe("applyPiHeuristicCleanup", () => {
 			applyFlushedStatuses(sessionId, db, replay.targets);
 			replayTranscript.commit();
 
-			// Aggregate target uses tagId in sentinel (matches OpenCode parity in
-			// apply-operations.ts:43 — `[dropped §<tagId>§]`). Tag allocation
-			// order across the transcript: user "older request" (#1), assistant
-			// text "I will reduce now." (#2), assistant toolCall reduce-1 (#3),
-			// user toolResult reuses #3, user "next request" (#4), assistant
-			// "newer answer" (#5), user "latest request" (#6). reduce-1 = #3.
-			expect(textOf(replayTranscript.getOutputMessages()[2] as never)).toBe("");
+			// The released pair replays on the `full` shape: the empty-input
+			// call carries the FPE token under the carrier key `d`, and the
+			// paired result takes the constant `...` released slot. Tokens are
+			// session-keyed, so the value is pinned as shape, never as bytes.
+			const replayed = replayTranscript.getOutputMessages();
+			const reducedCall = (
+				replayed[1] as {
+					content: Array<{ type: string; arguments?: Record<string, unknown> }>;
+				}
+			).content.find((p) => p.type === "toolCall")!;
+			expect(Object.keys(reducedCall.arguments!)).toEqual(["d"]);
+			expect(typeof reducedCall.arguments!.d).toBe("string");
+			expect(((reducedCall.arguments!.d as string) ?? "").length).toBeLessThan(
+				64,
+			);
+			expect(textOf(replayed[2] as never)).toBe("...");
 		} finally {
 			closeQuietly(db);
 		}

@@ -195,9 +195,19 @@ describe("native upgrade application", () => {
 				content: [
 					{ type: "thinking", thinking: "" },
 					{},
-					{ arguments: { dropped: expect.any(String) } },
+					{ arguments: { path: expect.any(String) } },
 				],
 			});
+			// The released `full` pair replays with the session-keyed FPE token
+			// in the copy-source seat — an opaque value, never the original
+			// input and never pinned as literal bytes.
+			expect(
+				(first[1] as { content: Array<{ arguments?: { path?: string } }> })
+					.content[2]!.arguments!.path,
+			).not.toBe(staleInput);
+			expect(
+				(first[2] as { content: Array<{ text: string }> }).content[0].text,
+			).toBe("...");
 			expect(nativeBytes(await f.pass(0))).toBe(a);
 			f.restart();
 			expect(nativeBytes(await f.pass(0))).toBe(a);
@@ -209,7 +219,11 @@ describe("native upgrade application", () => {
 			expect(b).not.toContain(ciphertext);
 			expect(b).toContain("visible answer");
 			expect(b).toContain("image_generation_call");
-			expect(b).not.toContain("call-old");
+			// The authorized transition rewrites the raw lane's function_call
+			// args to the removal marker and drops the reasoning item; the
+			// call identity itself stays on the lane.
+			expect(b).toContain(JSON.stringify(NATIVE_TOOL_REMOVAL_MARKER));
+			expect(b).toContain("call-old");
 			expect(getNativeToolInputs(f.db, sessionId).has(callId)).toBe(true);
 			expect(getNativeReasoningIds(f.db, sessionId).has("entry-old")).toBe(
 				true,
@@ -296,9 +310,20 @@ describe("native upgrade application", () => {
 						content: [
 							{ type: "thinking", thinking: "", thinkingSignature: undefined },
 							{},
-							{ arguments: { dropped: expect.any(String) } },
+							{ arguments: { path: expect.any(String) } },
 						],
 					});
+					// With the native lane unreadable the raw payload keeps the
+					// original bytes, while the Pi pair replays the released
+					// `full` shape with a session-keyed carrier token.
+					expect(
+						(messages[1] as { content: Array<{ arguments?: { path?: string } }> })
+							.content[2]!.arguments!.path,
+					).not.toBe(staleInput);
+					expect(
+						(messages[2] as { content: Array<{ text: string }> }).content[0]
+							.text,
+					).toBe("...");
 				}
 				expect(
 					f.db
@@ -337,9 +362,20 @@ describe("native upgrade application", () => {
 					content: [
 						{ type: "thinking", thinking: "", thinkingSignature: undefined },
 						{},
-						{ arguments: { dropped: expect.any(String) } },
+						{ arguments: { path: expect.any(String) } },
 					],
 				});
+				// An unreadable future document suspends the native lanes (raw
+				// bytes untouched) but never blocks the local pair rendering:
+				// the call carries an opaque carrier token, the result the
+				// constant `...`.
+				expect(
+					(messages[1] as { content: Array<{ arguments?: { path?: string } }> })
+						.content[2]!.arguments!.path,
+				).not.toBe(staleInput);
+				expect(
+					(messages[2] as { content: Array<{ text: string }> }).content[0].text,
+				).toBe("...");
 			}
 			expect(
 				f.db
