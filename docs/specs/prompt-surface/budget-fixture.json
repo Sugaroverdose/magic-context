@@ -38,12 +38,12 @@
   "fullMeasurements": {
     "guidance": {
       "primary-full-reduce-memory-on": {
-        "chars": 5974,
-        "tokens": 1398
+        "chars": 5941,
+        "tokens": 1384
       },
       "primary-full-reduce-memory-off": {
-        "chars": 5637,
-        "tokens": 1318
+        "chars": 5604,
+        "tokens": 1304
       },
       "primary-full-no-reduce-memory-on": {
         "chars": 4199,
@@ -54,34 +54,34 @@
         "tokens": 896
       },
       "primary-full-reduce-dreamer-off": {
-        "chars": 5826,
-        "tokens": 1368
-      },
-      "primary-full-reduce-temporal-off": {
-        "chars": 5812,
+        "chars": 5793,
         "tokens": 1354
       },
+      "primary-full-reduce-temporal-off": {
+        "chars": 5779,
+        "tokens": 1339
+      },
       "primary-full-reduce-caveman-on": {
-        "chars": 6589,
-        "tokens": 1524
+        "chars": 6556,
+        "tokens": 1510
       },
       "primary-full-reduce-language-on": {
-        "chars": 6174,
-        "tokens": 1444
+        "chars": 6141,
+        "tokens": 1430
       },
       "subagent-reduce": {
-        "chars": 2227,
-        "tokens": 552
+        "chars": 2191,
+        "tokens": 537
       }
     },
     "toolDescriptions": {
       "ctx_reduce": {
-        "chars": 1286,
-        "tokens": 309
+        "chars": 1270,
+        "tokens": 302
       },
       "ctx_expand": {
-        "chars": 1567,
-        "tokens": 387
+        "chars": 1534,
+        "tokens": 377
       },
       "ctx_note": {
         "chars": 1599,
@@ -102,8 +102,8 @@
         "tokens": 38
       },
       "ctx_expand": {
-        "chars": 774,
-        "tokens": 187
+        "chars": 743,
+        "tokens": 178
       },
       "ctx_note": {
         "chars": 1314,
@@ -117,11 +117,11 @@
         "chars": 566,
         "tokens": 134
       },
-      "totalTokens": 834
+      "totalTokens": 825
     },
-    "builtInProviderVisibleTotal": 3929
+    "builtInProviderVisibleTotal": 3889
   },
-  "mutableProseBaseline": 3095,
+  "mutableProseBaseline": 3064,
   "integerLightCeiling": 1917,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",

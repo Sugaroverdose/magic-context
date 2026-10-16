@@ -81,7 +81,7 @@ export function renderChecklist(checklist: Checklist): string {
 
     out.push("## Review notes");
     out.push("");
-    out.push("- The `[dropped §N§]` imitation prohibition is deliberately listed as `G-030` with `compressed` only for `subagent-reduce`; primary variants are `not-present` for this exact SUBAGENT_REDUCE_INTRO clause.");
+    out.push("- The released-item imitation prohibition is deliberately listed as `G-030` with `compressed` only for `subagent-reduce`; primary variants are `not-present` for this exact SUBAGENT_REDUCE_INTRO clause.");
     out.push("- Tool descriptions are included as load-bearing contract/mechanism rules, with active and memory-disabled tool compositions represented separately.");
     out.push("- No light prose is authored by this artifact. S3 must replace pending compressed targets with exact light lines after ratification.");
     out.push("");

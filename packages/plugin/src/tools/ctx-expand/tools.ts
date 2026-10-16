@@ -21,7 +21,7 @@ const ctxExpandArgsShape = {
         .union([tool.schema.number(), tool.schema.string()])
         .optional()
         .describe(
-            "Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
+            "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
         ),
     start: tool.schema
         .number()
