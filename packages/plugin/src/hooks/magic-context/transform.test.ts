@@ -2273,7 +2273,7 @@ describe("createTransform", () => {
         await transform({}, { messages: secondPass });
 
         //#then — user message shell is preserved (turn boundary) as the canonical
-        // [dropped §N§] placeholder; the tool tag is padded OUT of the newest-20
+        // constant `...` placeholder; the tool tag is padded OUT of the newest-20
         // skeleton window above, so the tool-only assistant takes the deep-history
         // FULL path: the carrier skeleton in place, the shell never stripped.
         // (The in-window skeleton path is covered in apply-operations.tool-drop.test.ts.)
@@ -2284,7 +2284,7 @@ describe("createTransform", () => {
         ]);
         expect(secondPass[0]?.info.role).toBe("user");
         const userShellText = (secondPass[0]?.parts[0] as { text: string }).text;
-        expect(userShellText).toBe("[dropped \u00a71\u00a7]");
+        expect(userShellText).toBe("...");
         expect(getTagById(db, "ses-1", 1)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.dropMode).toBe("full");
@@ -2935,7 +2935,7 @@ describe("createTransform", () => {
         decision = "execute";
         await transform({}, { messages });
 
-        expect(text(messages[0], 0)).toBe("[dropped §1§]");
+        expect(text(messages[0], 0)).toBe("...");
         expect(text(messages[1], 0)).not.toBe(compressibleOriginal);
         expect(text(messages[1], 0)).not.toContain("[dropped");
         expect(getTagById(db, sessionId, 1)?.cavemanDepth).toBe(0);
@@ -3129,11 +3129,11 @@ describe("createTransform", () => {
         ];
         await transform({}, { messages: secondPass });
 
-        // The dropped part gets the canonical [dropped §N§] placeholder (byte-stable
+        // The dropped part gets the canonical constant placeholder (byte-stable
         // across passes); the user-role message is never whole-message stripped (the
         // role guard in stripDroppedPlaceholderMessages), so the turn boundary
         // survives for AI SDK's Anthropic adapter. The sibling part is untouched.
-        expect(text(secondPass[0], 0)).toBe("[dropped \u00a71\u00a7]");
+        expect(text(secondPass[0], 0)).toBe("...");
         expect(text(secondPass[0], 1)).toStartWith("\u00a72\u00a7 ");
         expect(text(secondPass[0], 1)).toContain("actual user message");
     });

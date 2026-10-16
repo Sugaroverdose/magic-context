@@ -472,7 +472,7 @@ describe("apply operations for tool drops", () => {
         expect(didMutate).toBe(true);
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", messageTagId!)?.status).toBe("dropped");
-        expect(messages[2]?.parts).toEqual([{ type: "text", text: "[dropped §3§]" }]);
+        expect(messages[2]?.parts).toEqual([{ type: "text", text: "..." }]);
     });
 
     it("treats missing tool call as absent and finalizes pending drop", () => {
@@ -722,8 +722,8 @@ describe("apply operations for tool drops", () => {
         expect(messages[1]?.parts).toEqual([{ type: "text", text: "§2§ reduce me later" }]);
     });
 
-    describe("role-aware message drops (canonical [dropped §N§])", () => {
-        it("drops a user message to the canonical [dropped §N§] placeholder when queued", () => {
+    describe("role-aware message drops (canonical constant placeholder)", () => {
+        it("drops a user message to the canonical constant placeholder when queued", () => {
             useTempDataHome("context-user-msg-drop-pending-");
             const db = openDatabase();
             const tagger = createTagger();
@@ -752,7 +752,7 @@ describe("apply operations for tool drops", () => {
             const text = (messages[0]?.parts[0] as { text: string }).text;
             // ONE canonical placeholder — byte-identical regardless of role/content
             // so it can never flip across passes and bust the prompt cache.
-            expect(text).toBe(`[dropped §${userMsgTagId}§]`);
+            expect(text).toBe("...");
         });
 
         it("preserves user message shell when flushed dropped status is re-applied", () => {
@@ -786,10 +786,10 @@ describe("apply operations for tool drops", () => {
             const text = (messages[0]?.parts[0] as { text: string }).text;
             // Flushed-status replay produces the SAME canonical placeholder as the
             // execute-pass drop — byte-identical, no flip across passes.
-            expect(text).toBe(`[dropped §${userMsgTagId}§]`);
+            expect(text).toBe("...");
         });
 
-        it("keeps using [dropped §N§] full drop for assistant messages (no regression)", () => {
+        it("keeps the full drop as the constant placeholder for assistant messages (no regression)", () => {
             useTempDataHome("context-assistant-msg-drop-unchanged-");
             const db = openDatabase();
             const tagger = createTagger();
@@ -813,11 +813,11 @@ describe("apply operations for tool drops", () => {
 
             expect(didMutate).toBe(true);
             expect(messages[1]?.parts).toEqual([
-                { type: "text", text: `[dropped §${asstMsgTagId}§]` },
+                { type: "text", text: "..." },
             ]);
         });
 
-        it("a short user message also drops to the canonical [dropped §N§]", () => {
+        it("a short user message also drops to the canonical constant placeholder", () => {
             useTempDataHome("context-user-msg-short-");
             const db = openDatabase();
             const tagger = createTagger();
@@ -839,7 +839,7 @@ describe("apply operations for tool drops", () => {
             applyPendingOperations("ses-1", db, targets, new Set());
 
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            expect(text).toBe(`[dropped §${userMsgTagId}§]`);
+            expect(text).toBe("...");
         });
     });
 });

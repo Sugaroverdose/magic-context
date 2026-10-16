@@ -843,7 +843,10 @@ function findFirstTextPart(parts: unknown[]): { type: string; text: string } | n
 }
 
 function isDroppedPlaceholder(text: string): boolean {
-    return /^\[dropped §\d+§\]$/.test(text.trim());
+    // Branch shape: the constant `...` filler. The legacy forms stay
+    // detectable so pre-upgrade renders in long-lived sessions neutralize
+    // the same way.
+    return /^(?:\.\.\.|\[dropped(?: §\d+§)?\])$/.test(text.trim());
 }
 
 export interface M0SnapshotMarkers {

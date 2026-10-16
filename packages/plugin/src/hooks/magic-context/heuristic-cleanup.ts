@@ -13,7 +13,7 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
-import { applyNewToolDrop, hasSmallToolInput } from "./apply-operations";
+import { applyNewToolDrop, buildReplacementContent, hasSmallToolInput } from "./apply-operations";
 import { applyCavemanCleanup, type CavemanCleanupConfig } from "./caveman-cleanup";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import {
@@ -245,7 +245,7 @@ export function applyHeuristicCleanup(
 
                 if (strippedSource.trim().length === 0) {
                     const dropResult = target.drop?.() ?? "absent";
-                    const replacement = `[dropped §${tag.tagNumber}§]`;
+                    const replacement = buildReplacementContent(tag.tagNumber);
                     const didReplace =
                         dropResult === "absent" ? target.setContent(replacement) : false;
                     if (dropResult === "removed" || dropResult === "absent") {

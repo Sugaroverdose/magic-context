@@ -2209,7 +2209,7 @@ describe("registerPiContextHandler", () => {
 				overThresholdCtx as never,
 			);
 
-			expect(textOf(result.messages[1] as never)).toBe("[dropped §2§]");
+			expect(textOf(result.messages[1] as never)).toBe("...");
 			expect(getPendingOps(db, "ses-context")).toEqual([]);
 			expect(
 				getPiChannel1Baseline("ses-context")?.agentDropsAppliedThisPass,
@@ -2862,7 +2862,7 @@ describe("registerPiContextHandler", () => {
 				}),
 			} as never);
 
-			expect(textOf(result.messages[1] as never)).toBe("[dropped §2§]");
+			expect(textOf(result.messages[1] as never)).toBe("...");
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
@@ -7369,9 +7369,7 @@ describe("Pi proactive strip of invalidated thinking", () => {
 			updateTagStatus(db, sessionId, dropped.tagNumber, "dropped");
 			signalPiPendingMaterialization(sessionId);
 			const busting = await pass(false);
-			expect(textOf(busting[0] as never)).toBe(
-				`[dropped §${dropped.tagNumber}§]`,
-			);
+			expect(textOf(busting[0] as never)).toBe("...");
 			expect(busting.map(thinkingIn)).toEqual([0, 0, 0, 0, 0]);
 			expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
 				new Set([
