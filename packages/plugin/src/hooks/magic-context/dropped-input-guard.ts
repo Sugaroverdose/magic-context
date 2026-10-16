@@ -1,6 +1,5 @@
 import { refuseBudgetedToolCall } from "../../features/magic-context/dreamer/token-budget";
 import { sessionLog } from "../../shared/logger";
-import { deriveKey, fpeGate, isFpeTokenCandidate } from "./fpe";
 
 // The pre-fix truncated render kept at most five characters of the original
 // value before the sentinel, so a copied placeholder always has that exact
@@ -250,90 +249,23 @@ export function assertExecutableToolInput(guard: DroppedInputGuard, call: Droppe
     if (refusal !== undefined) throw new Error(refusal);
 }
 
-/**
- * FPE resolution deps: given a decrypted tag id, return the ORIGINAL tool
- * call input that the re-emitted carrier must run. The `.before` contract is
- * whole-args replacement: the token names a released call, so the call the
- * model just issued IS that call, executed with its original arguments.
- */
-export interface FpeResolveDeps {
-    lookupOriginal: (sessionId: string, tagId: number) => unknown | undefined;
-}
-
-function findFpeTagId(value: unknown, key: bigint, currentL: number): number | undefined {
-    if (typeof value === "string") {
-        if (!isFpeTokenCandidate(value)) return undefined;
-        const result = fpeGate(value, key, currentL);
-        return result.matched ? result.tagId : undefined;
-    }
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            const tagId = findFpeTagId(item, key, currentL);
-            if (tagId !== undefined) return tagId;
-        }
-        return undefined;
-    }
-    if (isRecord(value)) {
-        for (const item of Object.values(value)) {
-            const tagId = findFpeTagId(item, key, currentL);
-            if (tagId !== undefined) return tagId;
-        }
-        return undefined;
-    }
-    return undefined;
-}
-
-export interface DroppedInputToolExecuteBeforeHookOptions {
-    fpeResolve?: FpeResolveDeps;
-}
-
-/**
- * The shared `.before` FPE resolution used by every harness that has a
- * pre-execute hook: detect a released-call token in the args and return the
- * ORIGINAL input that must run in its place, or undefined when the args
- * carry no resolvable token. Harness adapters log and assign; the
- * detection/replacement contract lives only here.
- */
-export function resolveReleasedToolInput(
-    args: unknown,
-    sessionId: string,
-    fpeResolve: FpeResolveDeps,
-): unknown | undefined {
-    const tagId = findFpeTagId(args, deriveKey(sessionId), 8);
-    if (tagId === undefined) return undefined;
-    return fpeResolve.lookupOriginal(sessionId, tagId);
-}
-
-export function createDroppedInputToolExecuteBeforeHook(
-    options: DroppedInputToolExecuteBeforeHookOptions = {},
-) {
+export function createDroppedInputToolExecuteBeforeHook() {
     const guard = createDroppedInputGuard();
     return async (input: unknown, output: unknown): Promise<void> => {
         const call = isRecord(input) ? (input as { tool?: unknown; sessionID?: unknown }) : {};
         const args = isRecord(output) ? (output as { args?: unknown }).args : undefined;
-        const sessionId = typeof call.sessionID === "string" ? call.sessionID : undefined;
-        if (sessionId) {
-            const refusal = refuseBudgetedToolCall(sessionId);
+        if (typeof call.sessionID === "string") {
+            const refusal = refuseBudgetedToolCall(call.sessionID);
             if (refusal) {
-                sessionLog(sessionId, "dreamer token budget: tool call refused", {
+                sessionLog(call.sessionID, "dreamer token budget: tool call refused", {
                     tool: call.tool,
                     hardStopped: refusal.hardStopped,
                 });
                 throw new Error(refusal.message);
             }
         }
-        if (sessionId && args && options.fpeResolve) {
-            const original = resolveReleasedToolInput(args, sessionId, options.fpeResolve);
-            if (original !== undefined) {
-                sessionLog(sessionId, "fpe: resolved dropped token in tool call args", {
-                    tool: call.tool,
-                });
-                (output as { args: unknown }).args = original;
-                return;
-            }
-        }
         assertExecutableToolInput(guard, {
-            sessionID: sessionId,
+            sessionID: typeof call.sessionID === "string" ? call.sessionID : undefined,
             toolName: typeof call.tool === "string" ? call.tool : undefined,
             input: args,
         });

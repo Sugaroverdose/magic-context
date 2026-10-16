@@ -73,7 +73,7 @@ import {
     resolveHistorianContextLimit,
     resolveKnownHistorianContextLimit,
 } from "./derive-budgets";
-import { createDroppedInputToolExecuteBeforeHook } from "./dropped-input-guard";
+import { createToolExecuteBeforeHook } from "./fpe-resolve";
 import {
     type EmbedHistoryDeps,
     pauseEmbedHistoryDrain,
@@ -1183,7 +1183,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             }
         },
         "command.execute.before": createCommandExecuteBeforeHook(commandHandler),
-        "tool.execute.before": createDroppedInputToolExecuteBeforeHook({
+        "tool.execute.before": createToolExecuteBeforeHook({
             fpeResolve: {
                 lookupOriginal: (sessionId, tagNumber) =>
                     lookupReleasedToolInput(db, sessionId, tagNumber),

@@ -48,12 +48,8 @@ import {
     resolveHistorianContextLimit,
     resolveKnownHistorianContextLimit,
 } from "../../hooks/magic-context/derive-budgets";
-import {
-    assertExecutableToolInput,
-    createDroppedInputGuard,
-    recordToolParameters,
-    resolveReleasedToolInput,
-} from "../../hooks/magic-context/dropped-input-guard";
+import { recordToolParameters } from "../../hooks/magic-context/dropped-input-guard";
+import { resolveReleasedToolInput } from "../../hooks/magic-context/fpe-resolve";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
 import { lookupReleasedToolInput } from "../../hooks/magic-context/fpe-resolve";
@@ -839,7 +835,6 @@ export async function registerContext(context: V2Context) {
     const rawProviders = new Map<string, () => void>();
     let passDuties: ReturnType<typeof createChatMessageHook> | undefined;
     let toolDuties: ReturnType<typeof createToolExecuteAfterHook> | undefined;
-    const droppedInputGuard = createDroppedInputGuard();
     await context.tool.hook("execute.before", (draft) => {
         if (db && draft.input !== undefined) {
             const resolved = resolveReleasedToolInput(draft.input, draft.sessionID, {
@@ -854,11 +849,6 @@ export async function registerContext(context: V2Context) {
                 return;
             }
         }
-        assertExecutableToolInput(droppedInputGuard, {
-            sessionID: draft.sessionID,
-            toolName: draft.tool,
-            input: draft.input,
-        });
     });
     await context.tool.hook("execute.after", async (draft) => {
         if (!db) return;

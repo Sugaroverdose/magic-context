@@ -5,7 +5,6 @@ import { z } from "zod";
 import {
     containsDroppedInputPlaceholder,
     createDroppedInputGuard,
-    createDroppedInputToolExecuteBeforeHook,
     droppedInputRefusalMessage,
     recordToolParameters,
     toolParameterNames,
@@ -54,26 +53,9 @@ describe("dropped input execution guard", () => {
         ).toBe(false);
     });
 
-    it("rejects through the OpenCode tool.execute.before hook", async () => {
-        const hook = createDroppedInputToolExecuteBeforeHook();
-
-        await expect(
-            hook(
-                { tool: "write", sessionID: "ses-431", callID: "call-431" },
-                { args: { filePath: "/tmp/...[truncated]", content: "payload" } },
-            ),
-        ).rejects.toThrow("placeholder Magic Context shows");
-    });
-
-    it("allows ordinary executable arguments", async () => {
-        const hook = createDroppedInputToolExecuteBeforeHook();
-        await expect(
-            hook(
-                { tool: "bash", sessionID: "ses-clean", callID: "call-clean" },
-                { args: { command: "which docker" } },
-            ),
-        ).resolves.toBeUndefined();
-    });
+    // The tool.execute.before hook on this branch is the FPE/budget hook in
+    // fpe-resolve.ts; the dropped-input refusal regex is not wired there (no
+    // drop path renders the bytes it matched).
 });
 
 describe("dropped input refusal text", () => {
@@ -186,26 +168,24 @@ describe("consecutive dropped input refusals", () => {
         expect(guard.check({ sessionID: "ses-a", ...refused })).not.toContain("in a row");
     });
 
-    it("counts across calls through the OpenCode hook", async () => {
-        const hook = createDroppedInputToolExecuteBeforeHook();
-        const refusal = async () => {
-            try {
-                await hook(
-                    { tool: "bash", sessionID: "ses-hook", callID: "call" },
-                    { args: { dropped: "[dropped §769§]" } },
-                );
-            } catch (error) {
-                return (error as Error).message;
-            }
-            throw new Error("placeholder call was not refused");
-        };
+    it("counts consecutive refusals and resets on an accepted call", () => {
+        const guard = createDroppedInputGuard();
+        const check = () =>
+            guard.check({
+                sessionID: "ses-hook",
+                toolName: "bash",
+                input: { dropped: "[dropped §769§]" },
+            });
 
-        expect(await refusal()).not.toContain("in a row");
-        expect(await refusal()).toContain("This is the 2nd call in a row");
-        await hook(
-            { tool: "bash", sessionID: "ses-hook", callID: "call-ok" },
-            { args: { command: "ls" } },
-        );
-        expect(await refusal()).not.toContain("in a row");
+        expect(check()).not.toContain("in a row");
+        expect(check()).toContain("This is the 2nd call in a row");
+        expect(
+            guard.check({
+                sessionID: "ses-hook",
+                toolName: "bash",
+                input: { command: "ls" },
+            }),
+        ).toBeUndefined();
+        expect(check()).not.toContain("in a row");
     });
 });

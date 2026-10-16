@@ -12,7 +12,7 @@ import {
     updateTagStatus,
 } from "../../features/magic-context/storage";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
-import { createDroppedInputToolExecuteBeforeHook } from "./dropped-input-guard";
+import { createToolExecuteBeforeHook } from "./fpe-resolve";
 import { deriveKey, renderDropToken } from "./fpe";
 import {
     createToolDropTarget,
@@ -174,17 +174,18 @@ describe("tool release shape table", () => {
         );
     });
 
-    it("resolves a re-emitted carrier token by value substitution, as the hook ships it", async () => {
-        // The host-store lookup mirrors the carrier seat: the tag's original
-        // first-string value. The branch-proven resolveFpeInValue swaps the
-        // token VALUE, which restores the carrier in place.
-        const hook = createDroppedInputToolExecuteBeforeHook({
+    it("replaces re-emitted carrier args with the original tool call input", async () => {
+        // The `.before` contract: a token inside the args means the issued
+        // call IS the released one — the whole args become the original input.
+        const hook = createToolExecuteBeforeHook({
             fpeResolve: {
                 lookupOriginal: (sessionId, tagNumber) =>
-                    sessionId === session && tagNumber === 1 ? "ls -la /tmp" : undefined,
+                    sessionId === session && tagNumber === 1
+                        ? { command: "ls -la /tmp", limit: 5 }
+                        : undefined,
             },
         });
-        const output = { args: { command: renderDropToken(1, sessionKey), limit: 5 } };
+        const output = { args: { command: renderDropToken(1, sessionKey) } };
 
         await hook({ tool: "bash", sessionID: session, callID: "call-reemitted" }, output);
 
@@ -192,7 +193,7 @@ describe("tool release shape table", () => {
     });
 
     it("passes a token-shaped string whose lookup resolves to nothing through unresolved", async () => {
-        const hook = createDroppedInputToolExecuteBeforeHook({
+        const hook = createToolExecuteBeforeHook({
             fpeResolve: {
                 lookupOriginal: () => undefined,
             },
