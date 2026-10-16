@@ -1,6 +1,7 @@
 import type { Database } from "../../shared/sqlite";
 import { normalizeIndexText } from "./message-index";
 import { getPendingOps } from "./storage-ops";
+import { AGE_RECLAIM_MIN_TOKENS } from "./storage-tags";
 
 /**
  * The ids lane of the ctx_reduce v1 pointing grammar: the model copies wire
@@ -270,4 +271,75 @@ export function classifyMessageTag(
         return { kind: "refused", reason: "protected" };
     }
     return { kind: "released", messageId: outcome.messageId };
+}
+
+/**
+ * The no-arg default: release everything already responded past. Selection is
+ * the tool-output class only — active, unscheduled tool tags outside the
+ * protected working set, past the token floor (sub-floor items cost more in
+ * transform bytes than they save), and strictly BEFORE the newest user
+ * message: in-flight work of the current turn is structurally unreachable by
+ * the default, whatever the protection window's tail membership says. Text
+ * shells are deliberately NOT bulk-collected: they are the conversation's
+ * reference anchors, and their surgical release is what `samples` is for.
+ * The same report-only outcome vocabulary applies (inert framing is skipped,
+ * protected is excluded by construction, so what remains simply releases).
+ */
+export function resolveBulkDefault(
+    deps: ReduceResolverDeps & { sessionId: string },
+): ReduceResolveResult {
+    const { db, sessionId } = deps;
+    const lastUser = db
+        .prepare(
+            `SELECT MAX(CAST(message_ordinal AS INTEGER)) AS ordinal
+               FROM message_history_fts
+              WHERE session_id = ? AND role = 'user'`,
+        )
+        .get(sessionId) as { ordinal: number | null } | undefined;
+
+    const ordinalClause =
+        typeof lastUser?.ordinal === "number"
+            ? `AND (fts.message_ordinal IS NULL OR CAST(fts.message_ordinal AS INTEGER) < ?)`
+            : "";
+    const statement = db.prepare(
+        `SELECT t.tag_number, t.message_id
+           FROM tags t
+           LEFT JOIN message_history_fts fts
+             ON fts.session_id = t.session_id AND fts.message_id = t.message_id
+          WHERE t.session_id = ?
+            AND t.status = 'active'
+            AND t.type = 'tool'
+            AND NOT EXISTS (
+                SELECT 1 FROM pending_ops
+                 WHERE pending_ops.session_id = t.session_id
+                   AND pending_ops.tag_id = t.tag_number
+                   AND pending_ops.operation = 'drop'
+            )
+            AND ((t.token_count IS NULL AND t.input_token_count IS NULL)
+                 OR (COALESCE(t.token_count, 0) + COALESCE(t.input_token_count, 0)) >= ?)
+            ${ordinalClause}
+          ORDER BY t.tag_number ASC`,
+    );
+    const rows = (typeof lastUser?.ordinal === "number"
+        ? statement.all(sessionId, AGE_RECLAIM_MIN_TOKENS, lastUser.ordinal)
+        : statement.all(sessionId, AGE_RECLAIM_MIN_TOKENS)) as unknown as {
+        tag_number: number;
+        message_id: string;
+    }[];
+
+    const outcomes: ReduceInputOutcome[] = [];
+    const releasedTagNumbers: number[] = [];
+    for (const row of rows) {
+        if (deps.inertTagNumbers?.has(row.tag_number)) {
+            outcomes.push({ kind: "refused", reason: "provider-framing" });
+            continue;
+        }
+        if (deps.protectedTagNumbers.has(row.tag_number)) {
+            outcomes.push({ kind: "refused", reason: "protected" });
+            continue;
+        }
+        outcomes.push({ kind: "released", messageId: row.message_id });
+        releasedTagNumbers.push(row.tag_number);
+    }
+    return { outcomes, releasedTagNumbers };
 }

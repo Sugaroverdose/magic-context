@@ -9,6 +9,7 @@ import {
     classifyMessageTag,
     type ReduceInputOutcome,
     releasedMessageHandles,
+    resolveBulkDefault,
     resolveIds,
     resolveSamples,
 } from "../../features/magic-context/reduce-resolver";
@@ -103,20 +104,12 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             : `oc-${createHash("sha256").update(monotonicId).digest("hex")}`;
     };
 
-    const executePointingLane = async (
-        invokeContext: { sessionID: string; directory: string },
-        rawIds: string[],
-        rawSamples: string[],
-    ): Promise<string> => {
-        const sessionId = invokeContext.sessionID;
-        const ids = [...new Set(rawIds.map((id) => id.trim()).filter((id) => id.length > 0))];
-        const samples = rawSamples
-            .map((sample) => sample.trim())
-            .filter((sample) => sample.length > 0);
-        if (ids.length === 0 && samples.length === 0) {
-            return "Error: 'ids'/'samples' must contain entries.";
-        }
-
+    const resolveProtectionContext = (
+        sessionId: string,
+    ): {
+        protectedSet: ReadonlySet<number>;
+        inertTagNumbers: Set<number>;
+    } => {
         let protectedSet: ReadonlySet<number>;
         if (deps.protectedSet) {
             protectedSet =
@@ -135,6 +128,128 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         const inertTagNumbers = new Set(
             getInertWhitespaceAssistantTags(deps.db, sessionId).map((tag) => tag.tagNumber),
         );
+        return { protectedSet, inertTagNumbers };
+    };
+
+    const touchNudgeWatermark = (sessionId: string) => {
+        const currentInputTokens =
+            deps.getSessionTokens?.(sessionId) ??
+            getOrCreateSessionMeta(deps.db, sessionId).lastInputTokens;
+        updateSessionMeta(deps.db, sessionId, { lastNudgeTokens: currentInputTokens });
+    };
+
+    /** One apply event: route the released set through the active backend. */
+    const applyReleasedTags = async (
+        invokeContext: { sessionID: string; directory: string },
+        tagNumbers: readonly number[],
+    ): Promise<{ refused?: string; deduped: boolean }> => {
+        const sessionId = invokeContext.sessionID;
+        const rustReduce = deps.rustToolBackends?.reduce;
+        if (rustReduce) {
+            try {
+                const response = await rustReduce({
+                    sessionId,
+                    projectRoot: invokeContext.directory,
+                    drop: tagNumbers.join(","),
+                    commandId: commandIdForInvocation(sessionId, invokeContext),
+                });
+                const value =
+                    response !== null && typeof response === "object" && "result" in response
+                        ? (response as { result?: unknown }).result
+                        : response;
+                const record =
+                    value !== null && typeof value === "object"
+                        ? (value as Record<string, unknown>)
+                        : null;
+                if (record === null || record.ok !== true) {
+                    return { refused: renderCapabilityRefusal("context_cleanup"), deduped: false };
+                }
+                return {
+                    deduped: typeof record.queued === "number" && record.queued === 0,
+                };
+            } catch {
+                return { refused: renderCapabilityRefusal("context_cleanup"), deduped: false };
+            }
+        }
+        try {
+            const now = Date.now();
+            deps.db
+                .transaction(() => {
+                    for (const tagNumber of tagNumbers) {
+                        queuePendingOp(deps.db, sessionId, tagNumber, "drop", now);
+                    }
+                })
+                .immediate();
+        } catch (error) {
+            return {
+                refused: `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`,
+                deduped: false,
+            };
+        }
+        return { deduped: false };
+    };
+
+    /** No-arg default: release everything already responded past. */
+    const executeBulkRelease = async (invokeContext: {
+        sessionID: string;
+        directory: string;
+    }): Promise<string> => {
+        const sessionId = invokeContext.sessionID;
+        const { protectedSet, inertTagNumbers } = resolveProtectionContext(sessionId);
+        const result = resolveBulkDefault({
+            db: deps.db,
+            sessionId,
+            protectedTagNumbers: protectedSet,
+            inertTagNumbers,
+        });
+        if (result.releasedTagNumbers.length === 0) {
+            const held = result.outcomes.some(
+                (outcome) => outcome.kind === "refused" && outcome.reason === "protected",
+            );
+            return held
+                ? "Nothing older to release; newer work is still protected."
+                : "Nothing to release: no consumed tool output is waiting.";
+        }
+        const apply = await applyReleasedTags(invokeContext, result.releasedTagNumbers);
+        if (apply.refused) {
+            return apply.refused;
+        }
+        let handles = releasedMessageHandles(result);
+        if (apply.deduped) {
+            handles = [];
+        } else {
+            touchNudgeWatermark(sessionId);
+        }
+        const inert = result.outcomes.filter(
+            (outcome) => outcome.kind === "refused" && outcome.reason === "provider-framing",
+        ).length;
+        const lines: string[] = [];
+        if (handles.length > 0) {
+            lines.push(`Released everything responded past: ${handles.join(", ")}.`);
+        } else {
+            lines.push("Already released: nothing left to do.");
+        }
+        if (inert > 0) {
+            lines.push(`Ignored: ${inert} is provider framing, nothing to reclaim.`);
+        }
+        return lines.join(" ");
+    };
+
+    const executePointingLane = async (
+        invokeContext: { sessionID: string; directory: string },
+        rawIds: string[],
+        rawSamples: string[],
+    ): Promise<string> => {
+        const sessionId = invokeContext.sessionID;
+        const ids = [...new Set(rawIds.map((id) => id.trim()).filter((id) => id.length > 0))];
+        const samples = rawSamples
+            .map((sample) => sample.trim())
+            .filter((sample) => sample.length > 0);
+        if (ids.length === 0 && samples.length === 0) {
+            return "Error: 'ids'/'samples' must contain entries.";
+        }
+
+        const { protectedSet, inertTagNumbers } = resolveProtectionContext(sessionId);
 
         // Samples resolve FIRST: ambiguity is the only batch-rejecting class
         // and the rejection must land before anything applies, so the forced
@@ -221,63 +336,26 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         let sampleReleasedHandles = [...new Set(sampleReleased.map((r) => r.messageId))];
 
         if (queueNumbers.length > 0) {
-            const rustReduce = deps.rustToolBackends?.reduce;
-            if (rustReduce) {
-                try {
-                    const response = await rustReduce({
-                        sessionId,
-                        projectRoot: invokeContext.directory,
-                        drop: queueNumbers.join(","),
-                        commandId: commandIdForInvocation(sessionId, invokeContext),
-                    });
-                    const value =
-                        response !== null && typeof response === "object" && "result" in response
-                            ? (response as { result?: unknown }).result
-                            : response;
-                    const record =
-                        value !== null && typeof value === "object"
-                            ? (value as Record<string, unknown>)
-                            : null;
-                    if (record === null || record.ok !== true) {
-                        return renderCapabilityRefusal("context_cleanup");
+            const apply = await applyReleasedTags(invokeContext, queueNumbers);
+            if (apply.refused) {
+                return apply.refused;
+            }
+            if (apply.deduped) {
+                // Module-side dedupe beat the registry read: those inputs are
+                // already released; report, do not echo.
+                result.outcomes = result.outcomes.map((outcome) =>
+                    outcome.kind === "released" ? { kind: "already_released" } : outcome,
+                );
+                sampleReleasedHandles = [];
+                for (const outcome of sampleOutcomes) {
+                    if (outcome.kind === "released") {
+                        const mutable = outcome as { kind: string; messageId?: string };
+                        mutable.kind = "already_released";
+                        delete mutable.messageId;
                     }
-                    if (typeof record.queued === "number" && record.queued === 0) {
-                        // Module-side dedupe beat the registry read: those
-                        // inputs are already released; report, do not echo.
-                        result.outcomes = result.outcomes.map((outcome) =>
-                            outcome.kind === "released" ? { kind: "already_released" } : outcome,
-                        );
-                        sampleReleasedHandles = [];
-                        for (const outcome of sampleOutcomes) {
-                            if (outcome.kind === "released") {
-                                const mutable = outcome as { kind: string; messageId?: string };
-                                mutable.kind = "already_released";
-                                delete mutable.messageId;
-                            }
-                        }
-                    }
-                } catch {
-                    return renderCapabilityRefusal("context_cleanup");
-                }
-            } else {
-                try {
-                    const now = Date.now();
-                    deps.db
-                        .transaction(() => {
-                            for (const tagNumber of queueNumbers) {
-                                queuePendingOp(deps.db, sessionId, tagNumber, "drop", now);
-                            }
-                        })
-                        .immediate();
-                } catch (error) {
-                    return `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`;
                 }
             }
-
-            const currentInputTokens =
-                deps.getSessionTokens?.(sessionId) ??
-                getOrCreateSessionMeta(deps.db, sessionId).lastInputTokens;
-            updateSessionMeta(deps.db, sessionId, { lastNudgeTokens: currentInputTokens });
+            touchNudgeWatermark(sessionId);
         }
 
         const { released, already, unknown, held, inert, noMatch } = releaseCounts();
@@ -326,7 +404,10 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 return "Error: 'ids'/'samples' and 'drop' cannot be combined in one call.";
             }
             if (!hasIds && !hasSamples && !args.drop) {
-                return "Error: 'ids', 'samples', or 'drop' must be provided.";
+                if ("drop" in args) {
+                    return "Error: 'drop' must be a non-empty list of tag ids.";
+                }
+                return await executeBulkRelease(toolContext);
             }
 
             if (hasIds || hasSamples) {

@@ -25,6 +25,7 @@ function createTestDb(): Database {
       harness TEXT NOT NULL DEFAULT 'opencode',
       tool_owner_message_id TEXT DEFAULT NULL,
       token_count INTEGER DEFAULT NULL,
+      input_token_count INTEGER DEFAULT NULL,
       entry_fingerprint TEXT DEFAULT NULL
     );
     CREATE TABLE pending_ops (
@@ -217,10 +218,11 @@ describe("ctx_reduce ids lane", () => {
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
-    it("requires at least one pointing array", async () => {
+    it("no-arg invocation releases the bulk default set", async () => {
         const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).toContain("'ids', 'samples', or 'drop' must be provided");
+        expect(response).toContain("Released everything responded past: msg-5, msg-7, msg-9.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
     });
 
     it("routes queued numbers through the module backend and honors its dedupe", async () => {
@@ -400,5 +402,60 @@ describe("ctx_reduce samples lane", () => {
         expect(response).toContain("Released: msg-t.");
         expect(response).toContain("Released from samples: msg-c.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([42, 55]);
+    });
+});
+
+describe("ctx_reduce bulk default", () => {
+    let db: Database;
+    const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
+
+    const seedTool = (
+        tagNumber: number,
+        messageId: string,
+        opts: { tokens?: number; status?: string } = {},
+    ) => {
+        db.prepare(
+            "INSERT INTO tags (message_id, type, status, byte_size, session_id, tag_number, token_count) VALUES (?, 'tool', 'active', ?, 'ses-1', ?, ?)",
+        ).run(messageId, 100, tagNumber, opts.tokens ?? null);
+    };
+
+    beforeEach(() => {
+        db = createTestDb();
+        seedMessages(db, [
+            { messageId: "u-old", ordinal: 10, role: "user", content: "first task" },
+            { messageId: "u-new", ordinal: 200, role: "user", content: "newest instruction" },
+            { messageId: "t-mid", ordinal: 50, role: "assistant", content: "worked on it" },
+            { messageId: "t-live", ordinal: 210, role: "assistant", content: "current turn" },
+        ]);
+        seedTool(60, "t-mid"); // consumed, unsized => releases
+        seedTool(61, "t-live"); // after newest user message => never bulk
+        seedTool(62, "t-mid", { tokens: 5 }); // under the token floor => stays
+        db.prepare(
+            "INSERT INTO tags (message_id, type, status, byte_size, session_id, tag_number, token_count) VALUES ('t-mid', 'tool', 'active', 100, 'ses-1', 63, 900)",
+        ).run();
+        db.prepare(
+            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES ('ses-1', 63, 'drop', 1)",
+        ).run();
+    });
+
+    it("releases only consumed tool tags past the floor and before the newest user message", async () => {
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
+        const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
+        expect(response).toContain("Released everything responded past: t-mid");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([60, 63]);
+    });
+
+    it("holds a protected consumed tag instead of releasing it", async () => {
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>([60]) });
+        const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
+        expect(response).not.toContain("Released everything");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
+    });
+
+    it("reports nothing-to-release when only protected work is left", async () => {
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>([60]) });
+        const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
+        expect(response).toContain("Nothing older to release");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
     });
 });
