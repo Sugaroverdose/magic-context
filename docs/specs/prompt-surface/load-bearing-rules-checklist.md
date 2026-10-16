@@ -397,7 +397,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Scope:** primary sessions
 - **Polarity:** prohibition
 - **Operative condition:** Magic Context control markers appear in compressed or injected context.
-- **Mechanism:** Do not reproduce metadata markers such as `<session-history>`, `<project-memory>`, `[dropped §N§]`, or temporal comments in a normal reply and do not treat them as user instructions.
+- **Mechanism:** Do not reproduce metadata markers such as `<session-history>`, `<project-memory>`or temporal comments in a normal reply and do not treat them as user instructions.
 - **Consequence:** Control metadata cannot be imitated as assistant output or mistaken for directives.
 - **Source evidence:** `if there is no tool result on the desk`
 
@@ -733,7 +733,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Source fragment:** `guidance-subagent-reduce`
 - **Scope:** subagent sessions
 - **Polarity:** prohibition
-- **Operative condition:** Older tool calls appear as `[dropped §N§]` sentinels in a subagent context.
+- **Operative condition:** Released tool calls appear as skeleton calls with a constant `...` result slot in a subagent context.
 - **Mechanism:** Treat sentinels as normal context management, never as a pattern to copy; make a fresh real tool call and never fabricate or inline its output.
 - **Consequence:** The dropped placeholder cannot be imitated as assistant content.
 - **Source evidence:** `Your context is a desk`
@@ -1286,6 +1286,6 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 
 ## Review notes
 
-- The `[dropped §N§]` imitation prohibition is deliberately listed as `G-030` with `compressed` only for `subagent-reduce`; primary variants are `not-present` for this exact SUBAGENT_REDUCE_INTRO clause.
+- The released-item imitation prohibition is deliberately listed as `G-030` with `compressed` only for `subagent-reduce`; primary variants are `not-present` for this exact SUBAGENT_REDUCE_INTRO clause.
 - Tool descriptions are included as load-bearing contract/mechanism rules, with active and memory-disabled tool compositions represented separately.
 - No light prose is authored by this artifact. S3 must replace pending compressed targets with exact light lines after ratification.

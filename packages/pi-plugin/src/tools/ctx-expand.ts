@@ -44,7 +44,7 @@ const ParamsSchema = Type.Object(
 		tag: Type.Optional(
 			Type.Union([Type.Number(), Type.String()], {
 				description:
-					"Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
+					"Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
 			}),
 		),
 		start: Type.Optional(

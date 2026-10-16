@@ -5,7 +5,7 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
         drop: 'Tag IDs to drop: "3-5", "1,2,9", "1-5,8,12-15".',
     },
     ctx_expand: {
-        tag: "Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
+        tag: "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
         start: "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
         end: "Last message ordinal of the range, inclusive, not a tag number.",
         verbose:
@@ -47,7 +47,7 @@ export const LIGHT_PARAMETER_DESCRIPTIONS = {
         drop: 'Tag IDs: "3-5", "1,2,9", "1-5,8,12-15".',
     },
     ctx_expand: {
-        tag: "Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
+        tag: "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
         start: "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
         end: "Last message ordinal of the range, inclusive, not a tag number.",
         verbose: "With start/end: one entry per message with previews instead of the transcript.",

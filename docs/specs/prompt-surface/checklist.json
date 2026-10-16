@@ -874,7 +874,7 @@
       "scope": "primary sessions",
       "polarity": "prohibition",
       "operativeCondition": "Magic Context control markers appear in compressed or injected context.",
-      "mechanism": "Do not reproduce metadata markers such as `<session-history>`, `<project-memory>`, `[dropped §N§]`, or temporal comments in a normal reply and do not treat them as user instructions.",
+      "mechanism": "Do not reproduce metadata markers such as `<session-history>`, `<project-memory>`or temporal comments in a normal reply and do not treat them as user instructions.",
       "consequence": "Control metadata cannot be imitated as assistant output or mistaken for directives.",
       "evidence": "if there is no tool result on the desk"
     },
@@ -1027,7 +1027,7 @@
       "sourceFragment": "guidance-subagent-reduce",
       "scope": "subagent sessions",
       "polarity": "prohibition",
-      "operativeCondition": "Older tool calls appear as `[dropped §N§]` sentinels in a subagent context.",
+      "operativeCondition": "Released tool calls appear as skeleton calls with a constant `...` result slot in a subagent context.",
       "mechanism": "Treat sentinels as normal context management, never as a pattern to copy; make a fresh real tool call and never fabricate or inline its output.",
       "consequence": "The dropped placeholder cannot be imitated as assistant content.",
       "evidence": "Your context is a desk",
