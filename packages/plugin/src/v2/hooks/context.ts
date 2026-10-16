@@ -52,9 +52,11 @@ import {
     assertExecutableToolInput,
     createDroppedInputGuard,
     recordToolParameters,
+    resolveReleasedToolInput,
 } from "../../hooks/magic-context/dropped-input-guard";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
+import { lookupReleasedToolInput } from "../../hooks/magic-context/fpe-resolve";
 import {
     type HistoryBoundaryRepair,
     repairMissingHistoryBoundary,
@@ -838,13 +840,26 @@ export async function registerContext(context: V2Context) {
     let passDuties: ReturnType<typeof createChatMessageHook> | undefined;
     let toolDuties: ReturnType<typeof createToolExecuteAfterHook> | undefined;
     const droppedInputGuard = createDroppedInputGuard();
-    await context.tool.hook("execute.before", (draft) =>
+    await context.tool.hook("execute.before", (draft) => {
+        if (db && draft.input !== undefined) {
+            const resolved = resolveReleasedToolInput(draft.input, draft.sessionID, {
+                lookupOriginal: (sessionId, tagId) =>
+                    db ? lookupReleasedToolInput(db, sessionId, tagId) : undefined,
+            });
+            if (resolved !== undefined) {
+                sessionLog(draft.sessionID, "fpe: resolved dropped token in tool call args", {
+                    tool: draft.tool,
+                });
+                draft.input = resolved;
+                return;
+            }
+        }
         assertExecutableToolInput(droppedInputGuard, {
             sessionID: draft.sessionID,
             toolName: draft.tool,
             input: draft.input,
-        }),
-    );
+        });
+    });
     await context.tool.hook("execute.after", async (draft) => {
         if (!db) return;
         if (draft.status && draft.status !== "completed") return;

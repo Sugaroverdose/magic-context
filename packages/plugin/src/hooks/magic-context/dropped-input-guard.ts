@@ -251,43 +251,57 @@ export function assertExecutableToolInput(guard: DroppedInputGuard, call: Droppe
 }
 
 /**
- * FPE resolution deps: given a decrypted tag id, return the value a resolved
- * token is replaced with. Under the released-shape table the token's seat is
- * a string value inside the call's arguments (the `full`-mode carrier), so
- * the lookup returns the ORIGINAL value that sat in that seat.
+ * FPE resolution deps: given a decrypted tag id, return the ORIGINAL tool
+ * call input that the re-emitted carrier must run. The `.before` contract is
+ * whole-args replacement: the token names a released call, so the call the
+ * model just issued IS that call, executed with its original arguments.
  */
 export interface FpeResolveDeps {
     lookupOriginal: (sessionId: string, tagId: number) => unknown | undefined;
 }
 
-function resolveFpeInValue(
-    value: unknown,
-    key: bigint,
-    currentL: number,
-    lookup: (tagId: number) => unknown | undefined,
-): unknown {
+function findFpeTagId(value: unknown, key: bigint, currentL: number): number | undefined {
     if (typeof value === "string") {
-        if (!isFpeTokenCandidate(value)) return value;
+        if (!isFpeTokenCandidate(value)) return undefined;
         const result = fpeGate(value, key, currentL);
-        if (!result.matched || result.tagId === undefined) return value;
-        const original = lookup(result.tagId);
-        return original !== undefined ? original : value;
+        return result.matched ? result.tagId : undefined;
     }
     if (Array.isArray(value)) {
-        return value.map((v) => resolveFpeInValue(v, key, currentL, lookup));
+        for (const item of value) {
+            const tagId = findFpeTagId(item, key, currentL);
+            if (tagId !== undefined) return tagId;
+        }
+        return undefined;
     }
     if (isRecord(value)) {
-        const out: Record<string, unknown> = {};
-        for (const [k, v] of Object.entries(value)) {
-            out[k] = resolveFpeInValue(v, key, currentL, lookup);
+        for (const item of Object.values(value)) {
+            const tagId = findFpeTagId(item, key, currentL);
+            if (tagId !== undefined) return tagId;
         }
-        return out;
+        return undefined;
     }
-    return value;
+    return undefined;
 }
 
 export interface DroppedInputToolExecuteBeforeHookOptions {
     fpeResolve?: FpeResolveDeps;
+}
+
+/**
+ * The shared `.before` FPE resolution used by every harness that has a
+ * pre-execute hook: detect a released-call token in the args and return the
+ * ORIGINAL input that must run in its place, or undefined when the args
+ * carry no resolvable token. Harness adapters log and assign; the
+ * detection/replacement contract lives only here.
+ */
+export function resolveReleasedToolInput(
+    args: unknown,
+    sessionId: string,
+    fpeResolve: FpeResolveDeps,
+): unknown | undefined {
+    const tagId = findFpeTagId(args, deriveKey(sessionId), 8);
+    if (tagId === undefined) return undefined;
+    return fpeResolve.lookupOriginal(sessionId, tagId);
 }
 
 export function createDroppedInputToolExecuteBeforeHook(
@@ -309,15 +323,12 @@ export function createDroppedInputToolExecuteBeforeHook(
             }
         }
         if (sessionId && args && options.fpeResolve) {
-            const key = deriveKey(sessionId);
-            const resolved = resolveFpeInValue(args, key, 8, (tagId) =>
-                options.fpeResolve?.lookupOriginal(sessionId, tagId),
-            );
-            if (resolved !== args) {
+            const original = resolveReleasedToolInput(args, sessionId, options.fpeResolve);
+            if (original !== undefined) {
                 sessionLog(sessionId, "fpe: resolved dropped token in tool call args", {
                     tool: call.tool,
                 });
-                (output as { args: unknown }).args = resolved;
+                (output as { args: unknown }).args = original;
                 return;
             }
         }
