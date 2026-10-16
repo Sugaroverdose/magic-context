@@ -163,10 +163,10 @@ describe("ctx_reduce ids lane", () => {
             ctx,
         )) as string;
 
-        expect(response).toContain("Released: 5, 7.");
-        expect(response).toContain("Already released: 1");
-        expect(response).toContain("Unknown: 2");
-        expect(response).toContain("Held: 1");
+        expect(response).toContain("Released: 5, 7, 11.");
+        expect(response).toContain("Already released: 11.");
+        expect(response).toContain("Unknown: nope-1, call-e match no call");
+        expect(response).toContain("Held: call-c inside the protected working set");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7]);
     });
 
@@ -175,8 +175,8 @@ describe("ctx_reduce ids lane", () => {
         await tools.ctx_reduce!.execute({ ids: ["call-a"] }, ctx);
         const before = pendingTagNumbers(db, "ses-1");
         const response = (await tools.ctx_reduce!.execute({ ids: ["call-a"] }, ctx)) as string;
-        expect(response).toContain("Already released: 1");
-        expect(response).not.toContain("Released:");
+        expect(response).toBe("Released: 5. Already released: 5.");
+        expect(response).not.toContain("Released: 5,");
         expect(pendingTagNumbers(db, "ses-1")).toEqual(before);
     });
 
@@ -193,7 +193,7 @@ describe("ctx_reduce ids lane", () => {
     it("treats a foreign-session id as unknown, never a foreign release", async () => {
         const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
         const response = (await tools.ctx_reduce!.execute({ ids: ["call-e"] }, ctx)) as string;
-        expect(response).toContain("Unknown: 1");
+        expect(response).toContain("Unknown: call-e match no call");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
         expect(pendingTagNumbers(db, "ses-2")).toEqual([]);
     });
@@ -204,7 +204,7 @@ describe("ctx_reduce ids lane", () => {
         ]);
         const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
         const response = (await tools.ctx_reduce!.execute({ ids: ["call-b"] }, ctx)) as string;
-        expect(response).toContain("Unknown: 1");
+        expect(response).toContain("Unknown: call-b match no call");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
@@ -254,8 +254,8 @@ describe("ctx_reduce ids lane", () => {
             { ids: ["call-a", "call-b"] },
             ctx,
         )) as string;
-        expect(second).not.toContain("Released:");
-        expect(second).toContain("Already released: 2");
+        expect(second).toBe("Released: 5, 7. Already released: 5, 7.");
+        expect(second).toContain("Already released: 5, 7.");
     });
 
     it("refuses capability when the module backend throws", async () => {
@@ -375,7 +375,7 @@ describe("ctx_reduce samples lane", () => {
             { samples: ["purple platypus parliament"], ids: [] },
             ctx,
         )) as string;
-        expect(response).toContain("No match: 1");
+        expect(response).toContain("No match: sample 1 found nothing");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
@@ -385,7 +385,7 @@ describe("ctx_reduce samples lane", () => {
             { samples: ["deployment checklist"] },
             ctx,
         )) as string;
-        expect(response).toContain("Held: 1");
+        expect(response).toContain("Held: sample 1 inside the protected working set");
         expect(response).not.toContain("Released from samples");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });

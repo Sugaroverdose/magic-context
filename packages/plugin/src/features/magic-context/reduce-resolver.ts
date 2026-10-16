@@ -14,8 +14,10 @@ import { AGE_RECLAIM_MIN_TOKENS } from "./storage-tags";
 
 export type ReduceInputOutcome =
     | { kind: "released"; messageId: string; tagNumber: number }
-    | { kind: "already_released" }
-    | { kind: "refused"; reason: "protected" | "provider-framing" }
+    | { kind: "already_released"; tagNumber: number }
+    | { kind: "refused"; reason: "protected"; tagNumber?: number }
+    /** Noop success: whitespace-only provider framing, nothing reclaimable. */
+    | { kind: "noop"; reason: "provider-framing"; tagNumber: number }
     | { kind: "unknown" }
     /** Sample matched no live visible item (report-only, non-destructive). */
     | { kind: "no-match" }
@@ -94,19 +96,19 @@ export function resolveIds(
             continue;
         }
         if (tag.status === "dropped" || pendingMap.get(tag.tag_number) === "drop") {
-            outcomes.push({ kind: "already_released" });
+            outcomes.push({ kind: "already_released", tagNumber: tag.tag_number });
             continue;
         }
         if (tag.status === "compacted") {
-            outcomes.push({ kind: "already_released" });
+            outcomes.push({ kind: "already_released", tagNumber: tag.tag_number });
             continue;
         }
         if (deps.inertTagNumbers?.has(tag.tag_number)) {
-            outcomes.push({ kind: "refused", reason: "provider-framing" });
+            outcomes.push({ kind: "noop", reason: "provider-framing", tagNumber: tag.tag_number });
             continue;
         }
         if (deps.protectedTagNumbers.has(tag.tag_number)) {
-            outcomes.push({ kind: "refused", reason: "protected" });
+            outcomes.push({ kind: "refused", reason: "protected", tagNumber: tag.tag_number });
             continue;
         }
         outcomes.push({ kind: "released", messageId: tag.message_id, tagNumber: tag.tag_number });
@@ -123,15 +125,59 @@ export function resolveIds(
  * as `ctx_expand(tag=N)` without teaching any new handle format.
  */
 export function releasedTagHandles(result: ReduceResolveResult): number[] {
+    return successTagHandles(result.outcomes);
+}
+
+/**
+ * Success array: one tag per input that landed (freshly released or noop),
+ * input order, deduplicated. Noop facts are NOT marked inside the array —
+ * they are reported outside as separate info lines (settled response shape:
+ * the array mirrors the input, the reasons annotate it from the outside).
+ */
+export function successTagHandles(outcomes: readonly ReduceInputOutcome[]): number[] {
     const handles: number[] = [];
     const seen = new Set<number>();
-    for (const outcome of result.outcomes) {
-        if (outcome.kind === "released" && !seen.has(outcome.tagNumber)) {
+    for (const outcome of outcomes) {
+        if (
+            (outcome.kind === "released" ||
+                outcome.kind === "already_released" ||
+                outcome.kind === "noop") &&
+            !seen.has(outcome.tagNumber)
+        ) {
             seen.add(outcome.tagNumber);
             handles.push(outcome.tagNumber);
         }
     }
     return handles;
+}
+
+/** Tag lists for the noop entries, grouped by reason, for outside-array info lines. */
+export function noopTagLists(outcomes: readonly ReduceInputOutcome[]): {
+    alreadyReleased: number[];
+    nothingToReclaim: number[];
+} {
+    const alreadyReleased: number[] = [];
+    const nothingToReclaim: number[] = [];
+    for (const outcome of outcomes) {
+        if (outcome.kind === "already_released" && !alreadyReleased.includes(outcome.tagNumber)) {
+            alreadyReleased.push(outcome.tagNumber);
+        } else if (outcome.kind === "noop" && !nothingToReclaim.includes(outcome.tagNumber)) {
+            nothingToReclaim.push(outcome.tagNumber);
+        }
+    }
+    return { alreadyReleased, nothingToReclaim };
+}
+
+/** Input handles (index into the array) for the given outcome kinds, in order. */
+export function inputHandlesFor(
+    outcomes: readonly ReduceInputOutcome[],
+    kinds: ReduceInputOutcome["kind"][],
+): number[] {
+    const out: number[] = [];
+    outcomes.forEach((outcome, index) => {
+        if (kinds.includes(outcome.kind)) out.push(index);
+    });
+    return out;
 }
 
 /**
@@ -266,13 +312,13 @@ export function classifyMessageTag(
 ): ReduceInputOutcome {
     const pending = getPendingOps(deps.db, deps.sessionId);
     if (pending.some((op) => op.tagId === outcome.tagNumber && op.operation === "drop")) {
-        return { kind: "already_released" };
+        return { kind: "already_released", tagNumber: outcome.tagNumber };
     }
     if (deps.inertTagNumbers?.has(outcome.tagNumber)) {
-        return { kind: "refused", reason: "provider-framing" };
+        return { kind: "noop", reason: "provider-framing", tagNumber: outcome.tagNumber };
     }
     if (deps.protectedTagNumbers.has(outcome.tagNumber)) {
-        return { kind: "refused", reason: "protected" };
+        return { kind: "refused", reason: "protected", tagNumber: outcome.tagNumber };
     }
     return { kind: "released", messageId: outcome.messageId, tagNumber: outcome.tagNumber };
 }
@@ -335,11 +381,11 @@ export function resolveBulkDefault(
     const releasedTagNumbers: number[] = [];
     for (const row of rows) {
         if (deps.inertTagNumbers?.has(row.tag_number)) {
-            outcomes.push({ kind: "refused", reason: "provider-framing" });
+            outcomes.push({ kind: "noop", reason: "provider-framing", tagNumber: row.tag_number });
             continue;
         }
         if (deps.protectedTagNumbers.has(row.tag_number)) {
-            outcomes.push({ kind: "refused", reason: "protected" });
+            outcomes.push({ kind: "refused", reason: "protected", tagNumber: row.tag_number });
             continue;
         }
         outcomes.push({ kind: "released", messageId: row.message_id, tagNumber: row.tag_number });

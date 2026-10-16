@@ -8,7 +8,10 @@ import { parseRangeString } from "../../features/magic-context/range-parser";
 import {
     classifyMessageTag,
     type ReduceInputOutcome,
+    inputHandlesFor,
+    noopTagLists,
     releasedTagHandles,
+    successTagHandles,
     resolveBulkDefault,
     resolveIds,
     resolveSamples,
@@ -213,23 +216,35 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         if (apply.refused) {
             return apply.refused;
         }
-        let handles: number[] = result.releasedTagNumbers;
+        let handles: number[] = successTagHandles(result.outcomes);
         if (apply.deduped) {
             handles = [];
         } else {
             touchNudgeWatermark(sessionId);
         }
-        const inert = result.outcomes.filter(
-            (outcome) => outcome.kind === "refused" && outcome.reason === "provider-framing",
-        ).length;
+        const noopInfo = noopTagLists(result.outcomes);
+        const heldTags = result.outcomes
+            .filter(
+                (outcome): outcome is Extract<typeof outcome, { kind: "refused" }> & { tagNumber: number } =>
+                    outcome.kind === "refused" && typeof outcome.tagNumber === "number",
+            )
+            .map((outcome) => outcome.tagNumber);
         const lines: string[] = [];
         if (handles.length > 0) {
             lines.push(`Released everything responded past: ${handles.join(", ")}.`);
         } else {
             lines.push("Already released: nothing left to do.");
         }
-        if (inert > 0) {
-            lines.push(`Ignored: ${inert} is provider framing, nothing to reclaim.`);
+        if (noopInfo.alreadyReleased.length > 0) {
+            lines.push(`Already released: ${noopInfo.alreadyReleased.join(", ")}.`);
+        }
+        if (noopInfo.nothingToReclaim.length > 0) {
+            lines.push(`Nothing to reclaim: ${noopInfo.nothingToReclaim.join(", ")}.`);
+        }
+        if (heldTags.length > 0) {
+            lines.push(
+                `Held: ${heldTags.join(", ")} inside the protected working set; applies once newer work displaces it.`,
+            );
         }
         return lines.join(" ");
     };
@@ -309,30 +324,9 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             ids,
         );
 
-        const releaseCounts = () => {
-            let released = 0;
-            let already = 0;
-            let unknown = 0;
-            let held = 0;
-            let inert = 0;
-            let noMatch = 0;
-            for (const outcome of [...result.outcomes, ...sampleOutcomes]) {
-                if (outcome.kind === "no-match") noMatch += 1;
-                if (outcome.kind === "released") released += 1;
-                else if (outcome.kind === "already_released") already += 1;
-                else if (outcome.kind === "unknown") unknown += 1;
-                else if (outcome.kind === "refused") {
-                    if (outcome.reason === "protected") held += 1;
-                    else inert += 1;
-                }
-            }
-            return { released, already, unknown, held, inert, noMatch };
-        };
-
         const queueNumbers = [
             ...new Set([...result.releasedTagNumbers, ...sampleReleased.map((r) => r.tagNumber)]),
         ];
-        let sampleReleasedHandles = [...new Set(sampleReleased.map((r) => r.tagNumber))];
 
         if (queueNumbers.length > 0) {
             const apply = await applyReleasedTags(invokeContext, queueNumbers);
@@ -343,12 +337,13 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 // Module-side dedupe beat the registry read: those inputs are
                 // already released; report, do not echo.
                 result.outcomes = result.outcomes.map((outcome) =>
-                    outcome.kind === "released" ? { kind: "already_released" } : outcome,
+                    outcome.kind === "released"
+                        ? { kind: "already_released", tagNumber: outcome.tagNumber }
+                        : outcome,
                 );
-                sampleReleasedHandles = [];
                 for (const outcome of sampleOutcomes) {
                     if (outcome.kind === "released") {
-                        const mutable = outcome as { kind: string; messageId?: string };
+                        const mutable = outcome as { kind: string; tagNumber?: number; messageId?: string };
                         mutable.kind = "already_released";
                         delete mutable.messageId;
                     }
@@ -357,33 +352,45 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             touchNudgeWatermark(sessionId);
         }
 
-        const { released, already, unknown, held, inert, noMatch } = releaseCounts();
         const lines: string[] = [];
-        const handles = releasedTagHandles(result);
-        if (handles.length > 0) {
-            lines.push(`Released: ${handles.join(", ")}.`);
-        } else if (released > 0) {
-            lines.push(`Released: ${released}.`);
+        const idSuccess = successTagHandles(result.outcomes);
+        const sampleSuccess = successTagHandles(sampleOutcomes);
+        if (idSuccess.length > 0) {
+            lines.push(`Released: ${idSuccess.join(", ")}.`);
         }
-        if (sampleReleasedHandles.length > 0) {
-            lines.push(`Released from samples: ${sampleReleasedHandles.join(", ")}.`);
+        if (sampleSuccess.length > 0) {
+            lines.push(`Released from samples: ${sampleSuccess.join(", ")}.`);
         }
-        if (noMatch > 0) {
-            lines.push(`No match: ${noMatch} sample(s) found nothing in your visible context.`);
+        const noopInfo = noopTagLists([...result.outcomes, ...sampleOutcomes]);
+        if (noopInfo.alreadyReleased.length > 0) {
+            lines.push(`Already released: ${noopInfo.alreadyReleased.join(", ")}.`);
         }
-        if (already > 0) {
-            lines.push(`Already released: ${already} input(s) — nothing left to do.`);
+        if (noopInfo.nothingToReclaim.length > 0) {
+            lines.push(`Nothing to reclaim: ${noopInfo.nothingToReclaim.join(", ")}.`);
         }
-        if (unknown > 0) {
-            lines.push(`Unknown: ${unknown} input(s) match no call in this session.`);
-        }
-        if (held > 0) {
+        const unknownIdx = inputHandlesFor(result.outcomes, ["unknown"]);
+        if (unknownIdx.length > 0) {
             lines.push(
-                `Held: ${held} inside the protected working set; applies once newer work displaces it.`,
+                `Unknown: ${unknownIdx.map((i) => ids[i]).join(", ")} match no call in this session.`,
             );
         }
-        if (inert > 0) {
-            lines.push(`Ignored: ${inert} is provider framing, nothing to reclaim.`);
+        const heldIdx = inputHandlesFor(result.outcomes, ["refused"]);
+        if (heldIdx.length > 0) {
+            lines.push(
+                `Held: ${heldIdx.map((i) => ids[i]).join(", ")} inside the protected working set; resend once newer work displaces it.`,
+            );
+        }
+        const sampleHeldIdx = inputHandlesFor(sampleOutcomes, ["refused"]);
+        const sampleMissIdx = inputHandlesFor(sampleOutcomes, ["no-match"]);
+        if (sampleHeldIdx.length > 0) {
+            lines.push(
+                `Held: ${sampleHeldIdx.map((i) => `sample ${i + 1}`).join(", ")} inside the protected working set; resend once newer work displaces it.`,
+            );
+        }
+        if (sampleMissIdx.length > 0) {
+            lines.push(
+                `No match: ${sampleMissIdx.map((i) => `sample ${i + 1}`).join(", ")} found nothing in your visible context.`,
+            );
         }
         return lines.join(" ");
     };
