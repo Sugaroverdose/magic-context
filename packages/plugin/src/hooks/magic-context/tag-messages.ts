@@ -15,6 +15,7 @@ import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/
 import { textMentionsRecentCommit } from "../../shared/commit-detection";
 import { isRecord } from "../../shared/record-type-guard";
 import { isReduceToolPart } from "./drop-stale-reduce-calls";
+import { deriveKey } from "./fpe";
 import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
@@ -1101,7 +1102,14 @@ export function tagMessages(
         const thinkingParts = toolThinkingByCallId.get(compositeKey) ?? [];
         targets.set(
             tagId,
-            createToolDropTarget(compositeKey, thinkingParts, toolCallIndex, batch, tagId),
+            createToolDropTarget(
+                compositeKey,
+                thinkingParts,
+                toolCallIndex,
+                batch,
+                tagId,
+                deriveKey(sessionId),
+            ),
         );
     }
 
