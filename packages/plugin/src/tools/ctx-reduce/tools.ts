@@ -5,7 +5,13 @@ import {
     type ProtectionWindowResult,
 } from "../../features/magic-context/protection-window";
 import { parseRangeString } from "../../features/magic-context/range-parser";
-import { releasedMessageHandles, resolveIds } from "../../features/magic-context/reduce-resolver";
+import {
+    classifyMessageTag,
+    type ReduceInputOutcome,
+    releasedMessageHandles,
+    resolveIds,
+    resolveSamples,
+} from "../../features/magic-context/reduce-resolver";
 import {
     getOrCreateSessionMeta,
     getPendingOps,
@@ -62,6 +68,12 @@ const ctxReduceArgsShape = {
         .describe(
             "Call ids of tool calls to release, copied exactly from the calls as they appear in context.",
         ),
+    samples: tool.schema
+        .array(tool.schema.string())
+        .optional()
+        .describe(
+            "Quote a contiguous run of the item's own text, copied exactly — not reworded, not shortened with ellipses.",
+        ),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with
@@ -91,14 +103,18 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             : `oc-${createHash("sha256").update(monotonicId).digest("hex")}`;
     };
 
-    const executeIdsLane = async (
+    const executePointingLane = async (
         invokeContext: { sessionID: string; directory: string },
         rawIds: string[],
+        rawSamples: string[],
     ): Promise<string> => {
         const sessionId = invokeContext.sessionID;
         const ids = [...new Set(rawIds.map((id) => id.trim()).filter((id) => id.length > 0))];
-        if (ids.length === 0) {
-            return "Error: 'ids' must contain call ids.";
+        const samples = rawSamples
+            .map((sample) => sample.trim())
+            .filter((sample) => sample.length > 0);
+        if (ids.length === 0 && samples.length === 0) {
+            return "Error: 'ids'/'samples' must contain entries.";
         }
 
         let protectedSet: ReadonlySet<number>;
@@ -120,6 +136,55 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             getInertWhitespaceAssistantTags(deps.db, sessionId).map((tag) => tag.tagNumber),
         );
 
+        // Samples resolve FIRST: ambiguity is the only batch-rejecting class
+        // and the rejection must land before anything applies, so the forced
+        // retry is application-free (one apply event per reduce intent).
+        const sampleReleased: { tagNumber: number; messageId: string }[] = [];
+        const sampleOutcomes: ReduceInputOutcome[] = resolveSamples(
+            deps.db,
+            sessionId,
+            samples,
+        ).map((outcome): ReduceInputOutcome => {
+            if (outcome.kind === "matched") {
+                const classified = classifyMessageTag(
+                    {
+                        db: deps.db,
+                        sessionId,
+                        protectedTagNumbers: protectedSet,
+                        inertTagNumbers,
+                    },
+                    outcome,
+                );
+                if (classified.kind === "released") {
+                    sampleReleased.push({
+                        tagNumber: outcome.tagNumber,
+                        messageId: outcome.messageId,
+                    });
+                }
+                return classified;
+            }
+            if (outcome.kind === "ambiguous") {
+                return { kind: "ambiguous", candidates: outcome.candidates };
+            }
+            return { kind: "no-match" };
+        });
+        const ambiguous = sampleOutcomes.find(
+            (outcome): outcome is ReduceInputOutcome & { kind: "ambiguous" } =>
+                outcome.kind === "ambiguous",
+        );
+        if (ambiguous) {
+            const lines = [
+                "Ambiguous: a sample matches more than one visible item — nothing was released.",
+            ];
+            for (const candidate of ambiguous.candidates) {
+                lines.push(
+                    `- ${candidate.messageId}: ${candidate.excerpt.length > 0 ? candidate.excerpt : "(see item)"}…`,
+                );
+            }
+            lines.push("Copy a longer run and send the same batch again.");
+            return lines.join("\n");
+        }
+
         const result = resolveIds(
             {
                 db: deps.db,
@@ -136,7 +201,9 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             let unknown = 0;
             let held = 0;
             let inert = 0;
-            for (const outcome of result.outcomes) {
+            let noMatch = 0;
+            for (const outcome of [...result.outcomes, ...sampleOutcomes]) {
+                if (outcome.kind === "no-match") noMatch += 1;
                 if (outcome.kind === "released") released += 1;
                 else if (outcome.kind === "already_released") already += 1;
                 else if (outcome.kind === "unknown") unknown += 1;
@@ -145,17 +212,22 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     else inert += 1;
                 }
             }
-            return { released, already, unknown, held, inert };
+            return { released, already, unknown, held, inert, noMatch };
         };
 
-        if (result.releasedTagNumbers.length > 0) {
+        const queueNumbers = [
+            ...new Set([...result.releasedTagNumbers, ...sampleReleased.map((r) => r.tagNumber)]),
+        ];
+        let sampleReleasedHandles = [...new Set(sampleReleased.map((r) => r.messageId))];
+
+        if (queueNumbers.length > 0) {
             const rustReduce = deps.rustToolBackends?.reduce;
             if (rustReduce) {
                 try {
                     const response = await rustReduce({
                         sessionId,
                         projectRoot: invokeContext.directory,
-                        drop: result.releasedTagNumbers.join(","),
+                        drop: queueNumbers.join(","),
                         commandId: commandIdForInvocation(sessionId, invokeContext),
                     });
                     const value =
@@ -175,6 +247,14 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                         result.outcomes = result.outcomes.map((outcome) =>
                             outcome.kind === "released" ? { kind: "already_released" } : outcome,
                         );
+                        sampleReleasedHandles = [];
+                        for (const outcome of sampleOutcomes) {
+                            if (outcome.kind === "released") {
+                                const mutable = outcome as { kind: string; messageId?: string };
+                                mutable.kind = "already_released";
+                                delete mutable.messageId;
+                            }
+                        }
                     }
                 } catch {
                     return renderCapabilityRefusal("context_cleanup");
@@ -184,7 +264,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     const now = Date.now();
                     deps.db
                         .transaction(() => {
-                            for (const tagNumber of result.releasedTagNumbers) {
+                            for (const tagNumber of queueNumbers) {
                                 queuePendingOp(deps.db, sessionId, tagNumber, "drop", now);
                             }
                         })
@@ -200,13 +280,19 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             updateSessionMeta(deps.db, sessionId, { lastNudgeTokens: currentInputTokens });
         }
 
-        const { released, already, unknown, held, inert } = releaseCounts();
+        const { released, already, unknown, held, inert, noMatch } = releaseCounts();
         const lines: string[] = [];
         const handles = releasedMessageHandles(result);
         if (handles.length > 0) {
             lines.push(`Released: ${handles.join(", ")}.`);
         } else if (released > 0) {
             lines.push(`Released: ${released}.`);
+        }
+        if (sampleReleasedHandles.length > 0) {
+            lines.push(`Released from samples: ${sampleReleasedHandles.join(", ")}.`);
+        }
+        if (noMatch > 0) {
+            lines.push(`No match: ${noMatch} sample(s) found nothing in your visible context.`);
         }
         if (already > 0) {
             lines.push(`Already released: ${already} input(s) — nothing left to do.`);
@@ -235,15 +321,20 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             const sessionId = toolContext.sessionID;
 
             const hasIds = Array.isArray(args.ids) && args.ids.length > 0;
-            if (hasIds && args.drop) {
-                return "Error: 'ids' and 'drop' cannot be combined in one call.";
+            const hasSamples = Array.isArray(args.samples) && args.samples.length > 0;
+            if ((hasIds || hasSamples) && args.drop) {
+                return "Error: 'ids'/'samples' and 'drop' cannot be combined in one call.";
             }
-            if (!hasIds && !args.drop) {
-                return "Error: 'ids' or 'drop' must be provided.";
+            if (!hasIds && !hasSamples && !args.drop) {
+                return "Error: 'ids', 'samples', or 'drop' must be provided.";
             }
 
-            if (hasIds) {
-                return await executeIdsLane(toolContext, args.ids as string[]);
+            if (hasIds || hasSamples) {
+                return await executePointingLane(
+                    toolContext,
+                    hasIds ? (args.ids as string[]) : [],
+                    hasSamples ? (args.samples as string[]) : [],
+                );
             }
 
             const dropArg = args.drop;

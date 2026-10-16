@@ -35,6 +35,14 @@ function createTestDb(): Database {
       queued_at INTEGER NOT NULL,
       harness TEXT NOT NULL DEFAULT 'opencode'
     );
+    CREATE VIRTUAL TABLE message_history_fts USING fts5(
+      session_id UNINDEXED,
+      message_ordinal UNINDEXED,
+      message_id UNINDEXED,
+      role,
+      content,
+      tokenize='porter unicode61'
+    );
     CREATE TABLE session_meta (
       session_id TEXT PRIMARY KEY,
       last_response_time INTEGER,
@@ -72,19 +80,43 @@ interface SeedTag {
     sessionId: string;
     contentId?: string;
     status?: string;
+    tagType?: "message" | "tool";
+}
+
+interface SeedMessage {
+    messageId: string;
+    ordinal: number;
+    role: string;
+    content: string;
+    sessionId?: string;
 }
 
 function seedTags(db: Database, tags: SeedTag[]) {
     for (const tag of tags) {
         db.prepare(
-            "INSERT INTO tags (message_id, type, status, content_id, byte_size, session_id, tag_number) VALUES (?, 'tool', ?, ?, ?, ?, ?)",
+            "INSERT INTO tags (message_id, type, status, content_id, byte_size, session_id, tag_number) VALUES (?, ?, ?, ?, ?, ?, ?)",
         ).run(
             tag.messageId,
+            tag.tagType ?? "tool",
             tag.status ?? "active",
             tag.contentId ?? null,
             100,
             tag.sessionId,
             tag.tagNumber,
+        );
+    }
+}
+
+function seedMessages(db: Database, messages: SeedMessage[], sessionId = "ses-1") {
+    for (const message of messages) {
+        db.prepare(
+            "INSERT INTO message_history_fts (session_id, message_ordinal, message_id, role, content) VALUES (?, ?, ?, ?, ?)",
+        ).run(
+            message.sessionId ?? sessionId,
+            message.ordinal,
+            message.messageId,
+            message.role,
+            message.content,
         );
     }
 }
@@ -188,7 +220,7 @@ describe("ctx_reduce ids lane", () => {
     it("requires at least one pointing array", async () => {
         const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).toContain("'ids' or 'drop' must be provided");
+        expect(response).toContain("'ids', 'samples', or 'drop' must be provided");
     });
 
     it("routes queued numbers through the module backend and honors its dedupe", async () => {
@@ -238,5 +270,135 @@ describe("ctx_reduce ids lane", () => {
         const response = (await tools.ctx_reduce!.execute({ ids: ["call-a"] }, ctx)) as string;
         expect(response).toContain("cleanup");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+});
+
+describe("ctx_reduce samples lane", () => {
+    let db: Database;
+    const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
+
+    beforeEach(() => {
+        db = createTestDb();
+        seedMessages(db, [
+            {
+                messageId: "msg-a",
+                ordinal: 100,
+                role: "user",
+                content: "the quarterly figures show revenue climbing twelve percent overall",
+            },
+            {
+                messageId: "msg-b",
+                ordinal: 101,
+                role: "assistant",
+                content: "notes: revenue climbing\ttwelve   percent across all regions",
+            },
+            {
+                messageId: "msg-c",
+                ordinal: 102,
+                role: "user",
+                content: "unrelated deployment checklist for staging",
+            },
+        ]);
+        seedTags(db, [
+            { tagNumber: 40, messageId: "msg-a", sessionId: "ses-1", tagType: "message" },
+            { tagNumber: 41, messageId: "msg-b", sessionId: "ses-1", tagType: "message" },
+            { tagNumber: 42, messageId: "msg-c", sessionId: "ses-1", tagType: "message" },
+        ]);
+    });
+
+    it("releases the uniquely matched message shell via its echoed handle", async () => {
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
+        const response = (await tools.ctx_reduce!.execute(
+            { samples: ["unrelated deployment checklist"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("Released from samples: msg-c.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
+    });
+
+    it("matches through whitespace variance (mirror collapses, both sides tokenize)", async () => {
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
+        const response = (await tools.ctx_reduce!.execute(
+            { samples: ["revenue climbing twelve percent"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("Ambiguous");
+        expect(response).toContain("msg-a");
+        expect(response).toContain("msg-b");
+        expect(response).toContain("Copy a longer run");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("ambiguity rejects the whole call, including ids in the same batch", async () => {
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
+        const response = (await tools.ctx_reduce!.execute(
+            { samples: ["revenue climbing twelve percent"], ids: ["call-x"] },
+            { sessionID: "ses-1", directory: "/tmp" } as never,
+        )) as string;
+        expect(response).toContain("Ambiguous");
+        expect(response).toContain("nothing was released");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("counts only LIVE matches: a dropped twin leaves a unique winner", async () => {
+        seedMessages(db, [
+            {
+                messageId: "msg-d",
+                ordinal: 103,
+                role: "user",
+                content: "the quarterly figures show revenue climbing twelve percent overall",
+            },
+        ]);
+        seedTags(db, [
+            {
+                tagNumber: 43,
+                messageId: "msg-d",
+                sessionId: "ses-1",
+                tagType: "message",
+                status: "dropped",
+            },
+        ]);
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
+        const response = (await tools.ctx_reduce!.execute(
+            { samples: ["quarterly figures show revenue"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("Released from samples: msg-a.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([40]);
+    });
+
+    it("reports no-match without touching anything else", async () => {
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
+        const response = (await tools.ctx_reduce!.execute(
+            { samples: ["purple platypus parliament"], ids: [] },
+            ctx,
+        )) as string;
+        expect(response).toContain("No match: 1");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("holds a protected message match with displacement timing", async () => {
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>([42]) });
+        const response = (await tools.ctx_reduce!.execute(
+            { samples: ["deployment checklist"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("Held: 1");
+        expect(response).not.toContain("Released from samples");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("mixes ids and samples in one applied call, one queued transaction", async () => {
+        seedTags(db, [
+            { tagNumber: 55, messageId: "msg-t", sessionId: "ses-1", contentId: "call-t" },
+        ]);
+        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
+        const response = (await tools.ctx_reduce!.execute(
+            { ids: ["call-t"], samples: ["deployment checklist"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("Released: msg-t.");
+        expect(response).toContain("Released from samples: msg-c.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([42, 55]);
     });
 });

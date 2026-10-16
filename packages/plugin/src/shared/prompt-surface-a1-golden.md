@@ -125,7 +125,7 @@ Every user message, every text you write and every tool result in this conversat
 
 ## 2. Tool surface (description + parameters as serialized to the provider)
 
-### ctx_reduce — description ~302 tokens, params ~74 tokens (total ~376)
+### ctx_reduce — description ~302 tokens, params ~115 tokens (total ~417)
 
 **Description:**
 
@@ -148,6 +148,13 @@ Look at each tag before stamping it; never blanket-stamp a range like "1-50". Ma
   },
   "ids": {
     "description": "Call ids of tool calls to release, copied exactly from the calls as they appear in context.",
+    "type": "array",
+    "items": {
+      "type": "string"
+    }
+  },
+  "samples": {
+    "description": "Quote a contiguous run of the item's own text, copied exactly — not reworded, not shortened with ellipses.",
     "type": "array",
     "items": {
       "type": "string"

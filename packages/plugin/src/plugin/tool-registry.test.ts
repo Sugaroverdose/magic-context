@@ -82,7 +82,7 @@ describe("createToolRegistry — memory gating", () => {
         isolateDb();
         const tools = buildRegistry({});
         const expectedFields: Record<string, string[]> = {
-            ctx_reduce: ["drop", "ids"],
+            ctx_reduce: ["drop", "ids", "samples"],
             ctx_expand: ["start", "end", "verbose", "message", "tag"],
             ctx_note: [
                 "action",

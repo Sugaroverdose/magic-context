@@ -1,4 +1,5 @@
 import type { Database } from "../../shared/sqlite";
+import { normalizeIndexText } from "./message-index";
 import { getPendingOps } from "./storage-ops";
 
 /**
@@ -14,7 +15,11 @@ export type ReduceInputOutcome =
     | { kind: "released"; messageId: string }
     | { kind: "already_released" }
     | { kind: "refused"; reason: "protected" | "provider-framing" }
-    | { kind: "unknown" };
+    | { kind: "unknown" }
+    /** Sample matched no live visible item (report-only, non-destructive). */
+    | { kind: "no-match" }
+    /** Sample matched >1 live visible item: the only batch-rejecting class. */
+    | { kind: "ambiguous"; candidates: SampleCandidate[] };
 
 export interface ReduceResolveResult {
     /** One outcome per input id, same order as the input array. */
@@ -122,4 +127,147 @@ export function releasedMessageHandles(result: ReduceResolveResult): string[] {
         }
     }
     return handles;
+}
+
+/**
+ * The samples lane: the model quotes a contiguous run of an item's own text,
+ * copied exactly. Resolution is the LEXICAL lane only — one FTS5 phrase
+ * query over the live `message_history_fts` mirror (tokenize='porter
+ * unicode61', content-only so role terms never leak in), which absorbs case,
+ * morphology, and whitespace variance on BOTH sides: the mirror indexes
+ * whitespace-collapsed text, so a copied run matches its source modulo
+ * whitespace runs even though neither side rewrites the other.
+ *
+ * A phrase matches MESSAGES (the mirror is per-message), which is exactly the
+ * message-shell release class; the candidate must own a live `message` tag —
+ * an FTS hit whose message has no registry handle is not a release candidate
+ * at all ("what you cannot see is not a candidate"). More than one live
+ * candidate is the ONE batch-rejecting class: the caller must reject the
+ * whole call before applying anything (the forced retry must be
+ * application-free, ≤1 apply event per reduce intent).
+ */
+
+export interface SampleCandidate {
+    messageId: string;
+    excerpt: string;
+    /** Internal registry number, resolver-side bookkeeping. */
+    tagNumber?: number;
+}
+
+export type SampleOutcome =
+    | { kind: "matched"; tagNumber: number; messageId: string }
+    | { kind: "no-match" }
+    | { kind: "ambiguous"; candidates: SampleCandidate[] };
+
+const SAMPLE_MATCH_LIMIT = 30;
+const SAMPLE_EXCERPT_CHARS = 120;
+
+function ftsPhraseQuery(sample: string): string {
+    const collapsed = normalizeIndexText(sample);
+    if (collapsed.length === 0) return "";
+    // Tokens must survive tokenization; a quote with no word characters can
+    // never form a phrase.
+    if (!/[\p{L}\p{N}_]/u.test(collapsed)) return "";
+    const escaped = collapsed.replace(/"/g, '""');
+    return `content : ("${escaped}")`;
+}
+
+interface SampleRow {
+    message_id: string;
+    excerpt: string;
+}
+
+export function resolveSamples(
+    db: Database,
+    sessionId: string,
+    samples: readonly string[],
+): SampleOutcome[] {
+    if (samples.length === 0) return [];
+    const matchStatement = db.prepare(
+        `SELECT message_id, substr(content, 1, ?) AS excerpt
+           FROM message_history_fts
+          WHERE session_id = ? AND message_history_fts MATCH ?
+          ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC
+          LIMIT ?`,
+    );
+    const messageTags = db.prepare(
+        `SELECT tag_number, status FROM tags
+          WHERE session_id = ? AND message_id = ? AND type = 'message'
+          ORDER BY tag_number ASC LIMIT 2`,
+    );
+
+    return samples.map((sample): SampleOutcome => {
+        const query = ftsPhraseQuery(sample);
+        if (query.length === 0) return { kind: "no-match" };
+
+        const rows = matchStatement.all(
+            SAMPLE_EXCERPT_CHARS,
+            sessionId,
+            query,
+            SAMPLE_MATCH_LIMIT,
+        ) as unknown as SampleRow[];
+
+        const live: { tagNumber: number; candidate: SampleCandidate }[] = [];
+        const seen = new Set<string>();
+        for (const row of rows) {
+            if (seen.has(row.message_id)) continue;
+            seen.add(row.message_id);
+            const tags = messageTags.all(sessionId, row.message_id) as unknown as {
+                tag_number: number;
+                status: string;
+            }[];
+            const liveTag = tags.find((tag) => tag.status === "active");
+            // Registry-absent, corrupt-duplicate, or non-active matches are
+            // not release candidates at all: "what you cannot see is not a
+            // candidate". Ambiguity is computed over LIVE matches only.
+            if (liveTag && tags.length === 1) {
+                live.push({
+                    tagNumber: liveTag.tag_number,
+                    candidate: { messageId: row.message_id, excerpt: row.excerpt },
+                });
+            }
+        }
+
+        if (live.length === 0) return { kind: "no-match" };
+        if (live.length === 1) {
+            const only = live[0];
+            return {
+                kind: "matched",
+                tagNumber: only.tagNumber,
+                messageId: only.candidate.messageId,
+            };
+        }
+        return {
+            kind: "ambiguous",
+            candidates: live
+                .slice(0, 8)
+                .map((entry) => ({ ...entry.candidate, tagNumber: entry.tagNumber })),
+        };
+    });
+}
+
+/**
+ * Classify a sample-matched message tag against the same protection/pending
+ * state the ids lane uses. Returns the shared input-outcome vocabulary.
+ */
+export function classifyMessageTag(
+    deps: {
+        db: Database;
+        sessionId: string;
+        protectedTagNumbers: ReadonlySet<number>;
+        inertTagNumbers?: ReadonlySet<number>;
+    },
+    outcome: Extract<SampleOutcome, { kind: "matched" }>,
+): ReduceInputOutcome {
+    const pending = getPendingOps(deps.db, deps.sessionId);
+    if (pending.some((op) => op.tagId === outcome.tagNumber && op.operation === "drop")) {
+        return { kind: "already_released" };
+    }
+    if (deps.inertTagNumbers?.has(outcome.tagNumber)) {
+        return { kind: "refused", reason: "provider-framing" };
+    }
+    if (deps.protectedTagNumbers.has(outcome.tagNumber)) {
+        return { kind: "refused", reason: "protected" };
+    }
+    return { kind: "released", messageId: outcome.messageId };
 }
