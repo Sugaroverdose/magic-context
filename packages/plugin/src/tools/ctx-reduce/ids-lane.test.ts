@@ -163,7 +163,7 @@ describe("ctx_reduce ids lane", () => {
             ctx,
         )) as string;
 
-        expect(response).toContain("Released: msg-5, msg-7.");
+        expect(response).toContain("Released: 5, 7.");
         expect(response).toContain("Already released: 1");
         expect(response).toContain("Unknown: 2");
         expect(response).toContain("Held: 1");
@@ -176,7 +176,7 @@ describe("ctx_reduce ids lane", () => {
         const before = pendingTagNumbers(db, "ses-1");
         const response = (await tools.ctx_reduce!.execute({ ids: ["call-a"] }, ctx)) as string;
         expect(response).toContain("Already released: 1");
-        expect(response).not.toContain("Released: msg");
+        expect(response).not.toContain("Released:");
         expect(pendingTagNumbers(db, "ses-1")).toEqual(before);
     });
 
@@ -186,7 +186,7 @@ describe("ctx_reduce ids lane", () => {
             { ids: ["call-a", "call-a"] },
             ctx,
         )) as string;
-        expect(response).toBe("Released: msg-5.");
+        expect(response).toBe("Released: 5.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([5]);
     });
 
@@ -221,7 +221,7 @@ describe("ctx_reduce ids lane", () => {
     it("no-arg invocation releases the bulk default set", async () => {
         const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).toContain("Released everything responded past: msg-5, msg-7, msg-9.");
+        expect(response).toContain("Released everything responded past: 5, 7, 9.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
     });
 
@@ -246,7 +246,7 @@ describe("ctx_reduce ids lane", () => {
             ctx,
         )) as string;
         expect(received).toBe("5,7");
-        expect(first).toContain("Released: msg-5, msg-7.");
+        expect(first).toContain("Released: 5, 7.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
 
         queued = 0;
@@ -254,7 +254,7 @@ describe("ctx_reduce ids lane", () => {
             { ids: ["call-a", "call-b"] },
             ctx,
         )) as string;
-        expect(second).not.toContain("Released: msg");
+        expect(second).not.toContain("Released:");
         expect(second).toContain("Already released: 2");
     });
 
@@ -314,7 +314,7 @@ describe("ctx_reduce samples lane", () => {
             { samples: ["unrelated deployment checklist"] },
             ctx,
         )) as string;
-        expect(response).toContain("Released from samples: msg-c.");
+        expect(response).toContain("Released from samples: 42.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
     });
 
@@ -325,8 +325,8 @@ describe("ctx_reduce samples lane", () => {
             ctx,
         )) as string;
         expect(response).toContain("Ambiguous");
-        expect(response).toContain("msg-a");
-        expect(response).toContain("msg-b");
+        expect(response).toContain("tag 40");
+        expect(response).toContain("tag 41");
         expect(response).toContain("Copy a longer run");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
@@ -365,7 +365,7 @@ describe("ctx_reduce samples lane", () => {
             { samples: ["quarterly figures show revenue"] },
             ctx,
         )) as string;
-        expect(response).toContain("Released from samples: msg-a.");
+        expect(response).toContain("Released from samples: 40.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([40]);
     });
 
@@ -399,8 +399,8 @@ describe("ctx_reduce samples lane", () => {
             { ids: ["call-t"], samples: ["deployment checklist"] },
             ctx,
         )) as string;
-        expect(response).toContain("Released: msg-t.");
-        expect(response).toContain("Released from samples: msg-c.");
+        expect(response).toContain("Released: 55.");
+        expect(response).toContain("Released from samples: 42.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([42, 55]);
     });
 });
@@ -441,7 +441,7 @@ describe("ctx_reduce bulk default", () => {
     it("releases only consumed tool tags past the floor and before the newest user message", async () => {
         const tools = createCtxReduceTools({ db, protectedSet: new Set<number>() });
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).toContain("Released everything responded past: t-mid");
+        expect(response).toContain("Released everything responded past: 60.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([60, 63]);
     });
 

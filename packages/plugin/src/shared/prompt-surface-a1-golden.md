@@ -159,7 +159,7 @@ Look at each tag before stamping it; never blanket-stamp a range like "1-50". Ma
 }
 ```
 
-### ctx_expand — description ~377 tokens, params ~167 tokens (total ~544)
+### ctx_expand — description ~377 tokens, params ~178 tokens (total ~555)
 
 **Description:**
 
@@ -181,6 +181,17 @@ Finer recovery:
 
 ```json
 {
+  "tag": {
+    "description": "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
+    "anyOf": [
+      {
+        "type": "number"
+      },
+      {
+        "type": "string"
+      }
+    ]
+  },
   "start": {
     "description": "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
     "type": "number"
@@ -196,10 +207,6 @@ Finer recovery:
   "message": {
     "description": "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
     "type": "number"
-  },
-  "message_id": {
-    "description": "Message id from a ctx_reduce release echo. Returns that message in full. Use alone.",
-    "type": "string"
   }
 }
 ```

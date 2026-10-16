@@ -13,7 +13,7 @@ import { AGE_RECLAIM_MIN_TOKENS } from "./storage-tags";
  */
 
 export type ReduceInputOutcome =
-    | { kind: "released"; messageId: string }
+    | { kind: "released"; messageId: string; tagNumber: number }
     | { kind: "already_released" }
     | { kind: "refused"; reason: "protected" | "provider-framing" }
     | { kind: "unknown" }
@@ -109,7 +109,7 @@ export function resolveIds(
             outcomes.push({ kind: "refused", reason: "protected" });
             continue;
         }
-        outcomes.push({ kind: "released", messageId: tag.message_id });
+        outcomes.push({ kind: "released", messageId: tag.message_id, tagNumber: tag.tag_number });
         seenQueue.add(tag.tag_number);
         toQueue.push({ tagNumber: tag.tag_number, messageId: tag.message_id });
     }
@@ -117,14 +117,18 @@ export function resolveIds(
     return { outcomes, releasedTagNumbers: [...new Set(toQueue.map((i) => i.tagNumber))] };
 }
 
-/** Ordered echo of released message ids, input-order, deduplicated. */
-export function releasedMessageHandles(result: ReduceResolveResult): string[] {
-    const handles: string[] = [];
-    const seen = new Set<string>();
+/**
+ * Ordered echo of the released items' registry tags, input-order, deduplicated.
+ * Tags are the plugin's addressing mechanism — the echo is directly reusable
+ * as `ctx_expand(tag=N)` without teaching any new handle format.
+ */
+export function releasedTagHandles(result: ReduceResolveResult): number[] {
+    const handles: number[] = [];
+    const seen = new Set<number>();
     for (const outcome of result.outcomes) {
-        if (outcome.kind === "released" && !seen.has(outcome.messageId)) {
-            seen.add(outcome.messageId);
-            handles.push(outcome.messageId);
+        if (outcome.kind === "released" && !seen.has(outcome.tagNumber)) {
+            seen.add(outcome.tagNumber);
+            handles.push(outcome.tagNumber);
         }
     }
     return handles;
@@ -270,7 +274,7 @@ export function classifyMessageTag(
     if (deps.protectedTagNumbers.has(outcome.tagNumber)) {
         return { kind: "refused", reason: "protected" };
     }
-    return { kind: "released", messageId: outcome.messageId };
+    return { kind: "released", messageId: outcome.messageId, tagNumber: outcome.tagNumber };
 }
 
 /**
@@ -338,7 +342,7 @@ export function resolveBulkDefault(
             outcomes.push({ kind: "refused", reason: "protected" });
             continue;
         }
-        outcomes.push({ kind: "released", messageId: row.message_id });
+        outcomes.push({ kind: "released", messageId: row.message_id, tagNumber: row.tag_number });
         releasedTagNumbers.push(row.tag_number);
     }
     return { outcomes, releasedTagNumbers };

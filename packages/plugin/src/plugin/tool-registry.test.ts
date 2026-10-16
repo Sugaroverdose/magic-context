@@ -82,10 +82,12 @@ describe("createToolRegistry — memory gating", () => {
         isolateDb();
         const tools = buildRegistry({});
         const expectedFields: Record<string, string[]> = {
-            // ctx_reduce v1: `drop`/`tag` are retired from the advertised
-            // shape; the passthrough engine path still accepts them.
+            // ctx_reduce v1: `drop` is retired from ctx_reduce's advertised
+            // shape (the passthrough engine path still accepts it).
+            // ctx_expand stays byte-vanilla: tags are the plugin's addressing
+            // mechanism and the release echo returns tags for vanilla reuse.
             ctx_reduce: ["ids", "samples"],
-            ctx_expand: ["start", "end", "verbose", "message", "message_id"],
+            ctx_expand: ["tag", "start", "end", "verbose", "message"],
             ctx_note: [
                 "action",
                 "content",

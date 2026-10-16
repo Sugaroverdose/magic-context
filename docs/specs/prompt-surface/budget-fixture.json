@@ -102,8 +102,8 @@
         "tokens": 77
       },
       "ctx_expand": {
-        "chars": 712,
-        "tokens": 167
+        "chars": 743,
+        "tokens": 178
       },
       "ctx_note": {
         "chars": 1314,
@@ -117,9 +117,9 @@
         "chars": 566,
         "tokens": 134
       },
-      "totalTokens": 853
+      "totalTokens": 864
     },
-    "builtInProviderVisibleTotal": 3917
+    "builtInProviderVisibleTotal": 3928
   },
   "mutableProseBaseline": 3064,
   "integerLightCeiling": 1917,

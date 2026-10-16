@@ -8,7 +8,7 @@ import { parseRangeString } from "../../features/magic-context/range-parser";
 import {
     classifyMessageTag,
     type ReduceInputOutcome,
-    releasedMessageHandles,
+    releasedTagHandles,
     resolveBulkDefault,
     resolveIds,
     resolveSamples,
@@ -213,7 +213,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         if (apply.refused) {
             return apply.refused;
         }
-        let handles = releasedMessageHandles(result);
+        let handles: number[] = result.releasedTagNumbers;
         if (apply.deduped) {
             handles = [];
         } else {
@@ -292,7 +292,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             ];
             for (const candidate of ambiguous.candidates) {
                 lines.push(
-                    `- ${candidate.messageId}: ${candidate.excerpt.length > 0 ? candidate.excerpt : "(see item)"}…`,
+                    `- tag ${candidate.tagNumber ?? "?"}: ${candidate.excerpt.length > 0 ? candidate.excerpt : "(see item)"}…`,
                 );
             }
             lines.push("Copy a longer run and send the same batch again.");
@@ -332,7 +332,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         const queueNumbers = [
             ...new Set([...result.releasedTagNumbers, ...sampleReleased.map((r) => r.tagNumber)]),
         ];
-        let sampleReleasedHandles = [...new Set(sampleReleased.map((r) => r.messageId))];
+        let sampleReleasedHandles = [...new Set(sampleReleased.map((r) => r.tagNumber))];
 
         if (queueNumbers.length > 0) {
             const apply = await applyReleasedTags(invokeContext, queueNumbers);
@@ -359,7 +359,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
 
         const { released, already, unknown, held, inert, noMatch } = releaseCounts();
         const lines: string[] = [];
-        const handles = releasedMessageHandles(result);
+        const handles = releasedTagHandles(result);
         if (handles.length > 0) {
             lines.push(`Released: ${handles.join(", ")}.`);
         } else if (released > 0) {
