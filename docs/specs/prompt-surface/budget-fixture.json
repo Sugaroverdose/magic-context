@@ -98,8 +98,8 @@
     },
     "serializedParameterSchemas": {
       "ctx_reduce": {
-        "chars": 96,
-        "tokens": 38
+        "chars": 253,
+        "tokens": 74
       },
       "ctx_expand": {
         "chars": 743,
@@ -117,9 +117,9 @@
         "chars": 566,
         "tokens": 134
       },
-      "totalTokens": 825
+      "totalTokens": 861
     },
-    "builtInProviderVisibleTotal": 3889
+    "builtInProviderVisibleTotal": 3925
   },
   "mutableProseBaseline": 3064,
   "integerLightCeiling": 1917,

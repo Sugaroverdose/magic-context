@@ -5,6 +5,7 @@ import {
     type ProtectionWindowResult,
 } from "../../features/magic-context/protection-window";
 import { parseRangeString } from "../../features/magic-context/range-parser";
+import { releasedMessageHandles, resolveIds } from "../../features/magic-context/reduce-resolver";
 import {
     getOrCreateSessionMeta,
     getPendingOps,
@@ -55,6 +56,12 @@ const ctxReduceArgsShape = {
         .string()
         .optional()
         .describe('Tag IDs to drop: "3-5", "1,2,9", "1-5,8,12-15".'),
+    ids: tool.schema
+        .array(tool.schema.string())
+        .optional()
+        .describe(
+            "Call ids of tool calls to release, copied exactly from the calls as they appear in context.",
+        ),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with
@@ -84,6 +91,140 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             : `oc-${createHash("sha256").update(monotonicId).digest("hex")}`;
     };
 
+    const executeIdsLane = async (
+        invokeContext: { sessionID: string; directory: string },
+        rawIds: string[],
+    ): Promise<string> => {
+        const sessionId = invokeContext.sessionID;
+        const ids = [...new Set(rawIds.map((id) => id.trim()).filter((id) => id.length > 0))];
+        if (ids.length === 0) {
+            return "Error: 'ids' must contain call ids.";
+        }
+
+        let protectedSet: ReadonlySet<number>;
+        if (deps.protectedSet) {
+            protectedSet =
+                typeof deps.protectedSet === "function"
+                    ? deps.protectedSet(sessionId)
+                    : deps.protectedSet;
+        } else if (deps.getProtectionWindow) {
+            protectedSet = deps.getProtectionWindow(sessionId).protectedTagNumbers;
+        } else {
+            protectedSet = getProtectionWindowForSession(
+                deps.db,
+                sessionId,
+                deps.floor,
+            ).protectedTagNumbers;
+        }
+        const inertTagNumbers = new Set(
+            getInertWhitespaceAssistantTags(deps.db, sessionId).map((tag) => tag.tagNumber),
+        );
+
+        const result = resolveIds(
+            {
+                db: deps.db,
+                sessionId,
+                protectedTagNumbers: protectedSet,
+                inertTagNumbers,
+            },
+            ids,
+        );
+
+        const releaseCounts = () => {
+            let released = 0;
+            let already = 0;
+            let unknown = 0;
+            let held = 0;
+            let inert = 0;
+            for (const outcome of result.outcomes) {
+                if (outcome.kind === "released") released += 1;
+                else if (outcome.kind === "already_released") already += 1;
+                else if (outcome.kind === "unknown") unknown += 1;
+                else if (outcome.kind === "refused") {
+                    if (outcome.reason === "protected") held += 1;
+                    else inert += 1;
+                }
+            }
+            return { released, already, unknown, held, inert };
+        };
+
+        if (result.releasedTagNumbers.length > 0) {
+            const rustReduce = deps.rustToolBackends?.reduce;
+            if (rustReduce) {
+                try {
+                    const response = await rustReduce({
+                        sessionId,
+                        projectRoot: invokeContext.directory,
+                        drop: result.releasedTagNumbers.join(","),
+                        commandId: commandIdForInvocation(sessionId, invokeContext),
+                    });
+                    const value =
+                        response !== null && typeof response === "object" && "result" in response
+                            ? (response as { result?: unknown }).result
+                            : response;
+                    const record =
+                        value !== null && typeof value === "object"
+                            ? (value as Record<string, unknown>)
+                            : null;
+                    if (record === null || record.ok !== true) {
+                        return renderCapabilityRefusal("context_cleanup");
+                    }
+                    if (typeof record.queued === "number" && record.queued === 0) {
+                        // Module-side dedupe beat the registry read: those
+                        // inputs are already released; report, do not echo.
+                        result.outcomes = result.outcomes.map((outcome) =>
+                            outcome.kind === "released" ? { kind: "already_released" } : outcome,
+                        );
+                    }
+                } catch {
+                    return renderCapabilityRefusal("context_cleanup");
+                }
+            } else {
+                try {
+                    const now = Date.now();
+                    deps.db
+                        .transaction(() => {
+                            for (const tagNumber of result.releasedTagNumbers) {
+                                queuePendingOp(deps.db, sessionId, tagNumber, "drop", now);
+                            }
+                        })
+                        .immediate();
+                } catch (error) {
+                    return `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`;
+                }
+            }
+
+            const currentInputTokens =
+                deps.getSessionTokens?.(sessionId) ??
+                getOrCreateSessionMeta(deps.db, sessionId).lastInputTokens;
+            updateSessionMeta(deps.db, sessionId, { lastNudgeTokens: currentInputTokens });
+        }
+
+        const { released, already, unknown, held, inert } = releaseCounts();
+        const lines: string[] = [];
+        const handles = releasedMessageHandles(result);
+        if (handles.length > 0) {
+            lines.push(`Released: ${handles.join(", ")}.`);
+        } else if (released > 0) {
+            lines.push(`Released: ${released}.`);
+        }
+        if (already > 0) {
+            lines.push(`Already released: ${already} input(s) — nothing left to do.`);
+        }
+        if (unknown > 0) {
+            lines.push(`Unknown: ${unknown} input(s) match no call in this session.`);
+        }
+        if (held > 0) {
+            lines.push(
+                `Held: ${held} inside the protected working set; applies once newer work displaces it.`,
+            );
+        }
+        if (inert > 0) {
+            lines.push(`Ignored: ${inert} is provider framing, nothing to reclaim.`);
+        }
+        return lines.join(" ");
+    };
+
     return tool({
         description: CTX_REDUCE_DESCRIPTION,
         args: ctxReduceArgsShape,
@@ -93,7 +234,20 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             args = unwrapImitatedReducedArgs(args, ["drop"], { drop: "string" });
             const sessionId = toolContext.sessionID;
 
-            if (!args.drop) {
+            const hasIds = Array.isArray(args.ids) && args.ids.length > 0;
+            if (hasIds && args.drop) {
+                return "Error: 'ids' and 'drop' cannot be combined in one call.";
+            }
+            if (!hasIds && !args.drop) {
+                return "Error: 'ids' or 'drop' must be provided.";
+            }
+
+            if (hasIds) {
+                return await executeIdsLane(toolContext, args.ids as string[]);
+            }
+
+            const dropArg = args.drop;
+            if (!dropArg) {
                 return "Error: 'drop' must be provided.";
             }
 
@@ -103,7 +257,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     const response = await rustReduce({
                         sessionId,
                         projectRoot: toolContext.directory,
-                        drop: args.drop,
+                        drop: dropArg,
                         commandId: commandIdForInvocation(sessionId, toolContext),
                     });
                     const value =
@@ -141,7 +295,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     // The module owns range parsing and tag canonicalization. Keep the
                     // existing queued acknowledgement shape without reimplementing that
                     // parsing in the OpenCode tool.
-                    return `Queued: drop ${formatRawDropForAck(args.drop)}.`;
+                    return `Queued: drop ${formatRawDropForAck(dropArg)}.`;
                 } catch (error) {
                     sessionLog(sessionId, "ctx_reduce capability refusal", error);
                     return renderCapabilityRefusal("context_cleanup");
@@ -151,7 +305,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             let dropIds: number[] = [];
 
             try {
-                dropIds = parseRangeString(args.drop);
+                dropIds = parseRangeString(dropArg);
             } catch (e) {
                 return `Error: Invalid range syntax. ${(e as Error).message}`;
             }
