@@ -11,6 +11,8 @@ export type Channel1Level = "gentle" | "firm" | "urgent";
 export interface ToolReclaimHint {
     tagNumber: number;
     toolName: string | null;
+    /** Wire call id: the copyable release handle, preferred over the tag number. */
+    callId?: string | null;
 }
 
 export interface Channel1State extends TailHygieneBaseline {
@@ -425,7 +427,8 @@ function formatOldestReclaimableHint(hint?: readonly ToolReclaimHint[]): string 
     if (!hint || hint.length === 0) return "";
     const rendered = hint
         .slice(0, 4)
-        .map((tag) => `§${tag.tagNumber}§ ${tag.toolName ?? "tool"}`)
+        .filter((tag) => tag.callId !== undefined && tag.callId !== "")
+        .map((tag) => `${tag.callId} ${tag.toolName ?? "tool"}`)
         .join(" · ");
     return rendered.length > 0 ? `\noldest reclaimable: ${rendered}.` : "";
 }
