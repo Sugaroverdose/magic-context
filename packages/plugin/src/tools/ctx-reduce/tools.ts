@@ -152,7 +152,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 ? deps.ordinalMint(sessionId)
                 : deps.ordinalMint;
         }
-        return createHostOrdinalMint(sessionId);
+        return createHostOrdinalMint(deps.db, sessionId);
     };
 
     /** One apply event: route the released set through the active backend. */

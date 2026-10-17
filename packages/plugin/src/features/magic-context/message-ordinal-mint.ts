@@ -1,3 +1,4 @@
+import type { Database } from "../../shared/sqlite";
 import { openOpenCodeDb } from "./dreamer/open-opencode-db";
 import type { OrdinalMint } from "./reduce-resolver";
 
@@ -21,7 +22,7 @@ import type { OrdinalMint } from "./reduce-resolver";
  * the resolver can hold: bare message ids, wire call ids (to their owner
  * message's ordinal), and the newest user-message boundary for the bulk lane.
  */
-export function createHostOrdinalMint(sessionId: string): OrdinalMint | undefined {
+export function createHostOrdinalMint(mcDb: Database, sessionId: string): OrdinalMint | undefined {
     const hostDb = openOpenCodeDb();
     if (!hostDb) return undefined;
     try {
@@ -36,23 +37,23 @@ export function createHostOrdinalMint(sessionId: string): OrdinalMint | undefine
         for (const row of rows) {
             ordinalByMessageId.set(row.id, row.ordinal);
         }
-        // Wire callID -> owner message ordinal. The host stores the provider
-        // call id inside the part's data JSON (part.id is a prt_* row id).
+        // Wire callID -> owner message ordinal, from the registry: tool rows
+// key on the wire call id and carry `tool_owner_message_id`, covered by
+// idx_tags_tool_composite — an index range read. The host part scan
+// (json_extract over every session part, ~1.6 s at 64K parts) is not
+// needed: the resolver only ever asks for call ids it resolved through
+// the registry, and every registered call is here.
         const ordinalByCallId = new Map<string, number>();
-        const partRows = hostDb
+        const toolRows = mcDb
             .prepare(
-                `SELECT json_extract(p.data, '$.callID') AS call_id, m.ordinal
-                   FROM part p
-                   JOIN (
-                     SELECT id, ROW_NUMBER() OVER (ORDER BY time_created ASC, id ASC) AS ordinal
-                       FROM message WHERE session_id = ?
-                   ) m ON m.id = p.message_id
-                  WHERE p.session_id = ?
-                    AND json_extract(p.data, '$.type') = 'tool'`,
+                `SELECT message_id, tool_owner_message_id
+                   FROM tags
+                  WHERE session_id = ? AND type = 'tool' AND tool_owner_message_id IS NOT NULL`,
             )
-            .all(sessionId, sessionId) as unknown as { call_id: string | null; ordinal: number }[];
-        for (const row of partRows) {
-            if (row.call_id) ordinalByCallId.set(row.call_id, row.ordinal);
+            .all(sessionId) as unknown as { message_id: string; tool_owner_message_id: string }[];
+        for (const row of toolRows) {
+            const ordinal = ordinalByMessageId.get(row.tool_owner_message_id);
+            if (ordinal !== undefined) ordinalByCallId.set(row.message_id, ordinal);
         }
         let latestUserOrdinal: number | undefined;
         const userRows = hostDb
