@@ -351,33 +351,6 @@ function resolvePhrase(
     return { outcome: { kind: "error", reason: "not-found", input: text } };
 }
 
-/**
- * Resolve one string to a registry position through the two pointing lanes
- * (id hit, then phrase). Used for plain entries and for range endpoints
- * alike; classification is NOT applied (endpoints are geometry, not claims).
- */
-function resolvePosition(
-    deps: HandleResolverDeps,
-    registry: RegistryView,
-    statements: ReduceStatements,
-    callIdResolver: CallIdTagResolver,
-    text: string,
-): { tag: HandleItemRef } | { error: Extract<ReduceInputOutcome, { kind: "error" }> } {
-    const direct = callIdResolver.resolve([text]).get(text);
-    if (direct) {
-        return { tag: { tagNumber: direct.tag_number, messageId: direct.message_id } };
-    }
-    const phrase = resolvePhrase(deps, registry, statements, text).outcome;
-    if (phrase.kind === "error") {
-        return { error: phrase };
-    }
-    if (phrase.kind === "range") {
-        // Unreachable: the phrase lane never produces range outcomes.
-        return { error: { kind: "error", reason: "not-found", input: text } };
-    }
-    return { tag: { tagNumber: phrase.tagNumber, messageId: phrase.messageId } };
-}
-
 const RANGE_SEPARATOR = "..";
 
 function splitRangeEntry(entry: string): { from: string; to: string } | undefined {
@@ -437,6 +410,24 @@ export function resolveHandles(
     const ordinalOf = (messageId: string): number | undefined =>
         ordinalForRegistryKey(deps.mint, messageId);
 
+    /** Range endpoint: id hit, then phrase — the two pointing lanes,
+     *  no classification (geometry, not a claim). */
+    const resolveEndpoint = (
+        registry: RegistryView,
+        statements: ReduceStatements,
+        text: string,
+    ):
+        | { tagNumber: number; messageId: string }
+        | { error: Extract<ReduceInputOutcome, { kind: "error" }> } => {
+        const direct = deps.callIdResolver.resolve([text]).get(text);
+        if (direct) return { tagNumber: direct.tag_number, messageId: direct.message_id };
+        const phrase = resolvePhrase(deps, registry, statements, text).outcome;
+        if (phrase.kind === "error") return { error: phrase };
+        if (phrase.kind === "range")
+            return { error: { kind: "error", reason: "not-found", input: text } };
+        return { tagNumber: phrase.tagNumber, messageId: phrase.messageId };
+    };
+
     for (const entry of entries) {
         const direct = tagsById.get(entry);
         if (direct) {
@@ -460,24 +451,18 @@ export function resolveHandles(
                 internalError: "Error: message positions are unavailable for range entries.",
             };
         }
-        const start = resolvePosition(deps, registry, statements, deps.callIdResolver, range.from);
+        const start = resolveEndpoint(registry, statements, range.from);
         if ("error" in start) {
-            collect({
-                ...start.error,
-                range: { entry, which: "start" },
-            });
+            collect({ ...start.error, range: { entry, which: "start" } });
             continue;
         }
-        const end = resolvePosition(deps, registry, statements, deps.callIdResolver, range.to);
+        const end = resolveEndpoint(registry, statements, range.to);
         if ("error" in end) {
-            collect({
-                ...end.error,
-                range: { entry, which: "end" },
-            });
+            collect({ ...end.error, range: { entry, which: "end" } });
             continue;
         }
-        const fromOrdinal = ordinalOf(start.tag.messageId);
-        const toOrdinal = ordinalOf(end.tag.messageId);
+        const fromOrdinal = ordinalOf(start.messageId);
+        const toOrdinal = ordinalOf(end.messageId);
         if (fromOrdinal === undefined || toOrdinal === undefined) {
             return {
                 outcomes,
@@ -494,7 +479,7 @@ export function resolveHandles(
         // between the endpoints, ordered by message position then registry
         // order; the per-item classes apply inside (a range cannot smuggle a
         // protected item past the report discipline).
-        const span = collectSpanItems(registry, deps.mint, start.tag, end.tag);
+        const span = collectSpanItems(registry, deps.mint, start, end);
         if (span === "reversed") {
             collect({ kind: "error", reason: "reversed", input: entry });
             continue;
@@ -522,8 +507,8 @@ export function resolveHandles(
 function collectSpanItems(
     registry: RegistryView,
     mint: OrdinalMint,
-    start: HandleItemRef,
-    end: HandleItemRef,
+    start: { tagNumber: number },
+    end: { tagNumber: number },
 ): SpanMembership[] | "reversed" | "missing" {
     // Enumerate the session view in canonical geometry: every registered tag
     // whose key names a positioned message, ordered by (ordinal, tag_number).
