@@ -394,14 +394,7 @@ describe("createToolRegistry — prompt-surface registration", () => {
             );
             const lightParameters = providerParameters(light[toolId]);
             const fullParameters = providerParameters(full[toolId]);
-            if (toolId === "ctx_reduce") {
-                // ctx_reduce v1: `drop` was the only preset-specific parameter
-                // description; with it retired, light and full serialize the
-                // same ids/samples schema.
-                expect(lightParameters).toEqual(fullParameters);
-            } else {
-                expect(lightParameters).not.toEqual(fullParameters);
-            }
+            expect(lightParameters).not.toEqual(fullParameters);
             expect(withoutDescriptions(lightParameters)).toEqual(
                 withoutDescriptions(fullParameters),
             );

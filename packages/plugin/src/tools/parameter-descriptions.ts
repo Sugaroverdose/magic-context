@@ -2,7 +2,8 @@ import type { PromptSurfacePreset } from "../shared/prompt-surface";
 
 export const FULL_PARAMETER_DESCRIPTIONS = {
     ctx_reduce: {
-        drop: 'Tag IDs to drop: "3-5", "1,2,9", "1-5,8,12-15".',
+        ctx_handles:
+            "Exact targets of the release, copied from your context: a tool call id, a verbatim run of an item's own text, or a stretch `<start>..<end>` of such handles.",
     },
     ctx_expand: {
         tag: "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
@@ -44,7 +45,8 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
 
 export const LIGHT_PARAMETER_DESCRIPTIONS = {
     ctx_reduce: {
-        drop: 'Tag IDs: "3-5", "1,2,9", "1-5,8,12-15".',
+        ctx_handles:
+            "Release targets copied from context: a tool call id, a verbatim text run, or a `<start>..<end>` stretch of such handles.",
     },
     ctx_expand: {
         tag: "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
