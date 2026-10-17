@@ -167,7 +167,7 @@ import {
     buildSupersessionReclaimOps,
     recentSupersessionOwnerMessageIds,
 } from "./supersession-reclaim";
-import { byteSize, prependTag } from "./tag-content-primitives";
+import { byteSize } from "./tag-content-primitives";
 import {
     assertTailHygieneContentUnchanged,
     countRealUserMessages,
