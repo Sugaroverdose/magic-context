@@ -8,7 +8,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
-/** The call id a tool tag's content_id stores, across part shapes. */
+/** The wire call id a tool tag's `message_id` carries (the registry keys
+ *  tool rows by it), across part shapes. */
 function partCallId(part: Record<string, unknown>): string | undefined {
     if (typeof part.callID === "string") return part.callID;
     if (typeof part.callId === "string") return part.callId;
@@ -28,10 +29,12 @@ function partToolInput(part: Record<string, unknown>): unknown | undefined {
 /**
  * Resolve an FPE drop token's tag number to the ORIGINAL tool call input —
  * the `.before` contract: a re-emitted carrier runs the call it names, never
- * junk. The tags row pins the exact call (content_id = the wire call id), so
- * parallel-call batches resolve unambiguously. Reads the host store
- * read-only: drops are wire transforms, so stored parts keep their real
- * input (the same property ctx_expand expands from). No schema, no writes.
+ * junk. The registry's restore spine pins the exact call: tool rows key on
+ * `message_id` = the wire call id, and `tool_owner_message_id` names the host
+ * row whose parts carry it — the same by-id parts read ctx_expand expands
+ * from. The match is exact on the stored call id, so parallel-call batches
+ * resolve unambiguously. Reads the host store read-only: drops are wire
+ * transforms, so stored parts keep their real input. No schema, no writes.
  * An unresolvable tag yields undefined and the token stays as it is.
  */
 export function lookupReleasedToolInput(
@@ -41,18 +44,19 @@ export function lookupReleasedToolInput(
 ): unknown | undefined {
     const tag = db
         .prepare(
-            "SELECT content_id, message_id, tool_owner_message_id FROM tags WHERE session_id = ? AND tag_number = ? AND type = 'tool'",
+            "SELECT message_id, tool_owner_message_id FROM tags WHERE session_id = ? AND tag_number = ? AND type = 'tool'",
         )
         .get(sessionId, tagNumber) as
-        | { content_id: string | null; message_id: string; tool_owner_message_id: string | null }
+        | { message_id: string; tool_owner_message_id: string | null }
         | undefined;
-    if (!tag || typeof tag.content_id !== "string" || tag.content_id.length === 0) {
+    const callId = tag?.message_id;
+    if (!tag || typeof callId !== "string" || callId.length === 0) {
         return undefined;
     }
     const hostDb = openOpenCodeDb();
     if (!hostDb) return undefined;
     try {
-        const messageIds = [...new Set([tag.message_id, tag.tool_owner_message_id ?? ""])].filter(
+        const messageIds = [...new Set([tag.tool_owner_message_id ?? "", callId])].filter(
             (id) => id.length > 0,
         );
         for (const messageId of messageIds) {
@@ -68,7 +72,7 @@ export function lookupReleasedToolInput(
                     continue;
                 }
                 if (!isRecord(part)) continue;
-                if (partCallId(part) !== tag.content_id) continue;
+                if (partCallId(part) !== callId) continue;
                 const input = partToolInput(part);
                 if (input !== undefined) return input;
             }
