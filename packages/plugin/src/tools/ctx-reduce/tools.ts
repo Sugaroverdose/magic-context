@@ -24,8 +24,8 @@ import {
 import { getInertWhitespaceAssistantTags } from "../../features/magic-context/storage-tags";
 import {
     type CallIdTagResolver,
-    createHostCallIdResolver,
-} from "../../features/magic-context/tag-call-bridge";
+    createRegistryCallIdResolver,
+} from "../../features/magic-context/tool-call-registry";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
@@ -292,7 +292,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 sessionId,
                 protectedTagNumbers: protectedSet,
                 inertTagNumbers,
-                callIdResolver: deps.callIdResolver ?? createHostCallIdResolver(deps.db, sessionId),
+                callIdResolver: deps.callIdResolver ?? createRegistryCallIdResolver(deps.db, sessionId),
                 mint,
             },
             handles,

@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it } from "bun:test";
 import type { OrdinalMint } from "../../features/magic-context/reduce-resolver";
-import type { CallIdTagResolver } from "../../features/magic-context/tag-call-bridge";
+import type { CallIdTagResolver } from "../../features/magic-context/tool-call-registry";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { Database } from "../../shared/sqlite";
 import { createCtxReduceTools } from "./tools";

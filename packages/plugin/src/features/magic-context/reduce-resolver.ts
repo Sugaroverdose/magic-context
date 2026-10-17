@@ -2,7 +2,7 @@ import type { Database } from "../../shared/sqlite";
 import { normalizeIndexText } from "./message-index";
 import { getPendingOps } from "./storage-ops";
 import { AGE_RECLAIM_MIN_TOKENS } from "./storage-tags";
-import type { CallIdTagResolver } from "./tag-call-bridge";
+import type { CallIdTagResolver } from "./tool-call-registry";
 
 /**
  * The ctx_reduce v1 pointing grammar resolver (Rev 5.3 + D18).

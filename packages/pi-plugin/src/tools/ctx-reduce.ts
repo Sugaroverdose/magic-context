@@ -34,7 +34,7 @@ import {
 	renderPointingError,
 	renderPointingSuccess,
 } from "@magic-context/core/features/magic-context/reduce-response";
-import type { CallIdTagResolver } from "@magic-context/core/features/magic-context/tag-call-bridge";
+import type { CallIdTagResolver } from "@magic-context/core/features/magic-context/tool-call-registry";
 import {
 	getProtectionWindowForSession,
 	readEpochFloorSnapshot,
