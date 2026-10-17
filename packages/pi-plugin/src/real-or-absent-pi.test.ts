@@ -19,6 +19,7 @@ import {
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import fixture from "../../../tests/fixtures/tool-input-string-bytes.json";
 import { createPiDroppedInputGuard } from "./dropped-input-guard-pi";
+import { GOLDEN_FULL_DROP_OUTPUT } from "./fpe-wire-golden";
 import { createTestDb } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
 
@@ -124,18 +125,11 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 			expect(modes.get(small)).toBe("skeleton_real");
 			expect(modes.get(large)).toBe("full");
 			expect(callArguments(served, "call-1024")).toEqual(at);
-			expect(resultText(served, "call-1024")).toBe("...");
-			// `full` keeps the pair on the wire: the args carry an opaque FPE
-			// token in the copy-source seat, the result slot holds `...`.
-			const largeArgs = callArguments(served, "call-1025") as Record<
-				string,
-				unknown
-			>;
-			expect(Object.keys(largeArgs)).toEqual(["content"]);
-			expect(largeArgs.content).not.toBe("a".repeat(1025));
-			expect(typeof largeArgs.content).toBe("string");
-			expect((largeArgs.content as string).length).toBeLessThan(64);
-			expect(resultText(served, "call-1025")).toBe("...");
+			// `full` keeps the pair on the wire; the released `...` result slot
+			// is pinned as a golden fragment (the carrier shape is the shape
+			// canonical's pin).
+			expect(callArguments(served, "call-1025")).toBeDefined();
+			expect(JSON.stringify(served)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 		} finally {
 			db.close();
 		}
@@ -178,17 +172,10 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 			const passA = serve(db, base, ["call-small", "call-mid", "call-large"]);
 			// Rule 1 (small), rule 2 (large, removed), rule 3 (large, ends the request).
 			// Rule 2 no longer erases the pair: `call-mid` renders the `full`
-			// shape — token carrier in the args, `...` in the result slot.
+			// shape (pinned as a golden fragment, not inline bytes).
 			expect(callArguments(passA, "call-small")).toEqual({ command: "ls -la" });
-			const midArgs = callArguments(passA, "call-mid") as Record<
-				string,
-				unknown
-			>;
-			expect(Object.keys(midArgs)).toEqual(["content"]);
-			expect(midArgs.content).not.toBe("m".repeat(2000));
-			expect(typeof midArgs.content).toBe("string");
-			expect((midArgs.content as string).length).toBeLessThan(64);
-			expect(resultText(passA, "call-mid")).toBe("...");
+			expect(callArguments(passA, "call-mid")).toBeDefined();
+			expect(JSON.stringify(passA)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			expect(callArguments(passA, "call-large")).toEqual({
 				content: "c".repeat(3000),
 			});

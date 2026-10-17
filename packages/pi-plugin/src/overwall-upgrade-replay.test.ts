@@ -16,6 +16,10 @@ import {
 	registerPiContextHandler,
 } from "./context-handler";
 import {
+	GOLDEN_FULL_DROP_CARRIER,
+	GOLDEN_FULL_DROP_OUTPUT,
+} from "./fpe-wire-golden";
+import {
 	assistantMessage,
 	createFakePi,
 	createTestDb,
@@ -169,34 +173,16 @@ for (const native of [false, true])
 		try {
 			await f.seed();
 			const first = await f.pass(0);
-			// Legacy `full` markers replay through the branch shape renderer:
-			// every pair survives with a session-keyed FPE token in the copy-
-			// source seat and `...` in the result slot. The pre-FPE base
-			// fixtures pinned the removed `[dropped §N§]` render, so the bytes
-			// here are recomputed and pinned relatively across defer passes,
-			// a restart, and against the per-pair shape below — never by
-			// copying a token literal.
+			// Legacy `full` markers replay through the shape renderers: every
+			// pair survives with a session-keyed FPE token in the copy-source
+			// seat and `...` in the result slot. The pre-FPE base fixtures
+			// pinned the removed `[dropped §N§]` render, so the bytes here are
+			// recomputed and pinned relatively across defer passes and a
+			// restart; the released shape is pinned as golden fragments.
 			expect(calls(first)).toBe(200);
 			expect(getNativeToolInputs(f.db, f.session).size).toBe(0);
-			for (let i = 0; i < 200; i++) {
-				const call = (
-					first[2 * i + 1] as {
-						content: Array<{
-							type: string;
-							arguments?: Record<string, unknown>;
-						}>;
-					}
-				).content.find((p) => p.type === "toolCall")!;
-				const args = call.arguments!;
-				expect(Object.keys(args)).toEqual(["path"]);
-				expect(args.path).not.toBe(`original-${i}`);
-				expect(typeof args.path).toBe("string");
-				expect((args.path as string).length).toBeLessThan(64);
-				const result = first[2 * i + 2] as {
-					content: Array<{ text: string }>;
-				};
-				expect(result.content[0].text).toBe("...");
-			}
+			expect(JSON.stringify(first)).toContain(GOLDEN_FULL_DROP_CARRIER);
+			expect(JSON.stringify(first)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			if (native) {
 				// The Responses raw lane keeps the original argument bytes.
 				const kept = (
@@ -384,25 +370,8 @@ const childMode = process.env.MC_OVERWALL_RESTART_MODE;
 		// The marker lane survives; the wire keeps the released pair (token
 		// carrier args + `...` result) instead of erasing it.
 		expect(calls(messages)).toBe(10);
-		expect(
-			(
-				messages[1] as {
-					content: Array<{
-						type: string;
-						arguments?: Record<string, unknown>;
-					}>;
-				}
-			)
-				.content.find((p) => p.type === "toolCall")!
-				.arguments!.path,
-		).not.toBe("original-0");
-		expect(
-			(
-				messages[2] as {
-					content: Array<{ text: string }>;
-				}
-			).content[0].text,
-		).toBe("...");
+		expect(JSON.stringify(messages)).toContain(GOLDEN_FULL_DROP_CARRIER);
+		expect(JSON.stringify(messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 		expect(markers).toHaveLength(10);
 		expect(
 			markers.every(

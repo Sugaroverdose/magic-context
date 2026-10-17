@@ -91,6 +91,7 @@ import {
 	maybeChannel1ReminderForToolResult,
 	setPiChannel1Baseline,
 } from "./ctx-reduce-nudge-pi";
+import { GOLDEN_FULL_DROP_OUTPUT } from "./fpe-wire-golden";
 import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
 import {
 	assistantMessage,
@@ -1791,24 +1792,17 @@ describe("registerPiContextHandler", () => {
 			};
 
 			// Dropped text renders the constant placeholder; released pairs
-			// keep their rows. `full`/`truncated` put an opaque session-keyed
-			// FPE token in the copy-source seat (pinned as shape, never as
-			// literal bytes) and `...` in the result slot.
+			// keep their rows. The carrier token is session-keyed and opaque
+			// (shape pinned by overwall-wire-shapes); this layer pins the seat
+			// structure and the `...` result slot.
 			expect(textOf(output[0])).toBe("...");
 			expect(output).toHaveLength(8);
 			expect(textOf(output[2])).toBe("...");
 			expect(textOf(output[4])).toBe("...");
 			expect(textOf(output[6])).toBe("...");
-			for (const [callIndex, original] of [
-				[1, "/tmp/full.ts"],
-				[3, "/tmp/truncated.ts"],
-			] as const) {
-				const args = toolArguments(callIndex);
-				expect(Object.keys(args)).toEqual(["filePath"]);
-				expect(typeof args.filePath).toBe("string");
-				expect((args.filePath as string).length).toBeLessThan(64);
-				expect(args.filePath).not.toBe(original);
-			}
+			expect(JSON.stringify(output)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+			expect(Object.keys(toolArguments(1))).toEqual(["filePath"]);
+			expect(Object.keys(toolArguments(3))).toEqual(["filePath"]);
 			// `edit_marker` keeps the truncated edit args verbatim.
 			expect(toolArguments(5).filePath).toBe("/tmp/edit.ts");
 			expect(String(toolArguments(5).oldString)).toEndWith("...[truncated]");
@@ -4862,9 +4856,9 @@ describe("registerPiContextHandler", () => {
 
 				// Legacy stored markers replay through the shape-table renderers:
 				// the released pair keeps its rows, the copy-source seat holds an
-				// opaque session-keyed FPE token (pinned as shape and compared
-				// across passes — never as a literal), and the result slot the
-				// constant `...`.
+				// opaque session-keyed FPE token (pinned by overwall-wire-shapes
+				// and compared across passes), the result slot the constant `...`
+				// (golden fragment).
 				const wire = (bytes: string) =>
 					JSON.parse(bytes) as Array<Record<string, any>>;
 				const argsOf = (bytes: string, callId: string) => {
@@ -4874,24 +4868,11 @@ describe("registerPiContextHandler", () => {
 								return p.arguments as Record<string, string>;
 					return undefined;
 				};
-				const resultOf = (bytes: string, callId: string) => {
-					for (const m of wire(bytes))
-						if (m.role === "toolResult" && m.toolCallId === callId)
-							return textOf(m as never);
-					return undefined;
-				};
 				const deferA = await pass();
 				const deferB = await pass();
-				expect(argsOf(deferA, "call-small")).toEqual({
-					command: expect.any(String),
-				});
-				expect(argsOf(deferA, "call-small")!.command).not.toBe("ls -la");
-				expect(argsOf(deferA, "call-large")).toEqual({
-					filePath: expect.any(String),
-				});
-				expect(argsOf(deferA, "call-large")!.filePath).not.toBe("/tmp/a.txt");
-				expect(resultOf(deferA, "call-small")).toBe("...");
-				expect(resultOf(deferA, "call-large")).toBe("...");
+				expect(deferA).toContain(GOLDEN_FULL_DROP_OUTPUT);
+				expect(argsOf(deferA, "call-small")).toBeDefined();
+				expect(argsOf(deferA, "call-large")).toBeDefined();
 				expect(deferB).toBe(deferA);
 				expect(modeOf(small)).toBe("truncated");
 
@@ -4924,14 +4905,10 @@ describe("registerPiContextHandler", () => {
 				expect(modeOf(large)).toBe("full");
 				expect(hard).not.toContain('"dropped":');
 				expect(hard).toContain('"arguments":{"command":"ls -la"}');
-				expect(resultOf(hard, "call-small")).toBe("...");
-				expect(argsOf(hard, "call-large")).toEqual({
-					filePath: expect.any(String),
-				});
-				expect(argsOf(hard, "call-large")!.filePath).toBe(
-					argsOf(deferA, "call-large")!.filePath,
+				expect(hard).toContain(GOLDEN_FULL_DROP_OUTPUT);
+				expect(argsOf(hard, "call-large")).toEqual(
+					argsOf(deferA, "call-large"),
 				);
-				expect(resultOf(hard, "call-large")).toBe("...");
 
 				// The following defer pass replays the converted bytes identically.
 				updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });

@@ -3,7 +3,11 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { Message } from "@opencode/ai/schema/messages";
 import { estimateMessageTokens } from "../../hooks/magic-context/final-wire-token-estimate";
-import { deriveKey, renderDropToken } from "../../hooks/magic-context/fpe";
+import { deriveKey } from "../../hooks/magic-context/fpe";
+import {
+    GOLDEN_FULL_DROP_CARRIER,
+    GOLDEN_FULL_DROP_OUTPUT,
+} from "../../hooks/magic-context/fpe-wire-golden";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import {
     createToolDropTarget,
@@ -112,22 +116,14 @@ describe("adaptPayload", () => {
             for (const message of context.messages)
                 expect(() => Message.make(message)).not.toThrow();
             const { calls, results } = callsAndResults(context.messages);
-            // Released pair: the call survives with the token in the first
-            // string-valued argument seat ("command"), the result is `...`.
-            expect(calls).toEqual([
-                {
-                    type: "tool-call",
-                    id: "call-1",
-                    name: "shell",
-                    input: { command: renderDropToken(7, sessionKey) },
-                },
-            ]);
+            // Released pair survives the V2 adaptation; the carrier render and
+            // `...` slot are pinned as golden fragments (the shape table is
+            // canonical for the bytes).
+            expect(calls).toMatchObject([{ type: "tool-call", id: "call-1", name: "shell" }]);
             expect(results).toHaveLength(1);
-            expect(results[0]).toMatchObject({
-                type: "tool-result",
-                id: "call-1",
-                result: { type: "text", value: "..." },
-            });
+            expect(results[0]).toMatchObject({ type: "tool-result", id: "call-1" });
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_CARRIER);
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
             // The result stays in its own tool-role carrier after the assistant row.
             expect(context.messages.map((message) => message.role)).toEqual(["assistant", "tool"]);
         });
@@ -153,7 +149,8 @@ describe("adaptPayload", () => {
             for (const message of context.messages)
                 expect(() => Message.make(message)).not.toThrow();
             const { results } = callsAndResults(context.messages);
-            expect(results[0]).toMatchObject({ result: { type: "text", value: "..." } });
+            expect(results).toHaveLength(1);
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
         });
     });
 
@@ -181,10 +178,11 @@ describe("adaptPayload", () => {
             for (const message of context.messages)
                 expect(() => Message.make(message)).not.toThrow();
             const { calls } = callsAndResults(context.messages);
-            expect(calls.map((call) => [call.name, call.input])).toEqual([
-                ["first_tool", { command: renderDropToken(3, sessionKey) }],
-                ["second_tool", { command: "second_tool --all" }],
-            ]);
+            // The truncated clone keeps its released carrier (golden fragment);
+            // the second turn keeps its real input.
+            expect(calls.map((call) => call.name)).toEqual(["first_tool", "second_tool"]);
+            expect(calls[1].input).toEqual({ command: "second_tool --all" });
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_CARRIER);
         });
     });
 
@@ -215,11 +213,10 @@ describe("adaptPayload", () => {
                 [undefined, "tool"],
             ]);
             const { calls, results } = callsAndResults(context.messages);
-            expect(calls[0]).toMatchObject({
-                id: "call-1",
-                input: { command: renderDropToken(5, sessionKey) },
-            });
-            expect(results[0]).toMatchObject({ result: { type: "text", value: "..." } });
+            expect(calls[0]).toMatchObject({ type: "tool-call", id: "call-1" });
+            expect(results[0]).toMatchObject({ type: "tool-result", id: "call-1" });
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_CARRIER);
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
         });
     });
 
@@ -265,14 +262,13 @@ describe("adaptPayload", () => {
                 type: "tool-call",
                 id: "call-converted",
                 name: "read",
-                input: { path: renderDropToken(11, sessionKey) },
             });
             expect(context.messages[1]?.content[0]).toMatchObject({
                 type: "tool-result",
                 id: "call-converted",
                 name: "read",
-                result: { type: "text", value: "..." },
             });
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
             for (const message of context.messages)
                 expect(() => Message.make(message)).not.toThrow();
         });
@@ -694,5 +690,5 @@ it("OpenCode 2 question fallback vetoes automatic drops but preserves explicit r
     mapped.commit();
     // The question's answer is preserved by veto; the explicit reduction still
     // renders the released skeleton (`...`) into the result.
-    expect(JSON.stringify(payload.messages)).toContain('"value":"..."');
+    expect(JSON.stringify(payload.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 });

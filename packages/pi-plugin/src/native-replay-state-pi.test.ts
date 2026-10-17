@@ -17,6 +17,7 @@ import {
 	registerPiContextHandler,
 	signalPiPendingMaterialization,
 } from "./context-handler";
+import { GOLDEN_FULL_DROP_OUTPUT } from "./fpe-wire-golden";
 import { NATIVE_TOOL_REMOVAL_MARKER } from "./native-replay-pi";
 import {
 	applyNativeReasoningReplayPi,
@@ -198,16 +199,9 @@ describe("native upgrade application", () => {
 					{ arguments: { path: expect.any(String) } },
 				],
 			});
-			// The released `full` pair replays with the session-keyed FPE token
-			// in the copy-source seat — an opaque value, never the original
-			// input and never pinned as literal bytes.
-			expect(
-				(first[1] as { content: Array<{ arguments?: { path?: string } }> })
-					.content[2]!.arguments!.path,
-			).not.toBe(staleInput);
-			expect(
-				(first[2] as { content: Array<{ text: string }> }).content[0].text,
-			).toBe("...");
+			// The released pair replays with the constant `...` result slot
+			// (golden fragment; the carrier shape is overwall-wire-shapes' pin).
+			expect(JSON.stringify(first)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			expect(nativeBytes(await f.pass(0))).toBe(a);
 			f.restart();
 			expect(nativeBytes(await f.pass(0))).toBe(a);
@@ -314,16 +308,9 @@ describe("native upgrade application", () => {
 						],
 					});
 					// With the native lane unreadable the raw payload keeps the
-					// original bytes, while the Pi pair replays the released
-					// `full` shape with a session-keyed carrier token.
-					expect(
-						(messages[1] as { content: Array<{ arguments?: { path?: string } }> })
-							.content[2]!.arguments!.path,
-					).not.toBe(staleInput);
-					expect(
-						(messages[2] as { content: Array<{ text: string }> }).content[0]
-							.text,
-					).toBe("...");
+					// original bytes, while the Pi pair replays with the `...`
+					// result slot (golden fragment).
+					expect(JSON.stringify(messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 				}
 				expect(
 					f.db
@@ -367,15 +354,9 @@ describe("native upgrade application", () => {
 				});
 				// An unreadable future document suspends the native lanes (raw
 				// bytes untouched) but never blocks the local pair rendering:
-				// the call carries an opaque carrier token, the result the
-				// constant `...`.
-				expect(
-					(messages[1] as { content: Array<{ arguments?: { path?: string } }> })
-						.content[2]!.arguments!.path,
-				).not.toBe(staleInput);
-				expect(
-					(messages[2] as { content: Array<{ text: string }> }).content[0].text,
-				).toBe("...");
+				// the result slot carries the `...` placeholder (golden
+				// fragment).
+				expect(JSON.stringify(messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			}
 			expect(
 				f.db

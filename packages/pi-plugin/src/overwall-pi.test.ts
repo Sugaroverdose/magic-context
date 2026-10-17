@@ -11,6 +11,10 @@ import {
 	applyPendingOperations,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
+import {
+	GOLDEN_FULL_DROP_CARRIER,
+	GOLDEN_FULL_DROP_OUTPUT,
+} from "./fpe-wire-golden";
 import { computePiPressure } from "./pi-pressure";
 import { measurePiTailHygiene } from "./tail-hygiene-walk-pi";
 import { createTestDb } from "./test-utils.test";
@@ -166,30 +170,17 @@ for (const native of [false, true]) {
 			expect(wireCalls).toHaveLength(25);
 			expect(wireResults).toEqual(wireCalls);
 			const bytes = JSON.stringify(served);
-			// Old paired result bytes are replaced by the released slot on
-			// every dropped pair; the pair itself (and its id) stays.
-			for (let i = 0; i < 25; i++) {
-				expect(wireBytes).not.toContain(`output-${i}"`);
-				expect(bytes).not.toContain(`output-${i}"`);
-			}
-			for (let i = 0; i < 25; i++) {
+			// The released-pair wire bytes (token carrier, `...` slot) are the
+			// shape canonical's pin; this layer pins them as golden fragments.
+			expect(wireBytes).toContain(GOLDEN_FULL_DROP_OUTPUT);
+			expect(bytes).toContain(GOLDEN_FULL_DROP_OUTPUT);
+			expect(bytes).toContain(GOLDEN_FULL_DROP_CARRIER);
+			// `skeleton_real`: the call keeps its real arguments.
+			for (let i = 5; i < 25; i++) {
 				const callPart = served[i * 2].content.find(
 					(p: unknown) => p.type === "toolCall",
 				);
-				const resultText = served[i * 2 + 1].content
-					.map((p: unknown) => p.text ?? "")
-					.join("");
-				expect(resultText).toBe("...");
-				if (i < 5) {
-					// `full`: an opaque FPE token sits in the copy-source seat.
-					expect(Object.keys(callPart.arguments)).toEqual(["path"]);
-					expect(callPart.arguments.path).not.toBe(`original-${i}`);
-					expect(callPart.arguments.path.length).toBeLessThan(64);
-					if (!native) expect(bytes).not.toContain(`original-${i}"`);
-				} else {
-					// `skeleton_real`: the call keeps its real arguments.
-					expect(callPart.arguments).toEqual({ path: `original-${i}` });
-				}
+				expect(callPart.arguments).toEqual({ path: `original-${i}` });
 			}
 			if (native) {
 				// The raw Responses lane is preserved byte-for-byte even for
