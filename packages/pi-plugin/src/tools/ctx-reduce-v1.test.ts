@@ -178,6 +178,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			);
 			seedMessage(db, sessionId, "pi-msg-1-111-user:p0", 10);
 			seedMessage(db, sessionId, "pi-msg-2-222-assistant:p0", 11);
+			// Registered AFTER both endpoint shells: outside the tag span 10..11.
 			seedTool(db, sessionId, "call-mid", 15);
 			// Window ballast so call-mid sits OUTSIDE the protected working
 			// set: protected = newest tags by registration order (23..20),
@@ -202,8 +203,10 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			);
 			expect(result.isError).toBe(false);
 			expect(result.text).toBe("ctx_handles: 1-2.");
+			// Registration span (D18): the endpoints' tag band; call-mid (15)
+			// registers after the end point and does not join.
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId).sort()).toEqual([
-				10, 11, 15,
+				10, 11,
 			]);
 		} finally {
 			closeQuietly(db);

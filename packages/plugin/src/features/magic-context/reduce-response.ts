@@ -51,9 +51,6 @@ export function renderPointingError(
             .filter(Boolean)
             .join(" ");
     }
-    if (outcome.reason === "reversed") {
-        return `error: "${echoInput(outcome.input)}" provided in ctx_handles is reversed: its end names an older position than its start in your context. Swap the endpoints, or send the items directly. ${NOTHING_RELEASED_CLOSER}`;
-    }
     return `error: "${echoInput(outcome.input)}" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.${rangeHint} Copy a call id or a verbatim run of text exactly from what you can see, or drop this entry and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
 }
 
@@ -78,7 +75,10 @@ export function renderPointingSuccess(
     }
 
     const slots = outcomes.map((outcome) => {
-        if (outcome.kind === "range") return `${outcome.fromOrdinal}-${outcome.toOrdinal}`;
+        if (outcome.kind === "range")
+            return outcome.fromOrdinal !== undefined && outcome.toOrdinal !== undefined
+                ? `${outcome.fromOrdinal}-${outcome.toOrdinal}`
+                : echoInput(entries[outcomes.indexOf(outcome)] ?? "");
         if (outcome.kind === "error") return "?";
         return String(ordinalOf(outcome.messageId) ?? "?");
     });

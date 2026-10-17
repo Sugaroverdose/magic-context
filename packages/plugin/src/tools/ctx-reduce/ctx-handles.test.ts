@@ -437,8 +437,8 @@ describe("ctx_reduce handles lane (quotes)", () => {
 
 describe("ctx_reduce range lane", () => {
     // Lane seed: message shells (suffixed keys) AND their tool calls
-    // (wire-id keys) share the span: the inclusive stretch must cross both
-    // key domains.
+    // (wire-id keys) sit in disjoint tag bands — the stretch is a
+    // registration span (D18), so bands resolve independently.
     const RANGE_SEED: WorldSpec = {
         messages: [
             { id: "msg-a", ordinal: 10, role: "user", content: "alpha task one", tag: 1, part: 1 },
@@ -455,32 +455,28 @@ describe("ctx_reduce range lane", () => {
     runTable(RANGE_SEED, [
         ["releases the inclusive stretch between two quote endpoints across key domains, span slot in echo", { ctx_handles: ["alpha task one..gamma task three"] }, {}, (response, db) => {
             expect(response).toBe("ctx_handles: 10-12.");
-            // Inclusive: every registered item in the stretch — message shells via
-            // the suffixed key, tool calls via the wire-id map — one event.
-            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
+            // Registration span 1..3: the tag band, one event.
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
         }],
         ["resolves range endpoints through the id lane too", { ctx_handles: ["call-a..call-b"] }, {}, (response, db) => {
             expect(response).toBe("ctx_handles: 10-11.");
-            expect(pendingTagNumbers(db, "ses-1")).toEqual([2, 21, 22]);
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([21, 22]);
         }],
         ["resolves a range whose endpoints are different handle kinds", { ctx_handles: ["call-a..gamma task three"] }, {}, (response, db) => {
             expect(response).toBe("ctx_handles: 10-12.");
-            expect(pendingTagNumbers(db, "ses-1")).toEqual([2, 3, 21, 22]);
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([3, 21]);
         }],
         ["resolves a quote-start/id-end range", { ctx_handles: ["alpha task one..call-b"] }, {}, (response, db) => {
             expect(response).toBe("ctx_handles: 10-11.");
-            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 21, 22]);
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
         }],
         ["keeps a literal double-dot as phrase text when the full entry matches", { ctx_handles: ["the .. marks a path segment"] }, { messages: [{ id: "msg-dot", ordinal: 20, role: "user", content: "the .. marks a path segment in this quote", tag: 8, part: 0 }] }, (response, db) => {
             expect(response).toBe("ctx_handles: 20.");
             expect(pendingTagNumbers(db, "ses-1")).toEqual([8]);
         }],
-        ["rejects a reversed range, naming the entry, nothing applied", { ctx_handles: ["gamma task three..alpha task one"] }, {}, (response, db) => {
-            expect(response).toContain(
-                'error: "gamma task three..alpha task one" provided in ctx_handles is reversed',
-            );
-            expect(response).toContain("Nothing was released; resend the corrected batch.");
-            expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+        ["treats a reversed-written range as the same span (direction is irrelevant)", { ctx_handles: ["gamma task three..alpha task one"] }, {}, (response, db) => {
+            expect(response).toBe("ctx_handles: 12-10.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
         }],
         ["a missing range endpoint is the same broken-input class as a missing entry", { ctx_handles: ["alpha task one..purple platypus"] }, {}, (response, db) => {
             expect(response).toContain('error: "purple platypus" provided in ctx_handles was not found');
@@ -490,19 +486,19 @@ describe("ctx_reduce range lane", () => {
         ["protected items inside a stretch queue deferred with the range promise line", { ctx_handles: ["alpha task one..delta task four"] }, { messages: [{ id: "msg-d", ordinal: 13, role: "user", content: "delta task four", tag: 4, part: 2 }], protectedSet: new Set<number>([3]) }, (response, db) => {
             expect(response).toContain("ctx_handles: 10-13.");
             expect(response).toContain("covers items inside the protected working set");
-            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 4, 21, 22, 23]);
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 4]);
         }],
         // msg-b's shell already queued (pre-queued op): the stretch still
         // spans, the inside noop reports without touching the slot.
         ["noop facts inside a stretch report ordinals, span slot unchanged", { ctx_handles: ["alpha task one..gamma task three"] }, { prequeued: [2] }, (response, db) => {
             expect(response).toContain("ctx_handles: 10-12.");
             expect(response).toContain("queued for release: 11.");
-            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
         }],
         ["handles array mixes a single entry, a range, and repeats in one positional line", { ctx_handles: ["call-b", "alpha task one..gamma task three"] }, {}, (response, db) => {
             // Positional mirror: entry 1 is the single id (ordinal 11), entry 2 the span.
             expect(response).toContain("ctx_handles: 11, 10-12.");
-            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 22]);
         }],
     ]);
 });

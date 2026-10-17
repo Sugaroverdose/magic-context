@@ -101,20 +101,22 @@ export type ReduceInputOutcome =
           messageId: string;
       }
     /**
-     * Composite stretch outcome: the endpoints resolved, direction holds,
-     * and every item inside the inclusive span was classified. Never
-     * contains error items (endpoint errors surface at entry level).
+     * Composite stretch outcome: the endpoints resolved and every tag
+     * between them (registration order, inclusive, direction-agnostic)
+     * was classified. Never contains error items (endpoint errors surface
+     * at entry level). Ordinals mint the echo slot; an unpositionable
+     * endpoint falls back to echoing the entry itself.
      */
     | {
           kind: "range";
-          fromOrdinal: number;
-          toOrdinal: number;
+          fromOrdinal?: number;
+          toOrdinal?: number;
           items: ReduceInputOutcome[];
       }
     /** Broken entry: the whole batch is rejected, nothing is enqueued. */
     | {
           kind: "error";
-          reason: "ambiguous" | "not-found" | "reversed";
+          reason: "ambiguous" | "not-found";
           input: string;
           candidates?: SampleCandidate[];
           /** Set when the failure happened inside a range entry. */
@@ -362,13 +364,6 @@ function splitRangeEntry(entry: string): { from: string; to: string } | undefine
     return { from, to };
 }
 
-interface SpanMembership {
-    tagNumber: number;
-    messageId: string;
-    ordinal: number;
-    tagOrder: number;
-}
-
 /**
  * The merged `ctx_handles` lane (Rev 5.3): form resolution in strict order —
  * id hit, phrase of the full entry, range split as strict fallback. Repeated
@@ -461,77 +456,38 @@ export function resolveHandles(
             collect({ ...end.error, range: { entry, which: "end" } });
             continue;
         }
-        const fromOrdinal = ordinalOf(start.messageId);
-        const toOrdinal = ordinalOf(end.messageId);
-        if (fromOrdinal === undefined || toOrdinal === undefined) {
-            return {
-                outcomes,
-                queueTagNumbers: [...queue],
-                internalError:
-                    "Error: could not resolve message positions for the range endpoints.",
-            };
-        }
-        if (fromOrdinal > toOrdinal) {
-            collect({ kind: "error", reason: "reversed", input: entry });
-            continue;
-        }
-        // Inclusive enumeration of the stretch (D18): every registered item
-        // between the endpoints, ordered by message position then registry
-        // order; the per-item classes apply inside (a range cannot smuggle a
-        // protected item past the report discipline).
-        const span = collectSpanItems(registry, deps.mint, start, end);
-        if (span === "reversed") {
-            collect({ kind: "error", reason: "reversed", input: entry });
-            continue;
-        }
-        if (span === "missing") {
-            return {
-                outcomes,
-                queueTagNumbers: [...queue],
-                internalError: "Error: range endpoints do not name registered items.",
-            };
-        }
+        // Registration span (D18, as ruled): the endpoints' tag numbers bind
+        // the stretch, inclusive; direction is irrelevant (min..max). The
+        // per-item classes apply inside (a range cannot smuggle a protected
+        // item past the report discipline).
         const items: ReduceInputOutcome[] = [];
-        for (const membership of span) {
-            const item = classifyRegistryTag(deps, registry, membership.tagNumber);
+        const spanRows = db
+            .prepare(
+                `SELECT tag_number
+                   FROM tags
+                  WHERE session_id = ? AND tag_number BETWEEN ? AND ?
+                  ORDER BY tag_number`,
+            )
+            .all(
+                sessionId,
+                Math.min(start.tagNumber, end.tagNumber),
+                Math.max(start.tagNumber, end.tagNumber),
+            ) as unknown as Array<{ tag_number: number }>;
+        for (const row of spanRows) {
+            const item = classifyRegistryTag(deps, registry, row.tag_number);
             items.push(item);
             if (item.kind === "released" || item.kind === "deferred") {
                 queue.add(item.tagNumber);
             }
         }
-        outcomes.push({ kind: "range", fromOrdinal, toOrdinal, items });
+        outcomes.push({
+            kind: "range",
+            fromOrdinal: ordinalOf(start.messageId),
+            toOrdinal: ordinalOf(end.messageId),
+            items,
+        });
     }
     return { outcomes, queueTagNumbers: [...queue] };
-}
-
-function collectSpanItems(
-    registry: RegistryView,
-    mint: OrdinalMint,
-    start: { tagNumber: number },
-    end: { tagNumber: number },
-): SpanMembership[] | "reversed" | "missing" {
-    // Enumerate the session view in canonical geometry: every registered tag
-    // whose key names a positioned message, ordered by (ordinal, tag_number).
-    // The view spans all three key domains (bare / suffixed message keys,
-    // wire call ids), so tool rows inside the stretch participate without a
-    // join across mismatched key shapes.
-    const memberships: SpanMembership[] = [];
-    for (const [tagNumber, messageId] of registry.messageIdByTag) {
-        const ordinal = ordinalForRegistryKey(mint, messageId);
-        if (typeof ordinal !== "number") continue;
-        memberships.push({ tagNumber, messageId, ordinal, tagOrder: tagNumber });
-    }
-    memberships.sort((a, b) => a.ordinal - b.ordinal || a.tagOrder - b.tagOrder);
-
-    // Bound to the endpoints themselves (inclusive). Endpoint tags exist by
-    // construction; the bounds keep same-message stretches precise. A
-    // same-message stretch whose endpoints invert in registration order is
-    // the reversed case, not a miss.
-    const startIndex = memberships.findIndex((m) => m.tagNumber === start.tagNumber);
-    const endIndex = memberships.findIndex((m) => m.tagNumber === end.tagNumber);
-    if (startIndex < 0 || endIndex < 0) return "missing";
-    if (startIndex > endIndex) return "reversed";
-    return memberships.slice(startIndex, endIndex + 1);
 }
 
 /**
