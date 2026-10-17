@@ -624,6 +624,27 @@ describe("ctx_reduce range lane", () => {
         expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2]);
     });
 
+    it("resolves a range whose endpoints are different handle kinds", async () => {
+        const tools = withWorld();
+        // Id start, quote end.
+        const forward = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["call-a..gamma task three"] },
+            ctx,
+        )) as string;
+        expect(forward).toBe("ctx_handles: 10-12.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
+    });
+
+    it("resolves a quote-start/id-end range", async () => {
+        const tools = withWorld();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["alpha task one..call-b"] },
+            ctx,
+        )) as string;
+        expect(response).toBe("ctx_handles: 10-11.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2]);
+    });
+
     it("keeps a literal double-dot as phrase text when the full entry matches", async () => {
         seedMessages(db, [
             {
