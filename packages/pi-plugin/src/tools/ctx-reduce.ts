@@ -66,7 +66,7 @@ const ParamsSchema = Type.Object(
 				Type.String(),
 				{
 					description:
-						"Exact targets of the release, copied from your context: a tool call id, a verbatim run of an item's own text, or a stretch `<start>..<end>` of such handles.",
+						"Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from the item that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
 				},
 			),
 		),
