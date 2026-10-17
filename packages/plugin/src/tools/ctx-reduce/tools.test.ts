@@ -116,7 +116,16 @@ describe("createCtxReduceTools", () => {
 
     beforeEach(() => {
         db = createTestDb();
-        tools = createCtxReduceTools({ db });
+        tools = createCtxReduceTools({
+            db,
+            // Empty-world mint: no positioned messages, no user boundary.
+            // Bulk with no newest user message has nothing "responded past".
+            ordinalMint: () => ({
+                ordinalByMessageId: new Map(),
+                ordinalByCallId: new Map(),
+                latestUserOrdinal: undefined,
+            }),
+        });
     });
 
     describe("ctx_reduce", () => {

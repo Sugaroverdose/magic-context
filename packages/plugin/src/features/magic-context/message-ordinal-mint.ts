@@ -13,6 +13,13 @@ import type { OrdinalMint } from "./reduce-resolver";
  * insert leaves the stored values stale for the tail; the mint recomputes
  * from the host table, the current truth. Read-only over the host store —
  * no schema, no writes, same property as the call-id bridge.
+ *
+ * Production key domains (verified against the live stores): registry
+ * message rows carry the suffixed content key `base:pK`, registry tool rows
+ * carry the WIRE callID (host part data `$.callID` — not part.id), and the
+ * FTS mirror carries bare message ids. The mint therefore maps ALL domains
+ * the resolver can hold: bare message ids, wire call ids (to their owner
+ * message's ordinal), and the newest user-message boundary for the bulk lane.
  */
 export function createHostOrdinalMint(sessionId: string): OrdinalMint | undefined {
     const hostDb = openOpenCodeDb();
@@ -29,7 +36,37 @@ export function createHostOrdinalMint(sessionId: string): OrdinalMint | undefine
         for (const row of rows) {
             ordinalByMessageId.set(row.id, row.ordinal);
         }
-        return { ordinalByMessageId };
+        // Wire callID -> owner message ordinal. The host stores the provider
+        // call id inside the part's data JSON (part.id is a prt_* row id).
+        const ordinalByCallId = new Map<string, number>();
+        const partRows = hostDb
+            .prepare(
+                `SELECT json_extract(p.data, '$.callID') AS call_id, m.ordinal
+                   FROM part p
+                   JOIN (
+                     SELECT id, ROW_NUMBER() OVER (ORDER BY time_created ASC, id ASC) AS ordinal
+                       FROM message WHERE session_id = ?
+                   ) m ON m.id = p.message_id
+                  WHERE p.session_id = ?
+                    AND json_extract(p.data, '$.type') = 'tool'`,
+            )
+            .all(sessionId, sessionId) as unknown as { call_id: string | null; ordinal: number }[];
+        for (const row of partRows) {
+            if (row.call_id) ordinalByCallId.set(row.call_id, row.ordinal);
+        }
+        let latestUserOrdinal: number | undefined;
+        const userRows = hostDb
+            .prepare(
+                `SELECT id FROM message WHERE session_id = ? AND json_extract(data, '$.role') = 'user'`,
+            )
+            .all(sessionId) as unknown as { id: string }[];
+        for (const row of userRows) {
+            const ordinal = ordinalByMessageId.get(row.id);
+            if (typeof ordinal === "number" && (latestUserOrdinal === undefined || ordinal > latestUserOrdinal)) {
+                latestUserOrdinal = ordinal;
+            }
+        }
+        return { ordinalByMessageId, ordinalByCallId, latestUserOrdinal };
     } catch {
         return undefined;
     } finally {

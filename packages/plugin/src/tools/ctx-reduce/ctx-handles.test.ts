@@ -7,6 +7,18 @@ import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { Database } from "../../shared/sqlite";
 import { createCtxReduceTools } from "./tools";
 
+/**
+ * The unit-test world mirrors the PRODUCTION key shapes (live context.db
+ * census): registry message rows carry the suffixed content key `base:pK`,
+ * registry tool rows carry the WIRE call id in message_id with the bare owner
+ * message in tool_owner_message_id, and the FTS mirror carries bare message
+ * ids. A world that seeded bare ids on message rows and owner ids on tool
+ * rows silently hid every cross-domain join miss — production geometry must
+ * be the seeded geometry. The host-store bridge (rank pairing) is covered
+ * against a host-shaped store in tag-call-bridge.test.ts; this file's fake
+ * resolver answers the production query shape (message_id = wire call id).
+ */
+
 function createTestDb(): Database {
     const db = new Database(":memory:");
     db.exec(`
@@ -79,11 +91,17 @@ function createTestDb(): Database {
 
 interface SeedTag {
     tagNumber: number;
+    /**
+     * Production registry key: `base:pK` for message rows, the WIRE CALL ID
+     * for tool rows.
+     */
     messageId: string;
     sessionId: string;
-    contentId?: string;
+    /** Bare owner message id (tool rows). */
+    owner?: string;
     status?: string;
     tagType?: "message" | "tool";
+    tokens?: number | null;
 }
 
 interface SeedMessage {
@@ -97,13 +115,14 @@ interface SeedMessage {
 function seedTags(db: Database, tags: SeedTag[]) {
     for (const tag of tags) {
         db.prepare(
-            "INSERT INTO tags (message_id, type, status, content_id, byte_size, session_id, tag_number) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tags (message_id, type, status, tool_owner_message_id, byte_size, token_count, session_id, tag_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
             tag.messageId,
             tag.tagType ?? "tool",
             tag.status ?? "active",
-            tag.contentId ?? null,
+            tag.owner ?? null,
             100,
+            tag.tokens ?? null,
             tag.sessionId,
             tag.tagNumber,
         );
@@ -125,12 +144,17 @@ function seedMessages(db: Database, messages: SeedMessage[], sessionId = "ses-1"
 }
 
 /**
- * DI fake for the canonical message-ordinal mint: production reads the host
- * `message` table (read-session-raw order); the unit tests' world stores
+ * DI fake for the canonical message-ordinal mint: production recomputes from
+ * the host `message` table plus the part-data call ids; this world keeps
  * positions in the FTS mirror, so the fake reads those plus explicit
- * overrides for messages the test world has no mirror row for.
+ * overrides, and builds the wire-call-id map from the seeded production-
+ * shaped tool rows (message_id = call id, owner = positioned message).
  */
-function fakeOrdinalMint(db: Database, extra: Record<string, number> = {}): OrdinalMint {
+function fakeOrdinalMint(
+    db: Database,
+    extra: Record<string, number> = {},
+    latestUserOrdinal?: number,
+): OrdinalMint {
     const rows = db
         .prepare(
             "SELECT message_id, CAST(message_ordinal AS INTEGER) AS ordinal FROM message_history_fts",
@@ -141,14 +165,25 @@ function fakeOrdinalMint(db: Database, extra: Record<string, number> = {}): Ordi
     for (const [messageId, ordinal] of Object.entries(extra)) {
         ordinalByMessageId.set(messageId, ordinal);
     }
-    return { ordinalByMessageId };
+    const ordinalByCallId = new Map<string, number>();
+    const toolRows = db
+        .prepare(
+            "SELECT message_id, tool_owner_message_id FROM tags WHERE type = 'tool' AND message_id NOT LIKE 'msg-%'",
+        )
+        .all() as unknown as { message_id: string; tool_owner_message_id: string | null }[];
+    for (const row of toolRows) {
+        const ordinal = row.tool_owner_message_id
+            ? ordinalByMessageId.get(row.tool_owner_message_id)
+            : undefined;
+        if (typeof ordinal === "number") ordinalByCallId.set(row.message_id, ordinal);
+    }
+    return { ordinalByMessageId, ordinalByCallId, latestUserOrdinal };
 }
 
 /**
- * DI fake for the call-id bridge: the unit tests' tags table carries a
- * content_id column as the fake world's registry key. The production bridge
- * (host-store rank pairing) is covered against a host-shaped store in
- * tag-call-bridge.test.ts, not here.
+ * DI fake for the call-id bridge answering in the PRODUCTION query shape:
+ * tool rows key themselves by the wire call id in message_id. The host-store
+ * rank pairing lives in tag-call-bridge.test.ts against a host-shaped store.
  */
 function fakeCallIdResolver(db: Database, sessionId: string): CallIdTagResolver {
     return {
@@ -160,7 +195,7 @@ function fakeCallIdResolver(db: Database, sessionId: string): CallIdTagResolver 
             for (const callId of callIds) {
                 const row = db
                     .prepare(
-                        "SELECT tag_number, message_id, status, type FROM tags WHERE session_id = ? AND content_id = ? AND content_id IS NOT NULL LIMIT 1",
+                        "SELECT tag_number, message_id, status, type FROM tags WHERE session_id = ? AND message_id = ? AND type = 'tool' LIMIT 1",
                     )
                     .get(sessionId, callId) as
                     | { tag_number: number; message_id: string; status: string; type: string }
@@ -188,17 +223,17 @@ describe("ctx_reduce handles lane (ids)", () => {
 
     const seed = (d: Database) =>
         seedTags(d, [
-            { tagNumber: 5, messageId: "msg-5", sessionId: "ses-1", contentId: "call-a" },
-            { tagNumber: 7, messageId: "msg-7", sessionId: "ses-1", contentId: "call-b" },
-            { tagNumber: 9, messageId: "msg-9", sessionId: "ses-1", contentId: "call-c" },
+            { tagNumber: 5, messageId: "call-a", owner: "msg-5", sessionId: "ses-1" },
+            { tagNumber: 7, messageId: "call-b", owner: "msg-7", sessionId: "ses-1" },
+            { tagNumber: 9, messageId: "call-c", owner: "msg-9", sessionId: "ses-1" },
             {
                 tagNumber: 11,
-                messageId: "msg-11",
+                messageId: "call-d",
+                owner: "msg-11",
                 sessionId: "ses-1",
-                contentId: "call-d",
                 status: "dropped",
             },
-            { tagNumber: 3, messageId: "msg-3", sessionId: "ses-2", contentId: "call-e" },
+            { tagNumber: 3, messageId: "call-e", owner: "msg-3", sessionId: "ses-2" },
         ]);
 
     beforeEach(() => {
@@ -211,20 +246,25 @@ describe("ctx_reduce handles lane (ids)", () => {
         rustToolBackends?: RustToolBackends;
         resolver?: CallIdTagResolver;
         mintExtra?: Record<string, number>;
+        latestUserOrdinal?: number;
     }) =>
         createCtxReduceTools({
             db,
             protectedSet: overrides.protectedSet ?? new Set<number>(),
             callIdResolver: overrides.resolver ?? fakeCallIdResolver(db, "ses-1"),
             ordinalMint: () =>
-                fakeOrdinalMint(db, {
-                    "msg-5": 5,
-                    "msg-7": 7,
-                    "msg-9": 9,
-                    "msg-11": 11,
-                    "msg-3": 3,
-                    ...overrides.mintExtra,
-                }),
+                fakeOrdinalMint(
+                    db,
+                    {
+                        "msg-5": 5,
+                        "msg-7": 7,
+                        "msg-9": 9,
+                        "msg-11": 11,
+                        "msg-3": 3,
+                        ...overrides.mintExtra,
+                    },
+                    overrides.latestUserOrdinal,
+                ),
             rustToolBackends: overrides.rustToolBackends,
         });
 
@@ -321,7 +361,7 @@ describe("ctx_reduce handles lane (ids)", () => {
     });
 
     it("no-arg invocation releases the bulk default set", async () => {
-        const tools = withWorld({});
+        const tools = withWorld({ latestUserOrdinal: 11 });
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
         expect(response).toContain("released everything responded past: 5, 7, 9.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
@@ -398,10 +438,13 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 content: "unrelated deployment checklist for staging",
             },
         ]);
+        // Production shape: the registry keys these with the suffixed content
+        // key (`:pK`, often K>=1); the mirror keeps bare ids. The geometry must
+        // join across the suffix.
         seedTags(db, [
-            { tagNumber: 40, messageId: "msg-a", sessionId: "ses-1", tagType: "message" },
-            { tagNumber: 41, messageId: "msg-b", sessionId: "ses-1", tagType: "message" },
-            { tagNumber: 42, messageId: "msg-c", sessionId: "ses-1", tagType: "message" },
+            { tagNumber: 40, messageId: "msg-a:p2", sessionId: "ses-1", tagType: "message" },
+            { tagNumber: 41, messageId: "msg-b:p3", sessionId: "ses-1", tagType: "message" },
+            { tagNumber: 42, messageId: "msg-c:p1", sessionId: "ses-1", tagType: "message" },
         ]);
     });
 
@@ -413,7 +456,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
             ordinalMint: () => fakeOrdinalMint(db),
         });
 
-    it("releases the uniquely matched message shell, slot echoes its ordinal", async () => {
+    it("releases the uniquely matched message shell across the key suffix, slot echoes its ordinal", async () => {
         const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute(
             { ctx_handles: ["unrelated deployment checklist"] },
@@ -463,7 +506,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
         seedTags(db, [
             {
                 tagNumber: 43,
-                messageId: "msg-d",
+                messageId: "msg-d:p0",
                 sessionId: "ses-1",
                 tagType: "message",
                 status: "dropped",
@@ -503,7 +546,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
         seedTags(db, [
             {
                 tagNumber: 44,
-                messageId: "msg-dead",
+                messageId: "msg-dead:p1",
                 sessionId: "ses-1",
                 tagType: "message",
                 status: "dropped",
@@ -542,7 +585,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
 
     it("mixes ids and quotes in one array, one applied call, one queued transaction", async () => {
         seedTags(db, [
-            { tagNumber: 55, messageId: "msg-t", sessionId: "ses-1", contentId: "call-t" },
+            { tagNumber: 55, messageId: "call-t", owner: "msg-t", sessionId: "ses-1" },
         ]);
         const tools = createCtxReduceTools({
             db,
@@ -570,28 +613,15 @@ describe("ctx_reduce range lane", () => {
             { messageId: "msg-b", ordinal: 11, role: "assistant", content: "beta task two" },
             { messageId: "msg-c", ordinal: 12, role: "assistant", content: "gamma task three" },
         ]);
+        // Message shells (suffixed keys) AND their tool calls (wire-id keys)
+        // share the span: the inclusive stretch must cross both key domains.
         seedTags(db, [
-            {
-                tagNumber: 1,
-                messageId: "msg-a",
-                sessionId: "ses-1",
-                tagType: "message",
-                contentId: "call-a",
-            },
-            {
-                tagNumber: 2,
-                messageId: "msg-b",
-                sessionId: "ses-1",
-                tagType: "message",
-                contentId: "call-b",
-            },
-            {
-                tagNumber: 3,
-                messageId: "msg-c",
-                sessionId: "ses-1",
-                tagType: "message",
-                contentId: "call-c",
-            },
+            { tagNumber: 1, messageId: "msg-a:p1", sessionId: "ses-1", tagType: "message" },
+            { tagNumber: 2, messageId: "msg-b:p2", sessionId: "ses-1", tagType: "message" },
+            { tagNumber: 3, messageId: "msg-c:p1", sessionId: "ses-1", tagType: "message" },
+            { tagNumber: 21, messageId: "call-a", owner: "msg-a", sessionId: "ses-1" },
+            { tagNumber: 22, messageId: "call-b", owner: "msg-b", sessionId: "ses-1" },
+            { tagNumber: 23, messageId: "call-c", owner: "msg-c", sessionId: "ses-1" },
         ]);
     });
 
@@ -603,15 +633,16 @@ describe("ctx_reduce range lane", () => {
             ordinalMint: () => fakeOrdinalMint(db),
         });
 
-    it("releases the inclusive stretch between two quote endpoints, span slot in echo", async () => {
+    it("releases the inclusive stretch between two quote endpoints across key domains, span slot in echo", async () => {
         const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute(
             { ctx_handles: ["alpha task one..gamma task three"] },
             ctx,
         )) as string;
         expect(response).toBe("ctx_handles: 10-12.");
-        // Inclusive: all three message items between the endpoints, one event.
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
+        // Inclusive: every registered item in the stretch — message shells via
+        // the suffixed key, tool calls via the wire-id map — one event.
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
     });
 
     it("resolves range endpoints through the id lane too", async () => {
@@ -621,7 +652,7 @@ describe("ctx_reduce range lane", () => {
             ctx,
         )) as string;
         expect(response).toBe("ctx_handles: 10-11.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2]);
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([2, 21, 22]);
     });
 
     it("resolves a range whose endpoints are different handle kinds", async () => {
@@ -632,7 +663,7 @@ describe("ctx_reduce range lane", () => {
             ctx,
         )) as string;
         expect(forward).toBe("ctx_handles: 10-12.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([2, 3, 21, 22]);
     });
 
     it("resolves a quote-start/id-end range", async () => {
@@ -642,7 +673,7 @@ describe("ctx_reduce range lane", () => {
             ctx,
         )) as string;
         expect(response).toBe("ctx_handles: 10-11.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2]);
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 21, 22]);
     });
 
     it("keeps a literal double-dot as phrase text when the full entry matches", async () => {
@@ -655,7 +686,7 @@ describe("ctx_reduce range lane", () => {
             },
         ]);
         seedTags(db, [
-            { tagNumber: 8, messageId: "msg-dot", sessionId: "ses-1", tagType: "message" },
+            { tagNumber: 8, messageId: "msg-dot:p0", sessionId: "ses-1", tagType: "message" },
         ]);
         const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute(
@@ -704,10 +735,9 @@ describe("ctx_reduce range lane", () => {
         seedTags(db, [
             {
                 tagNumber: 4,
-                messageId: "msg-d",
+                messageId: "msg-d:p2",
                 sessionId: "ses-1",
                 tagType: "message",
-                contentId: "call-d",
             },
         ]);
         const tools = withWorld({ protectedSet: new Set<number>([3]) });
@@ -717,12 +747,12 @@ describe("ctx_reduce range lane", () => {
         )) as string;
         expect(response).toContain("ctx_handles: 10-13.");
         expect(response).toContain("covers items inside the protected working set");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 4]);
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 4, 21, 22, 23]);
     });
 
     it("noop facts inside a stretch report ordinals, span slot unchanged", async () => {
-        // msg-b's tag already queued: the stretch still spans, the inside noop
-        // reports without touching the slot.
+        // msg-b's shell already queued: the stretch still spans, the inside
+        // noop reports without touching the slot.
         db.prepare(
             "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES ('ses-1', 2, 'drop', 1)",
         ).run();
@@ -733,7 +763,7 @@ describe("ctx_reduce range lane", () => {
         )) as string;
         expect(response).toContain("ctx_handles: 10-12.");
         expect(response).toContain("queued for release: 11.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
     });
 
     it("handles array mixes a single entry, a range, and repeats in one positional line", async () => {
@@ -744,7 +774,7 @@ describe("ctx_reduce range lane", () => {
         )) as string;
         // Positional mirror: entry 1 is the single id (ordinal 11), entry 2 the span.
         expect(response).toContain("ctx_handles: 11, 10-12.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
     });
 });
 
@@ -752,14 +782,17 @@ describe("ctx_reduce bulk default", () => {
     let db: Database;
     const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
 
+    // Production tool-row shape: message_id = wire call id, owner = bare
+    // positioned message.
     const seedTool = (
         tagNumber: number,
-        messageId: string,
+        callId: string,
+        owner: string,
         opts: { tokens?: number; status?: string } = {},
     ) => {
         db.prepare(
-            "INSERT INTO tags (message_id, type, status, byte_size, session_id, tag_number, token_count) VALUES (?, 'tool', 'active', ?, 'ses-1', ?, ?)",
-        ).run(messageId, 100, tagNumber, opts.tokens ?? null);
+            "INSERT INTO tags (message_id, type, status, tool_owner_message_id, byte_size, session_id, tag_number, token_count) VALUES (?, 'tool', 'active', ?, 100, 'ses-1', ?, ?)",
+        ).run(callId, owner, tagNumber, opts.tokens ?? null);
     };
 
     beforeEach(() => {
@@ -770,12 +803,10 @@ describe("ctx_reduce bulk default", () => {
             { messageId: "t-mid", ordinal: 50, role: "assistant", content: "worked on it" },
             { messageId: "t-live", ordinal: 210, role: "assistant", content: "current turn" },
         ]);
-        seedTool(60, "t-mid"); // consumed, unsized => releases
-        seedTool(61, "t-live"); // after newest user message => never bulk
-        seedTool(62, "t-mid", { tokens: 5 }); // under the token floor => stays
-        db.prepare(
-            "INSERT INTO tags (message_id, type, status, byte_size, session_id, tag_number, token_count) VALUES ('t-mid', 'tool', 'active', 100, 'ses-1', 63, 900)",
-        ).run();
+        seedTool(60, "call-x", "t-mid"); // consumed, unsized => releases
+        seedTool(61, "call-y", "t-live"); // after newest user message => never bulk
+        seedTool(62, "call-z", "t-mid", { tokens: 5 }); // under the token floor => stays
+        seedTool(63, "call-w", "t-mid", { tokens: 900 });
         db.prepare(
             "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES ('ses-1', 63, 'drop', 1)",
         ).run();
@@ -786,7 +817,8 @@ describe("ctx_reduce bulk default", () => {
             db,
             protectedSet: overrides.protectedSet ?? new Set<number>(),
             callIdResolver: fakeCallIdResolver(db, "ses-1"),
-            ordinalMint: () => fakeOrdinalMint(db),
+            // The mint owns the bulk boundary: newest user message, live space.
+            ordinalMint: () => fakeOrdinalMint(db, {}, 200),
         });
 
     it("releases only consumed tool tags past the floor and before the newest user message", async () => {
@@ -807,6 +839,19 @@ describe("ctx_reduce bulk default", () => {
         const tools = withWorld({ protectedSet: new Set<number>([60]) });
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
         expect(response).toContain("Nothing older to release");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
+    });
+
+    it("without a newest user message nothing has been responded past: nothing bulk-released", async () => {
+        const tools = createCtxReduceTools({
+            db,
+            protectedSet: new Set<number>(),
+            callIdResolver: fakeCallIdResolver(db, "ses-1"),
+            ordinalMint: () => fakeOrdinalMint(db, {}, undefined),
+        });
+        const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
+        expect(response).toContain("Nothing to release");
+        // Only the pre-seeded pending op remains; nothing new was queued.
         expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
     });
 });

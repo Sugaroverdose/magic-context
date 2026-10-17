@@ -33,8 +33,38 @@ import type { CallIdTagResolver } from "./tag-call-bridge";
  */
 
 export interface OrdinalMint {
-    /** Host message order: message id -> 1-based ordinal in the session. */
+    /** Host message order: bare message id -> 1-based ordinal in the session. */
     ordinalByMessageId: Map<string, number>;
+    /** Wire call id -> the ordinal of its owner message (tool registry rows). */
+    ordinalByCallId?: Map<string, number>;
+    /**
+     * Ordinal of the newest user message in the canonical space (live store).
+     * The bulk lane's boundary: nothing newer than this is reclaimable.
+     */
+    latestUserOrdinal?: number;
+}
+
+/** Strip the registry's text-content suffix (`:pK`) from a message key. */
+export function registryMessageBase(messageId: string): string {
+    return messageId.replace(/:p\d+$/, "");
+}
+
+/**
+ * Resolve the canonical ordinal for any key a registry row can carry:
+ * bare message id (mirror / file rows), suffixed content key `base:pK`
+ * (message rows), or wire call id (tool rows). `undefined` means the key
+ * does not name a positioned message — never a guessed position.
+ */
+export function ordinalForRegistryKey(
+    mint: OrdinalMint | undefined,
+    key: string,
+): number | undefined {
+    if (!mint) return undefined;
+    const direct = mint.ordinalByMessageId.get(key) ?? mint.ordinalByCallId?.get(key);
+    if (typeof direct === "number") return direct;
+    const base = registryMessageBase(key);
+    if (base !== key) return mint.ordinalByMessageId.get(base);
+    return undefined;
 }
 
 export interface HandleItemRef {
@@ -108,32 +138,60 @@ export interface HandleResolverDeps extends ReduceResolverDeps {
 
 interface ReduceStatements {
     match: { all(...args: unknown[]): unknown[] };
-    messageTags: { all(...args: unknown[]): unknown[] };
 }
 
 interface RegistryView {
     statusByTag: Map<number, string>;
     messageIdByTag: Map<number, string>;
+    typeByTag: Map<number, string>;
+    tokensByTag: Map<number, number | null>;
     pendingTags: Set<number>;
+    /** Message-class tags keyed by the bare message id (`base` of `base:pK`). */
+    tagNumbersByMessageBase: Map<string, number[]>;
 }
 
 function readRegistryView(db: Database, sessionId: string): RegistryView {
     const rows = db
-        .prepare(`SELECT tag_number, message_id, status FROM tags WHERE session_id = ?`)
+        .prepare(
+            `SELECT tag_number, message_id, status, type, token_count, input_token_count
+               FROM tags WHERE session_id = ?`,
+        )
         .all(sessionId) as unknown as {
         tag_number: number;
         message_id: string;
         status: string;
+        type: string;
+        token_count: number | null;
+        input_token_count: number | null;
     }[];
     const pending = new Set(
         getPendingOps(db, sessionId)
             .filter((op) => op.operation === "drop")
             .map((op) => op.tagId),
     );
+    const tagNumbersByMessageBase = new Map<string, number[]>();
+    for (const row of rows) {
+        if (row.type !== "message") continue;
+        const base = registryMessageBase(row.message_id);
+        const existing = tagNumbersByMessageBase.get(base);
+        if (existing) existing.push(row.tag_number);
+        else tagNumbersByMessageBase.set(base, [row.tag_number]);
+    }
+    for (const list of tagNumbersByMessageBase.values()) list.sort((a, b) => a - b);
     return {
         statusByTag: new Map(rows.map((row) => [row.tag_number, row.status])),
         messageIdByTag: new Map(rows.map((row) => [row.tag_number, row.message_id])),
+        typeByTag: new Map(rows.map((row) => [row.tag_number, row.type])),
+        tokensByTag: new Map(
+            rows.map((row) => [
+                row.tag_number,
+                row.token_count === null && row.input_token_count === null
+                    ? null
+                    : (row.token_count ?? 0) + (row.input_token_count ?? 0),
+            ]),
+        ),
         pendingTags: pending,
+        tagNumbersByMessageBase,
     };
 }
 
@@ -226,10 +284,14 @@ function resolvePhrase(
     for (const row of rows) {
         if (seen.has(row.message_id)) continue;
         seen.add(row.message_id);
-        const tags = statements.messageTags.all(sessionId, row.message_id) as unknown as {
-            tag_number: number;
-            status: string;
-        }[];
+        // Production registry keys are the suffixed content key `base:pK`;
+        // the mirror carries the bare base. The view map joins the domains.
+        const tags = (registry.tagNumbersByMessageBase.get(row.message_id) ?? []).map(
+            (tagNumber) => ({
+                tag_number: tagNumber,
+                status: registry.statusByTag.get(tagNumber) ?? "",
+            }),
+        );
         const rowTag = tags.find(
             (tag) =>
                 tag.status === "active" ||
@@ -335,12 +397,7 @@ export function resolveHandles(
           ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC
           LIMIT ?`,
     );
-    const messageTags = db.prepare(
-        `SELECT tag_number, status FROM tags
-          WHERE session_id = ? AND message_id = ? AND type = 'message'
-          ORDER BY tag_number ASC LIMIT 2`,
-    );
-    const statements = { match, messageTags };
+    const statements = { match };
     const registry = readRegistryView(db, sessionId);
     const tagsById = deps.callIdResolver.resolve(entries);
 
@@ -361,7 +418,7 @@ export function resolveHandles(
     };
 
     const ordinalOf = (messageId: string): number | undefined =>
-        deps.mint?.ordinalByMessageId.get(messageId);
+        ordinalForRegistryKey(deps.mint, messageId);
 
     for (const entry of entries) {
         const direct = tagsById.get(entry);
@@ -420,15 +477,7 @@ export function resolveHandles(
         // between the endpoints, ordered by message position then registry
         // order; the per-item classes apply inside (a range cannot smuggle a
         // protected item past the report discipline).
-        const span = collectSpanItems(
-            db,
-            sessionId,
-            deps.mint,
-            start.tag,
-            end.tag,
-            fromOrdinal,
-            toOrdinal,
-        );
+        const span = collectSpanItems(registry, deps.mint, start.tag, end.tag);
         if (span === "reversed") {
             collect({ kind: "error", reason: "reversed", input: entry });
             continue;
@@ -454,52 +503,23 @@ export function resolveHandles(
 }
 
 function collectSpanItems(
-    db: Database,
-    sessionId: string,
+    registry: RegistryView,
     mint: OrdinalMint,
     start: HandleItemRef,
     end: HandleItemRef,
-    fromOrdinal: number,
-    toOrdinal: number,
 ): SpanMembership[] | "reversed" | "missing" {
-    const messageIdsInSpan: { messageId: string; ordinal: number }[] = [];
-    for (const [messageId, ordinal] of mint.ordinalByMessageId) {
-        if (ordinal >= fromOrdinal && ordinal <= toOrdinal) {
-            messageIdsInSpan.push({ messageId, ordinal });
-        }
+    // Enumerate the session view in canonical geometry: every registered tag
+    // whose key names a positioned message, ordered by (ordinal, tag_number).
+    // The view spans all three key domains (bare / suffixed message keys,
+    // wire call ids), so tool rows inside the stretch participate without a
+    // join across mismatched key shapes.
+    const memberships: SpanMembership[] = [];
+    for (const [tagNumber, messageId] of registry.messageIdByTag) {
+        const ordinal = ordinalForRegistryKey(mint, messageId);
+        if (typeof ordinal !== "number") continue;
+        memberships.push({ tagNumber, messageId, ordinal, tagOrder: tagNumber });
     }
-    if (messageIdsInSpan.length === 0) return "missing";
-    messageIdsInSpan.sort((a, b) => a.ordinal - b.ordinal);
-
-    const rows: { tag_number: number; message_id: string }[] = [];
-    const CHUNK = 400;
-    for (let offset = 0; offset < messageIdsInSpan.length; offset += CHUNK) {
-        const chunk = messageIdsInSpan.slice(offset, offset + CHUNK);
-        const placeholders = chunk.map(() => "?").join(",");
-        const chunkRows = db
-            .prepare(
-                `SELECT tag_number, message_id FROM tags
-                  WHERE session_id = ? AND message_id IN (${placeholders})
-                  ORDER BY tag_number ASC`,
-            )
-            .all(sessionId, ...chunk.map((entry) => entry.messageId)) as unknown as {
-            tag_number: number;
-            message_id: string;
-        }[];
-        rows.push(...chunkRows);
-    }
-
-    const ordinalByMessage = new Map(
-        messageIdsInSpan.map((entry) => [entry.messageId, entry.ordinal]),
-    );
-    const memberships = rows
-        .map((row) => ({
-            tagNumber: row.tag_number,
-            messageId: row.message_id,
-            ordinal: ordinalByMessage.get(row.message_id) ?? 0,
-            tagOrder: row.tag_number,
-        }))
-        .sort((a, b) => a.ordinal - b.ordinal || a.tagOrder - b.tagOrder);
+    memberships.sort((a, b) => a.ordinal - b.ordinal || a.tagOrder - b.tagOrder);
 
     // Bound to the endpoints themselves (inclusive). Endpoint tags exist by
     // construction; the bounds keep same-message stretches precise. A
@@ -523,60 +543,49 @@ function collectSpanItems(
  * pointing grammar is for. Protected items are NOT queued here (nothing was
  * pointed at them; the model's explicit call is what defers them).
  */
-export function resolveBulkDefault(deps: ReduceResolverDeps & { sessionId: string }): {
+/**
+ * The no-arg bulk lane: every active tool-class item the model has already
+ * responded past — position strictly below the newest user message — above
+ * the token floor. Geometry runs on the registry view + mint (canonical,
+ * live-store positions): the FTS mirror join is deliberately NOT used, its
+ * stored ordinals are index-time values and its keys are the bare message
+ * ids while tool rows key on wire call ids. Items whose position cannot be
+ * established are never bulk-released (no positional claim is made about
+ * them); without a newest user message nothing has been responded past.
+ */
+export function resolveBulkDefault(deps: ReduceResolverDeps & {
+    sessionId: string;
+    mint?: OrdinalMint;
+}): {
     releasedItems: HandleItemRef[];
     inertItems: HandleItemRef[];
     protectedItems: HandleItemRef[];
 } {
     const { db, sessionId } = deps;
-    const lastUser = db
-        .prepare(
-            `SELECT MAX(CAST(message_ordinal AS INTEGER)) AS ordinal
-               FROM message_history_fts
-              WHERE session_id = ? AND role = 'user'`,
-        )
-        .get(sessionId) as { ordinal: number | null } | undefined;
-
-    const ordinalClause =
-        typeof lastUser?.ordinal === "number"
-            ? `AND (fts.message_ordinal IS NULL OR CAST(fts.message_ordinal AS INTEGER) < ?)`
-            : "";
-    const statement = db.prepare(
-        `SELECT t.tag_number, t.message_id
-           FROM tags t
-           LEFT JOIN message_history_fts fts
-             ON fts.session_id = t.session_id AND fts.message_id = t.message_id
-          WHERE t.session_id = ?
-            AND t.status = 'active'
-            AND t.type = 'tool'
-            AND NOT EXISTS (
-                SELECT 1 FROM pending_ops
-                 WHERE pending_ops.session_id = t.session_id
-                   AND pending_ops.tag_id = t.tag_number
-                   AND pending_ops.operation = 'drop'
-            )
-            AND ((t.token_count IS NULL AND t.input_token_count IS NULL)
-                 OR (COALESCE(t.token_count, 0) + COALESCE(t.input_token_count, 0)) >= ?)
-            ${ordinalClause}
-          ORDER BY t.tag_number ASC`,
-    );
-    const rows = (typeof lastUser?.ordinal === "number"
-        ? statement.all(sessionId, AGE_RECLAIM_MIN_TOKENS, lastUser.ordinal)
-        : statement.all(sessionId, AGE_RECLAIM_MIN_TOKENS)) as unknown as {
-        tag_number: number;
-        message_id: string;
-    }[];
-
+    const registry = readRegistryView(db, sessionId);
     const releasedItems: HandleItemRef[] = [];
     const inertItems: HandleItemRef[] = [];
     const protectedItems: HandleItemRef[] = [];
-    for (const row of rows) {
-        const item = { tagNumber: row.tag_number, messageId: row.message_id };
-        if (deps.inertTagNumbers?.has(row.tag_number)) {
+    const boundary = deps.mint?.latestUserOrdinal;
+    if (typeof boundary !== "number") return { releasedItems, inertItems, protectedItems };
+    const tagNumbers = [...registry.statusByTag.keys()].sort((a, b) => a - b);
+    for (const tagNumber of tagNumbers) {
+        if (registry.typeByTag.get(tagNumber) !== "tool") continue;
+        if (registry.statusByTag.get(tagNumber) !== "active") continue;
+        if (registry.pendingTags.has(tagNumber)) continue;
+        const tokens = registry.tokensByTag.get(tagNumber);
+        if (typeof tokens === "number" && tokens < AGE_RECLAIM_MIN_TOKENS) continue;
+        const ordinal = ordinalForRegistryKey(
+            deps.mint,
+            registry.messageIdByTag.get(tagNumber) ?? "",
+        );
+        if (typeof ordinal !== "number" || ordinal >= boundary) continue;
+        const item = { tagNumber, messageId: registry.messageIdByTag.get(tagNumber) ?? "" };
+        if (deps.inertTagNumbers?.has(tagNumber)) {
             inertItems.push(item);
             continue;
         }
-        if (deps.protectedTagNumbers.has(row.tag_number)) {
+        if (deps.protectedTagNumbers.has(tagNumber)) {
             protectedItems.push(item);
             continue;
         }
