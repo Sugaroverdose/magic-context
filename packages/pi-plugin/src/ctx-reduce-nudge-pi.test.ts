@@ -94,6 +94,12 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			const hints = reminder.hint.map(({ tag_number, tool_name }) => ({
 				tagNumber: tag_number,
 				toolName: tool_name,
+				// The golden is the registry-only (module-view) copy contract:
+				// no copyable handle visible, so no per-item line (the shared
+				// renderer rule). An explicit null marks "no handle" and
+				// survives delivery enrichment; the Pi production TS path has
+				// the wire call id available and renders the line.
+				callId: null,
 			}));
 			for (const hint of hints)
 				insertTag(
@@ -224,7 +230,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 
 	it("includes oldest reclaimable hints from the baseline", () => {
 		const db = createTestDb();
-		insertTag(db, SESSION, "hint-123", "tool", 9000, 123, 0, "read");
+		insertTag(db, SESSION, "call-h123", "tool", 9000, 123, 0, "read");
 		setPiChannel1Baseline(SESSION, {
 			...channel2BaselineFields(90_000, 120_000),
 			reducedSinceRefresh: false,
@@ -236,7 +242,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			toolName: "bash",
 			content: [{ type: "text", text: "some bash output" }],
 		});
-		expect(block?.text).toContain("oldest reclaimable: §123§ read.");
+		expect(block?.text).toContain("oldest reclaimable: call-h123 read.");
 		clearPiChannel1State(SESSION);
 	});
 
@@ -246,7 +252,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			insertTag(
 				db,
 				SESSION,
-				`msg-${tagNumber}`,
+				`call-${tagNumber}`,
 				"tool",
 				9000,
 				tagNumber,
@@ -285,10 +291,10 @@ describe("maybeChannel1ReminderForToolResult", () => {
 		});
 
 		expect(block?.text).toContain(
-			"oldest reclaimable: §4§ bash · §5§ bash · §6§ aft_search · §7§ read.",
+			"oldest reclaimable: call-4 bash · call-5 bash · call-6 aft_search · call-7 read.",
 		);
-		expect(block?.text).not.toContain("§1§ work");
-		expect(block?.text).not.toContain("§2§ board");
+		expect(block?.text).not.toContain("call-1 work");
+		expect(block?.text).not.toContain("call-2 board");
 		clearPiChannel1State(SESSION);
 	});
 
@@ -1123,9 +1129,9 @@ for (const channel of [1, 2]) {
 					sessionId,
 				);
 			}
-			expect(text).toContain("§3§ read");
-			expect(text).not.toContain("§1§");
-			expect(text).not.toContain("§2§");
+			expect(text).toContain("call-3 read");
+			expect(text).not.toContain("call-1");
+			expect(text).not.toContain("call-2");
 		} finally {
 			clearPiChannel1State(sessionId);
 			db.close();

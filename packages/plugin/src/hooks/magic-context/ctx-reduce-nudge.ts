@@ -427,7 +427,7 @@ function formatOldestReclaimableHint(hint?: readonly ToolReclaimHint[]): string 
     if (!hint || hint.length === 0) return "";
     const rendered = hint
         .slice(0, 4)
-        .filter((tag) => tag.callId !== undefined && tag.callId !== "")
+        .filter((tag) => typeof tag.callId === "string" && tag.callId !== "")
         .map((tag) => `${tag.callId} ${tag.toolName ?? "tool"}`)
         .join(" · ");
     return rendered.length > 0 ? `\noldest reclaimable: ${rendered}.` : "";

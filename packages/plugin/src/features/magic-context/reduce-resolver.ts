@@ -50,10 +50,25 @@ export function registryMessageBase(messageId: string): string {
 }
 
 /**
+ * Pi synthetic registration keys (`pi-msg-<ordinal>-<ts>-<role>`) freeze the
+ * birth position into the key. Pi histories are append-only, so the embedded
+ * ordinal stays the canonical position after id adoption would have.
+ */
+const SYNTHETIC_PI_MESSAGE_KEY = /^pi-msg-(\d+)-/;
+
+function syntheticBirthOrdinal(key: string): number | undefined {
+    const match = SYNTHETIC_PI_MESSAGE_KEY.exec(key);
+    if (!match) return undefined;
+    const ordinal = Number(match[1]);
+    return Number.isFinite(ordinal) && ordinal > 0 ? ordinal : undefined;
+}
+
+/**
  * Resolve the canonical ordinal for any key a registry row can carry:
  * bare message id (mirror / file rows), suffixed content key `base:pK`
- * (message rows), or wire call id (tool rows). `undefined` means the key
- * does not name a positioned message — never a guessed position.
+ * (message rows), wire call id (tool rows), or a Pi synthetic registration
+ * key whose birth ordinal is embedded in the grammar. `undefined` means the
+ * key does not name a positioned message — never a guessed position.
  */
 export function ordinalForRegistryKey(
     mint: OrdinalMint | undefined,
@@ -63,8 +78,10 @@ export function ordinalForRegistryKey(
     const direct = mint.ordinalByMessageId.get(key) ?? mint.ordinalByCallId?.get(key);
     if (typeof direct === "number") return direct;
     const base = registryMessageBase(key);
-    if (base !== key) return mint.ordinalByMessageId.get(base);
-    return undefined;
+    if (base === key) return syntheticBirthOrdinal(key);
+    const live = mint.ordinalByMessageId.get(base);
+    if (typeof live === "number") return live;
+    return syntheticBirthOrdinal(base);
 }
 
 export interface HandleItemRef {
@@ -553,10 +570,12 @@ function collectSpanItems(
  * established are never bulk-released (no positional claim is made about
  * them); without a newest user message nothing has been responded past.
  */
-export function resolveBulkDefault(deps: ReduceResolverDeps & {
-    sessionId: string;
-    mint?: OrdinalMint;
-}): {
+export function resolveBulkDefault(
+    deps: ReduceResolverDeps & {
+        sessionId: string;
+        mint?: OrdinalMint;
+    },
+): {
     releasedItems: HandleItemRef[];
     inertItems: HandleItemRef[];
     protectedItems: HandleItemRef[];
