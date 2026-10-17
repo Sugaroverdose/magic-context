@@ -21,12 +21,14 @@ describe("ctx-reduce constants", () => {
         });
 
         it("teaches the copy-handle grammar, never numeric stamps", () => {
-            expect(CTX_REDUCE_DESCRIPTION).toContain("toolcall_ids");
-            expect(CTX_REDUCE_DESCRIPTION).toContain("msg_samples");
-            expect(CTX_REDUCE_DESCRIPTION).toContain("copied exactly");
+            expect(CTX_REDUCE_DESCRIPTION).toContain("ctx_handles");
+            expect(CTX_REDUCE_DESCRIPTION).toContain("<start>..<end>");
+            expect(CTX_REDUCE_DESCRIPTION).toContain("ctx_expand(message=N)");
+            expect(CTX_REDUCE_DESCRIPTION).toContain("copied");
             expect(CTX_REDUCE_DESCRIPTION).toContain("slot for slot");
             expect(CTX_REDUCE_DESCRIPTION).not.toContain("§");
-            expect(CTX_REDUCE_DESCRIPTION).not.toContain("drop");
+            expect(CTX_REDUCE_DESCRIPTION).not.toContain("drop=");
+            expect(CTX_REDUCE_DESCRIPTION).not.toContain("tag=N");
         });
     });
 });

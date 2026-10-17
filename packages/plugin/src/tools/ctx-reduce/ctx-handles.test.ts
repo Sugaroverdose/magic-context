@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it } from "bun:test";
+import type { OrdinalMint } from "../../features/magic-context/reduce-resolver";
 import type { CallIdTagResolver } from "../../features/magic-context/tag-call-bridge";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { Database } from "../../shared/sqlite";
@@ -124,6 +125,26 @@ function seedMessages(db: Database, messages: SeedMessage[], sessionId = "ses-1"
 }
 
 /**
+ * DI fake for the canonical message-ordinal mint: production reads the host
+ * `message` table (read-session-raw order); the unit tests' world stores
+ * positions in the FTS mirror, so the fake reads those plus explicit
+ * overrides for messages the test world has no mirror row for.
+ */
+function fakeOrdinalMint(db: Database, extra: Record<string, number> = {}): OrdinalMint {
+    const rows = db
+        .prepare(
+            "SELECT message_id, CAST(message_ordinal AS INTEGER) AS ordinal FROM message_history_fts",
+        )
+        .all() as unknown as { message_id: string; ordinal: number }[];
+    const ordinalByMessageId = new Map<string, number>();
+    for (const row of rows) ordinalByMessageId.set(row.message_id, row.ordinal);
+    for (const [messageId, ordinal] of Object.entries(extra)) {
+        ordinalByMessageId.set(messageId, ordinal);
+    }
+    return { ordinalByMessageId };
+}
+
+/**
  * DI fake for the call-id bridge: the unit tests' tags table carries a
  * content_id column as the fake world's registry key. The production bridge
  * (host-store rank pairing) is covered against a host-shaped store in
@@ -161,7 +182,7 @@ function pendingTagNumbers(db: Database, sessionId: string): number[] {
     ).map((row) => row.tag_id);
 }
 
-describe("ctx_reduce ids lane", () => {
+describe("ctx_reduce handles lane (ids)", () => {
     let db: Database;
     const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
 
@@ -185,74 +206,80 @@ describe("ctx_reduce ids lane", () => {
         seed(db);
     });
 
-    it("resolves copied call ids, mirrors slots in input order, reports noop facts outside", async () => {
-        const tools = createCtxReduceTools({
+    const withWorld = (overrides: {
+        protectedSet?: ReadonlySet<number>;
+        rustToolBackends?: RustToolBackends;
+        resolver?: CallIdTagResolver;
+        mintExtra?: Record<string, number>;
+    }) =>
+        createCtxReduceTools({
             db,
-            protectedSet: new Set<number>([9]),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
+            protectedSet: overrides.protectedSet ?? new Set<number>(),
+            callIdResolver: overrides.resolver ?? fakeCallIdResolver(db, "ses-1"),
+            ordinalMint: () =>
+                fakeOrdinalMint(db, {
+                    "msg-5": 5,
+                    "msg-7": 7,
+                    "msg-9": 9,
+                    "msg-11": 11,
+                    "msg-3": 3,
+                    ...overrides.mintExtra,
+                }),
+            rustToolBackends: overrides.rustToolBackends,
         });
+
+    it("resolves copied call ids, echoes ordinals in input order, reports noop facts outside", async () => {
+        const tools = withWorld({ protectedSet: new Set<number>([9]) });
         const response = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-a", "call-b", "call-d", "call-c"] },
+            { ctx_handles: ["call-a", "call-b", "call-d", "call-c"] },
             ctx,
         )) as string;
 
-        expect(response).toContain("toolcall_ids: 5, 7, 11, 9.");
+        expect(response).toContain("ctx_handles: 5, 7, 11, 9.");
         expect(response).toContain("already released: 11.");
         expect(response).toContain(
-            "call-c provided in toolcall_ids is inside the protected working set; it applies once newer work displaces it.",
+            "call-c provided in ctx_handles is inside the protected working set; it applies once newer work displaces it.",
         );
         // Protected items are queued deferred (upstream semantics), not refused.
         expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
     });
 
     it("is idempotent: re-sent ids report the queued noop and queue nothing new", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
-        await tools.ctx_reduce!.execute({ toolcall_ids: ["call-a"] }, ctx);
+        const tools = withWorld({});
+        await tools.ctx_reduce!.execute({ ctx_handles: ["call-a"] }, ctx);
         const before = pendingTagNumbers(db, "ses-1");
         const response = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-a"] },
+            { ctx_handles: ["call-a"] },
             ctx,
         )) as string;
         expect(response).toBe(
             [
                 "All requested tags were already queued or processed. No new action is needed.",
-                "toolcall_ids: 5.",
+                "ctx_handles: 5.",
                 "queued for release: 5.",
             ].join("\n"),
         );
         expect(pendingTagNumbers(db, "ses-1")).toEqual(before);
     });
 
-    it("keeps positional slots for repeated ids: same tag per slot, one queued op", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+    it("keeps positional slots for repeated ids: same ordinal per slot, one queued op", async () => {
+        const tools = withWorld({});
         const response = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-a", "call-a"] },
+            { ctx_handles: ["call-a", "call-a"] },
             ctx,
         )) as string;
-        expect(response).toBe("toolcall_ids: 5, 5.");
+        expect(response).toBe("ctx_handles: 5, 5.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([5]);
     });
 
     it("rejects a foreign-session id as broken input, never a foreign release", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+        const tools = withWorld({});
         const response = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-e"] },
+            { ctx_handles: ["call-e"] },
             ctx,
         )) as string;
         expect(response).toContain(
-            "error: call-e provided in toolcall_ids was not found: no tool call with this id exists in this session.",
+            'error: "call-e" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
         );
         expect(response).toContain("Nothing was released; resend the corrected batch.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
@@ -260,45 +287,33 @@ describe("ctx_reduce ids lane", () => {
     });
 
     it("rejects the whole batch when the bridge cannot pair one id, valid siblings unapplied", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: { resolve: () => new Map() },
-        });
+        const tools = withWorld({ resolver: { resolve: () => new Map() } });
         const response = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-b"] },
+            { ctx_handles: ["call-b", "call-a"] },
             ctx,
         )) as string;
-        expect(response).toContain("error: call-b provided in toolcall_ids was not found");
-        expect(response).not.toContain("toolcall_ids:");
+        expect(response).toContain('error: "call-b" provided in ctx_handles was not found');
+        expect(response).not.toContain("ctx_handles: 7");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
     it("error shape never coexists with success lines", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+        const tools = withWorld({});
         const response = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-a", "nope-1"] },
+            { ctx_handles: ["call-a", "nope-1"] },
             ctx,
         )) as string;
-        expect(response).toContain("error: nope-1 provided in toolcall_ids was not found");
+        expect(response).toContain('error: "nope-1" provided in ctx_handles was not found');
         // The valid sibling is NOT applied: the corrected resend applies all slots.
-        expect(response).not.toContain("toolcall_ids:");
+        expect(response).not.toContain("ctx_handles: 5");
         expect(response).not.toContain("already released");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
-    it("rejects mixing ids with the legacy drop grammar", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+    it("rejects mixing handles with the legacy drop grammar", async () => {
+        const tools = withWorld({});
         const response = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-a"], drop: "7" },
+            { ctx_handles: ["call-a"], drop: "7" },
             ctx,
         )) as string;
         expect(response).toContain("cannot be combined");
@@ -306,11 +321,7 @@ describe("ctx_reduce ids lane", () => {
     });
 
     it("no-arg invocation releases the bulk default set", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+        const tools = withWorld({});
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
         expect(response).toContain("released everything responded past: 5, 7, 9.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
@@ -325,29 +336,24 @@ describe("ctx_reduce ids lane", () => {
                 return { result: { ok: true, queued } };
             }) as unknown as RustToolBackends["reduce"],
         };
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            rustToolBackends,
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+        const tools = withWorld({ rustToolBackends });
 
         queued = 2;
         const first = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-a", "call-b"] },
+            { ctx_handles: ["call-a", "call-b"] },
             ctx,
         )) as string;
         expect(received).toBe("5,7");
-        expect(first).toBe("toolcall_ids: 5, 7.");
+        expect(first).toBe("ctx_handles: 5, 7.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
 
         queued = 0;
         const second = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-a", "call-b"] },
+            { ctx_handles: ["call-a", "call-b"] },
             ctx,
         )) as string;
         expect(second).toContain("already released: 5, 7.");
-        expect(second).toContain("toolcall_ids: 5, 7.");
+        expect(second).toContain("ctx_handles: 5, 7.");
     });
 
     it("refuses capability when the module backend throws", async () => {
@@ -356,14 +362,9 @@ describe("ctx_reduce ids lane", () => {
                 throw new Error("module down");
             }) as unknown as RustToolBackends["reduce"],
         };
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            rustToolBackends,
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+        const tools = withWorld({ rustToolBackends });
         const response = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-a"] },
+            { ctx_handles: ["call-a"] },
             ctx,
         )) as string;
         expect(response).toContain("cleanup");
@@ -371,7 +372,7 @@ describe("ctx_reduce ids lane", () => {
     });
 });
 
-describe("ctx_reduce samples lane", () => {
+describe("ctx_reduce handles lane (quotes)", () => {
     let db: Database;
     const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
 
@@ -404,54 +405,48 @@ describe("ctx_reduce samples lane", () => {
         ]);
     });
 
-    it("releases the uniquely matched message shell via its echoed handle", async () => {
-        const tools = createCtxReduceTools({
+    const withWorld = (overrides: { protectedSet?: ReadonlySet<number> } = {}) =>
+        createCtxReduceTools({
             db,
-            protectedSet: new Set<number>(),
+            protectedSet: overrides.protectedSet ?? new Set<number>(),
             callIdResolver: fakeCallIdResolver(db, "ses-1"),
+            ordinalMint: () => fakeOrdinalMint(db),
         });
+
+    it("releases the uniquely matched message shell, slot echoes its ordinal", async () => {
+        const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute(
-            { msg_samples: ["unrelated deployment checklist"] },
+            { ctx_handles: ["unrelated deployment checklist"] },
             ctx,
         )) as string;
-        expect(response).toBe("msg_samples: 42.");
+        expect(response).toBe("ctx_handles: 102.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
     });
 
     it("matches through whitespace variance (mirror collapses, both sides tokenize)", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+        const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute(
-            { msg_samples: ["revenue climbing twelve percent"] },
+            { ctx_handles: ["revenue climbing twelve percent"] },
             ctx,
         )) as string;
         expect(response).toContain(
-            'error: "revenue climbing twelve percent" provided in msg_samples was found twice',
+            'error: "revenue climbing twelve percent" provided in ctx_handles was found twice',
         );
-        // Candidates are listed in bm25 relevance order, not tag order.
-        expect(response).toContain("Candidates: 4");
-        expect(response).toContain('40: "the quarterly');
-        expect(response).toContain('41: "notes:');
+        // Candidates are listed in bm25 relevance order, named by context position.
+        expect(response).toContain('100: "the quarterly');
+        expect(response).toContain('101: "notes:');
         expect(response).toContain("Copy a longer run");
         expect(response).toContain("Nothing was released; resend the corrected batch.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
-    it("ambiguity rejects the whole call, including ids in the same batch", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+    it("ambiguity rejects the whole call, other handles in the same batch unapplied", async () => {
+        const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute(
-            { msg_samples: ["revenue climbing twelve percent"], toolcall_ids: ["call-x"] },
-            { sessionID: "ses-1", directory: "/tmp" } as never,
+            { ctx_handles: ["revenue climbing twelve percent", "unrelated deployment"] },
+            ctx,
         )) as string;
         expect(response).toContain("was found twice");
-        // The samples-lane ambiguity names itself; the batch never applies.
         expect(response).toContain("Nothing was released; resend the corrected batch.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
@@ -474,37 +469,29 @@ describe("ctx_reduce samples lane", () => {
                 status: "dropped",
             },
         ]);
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+        const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute(
-            { msg_samples: ["quarterly figures show revenue"] },
+            { ctx_handles: ["quarterly figures show revenue"] },
             ctx,
         )) as string;
-        expect(response).toBe("msg_samples: 40.");
+        expect(response).toBe("ctx_handles: 100.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([40]);
     });
 
-    it("rejects a sample that matches nothing anywhere as broken input", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+    it("rejects a quote that matches nothing anywhere as broken input", async () => {
+        const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute(
-            { msg_samples: ["purple platypus parliament"], toolcall_ids: [] },
+            { ctx_handles: ["purple platypus parliament"] },
             ctx,
         )) as string;
         expect(response).toContain(
-            'error: "purple platypus parliament" provided in msg_samples was not found: this text exists nowhere in this session.',
+            'error: "purple platypus parliament" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
         );
         expect(response).toContain("Nothing was released; resend the corrected batch.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
-    it("diagnoses an out-of-window sample as a noop, not an error", async () => {
+    it("diagnoses an out-of-window quote as a noop, not an error", async () => {
         seedMessages(db, [
             {
                 messageId: "msg-dead",
@@ -522,46 +509,38 @@ describe("ctx_reduce samples lane", () => {
                 status: "dropped",
             },
         ]);
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+        const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute(
-            { msg_samples: ["archived changelog entry"] },
+            { ctx_handles: ["archived changelog entry"] },
             ctx,
         )) as string;
         expect(response).toBe(
             [
                 "All requested tags were already queued or processed. No new action is needed.",
-                "msg_samples: 44.",
-                "already released: 44.",
+                "ctx_handles: 99.",
+                "already released: 99.",
             ].join("\n"),
         );
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
     it("queues a protected message match with the upstream promise line", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>([42]),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-        });
+        const tools = withWorld({ protectedSet: new Set<number>([42]) });
         const response = (await tools.ctx_reduce!.execute(
-            { msg_samples: ["deployment checklist"] },
+            { ctx_handles: ["deployment checklist"] },
             ctx,
         )) as string;
         expect(response).toBe(
             [
-                "msg_samples: 42.",
-                '"deployment checklist" provided in msg_samples is inside the protected working set; it applies once newer work displaces it.',
+                "ctx_handles: 102.",
+                "deployment checklist provided in ctx_handles is inside the protected working set; it applies once newer work displaces it.",
             ].join("\n"),
         );
         // Upstream semantics: protected drops are queued, applied on displacement.
         expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
     });
 
-    it("mixes ids and samples in one applied call, one queued transaction", async () => {
+    it("mixes ids and quotes in one array, one applied call, one queued transaction", async () => {
         seedTags(db, [
             { tagNumber: 55, messageId: "msg-t", sessionId: "ses-1", contentId: "call-t" },
         ]);
@@ -569,13 +548,182 @@ describe("ctx_reduce samples lane", () => {
             db,
             protectedSet: new Set<number>(),
             callIdResolver: fakeCallIdResolver(db, "ses-1"),
+            ordinalMint: () => fakeOrdinalMint(db, { "msg-t": 90 }),
         });
         const response = (await tools.ctx_reduce!.execute(
-            { toolcall_ids: ["call-t"], msg_samples: ["deployment checklist"] },
+            { ctx_handles: ["call-t", "deployment checklist"] },
             ctx,
         )) as string;
-        expect(response).toBe(["toolcall_ids: 55.", "msg_samples: 42."].join("\n"));
+        expect(response).toBe("ctx_handles: 90, 102.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([42, 55]);
+    });
+});
+
+describe("ctx_reduce range lane", () => {
+    let db: Database;
+    const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
+
+    beforeEach(() => {
+        db = createTestDb();
+        seedMessages(db, [
+            { messageId: "msg-a", ordinal: 10, role: "user", content: "alpha task one" },
+            { messageId: "msg-b", ordinal: 11, role: "assistant", content: "beta task two" },
+            { messageId: "msg-c", ordinal: 12, role: "assistant", content: "gamma task three" },
+        ]);
+        seedTags(db, [
+            {
+                tagNumber: 1,
+                messageId: "msg-a",
+                sessionId: "ses-1",
+                tagType: "message",
+                contentId: "call-a",
+            },
+            {
+                tagNumber: 2,
+                messageId: "msg-b",
+                sessionId: "ses-1",
+                tagType: "message",
+                contentId: "call-b",
+            },
+            {
+                tagNumber: 3,
+                messageId: "msg-c",
+                sessionId: "ses-1",
+                tagType: "message",
+                contentId: "call-c",
+            },
+        ]);
+    });
+
+    const withWorld = (overrides: { protectedSet?: ReadonlySet<number> } = {}) =>
+        createCtxReduceTools({
+            db,
+            protectedSet: overrides.protectedSet ?? new Set<number>(),
+            callIdResolver: fakeCallIdResolver(db, "ses-1"),
+            ordinalMint: () => fakeOrdinalMint(db),
+        });
+
+    it("releases the inclusive stretch between two quote endpoints, span slot in echo", async () => {
+        const tools = withWorld();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["alpha task one..gamma task three"] },
+            ctx,
+        )) as string;
+        expect(response).toBe("ctx_handles: 10-12.");
+        // Inclusive: all three message items between the endpoints, one event.
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
+    });
+
+    it("resolves range endpoints through the id lane too", async () => {
+        const tools = withWorld();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["call-a..call-b"] },
+            ctx,
+        )) as string;
+        expect(response).toBe("ctx_handles: 10-11.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2]);
+    });
+
+    it("keeps a literal double-dot as phrase text when the full entry matches", async () => {
+        seedMessages(db, [
+            {
+                messageId: "msg-dot",
+                ordinal: 20,
+                role: "user",
+                content: "the .. marks a path segment in this quote",
+            },
+        ]);
+        seedTags(db, [
+            { tagNumber: 8, messageId: "msg-dot", sessionId: "ses-1", tagType: "message" },
+        ]);
+        const tools = withWorld();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["the .. marks a path segment"] },
+            ctx,
+        )) as string;
+        expect(response).toBe("ctx_handles: 20.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([8]);
+    });
+
+    it("rejects a reversed range, naming the entry, nothing applied", async () => {
+        const tools = withWorld();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["gamma task three..alpha task one"] },
+            ctx,
+        )) as string;
+        expect(response).toContain(
+            'error: "gamma task three..alpha task one" provided in ctx_handles is reversed',
+        );
+        expect(response).toContain("Nothing was released; resend the corrected batch.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("a missing range endpoint is the same broken-input class as a missing entry", async () => {
+        const tools = withWorld();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["alpha task one..purple platypus"] },
+            ctx,
+        )) as string;
+        expect(response).toContain(
+            'error: "purple platypus" provided in ctx_handles was not found',
+        );
+        expect(response).toContain('It is the end of the range "alpha task one..purple platypus".');
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("protected items inside a stretch queue deferred with the range promise line", async () => {
+        seedMessages(db, [
+            {
+                messageId: "msg-d",
+                ordinal: 13,
+                role: "user",
+                content: "delta task four",
+            },
+        ]);
+        seedTags(db, [
+            {
+                tagNumber: 4,
+                messageId: "msg-d",
+                sessionId: "ses-1",
+                tagType: "message",
+                contentId: "call-d",
+            },
+        ]);
+        const tools = withWorld({ protectedSet: new Set<number>([3]) });
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["alpha task one..delta task four"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("ctx_handles: 10-13.");
+        expect(response).toContain("covers items inside the protected working set");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 4]);
+    });
+
+    it("noop facts inside a stretch report ordinals, span slot unchanged", async () => {
+        // msg-b's tag already queued: the stretch still spans, the inside noop
+        // reports without touching the slot.
+        db.prepare(
+            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES ('ses-1', 2, 'drop', 1)",
+        ).run();
+        const tools = withWorld();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["alpha task one..gamma task three"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("ctx_handles: 10-12.");
+        expect(response).toContain("queued for release: 11.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
+    });
+
+    it("handles array mixes a single entry, a range, and repeats in one positional line", async () => {
+        const tools = withWorld();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["call-b", "alpha task one..gamma task three"] },
+            ctx,
+        )) as string;
+        // Positional mirror: entry 1 is the single id (ordinal 11), entry 2 the span.
+        expect(response).toContain("ctx_handles: 11, 10-12.");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
     });
 });
 
@@ -612,26 +760,30 @@ describe("ctx_reduce bulk default", () => {
         ).run();
     });
 
-    it("releases only consumed tool tags past the floor and before the newest user message", async () => {
-        const tools = createCtxReduceTools({
+    const withWorld = (overrides: { protectedSet?: ReadonlySet<number> } = {}) =>
+        createCtxReduceTools({
             db,
-            protectedSet: new Set<number>(),
+            protectedSet: overrides.protectedSet ?? new Set<number>(),
             callIdResolver: fakeCallIdResolver(db, "ses-1"),
+            ordinalMint: () => fakeOrdinalMint(db),
         });
+
+    it("releases only consumed tool tags past the floor and before the newest user message", async () => {
+        const tools = withWorld();
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).toContain("released everything responded past: 60.");
+        expect(response).toContain("released everything responded past: 50.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([60, 63]);
     });
 
     it("holds a protected consumed tag instead of releasing it", async () => {
-        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>([60]) });
+        const tools = withWorld({ protectedSet: new Set<number>([60]) });
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
         expect(response).not.toContain("released everything");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
     });
 
     it("reports nothing-to-release when only protected work is left", async () => {
-        const tools = createCtxReduceTools({ db, protectedSet: new Set<number>([60]) });
+        const tools = withWorld({ protectedSet: new Set<number>([60]) });
         const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
         expect(response).toContain("Nothing older to release");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);

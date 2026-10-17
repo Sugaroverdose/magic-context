@@ -1,15 +1,17 @@
 import { createHash } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
+import { createHostOrdinalMint } from "../../features/magic-context/message-ordinal-mint";
 import {
     getProtectionWindowForSession,
     type ProtectionWindowResult,
 } from "../../features/magic-context/protection-window";
 import { parseRangeString } from "../../features/magic-context/range-parser";
 import {
+    type HandleItemRef,
+    type OrdinalMint,
     type ReduceInputOutcome,
     resolveBulkDefault,
-    resolveIds,
-    resolveSamples,
+    resolveHandles,
 } from "../../features/magic-context/reduce-resolver";
 import {
     getOrCreateSessionMeta,
@@ -19,6 +21,10 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { getInertWhitespaceAssistantTags } from "../../features/magic-context/storage-tags";
+import {
+    type CallIdTagResolver,
+    createHostCallIdResolver,
+} from "../../features/magic-context/tag-call-bridge";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
@@ -39,6 +45,10 @@ export interface CtxReduceToolDeps {
      * requested drops apply immediately, and non-tool tags are never reclaim targets.
      */
     protectedSet?: ReadonlySet<number> | ((sessionId: string) => ReadonlySet<number>);
+    /** DI seam for the ids lane's wire-call-id -> registry pairing (tests). */
+    callIdResolver?: CallIdTagResolver;
+    /** DI seam for the canonical message-ordinal mint (tests). */
+    ordinalMint?: OrdinalMint | ((sessionId: string) => OrdinalMint | undefined);
     getProtectionWindow?: (sessionId: string) => ProtectionWindowResult;
     floor?: number;
     getSessionTokens?: (sessionId: string) => number;
@@ -57,20 +67,15 @@ function formatRawDropForAck(rawDrop: string): string {
 }
 
 const ctxReduceArgsShape = {
-    // ctx_reduce v1: the numeric 'drop' parameter is no longer advertised to
-    // the model. The schema below is passthrough, so old-shaped or imitated
-    // calls still reach execute() and the upstream numeric path stays intact.
-    toolcall_ids: tool.schema
+    // ctx_reduce v1 (Rev 5.3): the numeric 'drop' parameter is no longer
+    // advertised to the model. The schema below is passthrough, so old-shaped
+    // or imitated calls still reach execute() and the upstream numeric path
+    // stays intact.
+    ctx_handles: tool.schema
         .array(tool.schema.string())
         .optional()
         .describe(
-            "Ids of tool calls to release, copied exactly from the calls as they appear in context.",
-        ),
-    msg_samples: tool.schema
-        .array(tool.schema.string())
-        .optional()
-        .describe(
-            "A contiguous run of a message's own text, copied exactly — not reworded, not shortened with ellipses.",
+            "Exact targets of the release, copied from your context: a tool call id, a verbatim run of an item's own text, or a stretch `<start>..<end>` of such handles.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model
@@ -86,41 +91,57 @@ function echoInput(input: string, maxChars = 80): string {
 
 const NOTHING_RELEASED_CLOSER = "Nothing was released; resend the corrected batch.";
 
-function renderPointingError(outcome: Extract<ReduceInputOutcome, { kind: "error" }>): string {
+function renderPointingError(
+    outcome: Extract<ReduceInputOutcome, { kind: "error" }>,
+    mint: OrdinalMint,
+): string {
+    const rangeHint = outcome.range
+        ? ` It is the ${outcome.range.which} of the range "${echoInput(outcome.range.entry)}".`
+        : "";
     if (outcome.reason === "ambiguous") {
         const candidates = (outcome.candidates ?? [])
-            .map((candidate) => `${candidate.tagNumber}: "${echoInput(candidate.excerpt, 60)}"`)
+            .map((candidate) => {
+                const ordinal = mint.ordinalByMessageId.get(candidate.messageId);
+                const position = typeof ordinal === "number" ? `${ordinal}: ` : "";
+                return `${position}"${echoInput(candidate.excerpt, 60)}"`;
+            })
             .join("; ");
         return [
-            `error: "${echoInput(outcome.input)}" provided in msg_samples was found twice: the text matches more than one item in your context.`,
-            candidates.length > 0 ? `Candidates: ${candidates}.` : "",
+            `error: "${echoInput(outcome.input)}" provided in ctx_handles was found twice: the text matches more than one item in your context.`,
+            rangeHint.trim().length > 0 ? rangeHint.trim() : "",
+            candidates.length > 0 ? `Candidates (context positions): ${candidates}.` : "",
             `Copy a longer run that contains the one you mean. ${NOTHING_RELEASED_CLOSER}`,
         ]
             .filter(Boolean)
             .join(" ");
     }
-    if (outcome.reason === "nowhere") {
-        return `error: "${echoInput(outcome.input)}" provided in msg_samples was not found: this text exists nowhere in this session. Copy a sample verbatim from a message you can see, or drop this input and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
+    if (outcome.reason === "reversed") {
+        return `error: "${echoInput(outcome.input)}" provided in ctx_handles is reversed: its end names an older position than its start in your context. Swap the endpoints, or send the items directly. ${NOTHING_RELEASED_CLOSER}`;
     }
-    return `error: ${echoInput(outcome.input)} provided in toolcall_ids was not found: no tool call with this id exists in this session. Copy the call id exactly from the call as shown, or drop this input and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
+    return `error: "${echoInput(outcome.input)}" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.${rangeHint} Copy a call id or a verbatim run of text exactly from what you can see, or drop this entry and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
 }
 
 /**
- * Settled success shape: optional leading upstream sentence (all-noop case),
- * then one line per called param — the array holds one SLOT PER INPUT in exact
- * input order (positional mirror), then noop fact lines (tags only), then the
- * protected promise lines per lane echoing the model's own input bytes. Bare
- * digits appear only inside the arrays and always mean tags.
+ * Settled success shape (Rev 5.2/5.3 + D18): optional leading upstream
+ * sentence (all-noop case), then ONE array line — the positional mirror: one
+ * SLOT PER ENTRY in exact input order; a slot holds the MESSAGE ORDINAL of
+ * the item (the same number ctx_expand(message=N) eats), a range entry's
+ * slot holds its ordinal span `first-last`. Then noop fact lines, then the
+ * protected promise lines echoing the model's own input bytes. Every bare
+ * number anywhere is a message ordinal.
  */
 function renderPointingSuccess(
-    inputs: { ids: readonly string[]; samples: readonly string[] },
-    idOutcomes: readonly ReduceInputOutcome[],
-    sampleOutcomes: readonly ReduceInputOutcome[],
+    entries: readonly string[],
+    outcomes: readonly ReduceInputOutcome[],
+    mint: OrdinalMint,
 ): string {
-    const laneTags = (outcomes: readonly ReduceInputOutcome[]): number[] =>
-        outcomes.map((outcome) => ("tagNumber" in outcome ? outcome.tagNumber : 0));
+    const ordinalOf = (messageId: string): number | undefined =>
+        mint.ordinalByMessageId.get(messageId);
 
-    const fresh = [...idOutcomes, ...sampleOutcomes].filter(
+    const flat = outcomes.flatMap((outcome) =>
+        outcome.kind === "range" ? outcome.items : [outcome],
+    );
+    const fresh = flat.filter(
         (outcome) => outcome.kind === "released" || outcome.kind === "deferred",
     ).length;
 
@@ -128,24 +149,26 @@ function renderPointingSuccess(
     if (fresh === 0) {
         lines.push("All requested tags were already queued or processed. No new action is needed.");
     }
-    if (inputs.ids.length > 0) {
-        lines.push(`toolcall_ids: ${laneTags(idOutcomes).join(", ")}.`);
-    }
-    if (inputs.samples.length > 0) {
-        lines.push(`msg_samples: ${laneTags(sampleOutcomes).join(", ")}.`);
-    }
 
-    const all = [...idOutcomes, ...sampleOutcomes];
+    const slots = outcomes.map((outcome) => {
+        if (outcome.kind === "range") return `${outcome.fromOrdinal}-${outcome.toOrdinal}`;
+        if (outcome.kind === "error") return "?";
+        return String(ordinalOf(outcome.messageId) ?? "?");
+    });
+    lines.push(`ctx_handles: ${slots.join(", ")}.`);
+
     const noopLine = (reason: "released" | "compacted" | "queued" | "inert", label: string) => {
-        const tags = [
+        const ordinals = [
             ...new Set(
-                all.flatMap((outcome) =>
-                    outcome.kind === "noop" && outcome.reason === reason ? [outcome.tagNumber] : [],
+                flat.flatMap((outcome) =>
+                    outcome.kind === "noop" && outcome.reason === reason
+                        ? [ordinalOf(outcome.messageId)]
+                        : [],
                 ),
             ),
-        ];
-        if (tags.length > 0) {
-            lines.push(`${label}: ${tags.join(", ")}.`);
+        ].filter((ordinal): ordinal is number => typeof ordinal === "number");
+        if (ordinals.length > 0) {
+            lines.push(`${label}: ${ordinals.join(", ")}.`);
         }
     };
     noopLine("released", "already released");
@@ -153,29 +176,31 @@ function renderPointingSuccess(
     noopLine("queued", "queued for release");
     noopLine("inert", "nothing to reclaim");
 
-    const protectedLine = (
-        inputsOfLane: readonly string[],
-        outcomesOfLane: readonly ReduceInputOutcome[],
-        param: string,
-    ) => {
-        const handles = outcomesOfLane.flatMap((outcome, index) =>
-            outcome.kind === "deferred" ? [echoInput(inputsOfLane[index] ?? "")] : [],
-        );
-        if (handles.length === 0) return;
-        const list =
-            handles.length === 1
-                ? `${handles[0]} provided in ${param} is inside the protected working set; it applies once newer work displaces it.`
-                : `${handles.join(", ")} provided in ${param} are inside the protected working set; they apply once newer work displaces them.`;
-        lines.push(list);
-    };
-    protectedLine(inputs.ids, idOutcomes, "toolcall_ids");
-    protectedLine(
-        inputs.samples.map((sample) => `"${echoInput(sample)}"`),
-        sampleOutcomes,
-        "msg_samples",
+    const protectedEntries = outcomes.flatMap((outcome, index) =>
+        outcome.kind === "deferred" ? [echoInput(entries[index] ?? "")] : [],
     );
+    if (protectedEntries.length > 0) {
+        const list =
+            protectedEntries.length === 1
+                ? `${protectedEntries[0]} provided in ctx_handles is inside the protected working set; it applies once newer work displaces it.`
+                : `${protectedEntries.join(", ")} provided in ctx_handles are inside the protected working set; they apply once newer work displaces them.`;
+        lines.push(list);
+    }
+    const protectedRanges = outcomes.filter(
+        (outcome) =>
+            outcome.kind === "range" && outcome.items.some((item) => item.kind === "deferred"),
+    );
+    for (const outcome of protectedRanges) {
+        const entryIndex = outcomes.indexOf(outcome);
+        lines.push(
+            `${echoInput(entries[entryIndex] ?? "")} covers items inside the protected working set; they apply once newer work displaces them.`,
+        );
+    }
     return lines.join("\n");
 }
+
+const MINT_UNAVAILABLE =
+    "Error: Message positions could not be resolved in this session; nothing was changed. Retry in a moment.";
 
 function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
     let fallbackCommandSequence = 0;
@@ -234,6 +259,15 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         updateSessionMeta(deps.db, sessionId, { lastNudgeTokens: currentInputTokens });
     };
 
+    const ordinalMintFor = (sessionId: string): OrdinalMint | undefined => {
+        if (deps.ordinalMint) {
+            return typeof deps.ordinalMint === "function"
+                ? deps.ordinalMint(sessionId)
+                : deps.ordinalMint;
+        }
+        return createHostOrdinalMint(sessionId);
+    };
+
     /** One apply event: route the released set through the active backend. */
     const applyReleasedTags = async (
         invokeContext: { sessionID: string; directory: string },
@@ -285,6 +319,15 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         return { deduped: false };
     };
 
+    const distinctOrdinals = (items: readonly HandleItemRef[], mint: OrdinalMint): number[] => [
+        ...new Set(
+            items.flatMap((item) => {
+                const ordinal = mint.ordinalByMessageId.get(item.messageId);
+                return typeof ordinal === "number" ? [ordinal] : [];
+            }),
+        ),
+    ];
+
     /** No-arg default: release everything already responded past. */
     const executeBulkRelease = async (invokeContext: {
         sessionID: string;
@@ -298,12 +341,17 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             protectedTagNumbers: protectedSet,
             inertTagNumbers,
         });
-        if (result.releasedTagNumbers.length === 0) {
-            return result.protectedTagNumbers.length > 0
+        if (result.releasedItems.length === 0) {
+            return result.protectedItems.length > 0
                 ? "Nothing older to release; newer work is still protected."
                 : "Nothing to release: no consumed tool output is waiting.";
         }
-        const apply = await applyReleasedTags(invokeContext, result.releasedTagNumbers);
+        const mint = ordinalMintFor(sessionId);
+        if (!mint) return MINT_UNAVAILABLE;
+        const apply = await applyReleasedTags(
+            invokeContext,
+            result.releasedItems.map((item) => item.tagNumber),
+        );
         if (apply.refused) {
             return apply.refused;
         }
@@ -315,13 +363,14 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             );
         } else {
             lines.push(
-                `released everything responded past: ${result.releasedTagNumbers.join(", ")}.`,
+                `released everything responded past: ${distinctOrdinals(result.releasedItems, mint).join(", ")}.`,
             );
         }
-        if (result.inertTagNumbers.length > 0) {
-            lines.push(`nothing to reclaim: ${result.inertTagNumbers.join(", ")}.`);
+        const inertOrdinals = distinctOrdinals(result.inertItems, mint);
+        if (inertOrdinals.length > 0) {
+            lines.push(`nothing to reclaim: ${inertOrdinals.join(", ")}.`);
         }
-        if (result.protectedTagNumbers.length > 0) {
+        if (result.protectedItems.length > 0) {
             lines.push(
                 "Newer items are inside the protected working set; they apply once your work displaces them.",
             );
@@ -331,72 +380,74 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
 
     const executePointingLane = async (
         invokeContext: { sessionID: string; directory: string },
-        rawIds: string[],
-        rawSamples: string[],
+        rawHandles: string[],
     ): Promise<string> => {
         const sessionId = invokeContext.sessionID;
-        const ids = rawIds.map((id) => id.trim()).filter((id) => id.length > 0);
-        const samples = rawSamples
-            .map((sample) => sample.trim())
-            .filter((sample) => sample.length > 0);
-        if (ids.length === 0 && samples.length === 0) {
-            return "Error: 'toolcall_ids'/'msg_samples' must contain entries.";
+        const handles = rawHandles
+            .map((handle) => handle.trim())
+            .filter((handle) => handle.length > 0);
+        if (handles.length === 0) {
+            return "Error: 'ctx_handles' must contain entries.";
         }
 
         const { protectedSet, inertTagNumbers } = resolveProtectionContext(sessionId);
+        const mint = ordinalMintFor(sessionId);
+        if (!mint) return MINT_UNAVAILABLE;
 
-        // Validation completes BEFORE any enqueue: both lanes resolve against
+        // Validation completes BEFORE any enqueue: the batch resolves against
         // the registry without touching it; any error class rejects the whole
         // batch, so the forced retry is application-free (one apply event per
         // reduce intent, ≤1 contiguous cache divergence).
-        const sampleResult = resolveSamples(
-            { db: deps.db, sessionId, protectedTagNumbers: protectedSet, inertTagNumbers },
-            samples,
-        );
-        const idResult = resolveIds(
+        const result = resolveHandles(
             {
                 db: deps.db,
                 sessionId,
                 protectedTagNumbers: protectedSet,
                 inertTagNumbers,
+                callIdResolver: deps.callIdResolver ?? createHostCallIdResolver(deps.db, sessionId),
+                mint,
             },
-            ids,
+            handles,
         );
+        if (result.internalError) {
+            return result.internalError;
+        }
 
-        const error = [...sampleResult.outcomes, ...idResult.outcomes].find(
+        const error = result.outcomes.find(
             (outcome): outcome is Extract<ReduceInputOutcome, { kind: "error" }> =>
                 outcome.kind === "error",
         );
         if (error) {
-            return renderPointingError(error);
+            return renderPointingError(error, mint);
         }
 
-        const queueNumbers = [
-            ...new Set([...sampleResult.queueTagNumbers, ...idResult.queueTagNumbers]),
-        ];
-
-        if (queueNumbers.length > 0) {
-            const apply = await applyReleasedTags(invokeContext, queueNumbers);
+        if (result.queueTagNumbers.length > 0) {
+            const apply = await applyReleasedTags(invokeContext, result.queueTagNumbers);
             if (apply.refused) {
                 return apply.refused;
             }
             if (apply.deduped) {
                 // Module-side dedupe beat the registry read: those inputs are
                 // already released; report, do not claim a fresh release.
-                for (const outcomes of [idResult.outcomes, sampleResult.outcomes]) {
-                    for (const outcome of outcomes) {
-                        if (outcome.kind === "released") {
-                            const mutable = outcome as { kind: string; reason?: string };
-                            mutable.kind = "noop";
-                            mutable.reason = "released";
-                        }
-                    }
-                }
+                const remap = (outcome: ReduceInputOutcome): ReduceInputOutcome =>
+                    outcome.kind === "released"
+                        ? {
+                              kind: "noop",
+                              reason: "released",
+                              tagNumber: outcome.tagNumber,
+                              messageId: outcome.messageId,
+                          }
+                        : outcome;
+                result.outcomes = result.outcomes.map((outcome) =>
+                    outcome.kind === "range"
+                        ? { ...outcome, items: outcome.items.map(remap) }
+                        : remap(outcome),
+                );
             }
             touchNudgeWatermark(sessionId);
         }
 
-        return renderPointingSuccess({ ids, samples }, idResult.outcomes, sampleResult.outcomes);
+        return renderPointingSuccess(handles, result.outcomes, mint);
     };
 
     return tool({
@@ -408,24 +459,22 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             args = unwrapImitatedReducedArgs(args, ["drop"], { drop: "string" });
             const sessionId = toolContext.sessionID;
 
-            const hasIds = Array.isArray(args.toolcall_ids) && args.toolcall_ids.length > 0;
-            const hasSamples = Array.isArray(args.msg_samples) && args.msg_samples.length > 0;
-            if ((hasIds || hasSamples) && args.drop) {
-                return "Error: 'toolcall_ids'/'msg_samples' and 'drop' cannot be combined in one call.";
+            const hasHandles = Array.isArray(args.ctx_handles) && args.ctx_handles.length > 0;
+            if (hasHandles && args.drop) {
+                return "Error: 'ctx_handles' and 'drop' cannot be combined in one call.";
             }
-            if (!hasIds && !hasSamples && !args.drop) {
+            if (!hasHandles && !args.drop) {
                 if ("drop" in args) {
                     return "Error: 'drop' must be a non-empty list of tag ids.";
+                }
+                if ("ctx_handles" in args) {
+                    return "Error: 'ctx_handles' must contain entries.";
                 }
                 return await executeBulkRelease(toolContext);
             }
 
-            if (hasIds || hasSamples) {
-                return await executePointingLane(
-                    toolContext,
-                    hasIds ? (args.toolcall_ids as string[]) : [],
-                    hasSamples ? (args.msg_samples as string[]) : [],
-                );
+            if (hasHandles) {
+                return await executePointingLane(toolContext, args.ctx_handles as string[]);
             }
 
             const dropArg = args.drop;

@@ -86,7 +86,7 @@ describe("createToolRegistry — memory gating", () => {
             // shape (the passthrough engine path still accepts it).
             // ctx_expand stays byte-vanilla: tags are the plugin's addressing
             // mechanism and the release echo returns tags for vanilla reuse.
-            ctx_reduce: ["toolcall_ids", "msg_samples"],
+            ctx_reduce: ["ctx_handles"],
             ctx_expand: ["tag", "start", "end", "verbose", "message"],
             ctx_note: [
                 "action",

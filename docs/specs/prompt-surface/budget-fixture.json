@@ -76,8 +76,8 @@
     },
     "toolDescriptions": {
       "ctx_reduce": {
-        "chars": 2220,
-        "tokens": 484
+        "chars": 2448,
+        "tokens": 534
       },
       "ctx_expand": {
         "chars": 1534,
@@ -98,8 +98,8 @@
     },
     "serializedParameterSchemas": {
       "ctx_reduce": {
-        "chars": 337,
-        "tokens": 80
+        "chars": 231,
+        "tokens": 60
       },
       "ctx_expand": {
         "chars": 743,
@@ -117,11 +117,11 @@
         "chars": 566,
         "tokens": 134
       },
-      "totalTokens": 867
+      "totalTokens": 847
     },
-    "builtInProviderVisibleTotal": 4113
+    "builtInProviderVisibleTotal": 4143
   },
-  "mutableProseBaseline": 3246,
+  "mutableProseBaseline": 3296,
   "integerLightCeiling": 1917,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",
