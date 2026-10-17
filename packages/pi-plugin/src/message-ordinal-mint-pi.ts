@@ -1,5 +1,5 @@
-import type { OrdinalMint } from "@magic-context/core/features/magic-context/reduce-resolver";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { OrdinalMint } from "@magic-context/core/features/magic-context/reduce-resolver";
 import { readPiSessionMessages } from "./read-session-pi";
 
 /**
@@ -43,6 +43,9 @@ export function createPiOrdinalMint(
 		) {
 			latestUserOrdinal = message.ordinal;
 		}
+		// Carriers only: a toolResult folds into a later message carrying the
+		// same callID, and last-write-wins would point the call at its result.
+		if (message.role !== "assistant") continue;
 		for (const part of message.parts) {
 			const tool = part as { type?: unknown; callID?: unknown } | null;
 			if (
