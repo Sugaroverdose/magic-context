@@ -522,7 +522,7 @@
         "file": "packages/plugin/src/tools/ctx-reduce/constants.ts",
         "symbol": "CTX_REDUCE_DESCRIPTION",
         "lines": "1-10",
-        "evidence": "Stamp an item on your desk"
+        "evidence": "Release already-consumed items from your context window"
       },
       "sharedAcrossPresets": false,
       "composedIn": [
@@ -1097,7 +1097,7 @@
       "operativeCondition": "A spent tagged output should leave the working set.",
       "mechanism": "Mark it discardable; release is queued and delayed until context space is needed.",
       "consequence": "The original remains visible until the system releases it.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Release already-consumed items from your context window"
     },
     {
       "id": "T-002",
@@ -1108,7 +1108,7 @@
       "operativeCondition": "A requested tag is in the recent window.",
       "mechanism": "The newest tags are protected and age out before release.",
       "consequence": "Marking recent output is harmless.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Release already-consumed items from your context window"
     },
     {
       "id": "T-003",
@@ -1119,7 +1119,7 @@
       "operativeCondition": "Content has finally been released.",
       "mechanism": "It becomes a short placeholder; rerun the recovery tool to get it back, and mark only content that is genuinely done.",
       "consequence": "The agent does not treat an unrecovered output as safely disposable.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Release already-consumed items from your context window"
     },
     {
       "id": "T-004",
@@ -1130,7 +1130,7 @@
       "operativeCondition": "Choosing output to mark.",
       "mechanism": "Prefer summarized, repeated, redundant, persisted, or merely confirmatory status output; keep user messages, unresolved errors, raw evidence, and exact wording that matters.",
       "consequence": "Reduction preserves unresolved and authoritative evidence.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Release already-consumed items from your context window"
     },
     {
       "id": "T-005",
@@ -1141,7 +1141,7 @@
       "operativeCondition": "A large range is under consideration.",
       "mechanism": "Review every tag before calling the drop parameter.",
       "consequence": "A blanket range cannot silently discard mixed-value content.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Release already-consumed items from your context window"
     },
     {
       "id": "T-006",

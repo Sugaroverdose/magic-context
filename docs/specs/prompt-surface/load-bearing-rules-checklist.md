@@ -884,7 +884,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** A spent tagged output should leave the working set.
 - **Mechanism:** Mark it discardable; release is queued and delayed until context space is needed.
 - **Consequence:** The original remains visible until the system releases it.
-- **Source evidence:** `Stamp an item on your desk`
+- **Source evidence:** `Release already-consumed items from your context window`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -908,7 +908,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** A requested tag is in the recent window.
 - **Mechanism:** The newest tags are protected and age out before release.
 - **Consequence:** Marking recent output is harmless.
-- **Source evidence:** `Stamp an item on your desk`
+- **Source evidence:** `Release already-consumed items from your context window`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -932,7 +932,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** Content has finally been released.
 - **Mechanism:** It becomes a short placeholder; rerun the recovery tool to get it back, and mark only content that is genuinely done.
 - **Consequence:** The agent does not treat an unrecovered output as safely disposable.
-- **Source evidence:** `Stamp an item on your desk`
+- **Source evidence:** `Release already-consumed items from your context window`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -956,7 +956,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** Choosing output to mark.
 - **Mechanism:** Prefer summarized, repeated, redundant, persisted, or merely confirmatory status output; keep user messages, unresolved errors, raw evidence, and exact wording that matters.
 - **Consequence:** Reduction preserves unresolved and authoritative evidence.
-- **Source evidence:** `Stamp an item on your desk`
+- **Source evidence:** `Release already-consumed items from your context window`
 
 | Variant | Applicability status |
 | --- | --- |
@@ -980,7 +980,7 @@ Applicability is calculated from the fragment's `composedIn`/`statusByVariant` m
 - **Operative condition:** A large range is under consideration.
 - **Mechanism:** Review every tag before calling the drop parameter.
 - **Consequence:** A blanket range cannot silently discard mixed-value content.
-- **Source evidence:** `Stamp an item on your desk`
+- **Source evidence:** `Release already-consumed items from your context window`
 
 | Variant | Applicability status |
 | --- | --- |
