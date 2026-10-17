@@ -2,200 +2,151 @@ import type { Database } from "../../shared/sqlite";
 import { normalizeIndexText } from "./message-index";
 import { getPendingOps } from "./storage-ops";
 import { AGE_RECLAIM_MIN_TOKENS } from "./storage-tags";
+import type { CallIdTagResolver } from "./tag-call-bridge";
 
 /**
- * The ids lane of the ctx_reduce v1 pointing grammar: the model copies wire
- * call ids; the resolver maps each to its tags-registry entry and hands the
- * internal tag numbers to the existing drop engine (queuePendingOp /
- * protection window). Resolution keys on `tags.content_id` (the wire call id,
- * the same key the FPE resolver uses); ids are session-scoped lookups — an id
- * copied from another session is `unknown` here, never a foreign release.
+ * The ctx_reduce v1 pointing grammar resolver: the model addresses items by
+ * copied handles (`toolcall_ids` — wire call ids; `msg_samples` — verbatim
+ * text excerpts). The resolver maps each input to its tags-registry entry and
+ * classifies it; the caller enqueues the released/deferred set exactly once
+ * through the active backend (queuePendingOp / module), keeping a single apply
+ * point per call.
+ *
+ * Outcome vocabulary (settled response contract): every input maps to exactly
+ * one outcome in INPUT ORDER (positional slots). `error` outcomes reject the
+ * whole batch before anything is enqueued (the forced retry stays
+ * application-free); `noop` outcomes are non-breaking successes reported with
+ * their tag; `deferred` is the protected class queued for deferred
+ * application (upstream semantics).
  */
 
 export type ReduceInputOutcome =
-    | { kind: "released"; messageId: string; tagNumber: number }
-    | { kind: "already_released"; tagNumber: number }
-    | { kind: "refused"; reason: "protected"; tagNumber?: number }
-    /** Noop success: whitespace-only provider framing, nothing reclaimable. */
-    | { kind: "noop"; reason: "provider-framing"; tagNumber: number }
-    | { kind: "unknown" }
-    /** Sample matched no live visible item (report-only, non-destructive). */
-    | { kind: "no-match" }
-    /** Sample matched >1 live visible item: the only batch-rejecting class. */
-    | { kind: "ambiguous"; candidates: SampleCandidate[] };
+    | { kind: "released"; tagNumber: number }
+    /** Protected: queued now, applied once newer work displaces it. */
+    | { kind: "deferred"; tagNumber: number }
+    /** Non-breaking success: the desired end state is or will be true. */
+    | {
+          kind: "noop";
+          reason: "released" | "compacted" | "queued" | "inert";
+          tagNumber: number;
+      }
+    /** Broken input: the whole batch is rejected, nothing is enqueued. */
+    | {
+          kind: "error";
+          reason: "no-such-id" | "nowhere" | "ambiguous";
+          input: string;
+          candidates?: SampleCandidate[];
+      };
 
 export interface ReduceResolveResult {
-    /** One outcome per input id, same order as the input array. */
+    /** One outcome per input, same order as the input array (positional). */
     outcomes: ReduceInputOutcome[];
     /**
-     * Internal tag numbers classified `released`, deduplicated. The resolver
-     * does NOT queue — the caller enqueues these exactly once through the
-     * active backend (module or TS), keeping a single apply point.
+     * Internal tag numbers to enqueue (released ∪ deferred), deduplicated.
+     * The resolver does NOT queue — the caller enqueues this set exactly once.
      */
-    releasedTagNumbers: number[];
+    queueTagNumbers: number[];
 }
 
 interface ReduceResolverDeps {
     db: Database;
-    /** Tag numbers inside the protected working set (not reclaimable now). */
+    /** Tag numbers inside the protected working set (queued deferred). */
     protectedTagNumbers: ReadonlySet<number>;
-    /** Tag numbers that are provider framing (nothing to reclaim). */
+    /** Tag numbers that are provider framing (nothing reclaimable). */
     inertTagNumbers?: ReadonlySet<number>;
 }
 
-interface RegistryRow {
-    tag_number: number;
-    message_id: string;
-    status: string;
-    type: string;
+interface RegistryView {
+    statusByTag: Map<number, string>;
+    pendingTags: Set<number>;
 }
 
-function lookupByContentId(db: Database, sessionId: string, contentId: string): RegistryRow[] {
-    return db
-        .prepare(
-            `SELECT tag_number, message_id, status, type
-       FROM tags
-      WHERE session_id = ? AND content_id = ?
-      ORDER BY tag_number ASC
-      LIMIT 2`,
-        )
-        .all(sessionId, contentId) as unknown as RegistryRow[];
+function readRegistryView(db: Database, sessionId: string): RegistryView {
+    const rows = db
+        .prepare(`SELECT tag_number, status FROM tags WHERE session_id = ?`)
+        .all(sessionId) as unknown as { tag_number: number; status: string }[];
+    const pending = new Set(
+        getPendingOps(db, sessionId)
+            .filter((op) => op.operation === "drop")
+            .map((op) => op.tagId),
+    );
+    return {
+        statusByTag: new Map(rows.map((row) => [row.tag_number, row.status])),
+        pendingTags: pending,
+    };
+}
+
+/** Shared classification of a resolved registry tag (both lanes). */
+export function classifyRegistryTag(
+    deps: { protectedTagNumbers: ReadonlySet<number>; inertTagNumbers?: ReadonlySet<number> },
+    registry: RegistryView,
+    tagNumber: number,
+): ReduceInputOutcome {
+    if (registry.pendingTags.has(tagNumber)) {
+        return { kind: "noop", reason: "queued", tagNumber };
+    }
+    const status = registry.statusByTag.get(tagNumber);
+    if (status === "dropped") {
+        return { kind: "noop", reason: "released", tagNumber };
+    }
+    if (status === "compacted") {
+        return { kind: "noop", reason: "compacted", tagNumber };
+    }
+    if (deps.inertTagNumbers?.has(tagNumber)) {
+        return { kind: "noop", reason: "inert", tagNumber };
+    }
+    if (deps.protectedTagNumbers.has(tagNumber)) {
+        return { kind: "deferred", tagNumber };
+    }
+    return { kind: "released", tagNumber };
 }
 
 /**
- * Resolve copied call ids to registry entries and classify each against the
- * registry. Non-destructive outcomes never reject the batch: every id gets a
- * report outcome while all `released` items form one queue set the caller
- * applies exactly once (≤1 apply event per call). `ids` must be deduplicated
- * by the caller BEFORE resolution — a repeated id would otherwise double the
- * released echo.
+ * The `toolcall_ids` lane: copied wire call ids resolve through the call-id
+ * bridge (the registry stores no call id; the bridge pairs wire calls to tags
+ * by registration rank). An id absent from the registry can only be a
+ * never-existing id (ids copied from another session are session-scoped
+ * misses too) — a broken input, error class. Repeated ids are allowed: each
+ * occurrence keeps its slot, queueing happens once.
  */
 export function resolveIds(
-    deps: ReduceResolverDeps & { sessionId: string },
+    deps: ReduceResolverDeps & { sessionId: string; callIdResolver: CallIdTagResolver },
     ids: readonly string[],
 ): ReduceResolveResult {
+    if (ids.length === 0) return { outcomes: [], queueTagNumbers: [] };
     const { db, sessionId } = deps;
+    const tagsById = deps.callIdResolver.resolve(ids);
+    const registry = readRegistryView(db, sessionId);
 
-    const tagsById = new Map<string, RegistryRow | undefined>();
-    for (const id of ids) {
-        if (tagsById.has(id)) continue;
-        const rows = lookupByContentId(db, sessionId, id);
-        if (rows.length === 1) tagsById.set(id, rows[0]);
-        else tagsById.set(id, undefined); // 0 rows = unknown; >1 = corrupt duplicate
-    }
-
-    const pendingMap = new Map(getPendingOps(db, sessionId).map((op) => [op.tagId, op.operation]));
     const outcomes: ReduceInputOutcome[] = [];
-    const toQueue: { tagNumber: number; messageId: string }[] = [];
-    const seenQueue = new Set<number>();
-
+    const queue = new Set<number>();
     for (const id of ids) {
         const tag = tagsById.get(id);
         if (!tag) {
-            outcomes.push({ kind: "unknown" });
+            outcomes.push({ kind: "error", reason: "no-such-id", input: id });
             continue;
         }
-        if (tag.status === "dropped" || pendingMap.get(tag.tag_number) === "drop") {
-            outcomes.push({ kind: "already_released", tagNumber: tag.tag_number });
-            continue;
+        const outcome = classifyRegistryTag(deps, registry, tag.tag_number);
+        outcomes.push(outcome);
+        if (outcome.kind === "released" || outcome.kind === "deferred") {
+            queue.add(tag.tag_number);
         }
-        if (tag.status === "compacted") {
-            outcomes.push({ kind: "already_released", tagNumber: tag.tag_number });
-            continue;
-        }
-        if (deps.inertTagNumbers?.has(tag.tag_number)) {
-            outcomes.push({ kind: "noop", reason: "provider-framing", tagNumber: tag.tag_number });
-            continue;
-        }
-        if (deps.protectedTagNumbers.has(tag.tag_number)) {
-            outcomes.push({ kind: "refused", reason: "protected", tagNumber: tag.tag_number });
-            continue;
-        }
-        outcomes.push({ kind: "released", messageId: tag.message_id, tagNumber: tag.tag_number });
-        seenQueue.add(tag.tag_number);
-        toQueue.push({ tagNumber: tag.tag_number, messageId: tag.message_id });
     }
-
-    return { outcomes, releasedTagNumbers: [...new Set(toQueue.map((i) => i.tagNumber))] };
+    return { outcomes, queueTagNumbers: [...queue] };
 }
 
 /**
- * Ordered echo of the released items' registry tags, input-order, deduplicated.
- * Tags are the plugin's addressing mechanism — the echo is directly reusable
- * as `ctx_expand(tag=N)` without teaching any new handle format.
- */
-export function releasedTagHandles(result: ReduceResolveResult): number[] {
-    return successTagHandles(result.outcomes);
-}
-
-/**
- * Success array: one tag per input that landed (freshly released or noop),
- * input order, deduplicated. Noop facts are NOT marked inside the array —
- * they are reported outside as separate info lines (settled response shape:
- * the array mirrors the input, the reasons annotate it from the outside).
- */
-export function successTagHandles(outcomes: readonly ReduceInputOutcome[]): number[] {
-    const handles: number[] = [];
-    const seen = new Set<number>();
-    for (const outcome of outcomes) {
-        if (
-            (outcome.kind === "released" ||
-                outcome.kind === "already_released" ||
-                outcome.kind === "noop") &&
-            !seen.has(outcome.tagNumber)
-        ) {
-            seen.add(outcome.tagNumber);
-            handles.push(outcome.tagNumber);
-        }
-    }
-    return handles;
-}
-
-/** Tag lists for the noop entries, grouped by reason, for outside-array info lines. */
-export function noopTagLists(outcomes: readonly ReduceInputOutcome[]): {
-    alreadyReleased: number[];
-    nothingToReclaim: number[];
-} {
-    const alreadyReleased: number[] = [];
-    const nothingToReclaim: number[] = [];
-    for (const outcome of outcomes) {
-        if (outcome.kind === "already_released" && !alreadyReleased.includes(outcome.tagNumber)) {
-            alreadyReleased.push(outcome.tagNumber);
-        } else if (outcome.kind === "noop" && !nothingToReclaim.includes(outcome.tagNumber)) {
-            nothingToReclaim.push(outcome.tagNumber);
-        }
-    }
-    return { alreadyReleased, nothingToReclaim };
-}
-
-/** Input handles (index into the array) for the given outcome kinds, in order. */
-export function inputHandlesFor(
-    outcomes: readonly ReduceInputOutcome[],
-    kinds: ReduceInputOutcome["kind"][],
-): number[] {
-    const out: number[] = [];
-    outcomes.forEach((outcome, index) => {
-        if (kinds.includes(outcome.kind)) out.push(index);
-    });
-    return out;
-}
-
-/**
- * The samples lane: the model quotes a contiguous run of an item's own text,
- * copied exactly. Resolution is the LEXICAL lane only — one FTS5 phrase
- * query over the live `message_history_fts` mirror (tokenize='porter
- * unicode61', content-only so role terms never leak in), which absorbs case,
- * morphology, and whitespace variance on BOTH sides: the mirror indexes
- * whitespace-collapsed text, so a copied run matches its source modulo
- * whitespace runs even though neither side rewrites the other.
+ * The `msg_samples` lane: the model quotes a contiguous run of a message's own
+ * text, copied exactly. Resolution is the LEXICAL lane only — one FTS5 phrase
+ * query over the live `message_history_fts` mirror, which absorbs case,
+ * morphology, and whitespace variance on both sides.
  *
- * A phrase matches MESSAGES (the mirror is per-message), which is exactly the
- * message-shell release class; the candidate must own a live `message` tag —
- * an FTS hit whose message has no registry handle is not a release candidate
- * at all ("what you cannot see is not a candidate"). More than one live
- * candidate is the ONE batch-rejecting class: the caller must reject the
- * whole call before applying anything (the forced retry must be
- * application-free, ≤1 apply event per reduce intent).
+ * The registry status doubles as the visibility scope: rows whose message tag
+ * is `active` are the in-window candidates (the contract path: ≥2 active is
+ * the ambiguity error); the same query's non-active rows are the diagnostic —
+ * text that exists in the session but whose item is already out of the window
+ * or queued is a noop, never an error. Only a phrase matching no row anywhere
+ * is broken input ("exists nowhere").
  */
 
 export interface SampleCandidate {
@@ -204,11 +155,6 @@ export interface SampleCandidate {
     /** Internal registry number, resolver-side bookkeeping. */
     tagNumber?: number;
 }
-
-export type SampleOutcome =
-    | { kind: "matched"; tagNumber: number; messageId: string }
-    | { kind: "no-match" }
-    | { kind: "ambiguous"; candidates: SampleCandidate[] };
 
 const SAMPLE_MATCH_LIMIT = 30;
 const SAMPLE_EXCERPT_CHARS = 120;
@@ -229,11 +175,11 @@ interface SampleRow {
 }
 
 export function resolveSamples(
-    db: Database,
-    sessionId: string,
+    deps: ReduceResolverDeps & { sessionId: string },
     samples: readonly string[],
-): SampleOutcome[] {
-    if (samples.length === 0) return [];
+): ReduceResolveResult {
+    if (samples.length === 0) return { outcomes: [], queueTagNumbers: [] };
+    const { db, sessionId } = deps;
     const matchStatement = db.prepare(
         `SELECT message_id, substr(content, 1, ?) AS excerpt
            FROM message_history_fts
@@ -246,11 +192,16 @@ export function resolveSamples(
           WHERE session_id = ? AND message_id = ? AND type = 'message'
           ORDER BY tag_number ASC LIMIT 2`,
     );
+    const registry = readRegistryView(db, sessionId);
 
-    return samples.map((sample): SampleOutcome => {
+    const outcomes: ReduceInputOutcome[] = [];
+    const queue = new Set<number>();
+    for (const sample of samples) {
         const query = ftsPhraseQuery(sample);
-        if (query.length === 0) return { kind: "no-match" };
-
+        if (query.length === 0) {
+            outcomes.push({ kind: "error", reason: "nowhere", input: sample });
+            continue;
+        }
         const rows = matchStatement.all(
             SAMPLE_EXCERPT_CHARS,
             sessionId,
@@ -259,6 +210,7 @@ export function resolveSamples(
         ) as unknown as SampleRow[];
 
         const live: { tagNumber: number; candidate: SampleCandidate }[] = [];
+        const dead: { tagNumber: number }[] = [];
         const seen = new Set<string>();
         for (const row of rows) {
             if (seen.has(row.message_id)) continue;
@@ -267,60 +219,53 @@ export function resolveSamples(
                 tag_number: number;
                 status: string;
             }[];
-            const liveTag = tags.find((tag) => tag.status === "active");
-            // Registry-absent, corrupt-duplicate, or non-active matches are
-            // not release candidates at all: "what you cannot see is not a
-            // candidate". Ambiguity is computed over LIVE matches only.
-            if (liveTag && tags.length === 1) {
+            const rowTag = tags.find(
+                (tag) =>
+                    tag.status === "active" ||
+                    tag.status === "dropped" ||
+                    registry.pendingTags.has(tag.tag_number),
+            );
+            if (!rowTag || tags.length !== 1) continue;
+            if (rowTag.status === "active" && !registry.pendingTags.has(rowTag.tag_number)) {
                 live.push({
-                    tagNumber: liveTag.tag_number,
+                    tagNumber: rowTag.tag_number,
                     candidate: { messageId: row.message_id, excerpt: row.excerpt },
                 });
+            } else {
+                dead.push({ tagNumber: rowTag.tag_number });
             }
         }
 
-        if (live.length === 0) return { kind: "no-match" };
         if (live.length === 1) {
-            const only = live[0];
-            return {
-                kind: "matched",
-                tagNumber: only.tagNumber,
-                messageId: only.candidate.messageId,
-            };
+            const outcome = classifyRegistryTag(deps, registry, live[0].tagNumber);
+            outcomes.push(outcome);
+            if (outcome.kind === "released" || outcome.kind === "deferred") {
+                queue.add(live[0].tagNumber);
+            }
+            continue;
         }
-        return {
-            kind: "ambiguous",
-            candidates: live
-                .slice(0, 8)
-                .map((entry) => ({ ...entry.candidate, tagNumber: entry.tagNumber })),
-        };
-    });
-}
-
-/**
- * Classify a sample-matched message tag against the same protection/pending
- * state the ids lane uses. Returns the shared input-outcome vocabulary.
- */
-export function classifyMessageTag(
-    deps: {
-        db: Database;
-        sessionId: string;
-        protectedTagNumbers: ReadonlySet<number>;
-        inertTagNumbers?: ReadonlySet<number>;
-    },
-    outcome: Extract<SampleOutcome, { kind: "matched" }>,
-): ReduceInputOutcome {
-    const pending = getPendingOps(deps.db, deps.sessionId);
-    if (pending.some((op) => op.tagId === outcome.tagNumber && op.operation === "drop")) {
-        return { kind: "already_released", tagNumber: outcome.tagNumber };
+        if (live.length > 1) {
+            outcomes.push({
+                kind: "error",
+                reason: "ambiguous",
+                input: sample,
+                candidates: live
+                    .slice(0, 8)
+                    .map((entry) => ({ ...entry.candidate, tagNumber: entry.tagNumber })),
+            });
+            continue;
+        }
+        // Zero live candidates: the same rows carry the diagnostic (out-of-window
+        // / dead-registry items are noops); zero registry rows anywhere is the
+        // nowhere error.
+        const diagnostic = dead.find((entry) => registry.statusByTag.has(entry.tagNumber));
+        if (diagnostic) {
+            outcomes.push(classifyRegistryTag(deps, registry, diagnostic.tagNumber));
+            continue;
+        }
+        outcomes.push({ kind: "error", reason: "nowhere", input: sample });
     }
-    if (deps.inertTagNumbers?.has(outcome.tagNumber)) {
-        return { kind: "noop", reason: "provider-framing", tagNumber: outcome.tagNumber };
-    }
-    if (deps.protectedTagNumbers.has(outcome.tagNumber)) {
-        return { kind: "refused", reason: "protected", tagNumber: outcome.tagNumber };
-    }
-    return { kind: "released", messageId: outcome.messageId, tagNumber: outcome.tagNumber };
+    return { outcomes, queueTagNumbers: [...queue] };
 }
 
 /**
@@ -329,15 +274,16 @@ export function classifyMessageTag(
  * protected working set, past the token floor (sub-floor items cost more in
  * transform bytes than they save), and strictly BEFORE the newest user
  * message: in-flight work of the current turn is structurally unreachable by
- * the default, whatever the protection window's tail membership says. Text
- * shells are deliberately NOT bulk-collected: they are the conversation's
- * reference anchors, and their surgical release is what `samples` is for.
- * The same report-only outcome vocabulary applies (inert framing is skipped,
- * protected is excluded by construction, so what remains simply releases).
+ * the default. Text shells are deliberately NOT bulk-collected: they are the
+ * conversation's reference anchors, and their surgical release is what
+ * `msg_samples` is for. Protected items are NOT queued here (nothing was
+ * pointed at them; the model's explicit call is what defers them).
  */
-export function resolveBulkDefault(
-    deps: ReduceResolverDeps & { sessionId: string },
-): ReduceResolveResult {
+export function resolveBulkDefault(deps: ReduceResolverDeps & { sessionId: string }): {
+    releasedTagNumbers: number[];
+    inertTagNumbers: number[];
+    protectedTagNumbers: number[];
+} {
     const { db, sessionId } = deps;
     const lastUser = db
         .prepare(
@@ -377,19 +323,19 @@ export function resolveBulkDefault(
         message_id: string;
     }[];
 
-    const outcomes: ReduceInputOutcome[] = [];
     const releasedTagNumbers: number[] = [];
+    const inert: number[] = [];
+    const protectedTags: number[] = [];
     for (const row of rows) {
         if (deps.inertTagNumbers?.has(row.tag_number)) {
-            outcomes.push({ kind: "noop", reason: "provider-framing", tagNumber: row.tag_number });
+            inert.push(row.tag_number);
             continue;
         }
         if (deps.protectedTagNumbers.has(row.tag_number)) {
-            outcomes.push({ kind: "refused", reason: "protected", tagNumber: row.tag_number });
+            protectedTags.push(row.tag_number);
             continue;
         }
-        outcomes.push({ kind: "released", messageId: row.message_id, tagNumber: row.tag_number });
         releasedTagNumbers.push(row.tag_number);
     }
-    return { outcomes, releasedTagNumbers };
+    return { releasedTagNumbers, inertTagNumbers: inert, protectedTagNumbers: protectedTags };
 }

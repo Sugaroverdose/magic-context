@@ -6,12 +6,7 @@ import {
 } from "../../features/magic-context/protection-window";
 import { parseRangeString } from "../../features/magic-context/range-parser";
 import {
-    classifyMessageTag,
     type ReduceInputOutcome,
-    inputHandlesFor,
-    noopTagLists,
-    releasedTagHandles,
-    successTagHandles,
     resolveBulkDefault,
     resolveIds,
     resolveSamples,
@@ -65,23 +60,122 @@ const ctxReduceArgsShape = {
     // ctx_reduce v1: the numeric 'drop' parameter is no longer advertised to
     // the model. The schema below is passthrough, so old-shaped or imitated
     // calls still reach execute() and the upstream numeric path stays intact.
-    ids: tool.schema
+    toolcall_ids: tool.schema
         .array(tool.schema.string())
         .optional()
         .describe(
-            "Call ids of tool calls to release, copied exactly from the calls as they appear in context.",
+            "Ids of tool calls to release, copied exactly from the calls as they appear in context.",
         ),
-    samples: tool.schema
+    msg_samples: tool.schema
         .array(tool.schema.string())
         .optional()
         .describe(
-            "Quote a contiguous run of the item's own text, copied exactly — not reworded, not shortened with ellipses.",
+            "A contiguous run of a message's own text, copied exactly — not reworded, not shortened with ellipses.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with
 // passthrough so execute() can receive those fields without advertising them.
 const ctxReduceArgsSchema = tool.schema.object(ctxReduceArgsShape).passthrough();
+
+/** Echo a broken input in its own format, readable-length truncated. */
+function echoInput(input: string, maxChars = 80): string {
+    const collapsed = input.replace(/\s+/g, " ").trim();
+    return collapsed.length > maxChars ? `${collapsed.slice(0, maxChars)}…` : collapsed;
+}
+
+const NOTHING_RELEASED_CLOSER = "Nothing was released; resend the corrected batch.";
+
+function renderPointingError(outcome: Extract<ReduceInputOutcome, { kind: "error" }>): string {
+    if (outcome.reason === "ambiguous") {
+        const candidates = (outcome.candidates ?? [])
+            .map((candidate) => `${candidate.tagNumber}: "${echoInput(candidate.excerpt, 60)}"`)
+            .join("; ");
+        return [
+            `error: "${echoInput(outcome.input)}" provided in msg_samples was found twice: the text matches more than one item in your context.`,
+            candidates.length > 0 ? `Candidates: ${candidates}.` : "",
+            `Copy a longer run that contains the one you mean. ${NOTHING_RELEASED_CLOSER}`,
+        ]
+            .filter(Boolean)
+            .join(" ");
+    }
+    if (outcome.reason === "nowhere") {
+        return `error: "${echoInput(outcome.input)}" provided in msg_samples was not found: this text exists nowhere in this session. Copy a sample verbatim from a message you can see, or drop this input and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
+    }
+    return `error: ${echoInput(outcome.input)} provided in toolcall_ids was not found: no tool call with this id exists in this session. Copy the call id exactly from the call as shown, or drop this input and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
+}
+
+/**
+ * Settled success shape: optional leading upstream sentence (all-noop case),
+ * then one line per called param — the array holds one SLOT PER INPUT in exact
+ * input order (positional mirror), then noop fact lines (tags only), then the
+ * protected promise lines per lane echoing the model's own input bytes. Bare
+ * digits appear only inside the arrays and always mean tags.
+ */
+function renderPointingSuccess(
+    inputs: { ids: readonly string[]; samples: readonly string[] },
+    idOutcomes: readonly ReduceInputOutcome[],
+    sampleOutcomes: readonly ReduceInputOutcome[],
+): string {
+    const laneTags = (outcomes: readonly ReduceInputOutcome[]): number[] =>
+        outcomes.map((outcome) => ("tagNumber" in outcome ? outcome.tagNumber : 0));
+
+    const fresh = [...idOutcomes, ...sampleOutcomes].filter(
+        (outcome) => outcome.kind === "released" || outcome.kind === "deferred",
+    ).length;
+
+    const lines: string[] = [];
+    if (fresh === 0) {
+        lines.push("All requested tags were already queued or processed. No new action is needed.");
+    }
+    if (inputs.ids.length > 0) {
+        lines.push(`toolcall_ids: ${laneTags(idOutcomes).join(", ")}.`);
+    }
+    if (inputs.samples.length > 0) {
+        lines.push(`msg_samples: ${laneTags(sampleOutcomes).join(", ")}.`);
+    }
+
+    const all = [...idOutcomes, ...sampleOutcomes];
+    const noopLine = (reason: "released" | "compacted" | "queued" | "inert", label: string) => {
+        const tags = [
+            ...new Set(
+                all.flatMap((outcome) =>
+                    outcome.kind === "noop" && outcome.reason === reason ? [outcome.tagNumber] : [],
+                ),
+            ),
+        ];
+        if (tags.length > 0) {
+            lines.push(`${label}: ${tags.join(", ")}.`);
+        }
+    };
+    noopLine("released", "already released");
+    noopLine("compacted", "already compacted");
+    noopLine("queued", "queued for release");
+    noopLine("inert", "nothing to reclaim");
+
+    const protectedLine = (
+        inputsOfLane: readonly string[],
+        outcomesOfLane: readonly ReduceInputOutcome[],
+        param: string,
+    ) => {
+        const handles = outcomesOfLane.flatMap((outcome, index) =>
+            outcome.kind === "deferred" ? [echoInput(inputsOfLane[index] ?? "")] : [],
+        );
+        if (handles.length === 0) return;
+        const list =
+            handles.length === 1
+                ? `${handles[0]} provided in ${param} is inside the protected working set; it applies once newer work displaces it.`
+                : `${handles.join(", ")} provided in ${param} are inside the protected working set; they apply once newer work displaces them.`;
+        lines.push(list);
+    };
+    protectedLine(inputs.ids, idOutcomes, "toolcall_ids");
+    protectedLine(
+        inputs.samples.map((sample) => `"${echoInput(sample)}"`),
+        sampleOutcomes,
+        "msg_samples",
+    );
+    return lines.join("\n");
+}
 
 function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
     let fallbackCommandSequence = 0;
@@ -205,10 +299,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             inertTagNumbers,
         });
         if (result.releasedTagNumbers.length === 0) {
-            const held = result.outcomes.some(
-                (outcome) => outcome.kind === "refused" && outcome.reason === "protected",
-            );
-            return held
+            return result.protectedTagNumbers.length > 0
                 ? "Nothing older to release; newer work is still protected."
                 : "Nothing to release: no consumed tool output is waiting.";
         }
@@ -216,37 +307,26 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         if (apply.refused) {
             return apply.refused;
         }
-        let handles: number[] = successTagHandles(result.outcomes);
-        if (apply.deduped) {
-            handles = [];
-        } else {
-            touchNudgeWatermark(sessionId);
-        }
-        const noopInfo = noopTagLists(result.outcomes);
-        const heldTags = result.outcomes
-            .filter(
-                (outcome): outcome is Extract<typeof outcome, { kind: "refused" }> & { tagNumber: number } =>
-                    outcome.kind === "refused" && typeof outcome.tagNumber === "number",
-            )
-            .map((outcome) => outcome.tagNumber);
+        touchNudgeWatermark(sessionId);
         const lines: string[] = [];
-        if (handles.length > 0) {
-            lines.push(`Released everything responded past: ${handles.join(", ")}.`);
-        } else {
-            lines.push("Already released: nothing left to do.");
-        }
-        if (noopInfo.alreadyReleased.length > 0) {
-            lines.push(`Already released: ${noopInfo.alreadyReleased.join(", ")}.`);
-        }
-        if (noopInfo.nothingToReclaim.length > 0) {
-            lines.push(`Nothing to reclaim: ${noopInfo.nothingToReclaim.join(", ")}.`);
-        }
-        if (heldTags.length > 0) {
+        if (apply.deduped) {
             lines.push(
-                `Held: ${heldTags.join(", ")} inside the protected working set; applies once newer work displaces it.`,
+                "All requested tags were already queued or processed. No new action is needed.",
+            );
+        } else {
+            lines.push(
+                `released everything responded past: ${result.releasedTagNumbers.join(", ")}.`,
             );
         }
-        return lines.join(" ");
+        if (result.inertTagNumbers.length > 0) {
+            lines.push(`nothing to reclaim: ${result.inertTagNumbers.join(", ")}.`);
+        }
+        if (result.protectedTagNumbers.length > 0) {
+            lines.push(
+                "Newer items are inside the protected working set; they apply once your work displaces them.",
+            );
+        }
+        return lines.join("\n");
     };
 
     const executePointingLane = async (
@@ -255,66 +335,25 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         rawSamples: string[],
     ): Promise<string> => {
         const sessionId = invokeContext.sessionID;
-        const ids = [...new Set(rawIds.map((id) => id.trim()).filter((id) => id.length > 0))];
+        const ids = rawIds.map((id) => id.trim()).filter((id) => id.length > 0);
         const samples = rawSamples
             .map((sample) => sample.trim())
             .filter((sample) => sample.length > 0);
         if (ids.length === 0 && samples.length === 0) {
-            return "Error: 'ids'/'samples' must contain entries.";
+            return "Error: 'toolcall_ids'/'msg_samples' must contain entries.";
         }
 
         const { protectedSet, inertTagNumbers } = resolveProtectionContext(sessionId);
 
-        // Samples resolve FIRST: ambiguity is the only batch-rejecting class
-        // and the rejection must land before anything applies, so the forced
-        // retry is application-free (one apply event per reduce intent).
-        const sampleReleased: { tagNumber: number; messageId: string }[] = [];
-        const sampleOutcomes: ReduceInputOutcome[] = resolveSamples(
-            deps.db,
-            sessionId,
+        // Validation completes BEFORE any enqueue: both lanes resolve against
+        // the registry without touching it; any error class rejects the whole
+        // batch, so the forced retry is application-free (one apply event per
+        // reduce intent, ≤1 contiguous cache divergence).
+        const sampleResult = resolveSamples(
+            { db: deps.db, sessionId, protectedTagNumbers: protectedSet, inertTagNumbers },
             samples,
-        ).map((outcome): ReduceInputOutcome => {
-            if (outcome.kind === "matched") {
-                const classified = classifyMessageTag(
-                    {
-                        db: deps.db,
-                        sessionId,
-                        protectedTagNumbers: protectedSet,
-                        inertTagNumbers,
-                    },
-                    outcome,
-                );
-                if (classified.kind === "released") {
-                    sampleReleased.push({
-                        tagNumber: outcome.tagNumber,
-                        messageId: outcome.messageId,
-                    });
-                }
-                return classified;
-            }
-            if (outcome.kind === "ambiguous") {
-                return { kind: "ambiguous", candidates: outcome.candidates };
-            }
-            return { kind: "no-match" };
-        });
-        const ambiguous = sampleOutcomes.find(
-            (outcome): outcome is ReduceInputOutcome & { kind: "ambiguous" } =>
-                outcome.kind === "ambiguous",
         );
-        if (ambiguous) {
-            const lines = [
-                "Ambiguous: a sample matches more than one visible item — nothing was released.",
-            ];
-            for (const candidate of ambiguous.candidates) {
-                lines.push(
-                    `- tag ${candidate.tagNumber ?? "?"}: ${candidate.excerpt.length > 0 ? candidate.excerpt : "(see item)"}…`,
-                );
-            }
-            lines.push("Copy a longer run and send the same batch again.");
-            return lines.join("\n");
-        }
-
-        const result = resolveIds(
+        const idResult = resolveIds(
             {
                 db: deps.db,
                 sessionId,
@@ -324,8 +363,16 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             ids,
         );
 
+        const error = [...sampleResult.outcomes, ...idResult.outcomes].find(
+            (outcome): outcome is Extract<ReduceInputOutcome, { kind: "error" }> =>
+                outcome.kind === "error",
+        );
+        if (error) {
+            return renderPointingError(error);
+        }
+
         const queueNumbers = [
-            ...new Set([...result.releasedTagNumbers, ...sampleReleased.map((r) => r.tagNumber)]),
+            ...new Set([...sampleResult.queueTagNumbers, ...idResult.queueTagNumbers]),
         ];
 
         if (queueNumbers.length > 0) {
@@ -335,64 +382,21 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             }
             if (apply.deduped) {
                 // Module-side dedupe beat the registry read: those inputs are
-                // already released; report, do not echo.
-                result.outcomes = result.outcomes.map((outcome) =>
-                    outcome.kind === "released"
-                        ? { kind: "already_released", tagNumber: outcome.tagNumber }
-                        : outcome,
-                );
-                for (const outcome of sampleOutcomes) {
-                    if (outcome.kind === "released") {
-                        const mutable = outcome as { kind: string; tagNumber?: number; messageId?: string };
-                        mutable.kind = "already_released";
-                        delete mutable.messageId;
+                // already released; report, do not claim a fresh release.
+                for (const outcomes of [idResult.outcomes, sampleResult.outcomes]) {
+                    for (const outcome of outcomes) {
+                        if (outcome.kind === "released") {
+                            const mutable = outcome as { kind: string; reason?: string };
+                            mutable.kind = "noop";
+                            mutable.reason = "released";
+                        }
                     }
                 }
             }
             touchNudgeWatermark(sessionId);
         }
 
-        const lines: string[] = [];
-        const idSuccess = successTagHandles(result.outcomes);
-        const sampleSuccess = successTagHandles(sampleOutcomes);
-        if (idSuccess.length > 0) {
-            lines.push(`Released: ${idSuccess.join(", ")}.`);
-        }
-        if (sampleSuccess.length > 0) {
-            lines.push(`Released from samples: ${sampleSuccess.join(", ")}.`);
-        }
-        const noopInfo = noopTagLists([...result.outcomes, ...sampleOutcomes]);
-        if (noopInfo.alreadyReleased.length > 0) {
-            lines.push(`Already released: ${noopInfo.alreadyReleased.join(", ")}.`);
-        }
-        if (noopInfo.nothingToReclaim.length > 0) {
-            lines.push(`Nothing to reclaim: ${noopInfo.nothingToReclaim.join(", ")}.`);
-        }
-        const unknownIdx = inputHandlesFor(result.outcomes, ["unknown"]);
-        if (unknownIdx.length > 0) {
-            lines.push(
-                `Unknown: ${unknownIdx.map((i) => ids[i]).join(", ")} match no call in this session.`,
-            );
-        }
-        const heldIdx = inputHandlesFor(result.outcomes, ["refused"]);
-        if (heldIdx.length > 0) {
-            lines.push(
-                `Held: ${heldIdx.map((i) => ids[i]).join(", ")} inside the protected working set; resend once newer work displaces it.`,
-            );
-        }
-        const sampleHeldIdx = inputHandlesFor(sampleOutcomes, ["refused"]);
-        const sampleMissIdx = inputHandlesFor(sampleOutcomes, ["no-match"]);
-        if (sampleHeldIdx.length > 0) {
-            lines.push(
-                `Held: ${sampleHeldIdx.map((i) => `sample ${i + 1}`).join(", ")} inside the protected working set; resend once newer work displaces it.`,
-            );
-        }
-        if (sampleMissIdx.length > 0) {
-            lines.push(
-                `No match: ${sampleMissIdx.map((i) => `sample ${i + 1}`).join(", ")} found nothing in your visible context.`,
-            );
-        }
-        return lines.join(" ");
+        return renderPointingSuccess({ ids, samples }, idResult.outcomes, sampleResult.outcomes);
     };
 
     return tool({
@@ -404,10 +408,10 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             args = unwrapImitatedReducedArgs(args, ["drop"], { drop: "string" });
             const sessionId = toolContext.sessionID;
 
-            const hasIds = Array.isArray(args.ids) && args.ids.length > 0;
-            const hasSamples = Array.isArray(args.samples) && args.samples.length > 0;
+            const hasIds = Array.isArray(args.toolcall_ids) && args.toolcall_ids.length > 0;
+            const hasSamples = Array.isArray(args.msg_samples) && args.msg_samples.length > 0;
             if ((hasIds || hasSamples) && args.drop) {
-                return "Error: 'ids'/'samples' and 'drop' cannot be combined in one call.";
+                return "Error: 'toolcall_ids'/'msg_samples' and 'drop' cannot be combined in one call.";
             }
             if (!hasIds && !hasSamples && !args.drop) {
                 if ("drop" in args) {
@@ -419,8 +423,8 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             if (hasIds || hasSamples) {
                 return await executePointingLane(
                     toolContext,
-                    hasIds ? (args.ids as string[]) : [],
-                    hasSamples ? (args.samples as string[]) : [],
+                    hasIds ? (args.toolcall_ids as string[]) : [],
+                    hasSamples ? (args.msg_samples as string[]) : [],
                 );
             }
 
@@ -470,9 +474,9 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     if (queued <= 0) {
                         return "All requested tags were already queued or processed. No new action is needed.";
                     }
-                    // The module owns range parsing and tag canonicalization. Keep the
-                    // existing queued acknowledgement shape without reimplementing that
-                    // parsing in the OpenCode tool.
+                    // The module owns range parsing and tag canonicalization. Keep
+                    // the existing queued acknowledgement shape without
+                    // reimplementing that parsing in the OpenCode tool.
                     return `Queued: drop ${formatRawDropForAck(dropArg)}.`;
                 } catch (error) {
                     sessionLog(sessionId, "ctx_reduce capability refusal", error);

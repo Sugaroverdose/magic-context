@@ -2,6 +2,6 @@ import type { ImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 
 export interface CtxReduceArgs extends ImitatedReducedArgs {
     drop?: string;
-    ids?: string[];
-    samples?: string[];
+    toolcall_ids?: string[];
+    msg_samples?: string[];
 }
