@@ -22,7 +22,7 @@ export function echoInput(input: string, maxChars = 80): string {
     return collapsed.length > maxChars ? `${collapsed.slice(0, maxChars)}…` : collapsed;
 }
 
-export const NOTHING_RELEASED_CLOSER = "Nothing was released; resend the corrected batch.";
+export const NOTHING_RELEASED_CLOSER = "Nothing was stamped; resend the corrected batch.";
 
 export const MINT_UNAVAILABLE =
     "Error: Message positions could not be resolved in this session; nothing was changed. Retry in a moment.";
@@ -98,9 +98,9 @@ export function renderPointingSuccess(
             lines.push(`${label}: ${ordinals.join(", ")}.`);
         }
     };
-    noopLine("released", "already released");
+    noopLine("released", "already cleared");
     noopLine("compacted", "already compacted");
-    noopLine("queued", "queued for release");
+    noopLine("queued", "stamped, waiting for the sweep");
     noopLine("inert", "nothing to reclaim");
 
     const protectedEntries = outcomes.flatMap((outcome, index) =>
@@ -121,6 +121,45 @@ export function renderPointingSuccess(
         const entryIndex = outcomes.indexOf(outcome);
         lines.push(
             `${echoInput(entries[entryIndex] ?? "")} covers items inside the protected working set; they apply once newer work displaces them.`,
+        );
+    }
+    return lines.join("\n");
+}
+
+/** The no-arg bulk path answer (both harnesses, one assembly). */
+export function renderBulkSuccess(
+    deduped: boolean,
+    releasedItems: readonly { messageId: string }[],
+    inertItems: readonly { messageId: string }[],
+    protectedCount: number,
+    mint: OrdinalMint,
+): string {
+    const distinct = (items: readonly { messageId: string }[]): number[] =>
+        [
+            ...new Set(
+                items.flatMap((item) => {
+                    const ordinal = ordinalForRegistryKey(mint, item.messageId);
+                    return typeof ordinal === "number" ? [ordinal] : [];
+                }),
+            ),
+        ];
+    const lines: string[] = [];
+    if (deduped) {
+        lines.push(
+            "All requested tags were already queued or processed. No new action is needed.",
+        );
+    } else {
+        lines.push(
+            `stamped everything you've responded past: ${distinct(releasedItems).join(", ")}.`,
+        );
+    }
+    const inertOrdinals = distinct(inertItems);
+    if (inertOrdinals.length > 0) {
+        lines.push(`nothing to reclaim: ${inertOrdinals.join(", ")}.`);
+    }
+    if (protectedCount > 0) {
+        lines.push(
+            "Newer items are inside the protected working set; they apply once your work displaces them.",
         );
     }
     return lines.join("\n");

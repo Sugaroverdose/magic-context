@@ -32,6 +32,7 @@ import {
 import {
 	MINT_UNAVAILABLE,
 	renderPointingError,
+	renderBulkSuccess,
 	renderPointingSuccess,
 } from "@magic-context/core/features/magic-context/reduce-response";
 import type { CallIdTagResolver } from "@magic-context/core/features/magic-context/tool-call-registry";
@@ -248,34 +249,7 @@ export function createCtxReduceTool(
 			);
 		}
 		touchNudgeWatermark(sessionId);
-		const distinctOrdinals = [
-			...new Set(
-				result.releasedItems.flatMap((item) => {
-					const ordinal = ordinalForRegistryKey(mint, item.messageId);
-					return typeof ordinal === "number" ? [ordinal] : [];
-				}),
-			),
-		];
-		const lines: string[] = [
-			`released everything responded past: ${distinctOrdinals.join(", ")}.`,
-		];
-		const inertOrdinals = [
-			...new Set(
-				result.inertItems.flatMap((item) => {
-					const ordinal = ordinalForRegistryKey(mint, item.messageId);
-					return typeof ordinal === "number" ? [ordinal] : [];
-				}),
-			),
-		];
-		if (inertOrdinals.length > 0) {
-			lines.push(`nothing to reclaim: ${inertOrdinals.join(", ")}.`);
-		}
-		if (result.protectedItems.length > 0) {
-			lines.push(
-				"Newer items are inside the protected working set; they apply once your work displaces them.",
-			);
-		}
-		return ok(lines.join("\n"));
+		return ok(renderBulkSuccess(false, result.releasedItems, result.inertItems, result.protectedItems.length, mint));
 	};
 
 	const executePointingLane = (

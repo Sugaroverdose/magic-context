@@ -33,7 +33,7 @@ import type { Database } from "../../shared/sqlite";
 import {
     MINT_UNAVAILABLE,
     renderPointingError,
-    renderPointingSuccess,
+    renderBulkSuccess, renderPointingSuccess,
 } from "../../features/magic-context/reduce-response";
 import { renderCapabilityRefusal } from "../../shared/user-facing-codes";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
@@ -244,26 +244,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             return apply.refused;
         }
         touchNudgeWatermark(sessionId);
-        const lines: string[] = [];
-        if (apply.deduped) {
-            lines.push(
-                "All requested tags were already queued or processed. No new action is needed.",
-            );
-        } else {
-            lines.push(
-                `released everything responded past: ${distinctOrdinals(result.releasedItems, mint).join(", ")}.`,
-            );
-        }
-        const inertOrdinals = distinctOrdinals(result.inertItems, mint);
-        if (inertOrdinals.length > 0) {
-            lines.push(`nothing to reclaim: ${inertOrdinals.join(", ")}.`);
-        }
-        if (result.protectedItems.length > 0) {
-            lines.push(
-                "Newer items are inside the protected working set; they apply once your work displaces them.",
-            );
-        }
-        return lines.join("\n");
+        return renderBulkSuccess(apply.deduped, result.releasedItems, result.inertItems, result.protectedItems.length, mint);
     };
 
     const executePointingLane = async (

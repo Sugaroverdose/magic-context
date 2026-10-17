@@ -117,7 +117,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			// Idempotent re-send: noop report, nothing new queued.
 			const second = await call(db, sessionId, { ctx_handles: ["call-a"] }, mint);
 			expect(second.isError).toBe(false);
-			expect(second.text).toContain("queued for release: 5.");
+			expect(second.text).toContain("stamped, waiting for the sweep: 5.");
 			expect(getPendingOps(db, sessionId)).toHaveLength(2);
 		} finally {
 			closeQuietly(db);
@@ -231,7 +231,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			);
 			expect(result.isError).toBe(true);
 			expect(result.text).toContain('error: "nope-9" provided in ctx_handles was not found');
-			expect(result.text).toContain("Nothing was released; resend the corrected batch.");
+			expect(result.text).toContain("Nothing was stamped; resend the corrected batch.");
 			expect(getPendingOps(db, sessionId)).toHaveLength(0);
 		} finally {
 			closeQuietly(db);
@@ -259,7 +259,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			};
 			const result = await call(db, sessionId, {}, mint);
 			expect(result.isError).toBe(false);
-			expect(result.text).toContain("released everything responded past: 3.");
+			expect(result.text).toContain("stamped everything you've responded past: 3.");
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([5]);
 		} finally {
 			closeQuietly(db);

@@ -279,7 +279,7 @@ describe("ctx_reduce handles lane (ids)", () => {
     runTable(IDS_SEED, [
         ["resolves copied call ids, echoes ordinals in input order, reports noop facts outside", { ctx_handles: ["call-a", "call-b", "call-d", "call-c"] }, { protectedSet: new Set<number>([9]) }, (response, db) => {
             expect(response).toContain("ctx_handles: 5, 7, 11, 9.");
-            expect(response).toContain("already released: 11.");
+            expect(response).toContain("already cleared: 11.");
             expect(response).toContain(
                 "call-c provided in ctx_handles is inside the protected working set; it applies once newer work displaces it.",
             );
@@ -294,7 +294,7 @@ describe("ctx_reduce handles lane (ids)", () => {
             expect(response).toContain(
                 'error: "call-e" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
             );
-            expect(response).toContain("Nothing was released; resend the corrected batch.");
+            expect(response).toContain("Nothing was stamped; resend the corrected batch.");
             expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
             expect(pendingTagNumbers(db, "ses-2")).toEqual([]);
         }],
@@ -315,7 +315,7 @@ describe("ctx_reduce handles lane (ids)", () => {
             expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
         }],
         ["no-arg invocation releases the bulk default set", {}, { latestUserOrdinal: 11 }, (response, db) => {
-            expect(response).toContain("released everything responded past: 5, 7, 9.");
+            expect(response).toContain("stamped everything you've responded past: 5, 7, 9.");
             expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
         }],
         ["refuses capability when the module backend throws", { ctx_handles: ["call-a"] }, { rustToolBackends: { reduce: (async () => { throw new Error("module down"); }) as unknown as RustToolBackends["reduce"] } }, (response, db) => {
@@ -333,7 +333,7 @@ describe("ctx_reduce handles lane (ids)", () => {
             [
                 "All requested tags were already queued or processed. No new action is needed.",
                 "ctx_handles: 5.",
-                "queued for release: 5.",
+                "stamped, waiting for the sweep: 5.",
             ].join("\n"),
         );
         expect(pendingTagNumbers(db, "ses-1")).toEqual(before);
@@ -358,7 +358,7 @@ describe("ctx_reduce handles lane (ids)", () => {
 
         queued = 0;
         const second = (await tools.ctx_reduce!.execute({ ctx_handles: ["call-a", "call-b"] }, ctx)) as string;
-        expect(second).toContain("already released: 5, 7.");
+        expect(second).toContain("already cleared: 5, 7.");
         expect(second).toContain("ctx_handles: 5, 7.");
     });
 });
@@ -388,12 +388,12 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 expect(response).toContain('100: "the quarterly');
                 expect(response).toContain('101: "notes:');
                 expect(response).toContain("Copy a longer run");
-                expect(response).toContain("Nothing was released; resend the corrected batch.");
+                expect(response).toContain("Nothing was stamped; resend the corrected batch.");
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
             }],
             ["ambiguity rejects the whole call, other handles in the same batch unapplied", { ctx_handles: ["revenue climbing twelve percent", "unrelated deployment"] }, {}, (response, db) => {
                 expect(response).toContain("was found twice");
-                expect(response).toContain("Nothing was released; resend the corrected batch.");
+                expect(response).toContain("Nothing was stamped; resend the corrected batch.");
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
             }],
             ["counts only LIVE matches: a dropped twin leaves a unique winner", { ctx_handles: ["quarterly figures show revenue"] }, { messages: [{ id: "msg-d", ordinal: 103, role: "user", tag: 43, part: 0, status: "dropped", content: "the quarterly figures show revenue climbing twelve percent overall" }] }, (response, db) => {
@@ -404,7 +404,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 expect(response).toContain(
                     'error: "purple platypus parliament" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
                 );
-                expect(response).toContain("Nothing was released; resend the corrected batch.");
+                expect(response).toContain("Nothing was stamped; resend the corrected batch.");
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
             }],
             ["diagnoses an out-of-window quote as a noop, not an error", { ctx_handles: ["archived changelog entry"] }, { messages: [{ id: "msg-dead", ordinal: 99, role: "assistant", tag: 44, part: 1, status: "dropped", content: "the archived changelog entry from last release" }] }, (response, db) => {
@@ -412,7 +412,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
                     [
                         "All requested tags were already queued or processed. No new action is needed.",
                         "ctx_handles: 99.",
-                        "already released: 99.",
+                        "already cleared: 99.",
                     ].join("\n"),
                 );
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
@@ -492,7 +492,7 @@ describe("ctx_reduce range lane", () => {
         // spans, the inside noop reports without touching the slot.
         ["noop facts inside a stretch report ordinals, span slot unchanged", { ctx_handles: ["alpha task one..gamma task three"] }, { prequeued: [2] }, (response, db) => {
             expect(response).toContain("ctx_handles: 10-12.");
-            expect(response).toContain("queued for release: 11.");
+            expect(response).toContain("stamped, waiting for the sweep: 11.");
             expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
         }],
         ["handles array mixes a single entry, a range, and repeats in one positional line", { ctx_handles: ["call-b", "alpha task one..gamma task three"] }, {}, (response, db) => {
@@ -526,7 +526,7 @@ describe("ctx_reduce bulk default", () => {
         },
         [
             ["releases only consumed tool tags past the floor and before the newest user message", {}, {}, (response, db) => {
-                expect(response).toContain("released everything responded past: 50.");
+                expect(response).toContain("stamped everything you've responded past: 50.");
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([60, 63]);
             }],
             ["holds a protected consumed tag instead of releasing it", {}, { protectedSet: new Set<number>([60]) }, (response, db) => {
