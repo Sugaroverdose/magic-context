@@ -2,7 +2,10 @@
 
 import { describe, expect, it } from "bun:test";
 import type { OrdinalMint } from "../../features/magic-context/reduce-resolver";
-import type { CallIdTagResolver } from "../../features/magic-context/tool-call-registry";
+import {
+    type CallIdTagResolver,
+    createRegistryCallIdResolver,
+} from "../../features/magic-context/tool-call-registry";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { Database } from "../../shared/sqlite";
 import { createCtxReduceTools } from "./tools";
@@ -14,9 +17,8 @@ import { createCtxReduceTools } from "./tools";
  * message in tool_owner_message_id, and the FTS mirror carries bare message
  * ids. A world that seeded bare ids on message rows and owner ids on tool
  * rows silently hid every cross-domain join miss — production geometry must
- * be the seeded geometry. The host-store bridge (rank pairing) is covered
- * against a host-shaped store in tag-call-bridge.test.ts; this file's fake
- * resolver answers the production query shape (message_id = wire call id).
+ * be the seeded geometry. Resolution runs the real createRegistryCallIdResolver
+ * (the production path), on top of that geometry.
  *
  * Every case runs on the parameterized `buildWorld` (rows spec -> exactly
  * that geometry) and the `runTable` driver; table rows are
@@ -184,33 +186,6 @@ function fakeOrdinalMint(
     return { ordinalByMessageId, ordinalByCallId, latestUserOrdinal };
 }
 
-/**
- * DI fake for the call-id bridge answering in the PRODUCTION query shape:
- * tool rows key themselves by the wire call id in message_id. The host-store
- * rank pairing lives in tag-call-bridge.test.ts against a host-shaped store.
- */
-function fakeCallIdResolver(db: Database, sessionId: string): CallIdTagResolver {
-    return {
-        resolve(callIds) {
-            const map = new Map<
-                string,
-                { tag_number: number; message_id: string; status: string; type: string } | undefined
-            >();
-            for (const callId of callIds) {
-                const row = db
-                    .prepare(
-                        "SELECT tag_number, message_id, status, type FROM tags WHERE session_id = ? AND message_id = ? AND type = 'tool' LIMIT 1",
-                    )
-                    .get(sessionId, callId) as
-                    | { tag_number: number; message_id: string; status: string; type: string }
-                    | undefined;
-                map.set(callId, row);
-            }
-            return map;
-        },
-    };
-}
-
 function pendingTagNumbers(db: Database, sessionId: string): number[] {
     return (
         db
@@ -270,7 +245,7 @@ function buildWorld(spec: WorldSpec): { db: Database; tools: ReturnType<typeof c
         tools: createCtxReduceTools({
             db,
             protectedSet: spec.protectedSet ?? new Set<number>(),
-            callIdResolver: spec.resolver ?? fakeCallIdResolver(db, "ses-1"),
+            callIdResolver: spec.resolver ?? createRegistryCallIdResolver(db, "ses-1"),
             ordinalMint: () => fakeOrdinalMint(db, spec.mintExtra ?? {}, spec.latestUserOrdinal),
             rustToolBackends: spec.rustToolBackends,
         }),
