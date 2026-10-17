@@ -1,6 +1,6 @@
 /// <reference types="bun-types" />
 
-import { beforeEach, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import type { OrdinalMint } from "../../features/magic-context/reduce-resolver";
 import type { CallIdTagResolver } from "../../features/magic-context/tool-call-registry";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
@@ -17,6 +17,10 @@ import { createCtxReduceTools } from "./tools";
  * be the seeded geometry. The host-store bridge (rank pairing) is covered
  * against a host-shaped store in tag-call-bridge.test.ts; this file's fake
  * resolver answers the production query shape (message_id = wire call id).
+ *
+ * Every case runs on the parameterized `buildWorld` (rows spec -> exactly
+ * that geometry) and the `runTable` driver; table rows are
+ * [name, execute args, world overrides, response assertions].
  */
 
 function createTestDb(): Database {
@@ -217,81 +221,139 @@ function pendingTagNumbers(db: Database, sessionId: string): number[] {
     ).map((row) => row.tag_id);
 }
 
-describe("ctx_reduce handles lane (ids)", () => {
-    let db: Database;
-    const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
+/** FTS mirror row; `tag` seeds the shell with the suffixed `base:pK` registry key. */
+type MsgRow = { id: string; ordinal: number; role: string; content: string; tag?: number; part?: number; status?: string; session?: string };
+/** Tool row in the production shape: message_id = wire call id, owner = bare message. */
+type ToolRow = { tag: number; callId: string; owner: string; status?: string; tokens?: number | null; session?: string };
+/** Rows spec + DI boundaries for the parameterized production-key world. */
+type WorldSpec = { messages?: MsgRow[]; tools?: ToolRow[]; mintExtra?: Record<string, number>; latestUserOrdinal?: number; prequeued?: number[]; protectedSet?: ReadonlySet<number>; resolver?: CallIdTagResolver; rustToolBackends?: RustToolBackends };
+/** Table case: [name, execute args, world overrides over the lane seed, response assertions]. */
+type Case = [name: string, args: Record<string, unknown>, world: WorldSpec, run: (response: string, db: Database) => void];
 
-    const seed = (d: Database) =>
-        seedTags(d, [
-            { tagNumber: 5, messageId: "call-a", owner: "msg-5", sessionId: "ses-1" },
-            { tagNumber: 7, messageId: "call-b", owner: "msg-7", sessionId: "ses-1" },
-            { tagNumber: 9, messageId: "call-c", owner: "msg-9", sessionId: "ses-1" },
-            {
-                tagNumber: 11,
-                messageId: "call-d",
-                owner: "msg-11",
-                sessionId: "ses-1",
-                status: "dropped",
-            },
-            { tagNumber: 3, messageId: "call-e", owner: "msg-3", sessionId: "ses-2" },
-        ]);
+const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
 
-    beforeEach(() => {
-        db = createTestDb();
-        seed(db);
-    });
+function mergeWorld(base: WorldSpec, over: WorldSpec): WorldSpec {
+    return {
+        messages: [...(base.messages ?? []), ...(over.messages ?? [])],
+        tools: [...(base.tools ?? []), ...(over.tools ?? [])],
+        prequeued: [...(base.prequeued ?? []), ...(over.prequeued ?? [])],
+        mintExtra: { ...base.mintExtra, ...over.mintExtra },
+        latestUserOrdinal: "latestUserOrdinal" in over ? over.latestUserOrdinal : base.latestUserOrdinal,
+        protectedSet: over.protectedSet ?? base.protectedSet,
+        resolver: over.resolver ?? base.resolver,
+        rustToolBackends: over.rustToolBackends ?? base.rustToolBackends,
+    };
+}
 
-    const withWorld = (overrides: {
-        protectedSet?: ReadonlySet<number>;
-        rustToolBackends?: RustToolBackends;
-        resolver?: CallIdTagResolver;
-        mintExtra?: Record<string, number>;
-        latestUserOrdinal?: number;
-    }) =>
-        createCtxReduceTools({
+/**
+ * The single parameterized world: seeds the production key geometry — FTS
+ * mirror rows (bare ids), message shells as `base:pK` tags, tool tags keyed
+ * by wire call id with the bare owner id, pre-queued drop ops, mint
+ * boundary — and wires the DI fakes onto a fresh db.
+ */
+function buildWorld(spec: WorldSpec): { db: Database; tools: ReturnType<typeof createCtxReduceTools> } {
+    const db = createTestDb();
+    seedMessages(db, (spec.messages ?? []).map((m) => ({ messageId: m.id, ordinal: m.ordinal, role: m.role, content: m.content, sessionId: m.session })));
+    seedTags(db, [
+        ...(spec.messages ?? []).filter((m) => m.tag !== undefined).map((m) => ({
+            tagNumber: m.tag as number, messageId: `${m.id}:p${m.part ?? 0}`, sessionId: m.session ?? "ses-1", tagType: "message" as const, status: m.status,
+        })),
+        ...(spec.tools ?? []).map((t) => ({
+            tagNumber: t.tag, messageId: t.callId, owner: t.owner, sessionId: t.session ?? "ses-1", status: t.status, tokens: t.tokens,
+        })),
+    ]);
+    for (const tagId of spec.prequeued ?? []) {
+        db.prepare("INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES ('ses-1', ?, 'drop', 1)").run(tagId);
+    }
+    return {
+        db,
+        tools: createCtxReduceTools({
             db,
-            protectedSet: overrides.protectedSet ?? new Set<number>(),
-            callIdResolver: overrides.resolver ?? fakeCallIdResolver(db, "ses-1"),
-            ordinalMint: () =>
-                fakeOrdinalMint(
-                    db,
-                    {
-                        "msg-5": 5,
-                        "msg-7": 7,
-                        "msg-9": 9,
-                        "msg-11": 11,
-                        "msg-3": 3,
-                        ...overrides.mintExtra,
-                    },
-                    overrides.latestUserOrdinal,
-                ),
-            rustToolBackends: overrides.rustToolBackends,
+            protectedSet: spec.protectedSet ?? new Set<number>(),
+            callIdResolver: spec.resolver ?? fakeCallIdResolver(db, "ses-1"),
+            ordinalMint: () => fakeOrdinalMint(db, spec.mintExtra ?? {}, spec.latestUserOrdinal),
+            rustToolBackends: spec.rustToolBackends,
+        }),
+    };
+}
+
+function runTable(seed: WorldSpec, cases: Case[]) {
+    for (const [name, args, world, run] of cases) {
+        it(name, async () => {
+            const { db, tools } = buildWorld(mergeWorld(seed, world));
+            const response = (await tools.ctx_reduce!.execute(args as never, ctx)) as string;
+            run(response, db);
         });
+    }
+}
 
-    it("resolves copied call ids, echoes ordinals in input order, reports noop facts outside", async () => {
-        const tools = withWorld({ protectedSet: new Set<number>([9]) });
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a", "call-b", "call-d", "call-c"] },
-            ctx,
-        )) as string;
+describe("ctx_reduce handles lane (ids)", () => {
+    // Lane seed: tool rows keyed by wire call id (bare owners), message
+    // positions supplied by the mint's extra map — no FTS rows in this lane.
+    const IDS_SEED: WorldSpec = {
+        tools: [
+            { tag: 5, callId: "call-a", owner: "msg-5" },
+            { tag: 7, callId: "call-b", owner: "msg-7" },
+            { tag: 9, callId: "call-c", owner: "msg-9" },
+            { tag: 11, callId: "call-d", owner: "msg-11", status: "dropped" },
+            { tag: 3, callId: "call-e", owner: "msg-3", session: "ses-2" },
+        ],
+        mintExtra: { "msg-5": 5, "msg-7": 7, "msg-9": 9, "msg-11": 11, "msg-3": 3 },
+    };
 
-        expect(response).toContain("ctx_handles: 5, 7, 11, 9.");
-        expect(response).toContain("already released: 11.");
-        expect(response).toContain(
-            "call-c provided in ctx_handles is inside the protected working set; it applies once newer work displaces it.",
-        );
-        // Protected items are queued deferred (upstream semantics), not refused.
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
-    });
+    runTable(IDS_SEED, [
+        ["resolves copied call ids, echoes ordinals in input order, reports noop facts outside", { ctx_handles: ["call-a", "call-b", "call-d", "call-c"] }, { protectedSet: new Set<number>([9]) }, (response, db) => {
+            expect(response).toContain("ctx_handles: 5, 7, 11, 9.");
+            expect(response).toContain("already released: 11.");
+            expect(response).toContain(
+                "call-c provided in ctx_handles is inside the protected working set; it applies once newer work displaces it.",
+            );
+            // Protected items are queued deferred (upstream semantics), not refused.
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
+        }],
+        ["keeps positional slots for repeated ids: same ordinal per slot, one queued op", { ctx_handles: ["call-a", "call-a"] }, {}, (response, db) => {
+            expect(response).toBe("ctx_handles: 5, 5.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([5]);
+        }],
+        ["rejects a foreign-session id as broken input, never a foreign release", { ctx_handles: ["call-e"] }, {}, (response, db) => {
+            expect(response).toContain(
+                'error: "call-e" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
+            );
+            expect(response).toContain("Nothing was released; resend the corrected batch.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            expect(pendingTagNumbers(db, "ses-2")).toEqual([]);
+        }],
+        ["rejects the whole batch when the bridge cannot pair one id, valid siblings unapplied", { ctx_handles: ["call-b", "call-a"] }, { resolver: { resolve: () => new Map() } }, (response, db) => {
+            expect(response).toContain('error: "call-b" provided in ctx_handles was not found');
+            expect(response).not.toContain("ctx_handles: 7");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+        }],
+        ["error shape never coexists with success lines", { ctx_handles: ["call-a", "nope-1"] }, {}, (response, db) => {
+            expect(response).toContain('error: "nope-1" provided in ctx_handles was not found');
+            // The valid sibling is NOT applied: the corrected resend applies all slots.
+            expect(response).not.toContain("ctx_handles: 5");
+            expect(response).not.toContain("already released");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+        }],
+        ["rejects mixing handles with the legacy drop grammar", { ctx_handles: ["call-a"], drop: "7" }, {}, (response, db) => {
+            expect(response).toContain("cannot be combined");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+        }],
+        ["no-arg invocation releases the bulk default set", {}, { latestUserOrdinal: 11 }, (response, db) => {
+            expect(response).toContain("released everything responded past: 5, 7, 9.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
+        }],
+        ["refuses capability when the module backend throws", { ctx_handles: ["call-a"] }, { rustToolBackends: { reduce: (async () => { throw new Error("module down"); }) as unknown as RustToolBackends["reduce"] } }, (response, db) => {
+            expect(response).toContain("cleanup");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+        }],
+    ]);
 
     it("is idempotent: re-sent ids report the queued noop and queue nothing new", async () => {
-        const tools = withWorld({});
+        const { db, tools } = buildWorld(IDS_SEED);
         await tools.ctx_reduce!.execute({ ctx_handles: ["call-a"] }, ctx);
         const before = pendingTagNumbers(db, "ses-1");
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a"] },
-            ctx,
-        )) as string;
+        const response = (await tools.ctx_reduce!.execute({ ctx_handles: ["call-a"] }, ctx)) as string;
         expect(response).toBe(
             [
                 "All requested tags were already queued or processed. No new action is needed.",
@@ -300,71 +362,6 @@ describe("ctx_reduce handles lane (ids)", () => {
             ].join("\n"),
         );
         expect(pendingTagNumbers(db, "ses-1")).toEqual(before);
-    });
-
-    it("keeps positional slots for repeated ids: same ordinal per slot, one queued op", async () => {
-        const tools = withWorld({});
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a", "call-a"] },
-            ctx,
-        )) as string;
-        expect(response).toBe("ctx_handles: 5, 5.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([5]);
-    });
-
-    it("rejects a foreign-session id as broken input, never a foreign release", async () => {
-        const tools = withWorld({});
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-e"] },
-            ctx,
-        )) as string;
-        expect(response).toContain(
-            'error: "call-e" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
-        );
-        expect(response).toContain("Nothing was released; resend the corrected batch.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-        expect(pendingTagNumbers(db, "ses-2")).toEqual([]);
-    });
-
-    it("rejects the whole batch when the bridge cannot pair one id, valid siblings unapplied", async () => {
-        const tools = withWorld({ resolver: { resolve: () => new Map() } });
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-b", "call-a"] },
-            ctx,
-        )) as string;
-        expect(response).toContain('error: "call-b" provided in ctx_handles was not found');
-        expect(response).not.toContain("ctx_handles: 7");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-    });
-
-    it("error shape never coexists with success lines", async () => {
-        const tools = withWorld({});
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a", "nope-1"] },
-            ctx,
-        )) as string;
-        expect(response).toContain('error: "nope-1" provided in ctx_handles was not found');
-        // The valid sibling is NOT applied: the corrected resend applies all slots.
-        expect(response).not.toContain("ctx_handles: 5");
-        expect(response).not.toContain("already released");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-    });
-
-    it("rejects mixing handles with the legacy drop grammar", async () => {
-        const tools = withWorld({});
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a"], drop: "7" },
-            ctx,
-        )) as string;
-        expect(response).toContain("cannot be combined");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-    });
-
-    it("no-arg invocation releases the bulk default set", async () => {
-        const tools = withWorld({ latestUserOrdinal: 11 });
-        const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).toContain("released everything responded past: 5, 7, 9.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
     });
 
     it("routes queued numbers through the module backend and honors its dedupe", async () => {
@@ -376,482 +373,204 @@ describe("ctx_reduce handles lane (ids)", () => {
                 return { result: { ok: true, queued } };
             }) as unknown as RustToolBackends["reduce"],
         };
-        const tools = withWorld({ rustToolBackends });
+        const { db, tools } = buildWorld({ ...IDS_SEED, rustToolBackends });
 
         queued = 2;
-        const first = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a", "call-b"] },
-            ctx,
-        )) as string;
+        const first = (await tools.ctx_reduce!.execute({ ctx_handles: ["call-a", "call-b"] }, ctx)) as string;
         expect(received).toBe("5,7");
         expect(first).toBe("ctx_handles: 5, 7.");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
 
         queued = 0;
-        const second = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a", "call-b"] },
-            ctx,
-        )) as string;
+        const second = (await tools.ctx_reduce!.execute({ ctx_handles: ["call-a", "call-b"] }, ctx)) as string;
         expect(second).toContain("already released: 5, 7.");
         expect(second).toContain("ctx_handles: 5, 7.");
-    });
-
-    it("refuses capability when the module backend throws", async () => {
-        const rustToolBackends = {
-            reduce: (async () => {
-                throw new Error("module down");
-            }) as unknown as RustToolBackends["reduce"],
-        };
-        const tools = withWorld({ rustToolBackends });
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a"] },
-            ctx,
-        )) as string;
-        expect(response).toContain("cleanup");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 });
 
 describe("ctx_reduce handles lane (quotes)", () => {
-    let db: Database;
-    const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
-
-    beforeEach(() => {
-        db = createTestDb();
-        seedMessages(db, [
-            {
-                messageId: "msg-a",
-                ordinal: 100,
-                role: "user",
-                content: "the quarterly figures show revenue climbing twelve percent overall",
-            },
-            {
-                messageId: "msg-b",
-                ordinal: 101,
-                role: "assistant",
-                content: "notes: revenue climbing\ttwelve   percent across all regions",
-            },
-            {
-                messageId: "msg-c",
-                ordinal: 102,
-                role: "user",
-                content: "unrelated deployment checklist for staging",
-            },
-        ]);
-        // Production shape: the registry keys these with the suffixed content
-        // key (`:pK`, often K>=1); the mirror keeps bare ids. The geometry must
-        // join across the suffix.
-        seedTags(db, [
-            { tagNumber: 40, messageId: "msg-a:p2", sessionId: "ses-1", tagType: "message" },
-            { tagNumber: 41, messageId: "msg-b:p3", sessionId: "ses-1", tagType: "message" },
-            { tagNumber: 42, messageId: "msg-c:p1", sessionId: "ses-1", tagType: "message" },
-        ]);
-    });
-
-    const withWorld = (overrides: { protectedSet?: ReadonlySet<number> } = {}) =>
-        createCtxReduceTools({
-            db,
-            protectedSet: overrides.protectedSet ?? new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-            ordinalMint: () => fakeOrdinalMint(db),
-        });
-
-    it("releases the uniquely matched message shell across the key suffix, slot echoes its ordinal", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["unrelated deployment checklist"] },
-            ctx,
-        )) as string;
-        expect(response).toBe("ctx_handles: 102.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
-    });
-
-    it("matches through whitespace variance (mirror collapses, both sides tokenize)", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["revenue climbing twelve percent"] },
-            ctx,
-        )) as string;
-        expect(response).toContain(
-            'error: "revenue climbing twelve percent" provided in ctx_handles was found twice',
-        );
-        // Candidates are listed in bm25 relevance order, named by context position.
-        expect(response).toContain('100: "the quarterly');
-        expect(response).toContain('101: "notes:');
-        expect(response).toContain("Copy a longer run");
-        expect(response).toContain("Nothing was released; resend the corrected batch.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-    });
-
-    it("ambiguity rejects the whole call, other handles in the same batch unapplied", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["revenue climbing twelve percent", "unrelated deployment"] },
-            ctx,
-        )) as string;
-        expect(response).toContain("was found twice");
-        expect(response).toContain("Nothing was released; resend the corrected batch.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-    });
-
-    it("counts only LIVE matches: a dropped twin leaves a unique winner", async () => {
-        seedMessages(db, [
-            {
-                messageId: "msg-d",
-                ordinal: 103,
-                role: "user",
-                content: "the quarterly figures show revenue climbing twelve percent overall",
-            },
-        ]);
-        seedTags(db, [
-            {
-                tagNumber: 43,
-                messageId: "msg-d:p0",
-                sessionId: "ses-1",
-                tagType: "message",
-                status: "dropped",
-            },
-        ]);
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["quarterly figures show revenue"] },
-            ctx,
-        )) as string;
-        expect(response).toBe("ctx_handles: 100.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([40]);
-    });
-
-    it("rejects a quote that matches nothing anywhere as broken input", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["purple platypus parliament"] },
-            ctx,
-        )) as string;
-        expect(response).toContain(
-            'error: "purple platypus parliament" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
-        );
-        expect(response).toContain("Nothing was released; resend the corrected batch.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-    });
-
-    it("diagnoses an out-of-window quote as a noop, not an error", async () => {
-        seedMessages(db, [
-            {
-                messageId: "msg-dead",
-                ordinal: 99,
-                role: "assistant",
-                content: "the archived changelog entry from last release",
-            },
-        ]);
-        seedTags(db, [
-            {
-                tagNumber: 44,
-                messageId: "msg-dead:p1",
-                sessionId: "ses-1",
-                tagType: "message",
-                status: "dropped",
-            },
-        ]);
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["archived changelog entry"] },
-            ctx,
-        )) as string;
-        expect(response).toBe(
-            [
-                "All requested tags were already queued or processed. No new action is needed.",
-                "ctx_handles: 99.",
-                "already released: 99.",
-            ].join("\n"),
-        );
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-    });
-
-    it("queues a protected message match with the upstream promise line", async () => {
-        const tools = withWorld({ protectedSet: new Set<number>([42]) });
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["deployment checklist"] },
-            ctx,
-        )) as string;
-        expect(response).toBe(
-            [
-                "ctx_handles: 102.",
-                "deployment checklist provided in ctx_handles is inside the protected working set; it applies once newer work displaces it.",
-            ].join("\n"),
-        );
-        // Upstream semantics: protected drops are queued, applied on displacement.
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
-    });
-
-    it("mixes ids and quotes in one array, one applied call, one queued transaction", async () => {
-        seedTags(db, [
-            { tagNumber: 55, messageId: "call-t", owner: "msg-t", sessionId: "ses-1" },
-        ]);
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-            ordinalMint: () => fakeOrdinalMint(db, { "msg-t": 90 }),
-        });
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-t", "deployment checklist"] },
-            ctx,
-        )) as string;
-        expect(response).toBe("ctx_handles: 90, 102.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([42, 55]);
-    });
+    // Production shape: the registry keys the shells with the suffixed
+    // content key (`:pK`, often K>=1); the mirror keeps bare ids. The
+    // geometry must join across the suffix.
+    runTable(
+        {
+            messages: [
+                { id: "msg-a", ordinal: 100, role: "user", tag: 40, part: 2, content: "the quarterly figures show revenue climbing twelve percent overall" },
+                { id: "msg-b", ordinal: 101, role: "assistant", tag: 41, part: 3, content: "notes: revenue climbing\ttwelve   percent across all regions" },
+                { id: "msg-c", ordinal: 102, role: "user", tag: 42, part: 1, content: "unrelated deployment checklist for staging" },
+            ],
+        },
+        [
+            ["releases the uniquely matched message shell across the key suffix, slot echoes its ordinal", { ctx_handles: ["unrelated deployment checklist"] }, {}, (response, db) => {
+                expect(response).toBe("ctx_handles: 102.");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
+            }],
+            ["matches through whitespace variance (mirror collapses, both sides tokenize)", { ctx_handles: ["revenue climbing twelve percent"] }, {}, (response, db) => {
+                expect(response).toContain(
+                    'error: "revenue climbing twelve percent" provided in ctx_handles was found twice',
+                );
+                // Candidates are listed in bm25 relevance order, named by context position.
+                expect(response).toContain('100: "the quarterly');
+                expect(response).toContain('101: "notes:');
+                expect(response).toContain("Copy a longer run");
+                expect(response).toContain("Nothing was released; resend the corrected batch.");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            }],
+            ["ambiguity rejects the whole call, other handles in the same batch unapplied", { ctx_handles: ["revenue climbing twelve percent", "unrelated deployment"] }, {}, (response, db) => {
+                expect(response).toContain("was found twice");
+                expect(response).toContain("Nothing was released; resend the corrected batch.");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            }],
+            ["counts only LIVE matches: a dropped twin leaves a unique winner", { ctx_handles: ["quarterly figures show revenue"] }, { messages: [{ id: "msg-d", ordinal: 103, role: "user", tag: 43, part: 0, status: "dropped", content: "the quarterly figures show revenue climbing twelve percent overall" }] }, (response, db) => {
+                expect(response).toBe("ctx_handles: 100.");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([40]);
+            }],
+            ["rejects a quote that matches nothing anywhere as broken input", { ctx_handles: ["purple platypus parliament"] }, {}, (response, db) => {
+                expect(response).toContain(
+                    'error: "purple platypus parliament" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
+                );
+                expect(response).toContain("Nothing was released; resend the corrected batch.");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            }],
+            ["diagnoses an out-of-window quote as a noop, not an error", { ctx_handles: ["archived changelog entry"] }, { messages: [{ id: "msg-dead", ordinal: 99, role: "assistant", tag: 44, part: 1, status: "dropped", content: "the archived changelog entry from last release" }] }, (response, db) => {
+                expect(response).toBe(
+                    [
+                        "All requested tags were already queued or processed. No new action is needed.",
+                        "ctx_handles: 99.",
+                        "already released: 99.",
+                    ].join("\n"),
+                );
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            }],
+            ["queues a protected message match with the upstream promise line", { ctx_handles: ["deployment checklist"] }, { protectedSet: new Set<number>([42]) }, (response, db) => {
+                expect(response).toBe(
+                    [
+                        "ctx_handles: 102.",
+                        "deployment checklist provided in ctx_handles is inside the protected working set; it applies once newer work displaces it.",
+                    ].join("\n"),
+                );
+                // Upstream semantics: protected drops are queued, applied on displacement.
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
+            }],
+            ["mixes ids and quotes in one array, one applied call, one queued transaction", { ctx_handles: ["call-t", "deployment checklist"] }, { tools: [{ tag: 55, callId: "call-t", owner: "msg-t" }], mintExtra: { "msg-t": 90 } }, (response, db) => {
+                expect(response).toBe("ctx_handles: 90, 102.");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([42, 55]);
+            }],
+        ],
+    );
 });
 
 describe("ctx_reduce range lane", () => {
-    let db: Database;
-    const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
+    // Lane seed: message shells (suffixed keys) AND their tool calls
+    // (wire-id keys) share the span: the inclusive stretch must cross both
+    // key domains.
+    const RANGE_SEED: WorldSpec = {
+        messages: [
+            { id: "msg-a", ordinal: 10, role: "user", content: "alpha task one", tag: 1, part: 1 },
+            { id: "msg-b", ordinal: 11, role: "assistant", content: "beta task two", tag: 2, part: 2 },
+            { id: "msg-c", ordinal: 12, role: "assistant", content: "gamma task three", tag: 3, part: 1 },
+        ],
+        tools: [
+            { tag: 21, callId: "call-a", owner: "msg-a" },
+            { tag: 22, callId: "call-b", owner: "msg-b" },
+            { tag: 23, callId: "call-c", owner: "msg-c" },
+        ],
+    };
 
-    beforeEach(() => {
-        db = createTestDb();
-        seedMessages(db, [
-            { messageId: "msg-a", ordinal: 10, role: "user", content: "alpha task one" },
-            { messageId: "msg-b", ordinal: 11, role: "assistant", content: "beta task two" },
-            { messageId: "msg-c", ordinal: 12, role: "assistant", content: "gamma task three" },
-        ]);
-        // Message shells (suffixed keys) AND their tool calls (wire-id keys)
-        // share the span: the inclusive stretch must cross both key domains.
-        seedTags(db, [
-            { tagNumber: 1, messageId: "msg-a:p1", sessionId: "ses-1", tagType: "message" },
-            { tagNumber: 2, messageId: "msg-b:p2", sessionId: "ses-1", tagType: "message" },
-            { tagNumber: 3, messageId: "msg-c:p1", sessionId: "ses-1", tagType: "message" },
-            { tagNumber: 21, messageId: "call-a", owner: "msg-a", sessionId: "ses-1" },
-            { tagNumber: 22, messageId: "call-b", owner: "msg-b", sessionId: "ses-1" },
-            { tagNumber: 23, messageId: "call-c", owner: "msg-c", sessionId: "ses-1" },
-        ]);
-    });
-
-    const withWorld = (overrides: { protectedSet?: ReadonlySet<number> } = {}) =>
-        createCtxReduceTools({
-            db,
-            protectedSet: overrides.protectedSet ?? new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-            ordinalMint: () => fakeOrdinalMint(db),
-        });
-
-    it("releases the inclusive stretch between two quote endpoints across key domains, span slot in echo", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["alpha task one..gamma task three"] },
-            ctx,
-        )) as string;
-        expect(response).toBe("ctx_handles: 10-12.");
-        // Inclusive: every registered item in the stretch — message shells via
-        // the suffixed key, tool calls via the wire-id map — one event.
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
-    });
-
-    it("resolves range endpoints through the id lane too", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a..call-b"] },
-            ctx,
-        )) as string;
-        expect(response).toBe("ctx_handles: 10-11.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([2, 21, 22]);
-    });
-
-    it("resolves a range whose endpoints are different handle kinds", async () => {
-        const tools = withWorld();
-        // Id start, quote end.
-        const forward = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-a..gamma task three"] },
-            ctx,
-        )) as string;
-        expect(forward).toBe("ctx_handles: 10-12.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([2, 3, 21, 22]);
-    });
-
-    it("resolves a quote-start/id-end range", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["alpha task one..call-b"] },
-            ctx,
-        )) as string;
-        expect(response).toBe("ctx_handles: 10-11.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 21, 22]);
-    });
-
-    it("keeps a literal double-dot as phrase text when the full entry matches", async () => {
-        seedMessages(db, [
-            {
-                messageId: "msg-dot",
-                ordinal: 20,
-                role: "user",
-                content: "the .. marks a path segment in this quote",
-            },
-        ]);
-        seedTags(db, [
-            { tagNumber: 8, messageId: "msg-dot:p0", sessionId: "ses-1", tagType: "message" },
-        ]);
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["the .. marks a path segment"] },
-            ctx,
-        )) as string;
-        expect(response).toBe("ctx_handles: 20.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([8]);
-    });
-
-    it("rejects a reversed range, naming the entry, nothing applied", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["gamma task three..alpha task one"] },
-            ctx,
-        )) as string;
-        expect(response).toContain(
-            'error: "gamma task three..alpha task one" provided in ctx_handles is reversed',
-        );
-        expect(response).toContain("Nothing was released; resend the corrected batch.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-    });
-
-    it("a missing range endpoint is the same broken-input class as a missing entry", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["alpha task one..purple platypus"] },
-            ctx,
-        )) as string;
-        expect(response).toContain(
-            'error: "purple platypus" provided in ctx_handles was not found',
-        );
-        expect(response).toContain('It is the end of the range "alpha task one..purple platypus".');
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
-    });
-
-    it("protected items inside a stretch queue deferred with the range promise line", async () => {
-        seedMessages(db, [
-            {
-                messageId: "msg-d",
-                ordinal: 13,
-                role: "user",
-                content: "delta task four",
-            },
-        ]);
-        seedTags(db, [
-            {
-                tagNumber: 4,
-                messageId: "msg-d:p2",
-                sessionId: "ses-1",
-                tagType: "message",
-            },
-        ]);
-        const tools = withWorld({ protectedSet: new Set<number>([3]) });
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["alpha task one..delta task four"] },
-            ctx,
-        )) as string;
-        expect(response).toContain("ctx_handles: 10-13.");
-        expect(response).toContain("covers items inside the protected working set");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 4, 21, 22, 23]);
-    });
-
-    it("noop facts inside a stretch report ordinals, span slot unchanged", async () => {
-        // msg-b's shell already queued: the stretch still spans, the inside
-        // noop reports without touching the slot.
-        db.prepare(
-            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES ('ses-1', 2, 'drop', 1)",
-        ).run();
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["alpha task one..gamma task three"] },
-            ctx,
-        )) as string;
-        expect(response).toContain("ctx_handles: 10-12.");
-        expect(response).toContain("queued for release: 11.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
-    });
-
-    it("handles array mixes a single entry, a range, and repeats in one positional line", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute(
-            { ctx_handles: ["call-b", "alpha task one..gamma task three"] },
-            ctx,
-        )) as string;
-        // Positional mirror: entry 1 is the single id (ordinal 11), entry 2 the span.
-        expect(response).toContain("ctx_handles: 11, 10-12.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
-    });
+    runTable(RANGE_SEED, [
+        ["releases the inclusive stretch between two quote endpoints across key domains, span slot in echo", { ctx_handles: ["alpha task one..gamma task three"] }, {}, (response, db) => {
+            expect(response).toBe("ctx_handles: 10-12.");
+            // Inclusive: every registered item in the stretch — message shells via
+            // the suffixed key, tool calls via the wire-id map — one event.
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
+        }],
+        ["resolves range endpoints through the id lane too", { ctx_handles: ["call-a..call-b"] }, {}, (response, db) => {
+            expect(response).toBe("ctx_handles: 10-11.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([2, 21, 22]);
+        }],
+        ["resolves a range whose endpoints are different handle kinds", { ctx_handles: ["call-a..gamma task three"] }, {}, (response, db) => {
+            expect(response).toBe("ctx_handles: 10-12.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([2, 3, 21, 22]);
+        }],
+        ["resolves a quote-start/id-end range", { ctx_handles: ["alpha task one..call-b"] }, {}, (response, db) => {
+            expect(response).toBe("ctx_handles: 10-11.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 21, 22]);
+        }],
+        ["keeps a literal double-dot as phrase text when the full entry matches", { ctx_handles: ["the .. marks a path segment"] }, { messages: [{ id: "msg-dot", ordinal: 20, role: "user", content: "the .. marks a path segment in this quote", tag: 8, part: 0 }] }, (response, db) => {
+            expect(response).toBe("ctx_handles: 20.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([8]);
+        }],
+        ["rejects a reversed range, naming the entry, nothing applied", { ctx_handles: ["gamma task three..alpha task one"] }, {}, (response, db) => {
+            expect(response).toContain(
+                'error: "gamma task three..alpha task one" provided in ctx_handles is reversed',
+            );
+            expect(response).toContain("Nothing was released; resend the corrected batch.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+        }],
+        ["a missing range endpoint is the same broken-input class as a missing entry", { ctx_handles: ["alpha task one..purple platypus"] }, {}, (response, db) => {
+            expect(response).toContain('error: "purple platypus" provided in ctx_handles was not found');
+            expect(response).toContain('It is the end of the range "alpha task one..purple platypus".');
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+        }],
+        ["protected items inside a stretch queue deferred with the range promise line", { ctx_handles: ["alpha task one..delta task four"] }, { messages: [{ id: "msg-d", ordinal: 13, role: "user", content: "delta task four", tag: 4, part: 2 }], protectedSet: new Set<number>([3]) }, (response, db) => {
+            expect(response).toContain("ctx_handles: 10-13.");
+            expect(response).toContain("covers items inside the protected working set");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 4, 21, 22, 23]);
+        }],
+        // msg-b's shell already queued (pre-queued op): the stretch still
+        // spans, the inside noop reports without touching the slot.
+        ["noop facts inside a stretch report ordinals, span slot unchanged", { ctx_handles: ["alpha task one..gamma task three"] }, { prequeued: [2] }, (response, db) => {
+            expect(response).toContain("ctx_handles: 10-12.");
+            expect(response).toContain("queued for release: 11.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
+        }],
+        ["handles array mixes a single entry, a range, and repeats in one positional line", { ctx_handles: ["call-b", "alpha task one..gamma task three"] }, {}, (response, db) => {
+            // Positional mirror: entry 1 is the single id (ordinal 11), entry 2 the span.
+            expect(response).toContain("ctx_handles: 11, 10-12.");
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 21, 22]);
+        }],
+    ]);
 });
 
 describe("ctx_reduce bulk default", () => {
-    let db: Database;
-    const ctx = { sessionID: "ses-1", directory: "/tmp" } as never;
-
-    // Production tool-row shape: message_id = wire call id, owner = bare
-    // positioned message.
-    const seedTool = (
-        tagNumber: number,
-        callId: string,
-        owner: string,
-        opts: { tokens?: number; status?: string } = {},
-    ) => {
-        db.prepare(
-            "INSERT INTO tags (message_id, type, status, tool_owner_message_id, byte_size, session_id, tag_number, token_count) VALUES (?, 'tool', 'active', ?, 100, 'ses-1', ?, ?)",
-        ).run(callId, owner, tagNumber, opts.tokens ?? null);
-    };
-
-    beforeEach(() => {
-        db = createTestDb();
-        seedMessages(db, [
-            { messageId: "u-old", ordinal: 10, role: "user", content: "first task" },
-            { messageId: "u-new", ordinal: 200, role: "user", content: "newest instruction" },
-            { messageId: "t-mid", ordinal: 50, role: "assistant", content: "worked on it" },
-            { messageId: "t-live", ordinal: 210, role: "assistant", content: "current turn" },
-        ]);
-        seedTool(60, "call-x", "t-mid"); // consumed, unsized => releases
-        seedTool(61, "call-y", "t-live"); // after newest user message => never bulk
-        seedTool(62, "call-z", "t-mid", { tokens: 5 }); // under the token floor => stays
-        seedTool(63, "call-w", "t-mid", { tokens: 900 });
-        db.prepare(
-            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES ('ses-1', 63, 'drop', 1)",
-        ).run();
-    });
-
-    const withWorld = (overrides: { protectedSet?: ReadonlySet<number> } = {}) =>
-        createCtxReduceTools({
-            db,
-            protectedSet: overrides.protectedSet ?? new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-            // The mint owns the bulk boundary: newest user message, live space.
-            ordinalMint: () => fakeOrdinalMint(db, {}, 200),
-        });
-
-    it("releases only consumed tool tags past the floor and before the newest user message", async () => {
-        const tools = withWorld();
-        const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).toContain("released everything responded past: 50.");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([60, 63]);
-    });
-
-    it("holds a protected consumed tag instead of releasing it", async () => {
-        const tools = withWorld({ protectedSet: new Set<number>([60]) });
-        const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).not.toContain("released everything");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
-    });
-
-    it("reports nothing-to-release when only protected work is left", async () => {
-        const tools = withWorld({ protectedSet: new Set<number>([60]) });
-        const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).toContain("Nothing older to release");
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
-    });
-
-    it("without a newest user message nothing has been responded past: nothing bulk-released", async () => {
-        const tools = createCtxReduceTools({
-            db,
-            protectedSet: new Set<number>(),
-            callIdResolver: fakeCallIdResolver(db, "ses-1"),
-            ordinalMint: () => fakeOrdinalMint(db, {}, undefined),
-        });
-        const response = (await tools.ctx_reduce!.execute({}, ctx)) as string;
-        expect(response).toContain("Nothing to release");
-        // Only the pre-seeded pending op remains; nothing new was queued.
-        expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
-    });
+    // Lane seed (production tool-row shape: message_id = wire call id,
+    // owner = bare positioned message). The mint owns the bulk boundary:
+    // newest user message, live space.
+    runTable(
+        {
+            messages: [
+                { id: "u-old", ordinal: 10, role: "user", content: "first task" },
+                { id: "u-new", ordinal: 200, role: "user", content: "newest instruction" },
+                { id: "t-mid", ordinal: 50, role: "assistant", content: "worked on it" },
+                { id: "t-live", ordinal: 210, role: "assistant", content: "current turn" },
+            ],
+            tools: [
+                { tag: 60, callId: "call-x", owner: "t-mid" }, // consumed, unsized => releases
+                { tag: 61, callId: "call-y", owner: "t-live" }, // after newest user => never bulk
+                { tag: 62, callId: "call-z", owner: "t-mid", tokens: 5 }, // under the floor => stays
+                { tag: 63, callId: "call-w", owner: "t-mid", tokens: 900 },
+            ],
+            prequeued: [63],
+            latestUserOrdinal: 200,
+        },
+        [
+            ["releases only consumed tool tags past the floor and before the newest user message", {}, {}, (response, db) => {
+                expect(response).toContain("released everything responded past: 50.");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([60, 63]);
+            }],
+            ["holds a protected consumed tag instead of releasing it", {}, { protectedSet: new Set<number>([60]) }, (response, db) => {
+                expect(response).not.toContain("released everything");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
+            }],
+            ["reports nothing-to-release when only protected work is left", {}, { protectedSet: new Set<number>([60]) }, (response, db) => {
+                expect(response).toContain("Nothing older to release");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
+            }],
+            ["without a newest user message nothing has been responded past: nothing bulk-released", {}, { latestUserOrdinal: undefined }, (response, db) => {
+                expect(response).toContain("Nothing to release");
+                // Only the pre-seeded pending op remains; nothing new was queued.
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([63]);
+            }],
+        ],
+    );
 });
