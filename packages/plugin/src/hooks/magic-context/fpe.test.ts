@@ -1,4 +1,8 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { Database } from "../../shared/sqlite";
 import {
     deriveKey,
     fpeDecrypt,
@@ -8,6 +12,7 @@ import {
     renderDropToken,
     stripFillers,
 } from "./fpe";
+import { lookupReleasedToolInput } from "./fpe-resolve";
 
 const KEY = deriveKey("test-session-001");
 
@@ -106,5 +111,69 @@ describe("FPE", () => {
     it("deriveKey is deterministic", () => {
         expect(deriveKey("session-1")).toBe(deriveKey("session-1"));
         expect(deriveKey("session-1")).not.toBe(deriveKey("session-2"));
+    });
+});
+
+describe("FPE released-input lookup (registry spine)", () => {
+    function makeWorld() {
+        const dir = mkdtempSync(join(tmpdir(), "fpe-lookup-"));
+        const hostPath = join(dir, "opencode.db");
+        const host = new Database(hostPath);
+        host.exec(`
+            CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, data TEXT);
+            CREATE TABLE part (id TEXT PRIMARY KEY, message_id TEXT, session_id TEXT, data TEXT);
+        `);
+        const insertPart = host.prepare(
+            "INSERT INTO part (id, message_id, session_id, data) VALUES (?, ?, ?, ?)",
+        );
+        const toolPart = (callId: string, command: string) =>
+            JSON.stringify({ type: "tool", tool: "bash", callID: callId, state: { input: { command } } });
+        insertPart.run("prt_a", "msg_owner", SESSION, toolPart("call_a", "ls"));
+        insertPart.run("prt_b", "msg_owner", SESSION, toolPart("call_b", "pwd"));
+        insertPart.run("prt_text", "msg_owner", SESSION, JSON.stringify({ type: "text", text: "narrative" }));
+        host.close();
+        process.env.OPENCODE_DB = hostPath;
+        const mc = new Database(":memory:");
+        mc.exec(`
+            CREATE TABLE tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT, message_id TEXT, type TEXT, status TEXT,
+                tag_number INTEGER, tool_owner_message_id TEXT
+            );
+        `);
+        const insertTag = mc.prepare(
+            "INSERT INTO tags (session_id, message_id, type, status, tag_number, tool_owner_message_id) VALUES (?, ?, 'tool', 'dropped', ?, ?)",
+        );
+        // Production key geometry: tool rows key on the wire call id.
+        insertTag.run(SESSION, "call_a", 7, "msg_owner");
+        insertTag.run(SESSION, "call_b", 8, "msg_owner");
+        insertTag.run(SESSION, "call_c", 9, "msg_owner"); // part pruned from the host
+        return { mc };
+    }
+    const SESSION = "ses_fpe_lookup";
+    const savedEnv = process.env.OPENCODE_DB;
+    afterEach(() => {
+        if (savedEnv === undefined) delete process.env.OPENCODE_DB;
+        else process.env.OPENCODE_DB = savedEnv;
+    });
+
+    it("resolves a released tag to the exact part's original input", () => {
+        const { mc } = makeWorld();
+        expect(lookupReleasedToolInput(mc, SESSION, 7)).toEqual({ command: "ls" });
+    });
+
+    it("parallel batch: same owner message resolves per call id", () => {
+        const { mc } = makeWorld();
+        expect(lookupReleasedToolInput(mc, SESSION, 8)).toEqual({ command: "pwd" });
+    });
+
+    it("pruned part resolves to undefined (token stays inert)", () => {
+        const { mc } = makeWorld();
+        expect(lookupReleasedToolInput(mc, SESSION, 9)).toBeUndefined();
+    });
+
+    it("unknown tag resolves to undefined", () => {
+        const { mc } = makeWorld();
+        expect(lookupReleasedToolInput(mc, SESSION, 404)).toBeUndefined();
     });
 });
