@@ -82,7 +82,7 @@ export function renderPointingSuccess(
         if (outcome.kind === "error") return "?";
         return String(ordinalOf(outcome.messageId) ?? "?");
     });
-    lines.push(`ctx_handles: ${slots.join(", ")}.`);
+    lines.push(`ctx_handles: ${slots.join(", ")}`);
 
     const noopLine = (reason: "released" | "compacted" | "queued" | "inert", label: string) => {
         const ordinals = [
@@ -95,7 +95,7 @@ export function renderPointingSuccess(
             ),
         ].filter((ordinal): ordinal is number => typeof ordinal === "number");
         if (ordinals.length > 0) {
-            lines.push(`${label}: ${ordinals.join(", ")}.`);
+            lines.push(`${label}: ${ordinals.join(", ")}`);
         }
     };
     noopLine("released", "already cleared");
@@ -150,12 +150,12 @@ export function renderBulkSuccess(
         );
     } else {
         lines.push(
-            `stamped everything you've responded past: ${distinct(releasedItems).join(", ")}.`,
+            `stamped everything you've responded past: ${distinct(releasedItems).join(", ")}`,
         );
     }
     const inertOrdinals = distinct(inertItems);
     if (inertOrdinals.length > 0) {
-        lines.push(`nothing to reclaim: ${inertOrdinals.join(", ")}.`);
+        lines.push(`nothing to reclaim: ${inertOrdinals.join(", ")}`);
     }
     if (protectedCount > 0) {
         lines.push(

@@ -111,13 +111,13 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			};
 			const first = await call(db, sessionId, { ctx_handles: ["call-b", "call-a"] }, mint);
 			expect(first.isError).toBe(false);
-			expect(first.text).toBe("ctx_handles: 7, 5.");
+			expect(first.text).toBe("ctx_handles: 7, 5");
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId).sort()).toEqual([5, 7]);
 
 			// Idempotent re-send: noop report, nothing new queued.
 			const second = await call(db, sessionId, { ctx_handles: ["call-a"] }, mint);
 			expect(second.isError).toBe(false);
-			expect(second.text).toContain("stamped, waiting for the sweep: 5.");
+			expect(second.text).toContain("stamped, waiting for the sweep: 5");
 			expect(getPendingOps(db, sessionId)).toHaveLength(2);
 		} finally {
 			closeQuietly(db);
@@ -149,7 +149,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 				mint,
 			);
 			expect(result.isError).toBe(false);
-			expect(result.text).toBe("ctx_handles: 9.");
+			expect(result.text).toBe("ctx_handles: 9");
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([12]);
 		} finally {
 			closeQuietly(db);
@@ -202,7 +202,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 				mint,
 			);
 			expect(result.isError).toBe(false);
-			expect(result.text).toBe("ctx_handles: 1-2.");
+			expect(result.text).toBe("ctx_handles: 1-2");
 			// Registration span (D18): the endpoints' tag band; call-mid (15)
 			// registers after the end point and does not join.
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId).sort()).toEqual([
@@ -259,7 +259,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			};
 			const result = await call(db, sessionId, {}, mint);
 			expect(result.isError).toBe(false);
-			expect(result.text).toContain("stamped everything you've responded past: 3.");
+			expect(result.text).toContain("stamped everything you've responded past: 3");
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([5]);
 		} finally {
 			closeQuietly(db);
