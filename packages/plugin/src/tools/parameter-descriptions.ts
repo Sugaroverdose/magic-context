@@ -6,7 +6,7 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
             "Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from the item that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
     },
     ctx_expand: {
-        start: "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
+        start: "First message ordinal of the range (a <session-history> heading's start, a ctx_search hit, or a ctx_reduce echo), not a tag number.",
         end: "Last message ordinal of the range, inclusive, not a tag number.",
         verbose:
             "With start/end: one entry per message with ordinal and per-part preview instead of the transcript.",
@@ -48,7 +48,7 @@ export const LIGHT_PARAMETER_DESCRIPTIONS = {
             "Release targets copied from context: a tool call id, a verbatim text run, or a `<start>..<end>` stretch of such handles.",
     },
     ctx_expand: {
-        start: "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
+        start: "First message ordinal of the range (a <session-history> heading's start, a ctx_search hit, or a ctx_reduce echo), not a tag number.",
         end: "Last message ordinal of the range, inclusive, not a tag number.",
         verbose: "With start/end: one entry per message with previews instead of the transcript.",
         message:

@@ -87,7 +87,7 @@ describe("createToolRegistry — memory gating", () => {
             // ctx_expand stays byte-vanilla: tags are the plugin's addressing
             // mechanism and the release echo returns tags for vanilla reuse.
             ctx_reduce: ["ctx_handles"],
-            ctx_expand: ["tag", "start", "end", "verbose", "message"],
+            ctx_expand: ["start", "end", "verbose", "message"],
             ctx_note: [
                 "action",
                 "content",

@@ -342,9 +342,6 @@ export function createCtxReduceTool(
 				);
 			}
 			if (!hasHandles && !params.drop) {
-				if ("ctx_handles" in params) {
-					return err("Error: 'ctx_handles' must contain entries.");
-				}
 				if ("drop" in params) {
 					return err("Error: 'drop' must be provided.");
 				}

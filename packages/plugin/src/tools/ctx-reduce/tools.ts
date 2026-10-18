@@ -336,9 +336,6 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 if ("drop" in args) {
                     return "Error: 'drop' must be a non-empty list of tag ids.";
                 }
-                if ("ctx_handles" in args) {
-                    return "Error: 'ctx_handles' must contain entries.";
-                }
                 return await executeBulkRelease(toolContext);
             }
 
