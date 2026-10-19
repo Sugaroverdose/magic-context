@@ -107,19 +107,35 @@ row measures empty-scan overhead, not content matching (the FTS5 table has
 no index on `session_id`, so every scan is a full-table walk + filter).
 The user's premise — "scan only the visible window, not super slow" — needs
 an indexed scope, and a new table is not how to get it. **Design ruling
-(2026-10-19, endorsed by user over the `mirror_bytes` proposal):
-shortlist-and-verify, zero new structures.** Split the entry into words,
-one `MATCH` with the words AND-joined (0.1 ms posting walk) to get a
-candidate shortlist, then `LIKE … ESCAPE` **only over the shortlisted
-rows**. Sound because byte-exact match ⇒ identical tokens on both sides
-(identical tokenizer, case-fold, porter stemmer) ⇒ the shortlist is a
-guaranteed superset of true hits; verification kills the skeleton's
-over-collection (u90 ghosts fail the byte check). Beats a new
-session-indexed table on every axis: no schema change, no double-write
-sync surface (the FTS mirror has drift history — the hash ledger exists
-for a reason), no new failure modes; the verify reads the same `_content`
-MATCH reads. Zero-token entries (pure punctuation) shortlist = all →
-capped full-scan fallback, rare and bounded.
+(2026-10-19, final after two revisions): verify-on-collision, scan-on-
+emptiness. Zero new structures.**
+
+1. Phrase MATCH (today's lane, unchanged) → **unique hit → stamp.**
+   Absorbed semantics (case/whitespace/morphology) stay the accepted
+   surface — byte-verify-always was rejected the same session it was
+   proposed: it makes the resolver stricter than today (`test failed`
+   vs `tests failed` copy-drift passes the index, fails bytes, becomes
+   a not-found), i.e. fixes the ghost class by manufacturing new ghost
+   retries. The index never touches bytes; it only ranks the work.
+2. **Multiple hits → `LIKE … ESCAPE` over the shortlisted rows.**
+   Byte truth exists exactly where the skeleton can't discriminate;
+   survivors decide, ghosts die (u90), "found twice" names messages
+   that visibly contain the text.
+3. **Zero byte survivors / zero skeleton hits → capped full-scan byte
+   pass** — rare bounded path; rescues `%`-containing phrases (FTS inert
+   there) and pure-decoration entries; 1 hit → stamp, many →
+   found-twice (byte-true), 0 → not-found (with S-3 wording).
+
+Residual accepted by standard (user's fidelity-not-integrity ruling on
+stamping): decorated copy whose skeleton is unique (
+`===== u90 =====` → single narration message) stamps the narration —
+topic-true, recoverable, and the canonical lane for tool rows is the
+call id (S-1 text, both sites).
+
+Beats a new session-indexed table (`mirror_bytes` proposal, superseded)
+on every axis: no schema, no double-write sync surface (the mirror has
+drift history — the hash ledger exists for a reason), no new failure
+modes; byte checks read the same `_content` MATCH reads.
 
 Family census for context: the mirror is `message_history_source` (73,498
 rows — indexed `(session_id, message_id)`/`(session_id, ordinal)` ledger of
