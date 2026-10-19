@@ -141,6 +141,41 @@ emptiness. Zero new structures.**
 Consequence: the engine performs **no substring scan on any path**.
 LIKE runs only over rows MATCH hands it (rule 2), where scope is free.
 
+Implementation spec — the complete decision gate (every branch, every
+test row; nothing trimmed):
+
+```
+index hits == 1   → stamp. LIKE never runs.
+index hits >= 2   → LIKE '%entry%' ESCAPE '!' over the hit rows:
+      survivors == 1  → stamp that one, normal success echo
+      survivors == 0  → not-found (ghost candidates not named)
+      survivors >= 2  → found-twice, listing survivors only
+index hits == 0   → not-found (S-3 wording)
+zero-token entry  → not-found + "entry has no searchable text"
+```
+
+Predicate: SQLite `LIKE` — ASCII-case-insensitive by default (case
+absorption matches the index lane); substring (boundary punctuation
+free, interior faithful).
+
+Test table (red-first, one row per branch, all branches):
+
+1. unique index hit, bytes do NOT match (entry `test failed`, sole hit
+   contains `tests failed`) → stamps, no verify (rule 1; absorbed
+   semantics preserved)
+2. collision, exactly one byte survivor (skeleton twin in second
+   message) → stamps the survivor, success echo, NO found-twice
+3. collision, byte `test failed` vs skeleton-twin `testing failure` →
+   stamps the byte one
+4. collision, head/tail trim (entry `test failed` vs survivor row
+   `test failed.`) → survivor passes free (substring)
+5. collision, interior trim (entry `test failed` vs row
+   `test, failed`) → NOT a survivor (by design)
+6. `50%` literal in prose → LIKE escaping inert, stamps
+7. zero-token entry `→→→` → not-found + "no searchable text"
+8. audit geometry (entry `===== u90 =====`, prose hits contain `u90`
+   only) → collision → 0 survivors → not-found, no ghosts named
+
 Residual accepted by standard (user's fidelity-not-integrity ruling on
 stamping): decorated copy whose skeleton is unique (
 `===== u90 =====` → single narration message) stamps the narration —
