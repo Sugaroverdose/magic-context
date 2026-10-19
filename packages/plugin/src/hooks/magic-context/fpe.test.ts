@@ -15,7 +15,11 @@ import {
     renderDropToken,
     stripFillers,
 } from "./fpe";
-import { lookupReleasedToolInput } from "./fpe-resolve";
+import {
+    createToolExecuteBeforeHook,
+    lookupReleasedToolInput,
+    resolveReleasedToolInput,
+} from "./fpe-resolve";
 
 const KEY = deriveKey("test-session-001");
 
@@ -280,5 +284,69 @@ describe("FPE released-input lookup (registry spine)", () => {
     it("never-released (active) tag resolves to undefined", () => {
         const { mc } = makeWorld();
         expect(lookupReleasedToolInput(mc, SESSION, 11)).toBeUndefined();
+    });
+});
+
+describe("FPE resolver contract (resolver, not gate)", () => {
+    const KEY = deriveKey("ses_fpe_lookup");
+    const deps = () => ({
+        lookupOriginal: (_sessionId: string, tagId: number) =>
+            tagId === 8 ? { command: "pwd" } : undefined,
+        maxTag: () => 100,
+    });
+
+    it("corrupted legacy soup resolves to nothing, never rejects", () => {
+        const args = { command: "9•⸱66•⸱4586‣‣5" };
+        expect(() =>
+            resolveReleasedToolInput(args, "ses_fpe_lookup", deps())
+        ).not.toThrow();
+        expect(resolveReleasedToolInput(args, "ses_fpe_lookup", deps())).toBeUndefined();
+    });
+
+    it("corrupted retired v2 shape resolves to nothing, never rejects", () => {
+        // v2 bulk-mark form: base36 payload + pool-mark fillers (U+0301 is a
+        // composition pair and NOT pool-valid — it must never appear here)
+        const args = { command: "zͦz͒z̓zͦz͒z̓zz" };
+        expect(() =>
+            resolveReleasedToolInput(args, "ses_fpe_lookup", deps())
+        ).not.toThrow();
+        expect(resolveReleasedToolInput(args, "ses_fpe_lookup", deps())).toBeUndefined();
+    });
+
+    it("synthesized v3-shaped token resolves to nothing, never rejects", () => {
+        const args = { command: "46z9\u036F73569\u031324" };
+        expect(() =>
+            resolveReleasedToolInput(args, "ses_fpe_lookup", deps())
+        ).not.toThrow();
+        expect(resolveReleasedToolInput(args, "ses_fpe_lookup", deps())).toBeUndefined();
+    });
+
+    it("a real v3 mint for a released call still resolves to the original", () => {
+        const token = renderDropToken(8, KEY);
+        const args = { command: token };
+        expect(resolveReleasedToolInput(args, "ses_fpe_lookup", deps())).toEqual({
+            command: "pwd",
+        });
+    });
+
+    it("hook passes corrupted legacy args through unchanged", async () => {
+        const hook = createToolExecuteBeforeHook({ fpeResolve: deps() });
+        const output = { args: { command: "9•⸱66•⸱4586‣‣5" } };
+        await hook({ tool: "bash", sessionID: "ses_fpe_lookup" }, output);
+        expect(output.args).toEqual({ command: "9•⸱66•⸱4586‣‣5" });
+    });
+
+    it("hook never blocks a call on resolver internals failure", async () => {
+        const broken = {
+            lookupOriginal: () => {
+                throw new Error("db exploded");
+            },
+            maxTag: () => 100,
+        };
+        const hook = createToolExecuteBeforeHook({ fpeResolve: broken });
+        const token = renderDropToken(8, KEY);
+        const output = { args: { command: token } };
+        await hook({ tool: "bash", sessionID: "ses_fpe_lookup" }, output);
+        expect(output.args).toEqual({ command: token });
     });
 });

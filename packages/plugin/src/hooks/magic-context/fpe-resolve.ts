@@ -108,12 +108,6 @@ export interface FpeResolveDeps {
     maxTag: (sessionId: string) => number | undefined;
 }
 
-/** Reject message for a corrupted legacy token. The model's documented
- *  self-repair for an unrestorable token is to re-issue the call from the
- *  context it still holds — the instruction mechanizes that path. */
-export const FPE_CORRUPTED_TOKEN_MESSAGE =
-    "Magic Context: a tool argument carries a corrupted drop-token — a string in the retired drop-token format that decrypts to no released call of this session, so the original input cannot be restored from it. Re-issue this tool call with the full input you intend.";
-
 function findFpeTagId(
     value: unknown,
     key: bigint,
@@ -172,6 +166,11 @@ function findLegacyTagId(value: unknown, key: bigint, maxTag: number): LegacySca
  * ORIGINAL input that must run in its place, or undefined when the args
  * carry no resolvable token. Harness adapters log and assign; the
  * detection/replacement contract lives only here.
+ *
+ * Resolver, not gate: a token-shaped string that resolves to nothing
+ * (corrupted, retired, synthesized) returns undefined and the call executes
+ * as issued — the loud tool failure is the model's self-repair loop. This
+ * function never rejects a command.
  */
 export function resolveReleasedToolInput(
     args: unknown,
@@ -184,8 +183,8 @@ export function resolveReleasedToolInput(
     const tagId = findFpeTagId(args, key, maxTag);
     if (tagId !== undefined) return fpeResolve.lookupOriginal(sessionId, tagId);
     const legacy = findLegacyTagId(args, key, maxTag);
-    if (legacy === "corrupted") throw new Error(FPE_CORRUPTED_TOKEN_MESSAGE);
-    if (legacy !== "none") return fpeResolve.lookupOriginal(sessionId, legacy.tagId);
+    if (legacy !== "none" && legacy !== "corrupted")
+        return fpeResolve.lookupOriginal(sessionId, legacy.tagId);
     return undefined;
 }
 
@@ -219,10 +218,13 @@ export function createToolExecuteBeforeHook(options: FpeResolveDepsOption = {}) 
             try {
                 original = resolveReleasedToolInput(args, sessionId, options.fpeResolve);
             } catch (error) {
-                sessionLog(sessionId, "fpe: corrupted legacy drop-token rejected", {
+                // Resolver, not gate: a resolver defect must never block a
+                // tool call. Log and execute the call as issued.
+                sessionLog(sessionId, "fpe: resolver error, call passed through", {
                     tool: call.tool,
+                    error: error instanceof Error ? error.message : String(error),
                 });
-                throw error;
+                return;
             }
             if (original !== undefined) {
                 sessionLog(sessionId, "fpe: resolved dropped token in tool call args", {

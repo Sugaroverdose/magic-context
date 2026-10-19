@@ -854,10 +854,13 @@ export async function registerContext(context: V2Context) {
                         )?.max_tag ?? undefined,
                 });
             } catch (error) {
-                sessionLog(draft.sessionID, "fpe: corrupted legacy drop-token rejected", {
+                // Resolver, not gate: a resolver defect must never block a
+                // tool call. Log and execute the call as issued.
+                sessionLog(draft.sessionID, "fpe: resolver error, call passed through", {
                     tool: draft.tool,
+                    error: error instanceof Error ? error.message : String(error),
                 });
-                throw error;
+                return;
             }
             if (resolved !== undefined) {
                 sessionLog(draft.sessionID, "fpe: resolved dropped token in tool call args", {
