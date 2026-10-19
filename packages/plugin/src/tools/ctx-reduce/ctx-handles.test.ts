@@ -298,17 +298,17 @@ describe("ctx_reduce handles lane (ids)", () => {
             expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
             expect(pendingTagNumbers(db, "ses-2")).toEqual([]);
         }],
-        ["rejects the whole batch when the bridge cannot pair one id, valid siblings unapplied", { ctx_handles: ["call-b", "call-a"] }, { resolver: { resolve: () => new Map() } }, (response, db) => {
+        ["rejects the whole batch when the bridge cannot pair ANY id (all-failed stays loud, S-4)", { ctx_handles: ["call-b", "call-a"] }, { resolver: { resolve: () => new Map() } }, (response, db) => {
             expect(response).toContain('error: "call-b" provided in ctx_handles was not found');
             expect(response).not.toContain("ctx_handles: 7");
             expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
         }],
-        ["error shape never coexists with success lines", { ctx_handles: ["call-a", "nope-1"] }, {}, (response, db) => {
-            expect(response).toContain('error: "nope-1" provided in ctx_handles was not found');
-            // The valid sibling is NOT applied: the corrected resend applies all slots.
-            expect(response).not.toContain("ctx_handles: 5");
+        ["plain not-found coexists with success lines as a graceful noop (S-4 ruling)", { ctx_handles: ["call-a", "nope-1"] }, {}, (response, db) => {
+            expect(response).toContain("ctx_handles: 5, ?");
+            expect(response).toContain("not found: nope-1");
+            expect(response).not.toContain("Nothing was stamped");
             expect(response).not.toContain("already released");
-            expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            expect(pendingTagNumbers(db, "ses-1")).toEqual([5]);
         }],
         ["rejects mixing handles with the legacy drop grammar", { ctx_handles: ["call-a"], drop: "7" }, {}, (response, db) => {
             expect(response).toContain("cannot be combined");
@@ -544,4 +544,74 @@ describe("ctx_reduce bulk default", () => {
             }],
         ],
     );
+});
+
+describe("ctx_reduce partial accept (S-4 ruling)", () => {
+    const world = (): ReturnType<typeof buildWorld> =>
+        buildWorld({
+            messages: [
+                { id: "m1", ordinal: 1, role: "user", content: "fix the auth bypass", tag: 40 },
+                { id: "m2", ordinal: 2, role: "assistant", content: "the cache ttl caused the login failure", tag: 41 },
+            ],
+            tools: [{ callId: "call-a", tag: 50, owner: "m1" }],
+        });
+
+    it("a lone not-found in a batch is a graceful noop; siblings stamp", async () => {
+        const { db, tools } = world();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["call-a", "purple platypus parliament"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("ctx_handles: 1, ?");
+        expect(response).toContain("purple platypus parliament");
+        expect(response).toContain("current context window");
+        expect(response).not.toContain("Nothing was stamped");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([50]);
+    });
+
+    it("a range with a dead endpoint keeps failing the whole call loudly", async () => {
+        const { db, tools } = world();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["call-a", "call-a..purple platypus parliament"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("Nothing was stamped");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("an ambiguous entry keeps failing the whole call loudly", async () => {
+        const { db, tools } = buildWorld({
+            messages: [
+                { id: "m1", ordinal: 1, role: "user", content: "the cache ttl is fine", tag: 40 },
+                { id: "m2", ordinal: 2, role: "assistant", content: "the cache ttl caused the login failure", tag: 41 },
+            ],
+            tools: [{ callId: "call-a", tag: 50, owner: "m1" }],
+        });
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["call-a", "cache ttl"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("Nothing was stamped");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("a lone entry that is the only pointer still fails as an error", async () => {
+        const { db, tools } = world();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["purple platypus parliament"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("Nothing was stamped");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("all entries not-found stays an error (nothing stamped is the truth)", async () => {
+        const { db, tools } = world();
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["purple platypus parliament", "ghost senate chamber"] },
+            ctx,
+        )) as string;
+        expect(response).toContain("Nothing was stamped");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
 });

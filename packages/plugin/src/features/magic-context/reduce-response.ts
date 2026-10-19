@@ -98,6 +98,13 @@ export function renderPointingSuccess(
             lines.push(`${label}: ${ordinals.join(", ")}`);
         }
     };
+    for (const outcome of outcomes) {
+        if (outcome.kind === "error") {
+            lines.push(
+                `not found: ${echoInput(outcome.input)} provided in ctx_handles matches no tool call id and no message text in your current context window; the rest of the batch was stamped.`,
+            );
+        }
+    }
     noopLine("released", "already cleared");
     noopLine("compacted", "already compacted");
     noopLine("queued", "stamped, waiting for the sweep");

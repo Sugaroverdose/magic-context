@@ -76,8 +76,8 @@
     },
     "toolDescriptions": {
       "ctx_reduce": {
-        "chars": 2944,
-        "tokens": 716
+        "chars": 3098,
+        "tokens": 751
       },
       "ctx_expand": {
         "chars": 1418,
@@ -119,9 +119,9 @@
       },
       "totalTokens": 843
     },
-    "builtInProviderVisibleTotal": 4204
+    "builtInProviderVisibleTotal": 4239
   },
-  "mutableProseBaseline": 3361,
+  "mutableProseBaseline": 3396,
   "integerLightCeiling": 1917,
   "includedSurfaces": [
     "The primary built-in full guidance section for the exact feature variant above.",

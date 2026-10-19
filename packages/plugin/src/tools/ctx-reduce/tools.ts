@@ -282,12 +282,22 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             return result.internalError;
         }
 
-        const error = result.outcomes.find(
+        const errors = result.outcomes.filter(
             (outcome): outcome is Extract<ReduceInputOutcome, { kind: "error" }> =>
                 outcome.kind === "error",
         );
-        if (error) {
-            return renderPointingError(error, mint);
+        if (errors.length > 0) {
+            // S-4 ruling: a plain not-found among resolvable siblings is a
+            // graceful noop (siblings stamp, the slot reports). Loud whole-call
+            // failure stays for: dead RANGE endpoints (the span is a guess),
+            // AMBIGUOUS entries (the engine refuses to guess), everything
+            // failed (nothing stamped is the truth), and mint failure.
+            const loud =
+                errors.length === result.outcomes.length ||
+                errors.some((outcome) => outcome.range !== undefined || outcome.reason === "ambiguous");
+            if (loud) {
+                return renderPointingError(errors[0]!, mint);
+            }
         }
 
         if (result.queueTagNumbers.length > 0) {

@@ -95,10 +95,9 @@ Risk ladder: found-twice (loud, seen 2×) → **single-token silent mispoint**
 (one prose message containing the word = a stamp on the wrong item). Not
 observed in the window; construction permits it.
 
-Queued fix: byte-exact substring lane (`LIKE … ESCAPE`) over the mirror
-content, run when the FTS lane yields no live hit (and as authority over
-token-skeleton artifacts). Approves trivially against the ruling: the
-registry scoping stays; the FTS lane keeps absorbing case/whitespace.
+Fix: see the design ruling and implementation spec below (superseding
+two earlier proposals: always-verify, scan-on-emptiness, and a
+`mirror_bytes` table — all rejected in-session, reasons recorded).
 
 Measured 2026-10-19 on a read-only copy of the live store (47,163 mirror
 rows, all sessions): FTS phrase path median **0.1 ms** (max 3.9); raw
@@ -222,7 +221,22 @@ The form→class text in the same tail teaches the model the desk scope.
 Signature: not-found whose text has raw `part.data` hits on `text`-type
 parts of messages whose registry tags are `dropped`/absent.
 
-### S-4 · All-or-nothing collateral rejection — **OPEN (policy, ruling pending)**
+### S-4 · All-or-nothing collateral rejection — **FIXED (2026-10-19, `0ea75381a`)**
+
+Ruling (user): graceful noop only for a plain not-found entry with
+resolvable siblings; loud whole-call failure stays for range entries
+with a dead endpoint, ambiguous entries, all-failed calls, and mint
+failure. Landing: gate in tools.ts, per-entry not-found line in the
+success assembly, description sentence migrated, golden + budget
+fixture re-measured, 5 new tests + 2 migrated pins.
+
+Ruling (user): graceful noop only for a plain not-found entry with
+resolvable siblings; loud whole-call failure stays for range entries
+with a dead endpoint (the span is a guess), ambiguous entries (the
+engine refuses to guess), all-failed calls (nothing stamped is the
+truth), and mint failure. Landed 2026-10-19 (0ea75381a): gate +
+per-entry not-found line in the success assembly + description
+sentence migrated + golden/budget re-measured + 5 tests.
 
 Symptom: 401/450 failed-call entries were collateral — perfectly resolvable
 entries rejected because one entry in the list failed (8.4 per failure). The
