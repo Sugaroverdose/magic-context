@@ -88,7 +88,7 @@ it.skipIf(!process.env.MC_GATE_PURE)("F pure replay child", async () => {
 // makes that edit impossible to slip through unnoticed. Regenerate both together
 // with scripts/generate-issue-485-pre-fix-fixture.ts, which prints the new value.
 const PRE_FIX_FIXTURE_SHA256 =
-	"2894b16e4bc059211132f5f592e60b4ee0306cd58f56090db15a191c57a5d68f";
+	"a0db047f050091119aff3c2f0ebd08ed6ff1b87df163d55b33131ea170f1dd34";
 
 it("F no-system served arrays equal pre-fix master on every replay", () => {
 	// The baseline is read from committed bytes, never from repository history: CI

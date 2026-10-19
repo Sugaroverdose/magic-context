@@ -3,6 +3,10 @@ import { createTagger } from "@magic-context/core/features/magic-context/tagger"
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import {
+	GOLDEN_FULL_DROP_CARRIER,
+	GOLDEN_FULL_DROP_OUTPUT,
+} from "./fpe-wire-golden";
+import {
 	assistantMessage,
 	assistantToolCall,
 	createTestDb,
@@ -69,7 +73,14 @@ describe("createPiTranscript", () => {
 			expect([...targets.values()][0]?.drop()).toBe("removed");
 			transcript.commit();
 			transcript.finalizeToolRemovals();
-			expect(transcript.getOutputMessages()).toEqual([reasoning]);
+			// The released pair survives the scoped sweep (carrier + `...`,
+			// pinned as golden fragments), and the unrelated reasoning-only
+			// assistant is still preserved.
+			const output = transcript.getOutputMessages();
+			expect(output).toHaveLength(3);
+			expect(JSON.stringify(output)).toContain(GOLDEN_FULL_DROP_CARRIER);
+			expect(JSON.stringify(output)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+			expect(output[2]).toEqual(reasoning);
 			console.log(
 				"SCOPED_GATE Pi removed tool arc; unrelated reasoning retained",
 			);
@@ -525,12 +536,20 @@ describe("createPiTranscript", () => {
 			transcript.commit();
 
 			const output = transcript.getOutputMessages() as Array<{
-				content?: Array<{ type: string; text?: string }>;
+				content?: Array<{ type: string; text?: string; arguments?: unknown }>;
 			}>;
-			expect(output[0]?.content).toEqual([]);
-			expect(output[1]?.content).toEqual([]);
+			// The dropped pair is never removed: the call keeps its row with
+			// the token carrier and its multi-block result takes the released
+			// slot (both pinned as golden fragments).
+			expect(JSON.stringify(output)).toContain(GOLDEN_FULL_DROP_CARRIER);
+			expect(JSON.stringify(output)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			transcript.finalizeToolRemovals();
-			expect(output).toHaveLength(2);
+			expect(output).toHaveLength(4);
+			// The later completed call was never dropped and keeps real bytes.
+			expect(
+				output[2]?.content?.find((p) => p.type === "toolCall")?.arguments,
+			).toEqual({ path: "next.txt" });
+			expect(output[3]?.content?.[0]?.text).toBe("next");
 		} finally {
 			closeQuietly(db);
 		}
