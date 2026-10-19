@@ -120,7 +120,12 @@ emptiness. Zero new structures.**
 2. **Multiple hits → `LIKE … ESCAPE` over the shortlisted rows.**
    Byte truth exists exactly where the skeleton can't discriminate;
    survivors decide, ghosts die (u90), "found twice" names messages
-   that visibly contain the text.
+   that visibly contain the text. Predicate = **substring** (`%entry%`),
+   not equality: boundary punctuation is free (models deliberately
+   trim head/tail punctuation — `test failed` matches `test failed.`
+   for free), interior punctuation is faithful (that's where the
+   identity signal lives; interior drops are the one case the trim
+   ruling does not cover, and stays not-a-survivor by design).
 3. **Entry tokenizes to zero tokens** (pure punctuation/arrows/marks) →
    **not-found, final — no scan.** The index is mute about them (no
    terms to query), and a scan is not the answer: there is no
