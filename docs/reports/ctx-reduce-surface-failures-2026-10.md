@@ -105,14 +105,30 @@ rows, all sessions): FTS phrase path median **0.1 ms** (max 3.9); raw
 `LIKE` full-table scan **49.1 ms**; "session-scoped" LIKE 15.1 ms — that
 row measures empty-scan overhead, not content matching (the FTS5 table has
 no index on `session_id`, so every scan is a full-table walk + filter).
-The user's premise — "scan only the visible window, not super slow" — is
-right **only with an indexed scope**: a plain `LIKE` over the FTS table
-walks all sessions and grows linearly (~50 ms at today's size, several
-hundred ms at ~10× sessions). Design implication: the byte lane needs its
-own rowid table indexed by `session_id` (same writer as the mirror, one
-extra row insert per message = negligible write cost) → lookups become
-window-proportional, sub-ms. Plain LIKE on the FTS table: rejected by
-measurement, kept only as a dev probe.
+The user's premise — "scan only the visible window, not super slow" — needs
+an indexed scope, and a new table is not how to get it. **Design ruling
+(2026-10-19, endorsed by user over the `mirror_bytes` proposal):
+shortlist-and-verify, zero new structures.** Split the entry into words,
+one `MATCH` with the words AND-joined (0.1 ms posting walk) to get a
+candidate shortlist, then `LIKE … ESCAPE` **only over the shortlisted
+rows**. Sound because byte-exact match ⇒ identical tokens on both sides
+(identical tokenizer, case-fold, porter stemmer) ⇒ the shortlist is a
+guaranteed superset of true hits; verification kills the skeleton's
+over-collection (u90 ghosts fail the byte check). Beats a new
+session-indexed table on every axis: no schema change, no double-write
+sync surface (the FTS mirror has drift history — the hash ledger exists
+for a reason), no new failure modes; the verify reads the same `_content`
+MATCH reads. Zero-token entries (pure punctuation) shortlist = all →
+capped full-scan fallback, rare and bounded.
+
+Family census for context: the mirror is `message_history_source` (73,498
+rows — indexed `(session_id, message_id)`/`(session_id, ordinal)` ledger of
+EVERY indexed message, metadata + `normalized_content_hash`, no content),
+`message_history_fts` (47,163 — the live window, self-contained FTS5),
+`message_history_index` (per-session cursors). The 26K-row gap is the
+swept population — the substrate S-3's report precision can name (a
+message present in source with no FTS row = out-of-window, measured, not
+inferred).
 
 Signature: "found twice" where the named entry's punctuation is absent from
 the quoted candidates.
