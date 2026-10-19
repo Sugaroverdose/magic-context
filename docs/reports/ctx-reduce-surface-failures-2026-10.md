@@ -121,15 +121,20 @@ emptiness. Zero new structures.**
    Byte truth exists exactly where the skeleton can't discriminate;
    survivors decide, ghosts die (u90), "found twice" names messages
    that visibly contain the text.
-3. **Entry tokenizes to zero tokens** (pure punctuation/arrows/marks —
-   the FTS query has no terms; the index is mute, not negative, while
-   the bytes sit in `_content`) → byte scan over the window, capped:
-   1 hit → stamp, many → found-twice (byte-true), 0 → not-found (S-3
-   wording). This is the ONLY scan case: byte truth ⊆ skeleton truth,
-   so for any entry with ≥1 token, zero skeleton hits ⇒ a byte scan is
-   arithmetically empty — go straight to not-found. ("`%`-phrases need
-   the scan" was wrong on review: `%` entries tokenize fine; escaping
-   `%`/`_` is a LIKE-lane concern in rule 2, not an emptiness case.)
+3. **Entry tokenizes to zero tokens** (pure punctuation/arrows/marks) →
+   **not-found, final — no scan.** The index is mute about them (no
+   terms to query), and a scan is not the answer: there is no
+   window-scoped scan (the FTS table has no session index — the
+   measured 49 ms full-table walk, linear growth, rejected by
+   measurement), a scan "capped" answers not-found on truncated
+   evidence = a lie, and the pointing form it served is taught out of
+   existence by S-1 (pure decoration is not prose; the thing it
+   decorates is a tool row, lane = call id). Report names the shape:
+   the entry carries no searchable text — point by prose words or the
+   call id.
+
+Consequence: the engine performs **no substring scan on any path**.
+LIKE runs only over rows MATCH hands it (rule 2), where scope is free.
 
 Residual accepted by standard (user's fidelity-not-integrity ruling on
 stamping): decorated copy whose skeleton is unique (
