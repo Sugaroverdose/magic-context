@@ -1075,7 +1075,7 @@ describe("createTransform", () => {
         // the optimization must retain every served byte, including caveman text.
         // Re-pinned for the released tool shape (carrier args + `...`, no
         // removal — the `full` row now rides the wire as a skeleton).
-        expect(digest).toBe("a73f82d6f04c5ea2c6abdfdcdfd49b791f012395b83dde68ccdf7e1664dbdae8");
+        expect(digest).toBe("d81f06cbdb192f7423f488bd17e1042a41182db74d463065f85f88cc36485950");
     });
 
     it("serves byte-identical hot passes while coalescing state and skipping all-hit token SQL", async () => {

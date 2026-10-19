@@ -2,7 +2,13 @@ import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-openco
 import { refuseBudgetedToolCall } from "../../features/magic-context/dreamer/token-budget";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import { deriveKey, fpeGate, fpeGateLegacy, isFpeTokenCandidate } from "./fpe";
+import {
+    deriveKey,
+    fpeGate,
+    fpeGateLegacySoup,
+    fpeGateLegacyV2,
+    isFpeTokenCandidate,
+} from "./fpe";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -111,24 +117,23 @@ export const FPE_CORRUPTED_TOKEN_MESSAGE =
 function findFpeTagId(
     value: unknown,
     key: bigint,
-    currentL: number,
     maxTag: number,
 ): number | undefined {
     if (typeof value === "string") {
         if (!isFpeTokenCandidate(value)) return undefined;
-        const result = fpeGate(value, key, currentL, maxTag);
+        const result = fpeGate(value, key, maxTag);
         return result.matched ? result.tagId : undefined;
     }
     if (Array.isArray(value)) {
         for (const item of value) {
-            const tagId = findFpeTagId(item, key, currentL, maxTag);
+            const tagId = findFpeTagId(item, key, maxTag);
             if (tagId !== undefined) return tagId;
         }
         return undefined;
     }
     if (isRecord(value)) {
         for (const item of Object.values(value)) {
-            const tagId = findFpeTagId(item, key, currentL, maxTag);
+            const tagId = findFpeTagId(item, key, maxTag);
             if (tagId !== undefined) return tagId;
         }
         return undefined;
@@ -138,26 +143,22 @@ function findFpeTagId(
 
 type LegacyScan = { tagId: number } | "corrupted" | "none";
 
-function findLegacyTagId(
-    value: unknown,
-    key: bigint,
-    currentL: number,
-    maxTag: number,
-): LegacyScan {
+function findLegacyTagId(value: unknown, key: bigint, maxTag: number): LegacyScan {
     if (typeof value === "string") {
-        const result = fpeGateLegacy(value, key, currentL, maxTag);
+        const v2 = fpeGateLegacyV2(value, key, maxTag);
+        const result = v2.status === "none" ? fpeGateLegacySoup(value, key, maxTag) : v2;
         return result.status === "resolved" ? { tagId: result.tagId } : result.status;
     }
     if (Array.isArray(value)) {
         for (const item of value) {
-            const r = findLegacyTagId(item, key, currentL, maxTag);
+            const r = findLegacyTagId(item, key, maxTag);
             if (r !== "none") return r;
         }
         return "none";
     }
     if (isRecord(value)) {
         for (const item of Object.values(value)) {
-            const r = findLegacyTagId(item, key, currentL, maxTag);
+            const r = findLegacyTagId(item, key, maxTag);
             if (r !== "none") return r;
         }
         return "none";
@@ -180,9 +181,9 @@ export function resolveReleasedToolInput(
     const key = deriveKey(sessionId);
     const maxTag = fpeResolve.maxTag(sessionId);
     if (maxTag === undefined) return undefined;
-    const tagId = findFpeTagId(args, key, 8, maxTag);
+    const tagId = findFpeTagId(args, key, maxTag);
     if (tagId !== undefined) return fpeResolve.lookupOriginal(sessionId, tagId);
-    const legacy = findLegacyTagId(args, key, 8, maxTag);
+    const legacy = findLegacyTagId(args, key, maxTag);
     if (legacy === "corrupted") throw new Error(FPE_CORRUPTED_TOKEN_MESSAGE);
     if (legacy !== "none") return fpeResolve.lookupOriginal(sessionId, legacy.tagId);
     return undefined;

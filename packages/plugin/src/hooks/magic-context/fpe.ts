@@ -66,12 +66,29 @@ function modInverse(a: bigint, m: bigint): bigint {
     return ((old_s % m) + m) % m;
 }
 
+function gcd(a: bigint, b: bigint): bigint {
+    let [x, y] = [a < 0n ? -a : a, b < 0n ? -b : b];
+    while (y !== 0n) {
+        [x, y] = [y, x % y];
+    }
+    return x;
+}
+
 function roundParams(key: bigint, round: number, modulus: bigint): { a: bigint; b: bigint } {
     const k = (key + BigInt(round * 8)) % modulus;
     let a = (k % (modulus - 1n)) + 1n;
     if (a % 2n === 0n) a += 1n;
     if (a % 3n === 0n) a += 2n;
     if (a >= modulus) a -= modulus;
+    // Coprimality against every modulus factor (the 2/3 checks above are
+    // sized for base-36 moduli; the cell radix 1188 = 2^2 * 3^3 * 11 adds
+    // factor 11). For moduli with only factors 2 and 3 the chain above
+    // already yields gcd(a, m) = 1, so the loop never runs — legacy
+    // (base-36) decryption is unchanged.
+    while (gcd(a, modulus) !== 1n) {
+        a += 2n;
+        if (a >= modulus) a -= modulus;
+    }
     const b = k % modulus;
     return { a, b };
 }
@@ -106,44 +123,125 @@ function fnv1a(s: string): bigint {
     return hash;
 }
 
-function xorshift64(state: bigint): [number, bigint] {
+function nextU64(state: bigint): bigint {
     let s = state;
     s ^= (s << 13n) % (1n << 64n);
     s ^= s >> 7n;
     s ^= (s << 17n) % (1n << 64n);
-    return [Number(s % 100n), s];
+    return s;
 }
 
-export function addFillers(token: string, key: bigint): string {
-    const seed = fnv1a(token + key.toString(16));
+/**
+ * v3 (B-form) render: the PAYLOAD rides the mark cells — the census-null class
+ * — and the bulk rides cheap alnum fillers. v2 (marks as fillers throughout)
+ * measured ~27 serve tokens per carrier because every mark byte-fallbacks; B
+ * pays that price for exactly P cells (2 or 3) instead of ~10.
+ *
+ * Cell = one base char (a-z0-9) + exactly one pool mark, 1188 cells.
+ * Payload = P cells, a bijection over 1188^P (P=2: 704K tags; P=3: 1.67G).
+ * P and the cell positions are seeded from the encrypted payload + key:
+ * pseudo-random, deterministic (same tag + session => same bytes forever —
+ * no cache-bust on restart). Cells never touch each other (a filler between
+ * every cell), so every mark cluster is exactly one cell: extraction is a
+ * single NFD pass with no grapheme-boundary guessing.
+ */
+const CELL_BASES = ALPHABET; // 36
+const CELL_RADIX = BigInt(CELL_BASES.length * FILLER_POOL.length); // 1188
+const P2_MAX_TAG = Number(CELL_RADIX ** 2n) - 1; // 1_411_183
+export const V3_LEN_FLOOR = 8;
+export const V3_LEN_CEIL = 22;
+
+function cellsToString(value: bigint, p: number): string {
+    let out = "";
+    let n = value;
+    for (let i = 0; i < p; i++) {
+        const cell = Number(n % CELL_RADIX);
+        n /= CELL_RADIX;
+        out =
+            CELL_BASES[Math.floor(cell / FILLER_POOL.length)] +
+            FILLER_POOL[cell % FILLER_POOL.length] +
+            out;
+    }
+    return out;
+}
+
+function cellFromString(base: string, mark: string): number {
+    const b = CELL_BASES.indexOf(base);
+    const m = FILLER_POOL.indexOf(mark);
+    if (b < 0 || m < 0) return -1;
+    return b * FILLER_POOL.length + m;
+}
+
+function encryptCellSpace(tagId: number, key: bigint, p: number): bigint {
+    const modulus = CELL_RADIX ** BigInt(p);
+    let value = BigInt(tagId);
+    for (let round = 0; round < ROUNDS; round++) {
+        const { a, b } = roundParams(key, round, modulus);
+        value = (value * a + b) % modulus;
+    }
+    return value;
+}
+
+function decryptCellSpace(cells: number[], key: bigint, p: number): number {
+    const modulus = CELL_RADIX ** BigInt(p);
+    let value = 0n;
+    for (const c of cells) value = value * CELL_RADIX + BigInt(c);
+    for (let round = ROUNDS - 1; round >= 0; round--) {
+        const { a, b } = roundParams(key, round, modulus);
+        const aInv = modInverse(a, modulus);
+        value = (((value - b + modulus) % modulus) * aInv) % modulus;
+    }
+    return Number(value);
+}
+
+function chooseP(tagId: number, seed: bigint): 2 | 3 {
+    if (tagId > P2_MAX_TAG) return 3;
+    return seed & 1n ? 2 : 3;
+}
+
+export function renderDropToken(tagId: number, key: bigint): string {
+    const plain = BigInt(tagId);
+    const probe = encryptCellSpace(tagId, key, 2);
+    const seed = fnv1a(probe.toString(36) + key.toString(16));
+    const p = chooseP(tagId, seed);
+    const encrypted = p === 2 ? probe : encryptCellSpace(tagId, key, 3);
+    const payload = cellsToString(encrypted, p);
+
+    // Layout: F filler slots + P cell slots, cells at seeded non-adjacent
+    // positions (Fisher-Yates on cell slots, seeded). Deterministic from the
+    // payload + key; nothing else can move them.
     let state = seed;
-    let result = "";
-    for (let i = 0; i < token.length; i++) {
-        result += token[i];
-        if (i < token.length - 1) {
-            const [pct, nextState] = xorshift64(state);
-            state = nextState;
-            // v2 density: every gap carries at least one mark — the line
-            // breaks at every payload character; no readable runs form.
-            const count = pct < 60 ? 1 : 2;
-            for (let j = 0; j < count; j++) {
-                const [fp, ns] = xorshift64(state);
-                state = ns;
-                result += FILLER_POOL[fp % FILLER_POOL.length];
+    let f = 10 + Number(seed % 5n); // 10..14 fillers => len 14..20
+    const slots = f + p;
+    const cellAt = new Set<number>();
+    while (cellAt.size < p) {
+        state = nextU64(state);
+        const pos = Number(state % BigInt(slots));
+        let ok = true;
+        for (const used of cellAt) {
+            if (Math.abs(used - pos) < 2) {
+                ok = false;
+                break;
             }
         }
+        if (ok) cellAt.add(pos);
     }
-    return result;
+    let out = "";
+    for (let i = 0, c = 0; i < slots; i++) {
+        if (cellAt.has(i)) {
+            // one cell = 2 code units
+            out += payload[c * 2] + payload[c * 2 + 1];
+            c++;
+        } else {
+            state = nextU64(state);
+            out += CELL_BASES[Number(state % BigInt(CELL_BASES.length))];
+        }
+    }
+    return out;
 }
 
 export function stripFillers(token: string): string {
     return token.replace(/[^a-z0-9]/g, "");
-}
-
-export function renderDropToken(tagId: number, key: bigint): string {
-    const length = tagId < 10_000_000 ? L_FLOOR : 9;
-    const encrypted = fpeEncrypt(tagId, key, length);
-    return addFillers(encrypted, key);
 }
 
 export interface FpeGateResult {
@@ -152,40 +250,61 @@ export interface FpeGateResult {
 }
 
 /**
- * Accept requires `tagId` to be a real released tag of the session
- * (`0 <= tagId <= maxTag`, status check lives in the lookup). The v1 accept
- * test `tagId < BASE ** len` ranged over the ENCODING space, not over real
- * tags: every 8-char base36 string decrypted "successfully" (the Feistel is
- * a bijection), so the gate policed obscurity of a format the wire publishes
- * on every release, and a shape-only imitation entered silently.
+ * Split into clusters: (base, marks[]) over NFD codepoints. Returns null on
+ * any non-pool mark (cheap reject).
  */
-export function fpeGate(
+function extractClusters(
     value: string,
-    key: bigint,
-    currentL: number,
-    maxTag: number,
-): FpeGateResult {
-    if (value.length < L_FLOOR || value.length > L_FLOOR + 14) {
+): Array<{ base: string; marks: string[] }> | null {
+    const clusters: Array<{ base: string; marks: string[] }> = [];
+    let current: { base: string; marks: string[] } | null = null;
+    for (const ch of value.normalize("NFD")) {
+        if (/[a-z0-9]/.test(ch)) {
+            current = { base: ch, marks: [] };
+            clusters.push(current);
+        } else if (/[\u0300-\u036f]/.test(ch)) {
+            if (!FILLER_SET.has(ch)) return null;
+            if (!current) return null; // leading orphan mark
+            current.marks.push(ch);
+        } else {
+            return null; // any other codepoint: not a token
+        }
+    }
+    return clusters;
+}
+
+/**
+ * v3 gate. Structural accept surface: every codepoint is a pool mark or an
+ * alnum base; exactly P clusters carry exactly one mark each; those cells are
+ * pairwise separated (>=1 alnum between); then the P-cell Feistel must land
+ * inside [0, maxTag] — the v1 lesson: acceptance ranges over REAL tags, never
+ * over the encoding space (the cipher is a bijection; a range over the cipher
+ * domain accepts every shape-valid string).
+ */
+export function fpeGate(value: string, key: bigint, maxTag: number): FpeGateResult {
+    if (value.length < V3_LEN_FLOOR || value.length > V3_LEN_CEIL) {
         return { matched: false };
     }
-    const hasNonAlnum = /[^a-z0-9]/.test(value);
-    if (!hasNonAlnum) return { matched: false };
-    const fillerChars = value.replace(/[a-z0-9]/g, "");
-    for (const c of fillerChars) {
-        if (!FILLER_SET.has(c)) return { matched: false };
+    const clusters = extractClusters(value);
+    if (!clusters) return { matched: false };
+    const cells: number[] = [];
+    const cellIdx: number[] = [];
+    for (let i = 0; i < clusters.length; i++) {
+        const { base, marks } = clusters[i];
+        if (marks.length === 0) continue;
+        if (marks.length > 1) return { matched: false };
+        const cell = cellFromString(base, marks[0]);
+        if (cell < 0) return { matched: false };
+        cells.push(cell);
+        cellIdx.push(i);
     }
-    const stripped = stripFillers(value);
-    const len = stripped.length;
-    if (len !== currentL && len !== currentL - 1) {
-        return { matched: false };
+    const p = cells.length;
+    if (p !== 2 && p !== 3) return { matched: false };
+    for (let i = 1; i < cellIdx.length; i++) {
+        if (cellIdx[i] - cellIdx[i - 1] < 2) return { matched: false };
     }
-    if (!/^[a-z0-9]+$/.test(stripped)) {
-        return { matched: false };
-    }
-    const tagId = fpeDecrypt(stripped, key, len);
-    if (tagId < 0 || tagId > maxTag) {
-        return { matched: false };
-    }
+    const tagId = decryptCellSpace(cells, key, p);
+    if (tagId < 0 || tagId > maxTag) return { matched: false };
     return { matched: true, tagId };
 }
 
@@ -203,36 +322,62 @@ export function isLegacySoupCandidate(value: string): boolean {
     return true;
 }
 
+/** Legacy (v2) drop-token shape: base36 payload + mark fillers throughout. */
+export function isLegacyV2Candidate(value: string): boolean {
+    if (value.length < L_FLOOR + 6 || value.length > L_FLOOR + 14) return false;
+    if (!/[\u0300-\u036f]/.test(value)) return false;
+    const stripped = stripFillers(value);
+    if (stripped.length < L_FLOOR - 1 || stripped.length > 10) return false;
+    if (!/^[a-z0-9]+$/.test(stripped)) return false;
+    for (const c of value) {
+        if (/[a-z0-9]/.test(c)) continue;
+        if (!FILLER_SET.has(c)) return false;
+    }
+    return true;
+}
+
 export type FpeLegacyGateResult =
     | { status: "resolved"; tagId: number }
     | { status: "corrupted" }
     | { status: "none" };
 
 /**
- * Legacy lane: this build renders v2 tokens only, so a v1-shaped string is
- * either a pre-upgrade release replay (decrypts to a real tag of this session
- * — resolve it) or a corrupted token (out of range — the model's own noise
- * shaped like our retired format; the original cannot be restored from it).
+ * Legacy lane: this build renders v3 tokens only, so a v1- or v2-shaped
+ * string is either a pre-upgrade release replay (decrypts to a real tag of
+ * this session — resolve it) or a corrupted token (out of range — the model's
+ * own noise shaped like a retired format; the original cannot be restored
+ * from it).
  */
-export function fpeGateLegacy(
-    value: string,
-    key: bigint,
-    currentL: number,
-    maxTag: number,
-): FpeLegacyGateResult {
+export function fpeGateLegacySoup(value: string, key: bigint, maxTag: number): FpeLegacyGateResult {
     if (!isLegacySoupCandidate(value)) return { status: "none" };
     const stripped = stripFillers(value);
     const len = stripped.length;
-    if (len !== currentL && len !== currentL - 1) return { status: "none" };
+    if (len < L_FLOOR - 1 || len > 10) return { status: "none" };
     const tagId = fpeDecrypt(stripped, key, len);
     if (tagId >= 0 && tagId <= maxTag) return { status: "resolved", tagId };
     return { status: "corrupted" };
 }
 
-export function isFpeTokenCandidate(value: string): boolean {
-    if (value.length < L_FLOOR || value.length > L_FLOOR + 14) return false;
-    if (!/[^a-z0-9]/.test(value)) return false;
+export function fpeGateLegacyV2(value: string, key: bigint, maxTag: number): FpeLegacyGateResult {
+    if (!isLegacyV2Candidate(value)) return { status: "none" };
     const stripped = stripFillers(value);
-    if (stripped.length < L_FLOOR - 1 || stripped.length > 10) return false;
-    return /^[a-z0-9]+$/.test(stripped);
+    const len = stripped.length;
+    if (len < L_FLOOR - 1 || len > 10) return { status: "none" };
+    const tagId = fpeDecrypt(stripped, key, len);
+    if (tagId >= 0 && tagId <= maxTag) return { status: "resolved", tagId };
+    return { status: "corrupted" };
+}
+
+/** @deprecated v1-shaped alias for the soup lane. */
+export const fpeGateLegacy = fpeGateLegacySoup;
+
+export function isFpeTokenCandidate(value: string): boolean {
+    if (value.length < V3_LEN_FLOOR || value.length > V3_LEN_CEIL) return false;
+    if (!/[\u0300-\u036f]/.test(value)) return false;
+    let marks = 0;
+    for (const ch of value) {
+        if (/[\u0300-\u036f]/.test(ch)) marks++;
+        else if (!/[a-z0-9]/.test(ch)) return false;
+    }
+    return marks === 2 || marks === 3;
 }
