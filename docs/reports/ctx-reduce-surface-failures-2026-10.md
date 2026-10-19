@@ -230,13 +230,6 @@ failure. Landing: gate in tools.ts, per-entry not-found line in the
 success assembly, description sentence migrated, golden + budget
 fixture re-measured, 5 new tests + 2 migrated pins.
 
-Ruling (user): graceful noop only for a plain not-found entry with
-resolvable siblings; loud whole-call failure stays for range entries
-with a dead endpoint (the span is a guess), ambiguous entries (the
-engine refuses to guess), all-failed calls (nothing stamped is the
-truth), and mint failure. Landed 2026-10-19 (0ea75381a): gate +
-per-entry not-found line in the success assembly + description
-sentence migrated + golden/budget re-measured + 5 tests.
 
 Symptom: 401/450 failed-call entries were collateral — perfectly resolvable
 entries rejected because one entry in the list failed (8.4 per failure). The
