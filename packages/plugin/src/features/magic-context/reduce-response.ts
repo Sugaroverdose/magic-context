@@ -32,7 +32,7 @@ export function renderPointingError(
     mint: OrdinalMint,
 ): string {
     const rangeHint = outcome.range
-        ? ` It is the ${outcome.range.which} of the range "${echoInput(outcome.range.entry)}".`
+        ? ` It is the ${outcome.range.which} of the range "${echoInput(outcome.range.entry)}". Endpoints inside tool output are call ids.`
         : "";
     if (outcome.reason === "ambiguous") {
         const candidates = (outcome.candidates ?? [])
@@ -51,7 +51,7 @@ export function renderPointingError(
             .filter(Boolean)
             .join(" ");
     }
-    return `error: "${echoInput(outcome.input)}" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.${rangeHint} Copy a call id or a verbatim run of text exactly from what you can see, or drop this entry and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
+    return `error: "${echoInput(outcome.input)}" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.${rangeHint} A phrase names a message — prose you wrote or were given; a tool call releases by its call id, not by its output text. Copy the words exactly, or drop this entry and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
 }
 
 export function renderPointingSuccess(

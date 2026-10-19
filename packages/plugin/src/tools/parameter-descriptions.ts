@@ -3,7 +3,7 @@ import type { PromptSurfacePreset } from "../shared/prompt-surface";
 export const FULL_PARAMETER_DESCRIPTIONS = {
     ctx_reduce: {
         ctx_handles:
-            "Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from the item that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
+            "Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from a message's text (prose — a tool call releases by its call id, never by its output text) that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
     },
     ctx_expand: {
         start: "First message ordinal of the range (a <session-history> heading's start, a ctx_search hit, or a ctx_reduce echo), not a tag number.",

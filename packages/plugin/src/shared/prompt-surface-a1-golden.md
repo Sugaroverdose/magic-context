@@ -26,7 +26,7 @@ Reduction prompts are routine housekeeping to keep the session fast and cheap �
 
 Think of your context as a desk. Every message and every tool output lands on it.
 
-When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` pointing at it — a tool call id copied exactly from the call, the shortest phrase copied word-for-word from the item that only that one item on the desk matches, `start..end` built from two such pointers, stamping them and everything in between; with the list left empty, it stamps every item you have already replied to. Stamped items leave your context when Magic Context clears them in one sweep, and you don't pick the moment — stamp as soon as an item has served its purpose, not at the end of the turn, and do it silently: nobody wants to read "I'll drop these outputs". The newest items are protected, so a stamp on recent output applies only once newer work displaces it. An output is used once you've taken what you need from it into your reasoning or your answer. Never stamp a user message for what it asks of you; a large paste inside one is fine once you have used it.
+When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` pointing at it — a tool call id copied exactly from the call, the shortest phrase copied word-for-word from a message's text (prose — a tool call releases by its call id, never by its output text) that only that one item on the desk matches, `start..end` built from two such pointers, stamping them and everything in between; with the list left empty, it stamps every item you have already replied to. Stamped items leave your context when Magic Context clears them in one sweep, and you don't pick the moment — stamp as soon as an item has served its purpose, not at the end of the turn, and do it silently: nobody wants to read "I'll drop these outputs". The newest items are protected, so a stamp on recent output applies only once newer work displaces it. An output is used once you've taken what you need from it into your reasoning or your answer. Never stamp a user message for what it asks of you; a large paste inside one is fine once you have used it.
 
 Nothing stamped is ever lost. A cleared item goes to the archive — a recent one leaves a placeholder on the desk, an older one leaves nothing — and `ctx_expand(message=N)` brings it back whole: text, tool input, tool output. Now and then Magic Context leaves a short reminder on the desk saying how much unstamped material is lying around. A reminder means stamping is overdue: act on it in your next step. It isn't a warning about the desk's size. The desk never gets smaller for it.
 
@@ -62,7 +62,7 @@ Reduction prompts are routine housekeeping to keep the session fast and cheap �
 
 Think of your context as a desk. Every message and every tool output lands on it.
 
-When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` pointing at it — a tool call id copied exactly from the call, the shortest phrase copied word-for-word from the item that only that one item on the desk matches, `start..end` built from two such pointers, stamping them and everything in between; with the list left empty, it stamps every item you have already replied to. Stamped items leave your context when Magic Context clears them in one sweep, and you don't pick the moment — stamp as soon as an item has served its purpose, not at the end of the turn, and do it silently: nobody wants to read "I'll drop these outputs". The newest items are protected, so a stamp on recent output applies only once newer work displaces it. An output is used once you've taken what you need from it into your reasoning or your answer. Never stamp a user message for what it asks of you; a large paste inside one is fine once you have used it.
+When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` pointing at it — a tool call id copied exactly from the call, the shortest phrase copied word-for-word from a message's text (prose — a tool call releases by its call id, never by its output text) that only that one item on the desk matches, `start..end` built from two such pointers, stamping them and everything in between; with the list left empty, it stamps every item you have already replied to. Stamped items leave your context when Magic Context clears them in one sweep, and you don't pick the moment — stamp as soon as an item has served its purpose, not at the end of the turn, and do it silently: nobody wants to read "I'll drop these outputs". The newest items are protected, so a stamp on recent output applies only once newer work displaces it. An output is used once you've taken what you need from it into your reasoning or your answer. Never stamp a user message for what it asks of you; a large paste inside one is fine once you have used it.
 
 Nothing stamped is ever lost. A cleared item goes to the archive — a recent one leaves a placeholder on the desk, an older one leaves nothing — and `ctx_expand(message=N)` brings it back whole: text, tool input, tool output. Now and then Magic Context leaves a short reminder on the desk saying how much unstamped material is lying around. A reminder means stamping is overdue: act on it in your next step. It isn't a warning about the desk's size. The desk never gets smaller for it.
 
@@ -114,7 +114,7 @@ Some things on the desk are Magic Context's own markings, not conversation. `<sy
 ```markdown
 ## Magic Context
 
-Your context is a desk. Every message and every tool output lands on it. When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` pointing at it — a tool call id copied exactly from the call, the shortest phrase copied word-for-word from the item that only that one item on the desk matches, `start..end` stamping them and everything in between. Stamped items leave your context when Magic Context clears them in one sweep, and the newest items are protected, so a stamp on recent output applies only once newer work displaces it — stamp as soon as an item has served its purpose, not at the end of the task, and do it silently. Never stamp a user message for what it asks of you; look at each item before stamping, and never blanket-stamp a whole stretch.
+Your context is a desk. Every message and every tool output lands on it. When an item no longer needs to stay on the desk for the work ahead, stamp it: `ctx_reduce` pointing at it — a tool call id copied exactly from the call, the shortest phrase copied word-for-word from a message's text (prose — a tool call releases by its call id, never by its output text) that only that one item on the desk matches, `start..end` stamping them and everything in between. Stamped items leave your context when Magic Context clears them in one sweep, and the newest items are protected, so a stamp on recent output applies only once newer work displaces it — stamp as soon as an item has served its purpose, not at the end of the task, and do it silently. Never stamp a user message for what it asks of you; look at each item before stamping, and never blanket-stamp a whole stretch.
 
 A cleared item leaves a placeholder or disappears from the desk; that is normal housekeeping, not something to copy or mention. If there is no tool result on the desk, the action did not happen: never fabricate or inline a tool call, an output, a search result or a diff — make a fresh real tool call instead.
 
@@ -130,7 +130,7 @@ Some things on the desk are Magic Context's own markings, not conversation. `<sy
 ```
 Stamp items you've consumed to free your context window. Not a delete: stamping QUEUES it, the item stays fully readable until Magic Context clears stamped items in one sweep, and the newest items are protected, so a stamp on recent output applies only once newer work displaces it. A cleared item goes to the archive — a recent one leaves a placeholder, an older one leaves nothing — and `ctx_expand(message=N)` is the way back. So the question before stamping is not "have I finished reading this?" but "does this need to stay in your context for the work ahead?" — a file you read and will keep editing stays; the grep that found it goes. A reply you are writing has not served its purpose until the user responds to it.
 
-Point at items with `ctx_handles`: a tool call id copied exactly from the call, the shortest phrase copied word-for-word from the item that only that one item on the desk matches, a span of two such pointers joined by `..`, stamping them and everything in between, and any mix of these in one list.
+Point at items with `ctx_handles`: a tool call id copied exactly from the call, the shortest phrase copied word-for-word from a message's text (your prose, and what you were given as prose) that only that one item on the desk matches — a tool call is released by its call id, never by its output text, a span of two such pointers joined by `..`, stamping them and everything in between, and any mix of these in one list.
 Examples —
 single id: `["call_81cf34"]`
 single phrase: `["Connection refused at 127.0.0.1:5432"]`
@@ -153,7 +153,7 @@ Do not stamp your own current reasoning or anything you have not yet acted on.
 ```json
 {
   "ctx_handles": {
-    "description": "Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from the item that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
+    "description": "Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from a message's text (prose — a tool call releases by its call id, never by its output text) that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
     "type": "array",
     "items": {
       "type": "string"
@@ -409,9 +409,9 @@ The hash handler persists the MD5 of `output.system.join("\\n")`. The values bel
 
 | Variant | Guidance bytes | MD5 system-prompt hash |
 |---|---:|---|
-| PRIMARY full | 5515 | `2d65a1fc137e81df1573fe844e9435af` |
-| PRIMARY memory-off | 5176 | `2de65be7034462993bddf0bbc7854d2f` |
-| PRIMARY reduce-off | 4221 | `09cad9b51a9cd18bfe2ce04d557beeb4` |
+| PRIMARY full | 5569 | `276c4dc657655205293aa92aca948cc5` |
+| PRIMARY memory-off | 5232 | `07327eba0b1b397dcf58f1d52f4a109b` |
+| PRIMARY reduce-off | 4199 | `09cad9b51a9cd18bfe2ce04d557beeb4` |
 | SUBAGENT minimal | 1621 | `4f66eaece939572edaa799a91f28b631` |
 
 The OpenCode and Pi runtime compatibility tests consume this snapshot for omitted `prompt_surface` and explicit `{ default: "full" }`: both assert guidance, registered tool descriptions, tool IDs, and hashes; OpenCode also asserts these parameter schemas directly, while Pi asserts its TypeBox-owned schemas stay byte-identical across both config forms.
