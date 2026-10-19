@@ -1,8 +1,8 @@
+import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-opencode-db";
 import { refuseBudgetedToolCall } from "../../features/magic-context/dreamer/token-budget";
 import { sessionLog } from "../../shared/logger";
-import { deriveKey, fpeGate, isFpeTokenCandidate } from "./fpe";
-import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-opencode-db";
 import type { Database } from "../../shared/sqlite";
+import { deriveKey, fpeGate, fpeGateLegacy, isFpeTokenCandidate } from "./fpe";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -44,7 +44,7 @@ export function lookupReleasedToolInput(
 ): unknown | undefined {
     const tag = db
         .prepare(
-            "SELECT message_id, tool_owner_message_id FROM tags WHERE session_id = ? AND tag_number = ? AND type = 'tool'",
+            "SELECT message_id, tool_owner_message_id FROM tags WHERE session_id = ? AND tag_number = ? AND type = 'tool' AND status = 'dropped'",
         )
         .get(sessionId, tagNumber) as
         | { message_id: string; tool_owner_message_id: string | null }
@@ -97,29 +97,72 @@ export function lookupReleasedToolInput(
  */
 export interface FpeResolveDeps {
     lookupOriginal: (sessionId: string, tagId: number) => unknown | undefined;
+    /** Highest tag_number ever assigned to the session (index-served MAX).
+     *  Undefined = no registry access; FPE resolution stays inert. */
+    maxTag: (sessionId: string) => number | undefined;
 }
 
-function findFpeTagId(value: unknown, key: bigint, currentL: number): number | undefined {
+/** Reject message for a corrupted legacy token. The model's documented
+ *  self-repair for an unrestorable token is to re-issue the call from the
+ *  context it still holds — the instruction mechanizes that path. */
+export const FPE_CORRUPTED_TOKEN_MESSAGE =
+    "Magic Context: a tool argument carries a corrupted drop-token — a string in the retired drop-token format that decrypts to no released call of this session, so the original input cannot be restored from it. Re-issue this tool call with the full input you intend.";
+
+function findFpeTagId(
+    value: unknown,
+    key: bigint,
+    currentL: number,
+    maxTag: number,
+): number | undefined {
     if (typeof value === "string") {
         if (!isFpeTokenCandidate(value)) return undefined;
-        const result = fpeGate(value, key, currentL);
+        const result = fpeGate(value, key, currentL, maxTag);
         return result.matched ? result.tagId : undefined;
     }
     if (Array.isArray(value)) {
         for (const item of value) {
-            const tagId = findFpeTagId(item, key, currentL);
+            const tagId = findFpeTagId(item, key, currentL, maxTag);
             if (tagId !== undefined) return tagId;
         }
         return undefined;
     }
     if (isRecord(value)) {
         for (const item of Object.values(value)) {
-            const tagId = findFpeTagId(item, key, currentL);
+            const tagId = findFpeTagId(item, key, currentL, maxTag);
             if (tagId !== undefined) return tagId;
         }
         return undefined;
     }
     return undefined;
+}
+
+type LegacyScan = { tagId: number } | "corrupted" | "none";
+
+function findLegacyTagId(
+    value: unknown,
+    key: bigint,
+    currentL: number,
+    maxTag: number,
+): LegacyScan {
+    if (typeof value === "string") {
+        const result = fpeGateLegacy(value, key, currentL, maxTag);
+        return result.status === "resolved" ? { tagId: result.tagId } : result.status;
+    }
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const r = findLegacyTagId(item, key, currentL, maxTag);
+            if (r !== "none") return r;
+        }
+        return "none";
+    }
+    if (isRecord(value)) {
+        for (const item of Object.values(value)) {
+            const r = findLegacyTagId(item, key, currentL, maxTag);
+            if (r !== "none") return r;
+        }
+        return "none";
+    }
+    return "none";
 }
 
 /**
@@ -134,9 +177,15 @@ export function resolveReleasedToolInput(
     sessionId: string,
     fpeResolve: FpeResolveDeps,
 ): unknown | undefined {
-    const tagId = findFpeTagId(args, deriveKey(sessionId), 8);
-    if (tagId === undefined) return undefined;
-    return fpeResolve.lookupOriginal(sessionId, tagId);
+    const key = deriveKey(sessionId);
+    const maxTag = fpeResolve.maxTag(sessionId);
+    if (maxTag === undefined) return undefined;
+    const tagId = findFpeTagId(args, key, 8, maxTag);
+    if (tagId !== undefined) return fpeResolve.lookupOriginal(sessionId, tagId);
+    const legacy = findLegacyTagId(args, key, 8, maxTag);
+    if (legacy === "corrupted") throw new Error(FPE_CORRUPTED_TOKEN_MESSAGE);
+    if (legacy !== "none") return fpeResolve.lookupOriginal(sessionId, legacy.tagId);
+    return undefined;
 }
 
 export interface FpeResolveDepsOption {
@@ -165,7 +214,15 @@ export function createToolExecuteBeforeHook(options: FpeResolveDepsOption = {}) 
             }
         }
         if (sessionId && args && options.fpeResolve) {
-            const original = resolveReleasedToolInput(args, sessionId, options.fpeResolve);
+            let original: unknown;
+            try {
+                original = resolveReleasedToolInput(args, sessionId, options.fpeResolve);
+            } catch (error) {
+                sessionLog(sessionId, "fpe: corrupted legacy drop-token rejected", {
+                    tool: call.tool,
+                });
+                throw error;
+            }
             if (original !== undefined) {
                 sessionLog(sessionId, "fpe: resolved dropped token in tool call args", {
                     tool: call.tool,

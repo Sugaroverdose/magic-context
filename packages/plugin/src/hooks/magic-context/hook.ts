@@ -73,7 +73,6 @@ import {
     resolveHistorianContextLimit,
     resolveKnownHistorianContextLimit,
 } from "./derive-budgets";
-import { createToolExecuteBeforeHook } from "./fpe-resolve";
 import {
     type EmbedHistoryDeps,
     pauseEmbedHistoryDrain,
@@ -94,7 +93,7 @@ import {
     resolveModelKey,
 } from "./event-resolvers";
 import { formatEmbedStatusText } from "./format-embed-status";
-import { lookupReleasedToolInput } from "./fpe-resolve";
+import { createToolExecuteBeforeHook, lookupReleasedToolInput } from "./fpe-resolve";
 import { clearInjectionCache } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
 import { dropSlot, registerLkgPersistence } from "./lkg-slot";
@@ -1187,6 +1186,14 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             fpeResolve: {
                 lookupOriginal: (sessionId, tagNumber) =>
                     lookupReleasedToolInput(db, sessionId, tagNumber),
+                maxTag: (sessionId) =>
+                    (
+                        db
+                            .prepare(
+                                "SELECT MAX(tag_number) AS max_tag FROM tags WHERE session_id = ?",
+                            )
+                            .get(sessionId) as { max_tag: number | null } | undefined
+                    )?.max_tag ?? undefined,
             },
         }),
         "tool.execute.after": createToolExecuteAfterHook({

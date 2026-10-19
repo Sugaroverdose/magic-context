@@ -181,7 +181,7 @@ import {
 	observePiMessageActivity,
 } from "./dreamer/session-activity-pi";
 import { registerPiFpeResolution } from "./fpe-resolution-pi";
-import { lookupReleasedToolInputPi } from "./fpe-resolve-pi";
+import { lookupReleasedToolInputPi, maxTagPi } from "./fpe-resolve-pi";
 import {
 	ensureProjectRegisteredFromPiDirectory,
 	unregisterPiProjectEmbeddings,
@@ -1801,6 +1801,7 @@ async function startPiMagicContextRuntime(
 	registerPiFpeResolution(pi, {
 		fpeLookup: (ctx, sessionId, tagNumber) =>
 			lookupReleasedToolInputPi(db, ctx?.sessionManager, sessionId, tagNumber),
+		fpeMaxTag: (sessionId) => maxTagPi(db, sessionId),
 	});
 	const todowriteEnabled = bootProjectDeps.config.todowrite.enabled;
 	const todowriteOverlayEnabled =

@@ -18,6 +18,14 @@ interface PiSessionReaderLike {
  * no MC writes. The OpenCode path (opencode.db) does not apply — on Pi the
  * transcript lives in the session entries.
  */
+/** Highest tag_number of the session (index-served MAX); FPE bound check input. */
+export function maxTagPi(db: Database, sessionId: string): number | undefined {
+	const row = db
+		.prepare("SELECT MAX(tag_number) AS max_tag FROM tags WHERE session_id = ?")
+		.get(sessionId) as { max_tag: number | null } | undefined;
+	return row?.max_tag ?? undefined;
+}
+
 export function lookupReleasedToolInputPi(
 	db: Database,
 	sessionManager: PiSessionReaderLike | undefined,
@@ -47,7 +55,11 @@ export function lookupReleasedToolInputPi(
 		if (!Array.isArray(content)) continue;
 		for (const block of content as unknown[]) {
 			if (!block || typeof block !== "object") continue;
-			const call = block as { type?: unknown; id?: unknown; arguments?: unknown };
+			const call = block as {
+				type?: unknown;
+				id?: unknown;
+				arguments?: unknown;
+			};
 			if (call.type !== "toolCall" || call.id !== callId) continue;
 			if (
 				call.arguments &&

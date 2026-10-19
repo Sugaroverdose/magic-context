@@ -49,10 +49,12 @@ import {
     resolveKnownHistorianContextLimit,
 } from "../../hooks/magic-context/derive-budgets";
 import { recordToolParameters } from "../../hooks/magic-context/dropped-input-guard";
-import { resolveReleasedToolInput } from "../../hooks/magic-context/fpe-resolve";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
-import { lookupReleasedToolInput } from "../../hooks/magic-context/fpe-resolve";
+import {
+    lookupReleasedToolInput,
+    resolveReleasedToolInput,
+} from "../../hooks/magic-context/fpe-resolve";
 import {
     type HistoryBoundaryRepair,
     repairMissingHistoryBoundary,
@@ -837,10 +839,26 @@ export async function registerContext(context: V2Context) {
     let toolDuties: ReturnType<typeof createToolExecuteAfterHook> | undefined;
     await context.tool.hook("execute.before", (draft) => {
         if (db && draft.input !== undefined) {
-            const resolved = resolveReleasedToolInput(draft.input, draft.sessionID, {
-                lookupOriginal: (sessionId, tagId) =>
-                    db ? lookupReleasedToolInput(db, sessionId, tagId) : undefined,
-            });
+            let resolved: unknown;
+            try {
+                resolved = resolveReleasedToolInput(draft.input, draft.sessionID, {
+                    lookupOriginal: (sessionId, tagId) =>
+                        db ? lookupReleasedToolInput(db, sessionId, tagId) : undefined,
+                    maxTag: (sessionId) =>
+                        (
+                            db
+                                ?.prepare(
+                                    "SELECT MAX(tag_number) AS max_tag FROM tags WHERE session_id = ?",
+                                )
+                                .get(sessionId) as { max_tag: number | null } | undefined
+                        )?.max_tag ?? undefined,
+                });
+            } catch (error) {
+                sessionLog(draft.sessionID, "fpe: corrupted legacy drop-token rejected", {
+                    tool: draft.tool,
+                });
+                throw error;
+            }
             if (resolved !== undefined) {
                 sessionLog(draft.sessionID, "fpe: resolved dropped token in tool call args", {
                     tool: draft.tool,

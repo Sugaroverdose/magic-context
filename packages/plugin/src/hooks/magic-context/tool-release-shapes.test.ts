@@ -12,8 +12,8 @@ import {
     updateTagStatus,
 } from "../../features/magic-context/storage";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
-import { createToolExecuteBeforeHook } from "./fpe-resolve";
 import { deriveKey, renderDropToken } from "./fpe";
+import { createToolExecuteBeforeHook } from "./fpe-resolve";
 import {
     createToolDropTarget,
     extractToolCallObservation,
@@ -183,6 +183,7 @@ describe("tool release shape table", () => {
                     sessionId === session && tagNumber === 1
                         ? { command: "ls -la /tmp", limit: 5 }
                         : undefined,
+                maxTag: () => 20_000,
             },
         });
         const output = { args: { command: renderDropToken(1, sessionKey) } };
@@ -196,6 +197,7 @@ describe("tool release shape table", () => {
         const hook = createToolExecuteBeforeHook({
             fpeResolve: {
                 lookupOriginal: () => undefined,
+                maxTag: () => 20_000,
             },
         });
         const orphan = renderDropToken(9001, sessionKey);

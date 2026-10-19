@@ -5,9 +5,11 @@ import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
 import {
     deriveKey,
+    FILLER_POOL,
     fpeDecrypt,
     fpeEncrypt,
     fpeGate,
+    fpeGateLegacy,
     isFpeTokenCandidate,
     renderDropToken,
     stripFillers,
@@ -39,6 +41,28 @@ describe("FPE", () => {
         expect(a).toBe(b);
     });
 
+    it("render is a pure function (restart/cache consistency)", () => {
+        // Tokens re-render every transform pass; the wire bytes only stay
+        // stable across restarts because render has no state, no RNG, and its
+        // seed derives from (token, sessionId) alone.
+        for (const tagId of [0, 42, 18118, 9_999_999]) {
+            const key = deriveKey("ses_restart_consistency");
+            expect(renderDropToken(tagId, key)).toBe(renderDropToken(tagId, key));
+        }
+    });
+
+    it("pool is U+0300-U+036F, NFC/NFD-anchored: no composition, no self-decomposition", () => {
+        for (const m of FILLER_POOL) {
+            const cp = m.codePointAt(0)!;
+            expect(cp).toBeGreaterThanOrEqual(0x300);
+            expect(cp).toBeLessThanOrEqual(0x36f);
+            expect(m.normalize("NFD")).toBe(m);
+            for (const base of "abcxyz0189") {
+                expect(`${base}${m}`.normalize("NFC").length).toBe(2);
+            }
+        }
+    });
+
     it("produces unique tokens for unique inputs (1000)", () => {
         const seen = new Set<string>();
         for (let i = 0; i < 1000; i++) {
@@ -65,15 +89,65 @@ describe("FPE", () => {
         const patterns = new Map<string, number>();
         for (let i = 0; i < 1000; i++) {
             const token = renderDropToken(i, KEY);
+            // v2: filler type counts (the format space is marks x counts, not
+            // dots-vs-alnum shape — v1's shape pattern collapsed to 2^7 here).
             const pattern = token
                 .split("")
-                .map((c) => (/[a-z0-9]/.test(c) ? "X" : "."))
+                .map((c) => (/[a-z0-9]/.test(c) ? "X" : c.codePointAt(0)!.toString(36)))
                 .join("");
             patterns.set(pattern, (patterns.get(pattern) ?? 0) + 1);
         }
-        expect(patterns.size).toBeGreaterThan(500);
+        expect(patterns.size).toBeGreaterThan(950);
         const maxFreq = Math.max(...patterns.values());
-        expect(maxFreq).toBeLessThanOrEqual(10);
+        expect(maxFreq).toBeLessThanOrEqual(3);
+    });
+
+    it("v2 density: every gap carries at least one mark", () => {
+        for (let i = 0; i < 200; i++) {
+            const token = renderDropToken(i, KEY);
+            const chars = [...token];
+            for (let j = 0; j < chars.length - 1; j++) {
+                if (/[a-z0-9]/.test(chars[j]) && /[a-z0-9]/.test(chars[j + 1])) {
+                    throw new Error(`adjacent payload chars at ${j}: ${token}`);
+                }
+            }
+            expect(token.length).toBeGreaterThanOrEqual(15);
+            expect(token.length).toBeLessThanOrEqual(22);
+        }
+    });
+
+    it("v2 pool is composition-free: render is NFC-stable by construction", () => {
+        const token = renderDropToken(1234, KEY);
+        expect(token.normalize("NFC")).toBe(token);
+        // No pool mark composes with a payload character.
+        const stripped = stripFillers(token);
+        const marks = [...token].filter((c) => !/[a-z0-9]/.test(c));
+        for (const m of new Set(marks)) {
+            for (const base of stripped) {
+                expect(`${base}${m}`.normalize("NFC").length).toBe(2);
+            }
+        }
+    });
+
+    it("gate bounds-check rejects in-range-only tokens", () => {
+        const token = renderDropToken(42, KEY);
+        expect(fpeGate(token, KEY, 8, 41).matched).toBe(false);
+        expect(fpeGate(token, KEY, 8, 42).matched).toBe(true);
+    });
+
+    it("legacy lane resolves a v1 replay and flags corrupted soup", () => {
+        // v1 render = same cipher, dot fillers.
+        const payload = fpeEncrypt(42, KEY, 8);
+        const legacy = `${payload[0]}\u00b7${payload.slice(1)}\u2022`;
+        const resolved = fpeGateLegacy(legacy, KEY, 8, 1000);
+        expect(resolved).toEqual({ status: "resolved", tagId: 42 });
+        // The session's recorded garble class: soup shape, out-of-range payload.
+        expect(fpeGateLegacy("9\u2022\u2e3166\u2022\u2e314586\u2023\u20235", KEY, 8, 1000)).toEqual(
+            {
+                status: "corrupted",
+            },
+        );
+        expect(fpeGateLegacy("npm install express", KEY, 8, 1000)).toEqual({ status: "none" });
     });
 
     it("gate rejects non-FPE strings", () => {
@@ -88,7 +162,7 @@ describe("FPE", () => {
             "curl https://example.com/api",
         ];
         for (const s of cases) {
-            const result = fpeGate(s, KEY, 8);
+            const result = fpeGate(s, KEY, 8, 10_000);
             expect(result.matched).toBe(false);
         }
     });
@@ -96,7 +170,7 @@ describe("FPE", () => {
     it("gate accepts valid FPE tokens", () => {
         for (const tagId of [0, 42, 999, 12345, 999_999]) {
             const token = renderDropToken(tagId, KEY);
-            const result = fpeGate(token, KEY, 8);
+            const result = fpeGate(token, KEY, 8, 1_000_000);
             expect(result.matched).toBe(true);
             expect(result.tagId).toBe(tagId);
         }
@@ -127,10 +201,20 @@ describe("FPE released-input lookup (registry spine)", () => {
             "INSERT INTO part (id, message_id, session_id, data) VALUES (?, ?, ?, ?)",
         );
         const toolPart = (callId: string, command: string) =>
-            JSON.stringify({ type: "tool", tool: "bash", callID: callId, state: { input: { command } } });
+            JSON.stringify({
+                type: "tool",
+                tool: "bash",
+                callID: callId,
+                state: { input: { command } },
+            });
         insertPart.run("prt_a", "msg_owner", SESSION, toolPart("call_a", "ls"));
         insertPart.run("prt_b", "msg_owner", SESSION, toolPart("call_b", "pwd"));
-        insertPart.run("prt_text", "msg_owner", SESSION, JSON.stringify({ type: "text", text: "narrative" }));
+        insertPart.run(
+            "prt_text",
+            "msg_owner",
+            SESSION,
+            JSON.stringify({ type: "text", text: "narrative" }),
+        );
         host.close();
         process.env.OPENCODE_DB = hostPath;
         const mc = new Database(":memory:");
@@ -148,6 +232,9 @@ describe("FPE released-input lookup (registry spine)", () => {
         insertTag.run(SESSION, "call_a", 7, "msg_owner");
         insertTag.run(SESSION, "call_b", 8, "msg_owner");
         insertTag.run(SESSION, "call_c", 9, "msg_owner"); // part pruned from the host
+        mc.prepare(
+            "INSERT INTO tags (session_id, message_id, type, status, tag_number, tool_owner_message_id) VALUES (?, ?, 'tool', 'active', ?, ?)",
+        ).run(SESSION, "call_a", 11, "msg_owner"); // never released
         return { mc };
     }
     const SESSION = "ses_fpe_lookup";
@@ -175,5 +262,10 @@ describe("FPE released-input lookup (registry spine)", () => {
     it("unknown tag resolves to undefined", () => {
         const { mc } = makeWorld();
         expect(lookupReleasedToolInput(mc, SESSION, 404)).toBeUndefined();
+    });
+
+    it("never-released (active) tag resolves to undefined", () => {
+        const { mc } = makeWorld();
+        expect(lookupReleasedToolInput(mc, SESSION, 11)).toBeUndefined();
     });
 });

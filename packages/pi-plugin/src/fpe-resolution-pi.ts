@@ -13,6 +13,8 @@ export interface PiFpeResolutionOptions {
 		sessionId: string,
 		tagNumber: number,
 	) => unknown;
+	/** Highest tag_number of the session; FPE resolution stays inert without it. */
+	fpeMaxTag?: (sessionId: string) => number | undefined;
 }
 
 /**
@@ -37,13 +39,25 @@ export function createPiFpeResolution(
 		} catch {
 			sessionID = undefined;
 		}
-		if (sessionID === undefined || event.input === undefined || !options.fpeLookup) {
+		if (
+			sessionID === undefined ||
+			event.input === undefined ||
+			!options.fpeLookup
+		) {
 			return undefined;
 		}
-		const resolved = resolveReleasedToolInput(event.input, sessionID, {
-			lookupOriginal: (sessionId, tagNumber) =>
-				options.fpeLookup?.(ctx, sessionId, tagNumber),
-		});
+		let resolved: unknown;
+		try {
+			resolved = resolveReleasedToolInput(event.input, sessionID, {
+				lookupOriginal: (sessionId, tagNumber) =>
+					options.fpeLookup?.(ctx, sessionId, tagNumber),
+				maxTag: (sessionId) => options.fpeMaxTag?.(sessionId),
+			});
+		} catch {
+			// Corrupted-token reject (instruction to re-issue) is wired on the
+			// OpenCode `.before` surface; the Pi spike passes it through.
+			return undefined;
+		}
 		if (
 			resolved !== undefined &&
 			event.input !== null &&
@@ -61,6 +75,9 @@ export function createPiFpeResolution(
 	};
 }
 
-export function registerPiFpeResolution(pi: ExtensionAPI, options: PiFpeResolutionOptions): void {
+export function registerPiFpeResolution(
+	pi: ExtensionAPI,
+	options: PiFpeResolutionOptions,
+): void {
 	pi.on("tool_call", createPiFpeResolution(options));
 }

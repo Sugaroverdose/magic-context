@@ -19,6 +19,7 @@ describe("Pi .before FPE resolution", () => {
 				sessionId === session && tagNumber === 42
 					? { path: "/tmp/a", content: "x" }
 					: undefined,
+			fpeMaxTag: () => 1000,
 		});
 		const input = { command: renderDropToken(42, key) };
 
@@ -34,7 +35,10 @@ describe("Pi .before FPE resolution", () => {
 	});
 
 	it("leaves the token as it is when the lookup resolves nothing", () => {
-		const guard = createPiFpeResolution({ fpeLookup: () => undefined });
+		const guard = createPiFpeResolution({
+			fpeLookup: () => undefined,
+			fpeMaxTag: () => 1000,
+		});
 		const token = renderDropToken(43, key);
 		const input = { command: token };
 
