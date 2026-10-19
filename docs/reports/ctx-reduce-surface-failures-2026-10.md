@@ -100,6 +100,20 @@ content, run when the FTS lane yields no live hit (and as authority over
 token-skeleton artifacts). Approves trivially against the ruling: the
 registry scoping stays; the FTS lane keeps absorbing case/whitespace.
 
+Measured 2026-10-19 on a read-only copy of the live store (47,163 mirror
+rows, all sessions): FTS phrase path median **0.1 ms** (max 3.9); raw
+`LIKE` full-table scan **49.1 ms**; "session-scoped" LIKE 15.1 ms — that
+row measures empty-scan overhead, not content matching (the FTS5 table has
+no index on `session_id`, so every scan is a full-table walk + filter).
+The user's premise — "scan only the visible window, not super slow" — is
+right **only with an indexed scope**: a plain `LIKE` over the FTS table
+walks all sessions and grows linearly (~50 ms at today's size, several
+hundred ms at ~10× sessions). Design implication: the byte lane needs its
+own rowid table indexed by `session_id` (same writer as the mirror, one
+extra row insert per message = negligible write cost) → lookups become
+window-proportional, sub-ms. Plain LIKE on the FTS table: rejected by
+measurement, kept only as a dev probe.
+
 Signature: "found twice" where the named entry's punctuation is absent from
 the quoted candidates.
 
@@ -109,6 +123,11 @@ Symptom: phrases from the model's own prose that compaction swept return
 "matches nothing in this session" — false statement about the store (raw
 hits exist; mirror rows = 0). The model re-issues ghost strings (observed:
 2 retries per swept string).
+
+Fix applied 2026-10-19 (user ruling: rephrase so the sentence is true for
+ctx_reduce): not-found now reads "…matches it in **your current context
+window**." The ctx-expand "in this session" strings are a separate lane
+(they speak about the stored history, where the claim is true) and stay.
 
 Root cause: `resolvePhrase` lumps out-of-window (registry `dropped`/absent
 mirror) into the same not-found as never-said. The `dead` row set exists in
@@ -135,6 +154,31 @@ the blast radius stays.
 
 Signature: failed calls with `entries_failed ≥ 2` where re-issued subsets
 succeed.
+
+Considered 2026-10-19 (user: consider carefully which errors become
+verbose noop). From the resolver source, the outcome taxonomy is already
+mostly partial-accept: per-entry outcomes are `released`, `deferred`
+(protected — reported per entry, never aborts), `noop` ×4 (`queued`,
+`released`, `compacted`, `inert` — the "reported, not retried" classes),
+`range`, and `error`. The atomic layer (tools.ts) gates **only** `error`,
+which has exactly two reasons:
+
+- `not-found` (id / phrase / range-endpoint variants) — stamps nothing by
+  construction; the safe verbose-noop class. Re-issue safety: a later
+  re-issue of a sibling that did stamp lands as noop `queued` — dedupe is
+  per-tag, no double-queue.
+- `ambiguous` (found-twice) — stamps nothing by construction; the report
+  already lists the colliding candidates. Same re-issue safety.
+
+Every other class is *already* a verbose noop. The mint-failure global error
+("positions could not be resolved") must stay atomic — it means the
+registry read itself failed, so per-entry verdicts are meaningless.
+
+Cost of the flip, named: loudness dilution. Today a call with one poisoned
+entry is 100% error text; under partial accept the failure is one line
+among N success lines, and a skimming model may not re-point the entry.
+Mitigation: the response stays slot-for-slot with the failed entry quoted
+and named. Net: two classes flip, everything else unchanged.
 
 ### S-5 · Fabricated ids — **NO ENGINE FIX (model-side)**
 

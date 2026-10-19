@@ -292,7 +292,7 @@ describe("ctx_reduce handles lane (ids)", () => {
         }],
         ["rejects a foreign-session id as broken input, never a foreign release", { ctx_handles: ["call-e"] }, {}, (response, db) => {
             expect(response).toContain(
-                'error: "call-e" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
+                'error: "call-e" provided in ctx_handles was not found: no tool call id and no message text matches it in your current context window.',
             );
             expect(response).toContain("Nothing was stamped; resend the corrected batch.");
             expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
@@ -402,7 +402,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
             }],
             ["rejects a quote that matches nothing anywhere as broken input", { ctx_handles: ["purple platypus parliament"] }, {}, (response, db) => {
                 expect(response).toContain(
-                    'error: "purple platypus parliament" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.',
+                    'error: "purple platypus parliament" provided in ctx_handles was not found: no tool call id and no message text matches it in your current context window.',
                 );
                 expect(response).toContain("Nothing was stamped; resend the corrected batch.");
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([]);

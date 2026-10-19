@@ -51,7 +51,7 @@ export function renderPointingError(
             .filter(Boolean)
             .join(" ");
     }
-    return `error: "${echoInput(outcome.input)}" provided in ctx_handles was not found: no tool call id and no message text matches it in this session.${rangeHint} A phrase names a message — prose you wrote or were given; a tool call releases by its call id, not by its output text. Copy the words exactly, or drop this entry and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
+    return `error: "${echoInput(outcome.input)}" provided in ctx_handles was not found: no tool call id and no message text matches it in your current context window.${rangeHint} A phrase names a message — prose you wrote or were given; a tool call releases by its call id, not by its output text. Copy the words exactly, or drop this entry and resend the rest. ${NOTHING_RELEASED_CLOSER}`;
 }
 
 export function renderPointingSuccess(
