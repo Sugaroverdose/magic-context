@@ -121,10 +121,15 @@ emptiness. Zero new structures.**
    Byte truth exists exactly where the skeleton can't discriminate;
    survivors decide, ghosts die (u90), "found twice" names messages
    that visibly contain the text.
-3. **Zero byte survivors / zero skeleton hits → capped full-scan byte
-   pass** — rare bounded path; rescues `%`-containing phrases (FTS inert
-   there) and pure-decoration entries; 1 hit → stamp, many →
-   found-twice (byte-true), 0 → not-found (with S-3 wording).
+3. **Entry tokenizes to zero tokens** (pure punctuation/arrows/marks —
+   the FTS query has no terms; the index is mute, not negative, while
+   the bytes sit in `_content`) → byte scan over the window, capped:
+   1 hit → stamp, many → found-twice (byte-true), 0 → not-found (S-3
+   wording). This is the ONLY scan case: byte truth ⊆ skeleton truth,
+   so for any entry with ≥1 token, zero skeleton hits ⇒ a byte scan is
+   arithmetically empty — go straight to not-found. ("`%`-phrases need
+   the scan" was wrong on review: `%` entries tokenize fine; escaping
+   `%`/`_` is a LIKE-lane concern in rule 2, not an emptiness case.)
 
 Residual accepted by standard (user's fidelity-not-integrity ruling on
 stamping): decorated copy whose skeleton is unique (
