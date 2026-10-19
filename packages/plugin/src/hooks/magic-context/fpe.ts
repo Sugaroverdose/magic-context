@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
-const BASE = 36n;
 /**
  * v2 filler alphabet: combining diacritical marks (U+0300–U+036F), restricted
  * to canonical class 230 (above, nonspacing — runs of one class never
@@ -23,28 +22,7 @@ const FILLER_CODEPOINTS = [
 ];
 export const FILLER_POOL = FILLER_CODEPOINTS.map((cp) => String.fromCodePoint(cp));
 const FILLER_SET = new Set(FILLER_POOL);
-/** v1 (retired) drop-token fillers — used only by the legacy resolution lane. */
-const LEGACY_FILLER_POOL = ["·", "∙", "⸱", "‣", "•", " "];
-const LEGACY_FILLER_SET = new Set(LEGACY_FILLER_POOL);
 const ROUNDS = 16;
-const L_FLOOR = 8;
-
-function strToBigint(s: string): bigint {
-    let n = 0n;
-    for (const c of s) {
-        n = n * BASE + BigInt(ALPHABET.indexOf(c));
-    }
-    return n;
-}
-
-function bigintToStr(n: bigint, length: number): string {
-    let s = "";
-    for (let i = 0; i < length; i++) {
-        s = ALPHABET[Number(n % BASE)] + s;
-        n /= BASE;
-    }
-    return s;
-}
 
 export function deriveKey(sessionId: string): bigint {
     const hash = createHash("sha256").update(sessionId).digest();
@@ -91,27 +69,6 @@ function roundParams(key: bigint, round: number, modulus: bigint): { a: bigint; 
     }
     const b = k % modulus;
     return { a, b };
-}
-
-export function fpeEncrypt(tagId: number, key: bigint, length: number): string {
-    const modulus = BASE ** BigInt(length);
-    let value = BigInt(tagId);
-    for (let round = 0; round < ROUNDS; round++) {
-        const { a, b } = roundParams(key, round, modulus);
-        value = (value * a + b) % modulus;
-    }
-    return bigintToStr(value, length);
-}
-
-export function fpeDecrypt(token: string, key: bigint, length: number): number {
-    const modulus = BASE ** BigInt(length);
-    let value = strToBigint(token);
-    for (let round = ROUNDS - 1; round >= 0; round--) {
-        const { a, b } = roundParams(key, round, modulus);
-        const aInv = modInverse(a, modulus);
-        value = (((value - b + modulus) % modulus) * aInv) % modulus;
-    }
-    return Number(value);
 }
 
 function fnv1a(s: string): bigint {
@@ -240,10 +197,6 @@ export function renderDropToken(tagId: number, key: bigint): string {
     return out;
 }
 
-export function stripFillers(token: string): string {
-    return token.replace(/[^a-z0-9]/g, "");
-}
-
 export interface FpeGateResult {
     matched: boolean;
     tagId?: number;
@@ -307,69 +260,6 @@ export function fpeGate(value: string, key: bigint, maxTag: number): FpeGateResu
     if (tagId < 0 || tagId > maxTag) return { matched: false };
     return { matched: true, tagId };
 }
-
-/** Legacy (v1) drop-token shape: soup payload + dot fillers, no marks. */
-export function isLegacySoupCandidate(value: string): boolean {
-    if (value.length < L_FLOOR || value.length > L_FLOOR + 14) return false;
-    if (!/[^a-z0-9]/.test(value)) return false;
-    const stripped = stripFillers(value);
-    if (stripped.length < L_FLOOR - 1 || stripped.length > 10) return false;
-    if (!/^[a-z0-9]+$/.test(stripped)) return false;
-    for (const c of value) {
-        if (/[a-z0-9]/.test(c)) continue;
-        if (!LEGACY_FILLER_SET.has(c)) return false;
-    }
-    return true;
-}
-
-/** Legacy (v2) drop-token shape: base36 payload + mark fillers throughout. */
-export function isLegacyV2Candidate(value: string): boolean {
-    if (value.length < L_FLOOR + 6 || value.length > L_FLOOR + 14) return false;
-    if (!/[\u0300-\u036f]/.test(value)) return false;
-    const stripped = stripFillers(value);
-    if (stripped.length < L_FLOOR - 1 || stripped.length > 10) return false;
-    if (!/^[a-z0-9]+$/.test(stripped)) return false;
-    for (const c of value) {
-        if (/[a-z0-9]/.test(c)) continue;
-        if (!FILLER_SET.has(c)) return false;
-    }
-    return true;
-}
-
-export type FpeLegacyGateResult =
-    | { status: "resolved"; tagId: number }
-    | { status: "corrupted" }
-    | { status: "none" };
-
-/**
- * Legacy lane: this build renders v3 tokens only, so a v1- or v2-shaped
- * string is either a pre-upgrade release replay (decrypts to a real tag of
- * this session — resolve it) or a corrupted token (out of range — the model's
- * own noise shaped like a retired format; the original cannot be restored
- * from it).
- */
-export function fpeGateLegacySoup(value: string, key: bigint, maxTag: number): FpeLegacyGateResult {
-    if (!isLegacySoupCandidate(value)) return { status: "none" };
-    const stripped = stripFillers(value);
-    const len = stripped.length;
-    if (len < L_FLOOR - 1 || len > 10) return { status: "none" };
-    const tagId = fpeDecrypt(stripped, key, len);
-    if (tagId >= 0 && tagId <= maxTag) return { status: "resolved", tagId };
-    return { status: "corrupted" };
-}
-
-export function fpeGateLegacyV2(value: string, key: bigint, maxTag: number): FpeLegacyGateResult {
-    if (!isLegacyV2Candidate(value)) return { status: "none" };
-    const stripped = stripFillers(value);
-    const len = stripped.length;
-    if (len < L_FLOOR - 1 || len > 10) return { status: "none" };
-    const tagId = fpeDecrypt(stripped, key, len);
-    if (tagId >= 0 && tagId <= maxTag) return { status: "resolved", tagId };
-    return { status: "corrupted" };
-}
-
-/** @deprecated v1-shaped alias for the soup lane. */
-export const fpeGateLegacy = fpeGateLegacySoup;
 
 export function isFpeTokenCandidate(value: string): boolean {
     if (value.length < V3_LEN_FLOOR || value.length > V3_LEN_CEIL) return false;

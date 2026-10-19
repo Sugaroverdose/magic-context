@@ -2,13 +2,7 @@ import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-openco
 import { refuseBudgetedToolCall } from "../../features/magic-context/dreamer/token-budget";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import {
-    deriveKey,
-    fpeGate,
-    fpeGateLegacySoup,
-    fpeGateLegacyV2,
-    isFpeTokenCandidate,
-} from "./fpe";
+import { deriveKey, fpeGate, isFpeTokenCandidate } from "./fpe";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
     return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -135,31 +129,6 @@ function findFpeTagId(
     return undefined;
 }
 
-type LegacyScan = { tagId: number } | "corrupted" | "none";
-
-function findLegacyTagId(value: unknown, key: bigint, maxTag: number): LegacyScan {
-    if (typeof value === "string") {
-        const v2 = fpeGateLegacyV2(value, key, maxTag);
-        const result = v2.status === "none" ? fpeGateLegacySoup(value, key, maxTag) : v2;
-        return result.status === "resolved" ? { tagId: result.tagId } : result.status;
-    }
-    if (Array.isArray(value)) {
-        for (const item of value) {
-            const r = findLegacyTagId(item, key, maxTag);
-            if (r !== "none") return r;
-        }
-        return "none";
-    }
-    if (isRecord(value)) {
-        for (const item of Object.values(value)) {
-            const r = findLegacyTagId(item, key, maxTag);
-            if (r !== "none") return r;
-        }
-        return "none";
-    }
-    return "none";
-}
-
 /**
  * The shared `.before` FPE resolution used by every harness that has a
  * pre-execute hook: detect a released-call token in the args and return the
@@ -171,6 +140,11 @@ function findLegacyTagId(value: unknown, key: bigint, maxTag: number): LegacySca
  * (corrupted, retired, synthesized) returns undefined and the call executes
  * as issued — the loud tool failure is the model's self-repair loop. This
  * function never rejects a command.
+ *
+ * Current format only: drop tokens are rendered live at every wire build
+ * (tag-transcript), so after a build switch the session's wire carries the
+ * new render exclusively and the model can never copy a retired shape into
+ * args. No retired-format decode path exists.
  */
 export function resolveReleasedToolInput(
     args: unknown,
@@ -182,9 +156,6 @@ export function resolveReleasedToolInput(
     if (maxTag === undefined) return undefined;
     const tagId = findFpeTagId(args, key, maxTag);
     if (tagId !== undefined) return fpeResolve.lookupOriginal(sessionId, tagId);
-    const legacy = findLegacyTagId(args, key, maxTag);
-    if (legacy !== "none" && legacy !== "corrupted")
-        return fpeResolve.lookupOriginal(sessionId, legacy.tagId);
     return undefined;
 }
 

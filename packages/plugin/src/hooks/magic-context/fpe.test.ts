@@ -6,14 +6,9 @@ import { Database } from "../../shared/sqlite";
 import {
     deriveKey,
     FILLER_POOL,
-    fpeDecrypt,
-    fpeEncrypt,
     fpeGate,
-    fpeGateLegacy,
-    fpeGateLegacyV2,
     isFpeTokenCandidate,
     renderDropToken,
-    stripFillers,
 } from "./fpe";
 import {
     createToolExecuteBeforeHook,
@@ -26,28 +21,6 @@ const KEY = deriveKey("test-session-001");
 describe("FPE", () => {
     const MARK = /[\u0300-\u036f]/;
     const markCount = (t: string) => [...t].filter((c) => MARK.test(c)).length;
-
-    it("round-trips the legacy cipher primitive at L=8", () => {
-        for (const tagId of [0, 1, 42, 999, 12345, 999_999, 9_999_999]) {
-            const token = fpeEncrypt(tagId, KEY, 8);
-            expect(token.length).toBe(8);
-            expect(fpeDecrypt(token, KEY, 8)).toBe(tagId);
-        }
-    });
-
-    it("round-trips the legacy cipher primitive at L=9", () => {
-        for (const tagId of [10_000_000, 99_999_999]) {
-            const token = fpeEncrypt(tagId, KEY, 9);
-            expect(token.length).toBe(9);
-            expect(fpeDecrypt(token, KEY, 9)).toBe(tagId);
-        }
-    });
-
-    it("is deterministic", () => {
-        const a = fpeEncrypt(42, KEY, 8);
-        const b = fpeEncrypt(42, KEY, 8);
-        expect(a).toBe(b);
-    });
 
     it("render is a pure function (restart/cache consistency)", () => {
         // Tokens re-render every transform pass; the wire bytes only stay
@@ -167,31 +140,9 @@ describe("FPE", () => {
         }
     });
 
-    it("soup lane resolves a pre-upgrade replay and flags corrupted soup", () => {
-        const payload = fpeEncrypt(42, KEY, 8);
-        const replay = `${payload[0]}\u00b7${payload.slice(1)}`;
-        expect(fpeGateLegacy(replay, KEY, 1000)).toEqual({ status: "resolved", tagId: 42 });
-        expect(fpeGateLegacy("9\u2022\u2e3166\u2022\u2e314586\u2023\u20235", KEY, 1000)).toEqual({
-            status: "corrupted",
-        });
-        expect(fpeGateLegacy("npm install express", KEY, 1000)).toEqual({ status: "none" });
-    });
-
-    it("v2 lane resolves a pre-upgrade replay and flags corrupted v2 shapes", () => {
-        // A faithful v2 token: every gap of the base-36 payload carries a mark
-        // (15+ chars). A single-mark string is a v3 shape, not v2 geometry.
-        const payload = fpeEncrypt(42, KEY, 8);
-        const replay = [...payload].join("\u034a");
-        expect(fpeGateLegacyV2(replay, KEY, 1000)).toEqual({ status: "resolved", tagId: 42 });
-        expect(fpeGateLegacyV2("b\u034b3\u033ec\u0366h\u0357w\u0342i\u0351g\u0369k", KEY, 1000)).toEqual({
-            status: "corrupted",
-        });
-        expect(fpeGateLegacyV2("ls -la", KEY, 1000)).toEqual({ status: "none" });
-    });
-
     it("isFpeTokenCandidate gates on the v3 shape", () => {
         expect(isFpeTokenCandidate(renderDropToken(42, KEY))).toBe(true);
-        // retired v2 shape (mark-heavy) is NOT a v3 candidate: it routes legacy
+        // retired v2 shape (mark-heavy) is NOT a candidate: passes through inert
         expect(isFpeTokenCandidate("b\u034b3\u033ec\u0366h\u0357w\u0342i\u0351g\u0369k")).toBe(false);
         expect(isFpeTokenCandidate("ls -la")).toBe(false);
         expect(isFpeTokenCandidate("a1b2c3d4e5f6")).toBe(false);
