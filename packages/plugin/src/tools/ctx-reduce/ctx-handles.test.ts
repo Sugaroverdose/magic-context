@@ -1208,6 +1208,33 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
             },
         ],
         [
+            "real-data geometry: table-row copy with a double space, normalized mirror + collision — stamps the target (user ruling: a not-found on a faithful copy is a plugin failure)",
+            { ctx_handles: ["budget  loc-i loc-e ref-i"] },
+            {
+                messages: [
+                    {
+                        id: "s2-table",
+                        ordinal: 318,
+                        role: "user",
+                        tag: 88,
+                        part: 0,
+                        content: "budget loc-i loc-e ref-i ndl-i",
+                    },
+                    {
+                        id: "s2-tabletwin",
+                        ordinal: 319,
+                        role: "assistant",
+                        tag: 89,
+                        part: 0,
+                        content: "budget loc-index loc-end ref-index summary",
+                    },
+                ],
+            },
+            (response) => {
+                expect(JSON.parse(response).stamped).toEqual([318]);
+            },
+        ],
+        [
             "S-4 interaction: ghost entry in a batch with a resolvable phrase — sibling stamps, ghost is a null slot",
             {
                 ctx_handles: [

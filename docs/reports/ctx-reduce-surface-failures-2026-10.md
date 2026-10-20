@@ -157,6 +157,16 @@ Predicate: SQLite `LIKE` — ASCII-case-insensitive by default (case
 absorption matches the index lane); substring (boundary punctuation
 free, interior faithful).
 
+**Final arbiter (user ruling 2026-10-20, measured basis):** copies of
+column-aligned tool output (table rows) carry whitespace runs — 11/545 real
+ctx_reduce entries (2%) have interior double spaces; the mirror normalizes all
+runs at write (0/48,204 rows carry a run). Such a copy MUST match: a not-found
+on it would be a plugin failure, not wrong input. This is the production
+justification for the collapse predicate over raw LIKE (the whitespace-variance
+pins exercise fixture geometry the writer cannot produce — 0 real occurrences —
+and are contract codifications, not the arbiter). Leading/trailing-space
+entries: 0/545 (the JSON emit path trims).
+
 **Implementation note (predicate deviation, recorded at landing).** The byte
 truth landed as a JS substring check (`collapse(content).includes(collapse(entry))`
 — whitespace runs collapsed to one space, ASCII-lowered) over the MATCH
@@ -168,9 +178,9 @@ rejection forbids; (b) `%`/`_` escaping — inert by construction in JS
 (no wildcards exist); (c) a `substr(…,120)` excerpt column truncates targets
 beyond 120 chars into false not-founds. Ruling semantics identical: case
 absorbed, head/tail trim free, interior punctuation faithful (whitespace is
-absorbed surface, not identity signal). Arbiter for the deviation: the two
+absorbed surface, not identity signal). Contract codification: the two
 pre-existing absorption pins in `ctx-handles.test.ts` (whitespace-variance
-cases) — they are red under raw LIKE, green under the collapse predicate.
+cases) — red under raw LIKE, green under the collapse predicate.
 
 Test table (red-first, one row per branch, all branches):
 
@@ -323,6 +333,7 @@ session). The v1 surface is the only one shipping; nothing to fix.
   substring over the MATCH shortlist — collapse predicate, see the
   implementation note; zero survivors → not-found, ghosts unnamed; survivors
   ≥2 → found-twice, survivors only; zero-token → not-found + shape clause,
-  no scan). Test rows 1–8 + survivors-≥2 + S-4 interaction green; the two
-  pre-existing whitespace-variance pins are the predicate arbiter. All audit
+  no scan). Test rows 1–8 + survivors-≥2 + S-4 interaction green. Predicate
+  arbiter: the entry-side whitespace-run census (11/545) + the ruling that a
+  faithful table-row copy must match. All audit
   surfaces now closed except S-5 (model-side, no engine fix).
