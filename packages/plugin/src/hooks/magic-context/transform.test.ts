@@ -1075,7 +1075,7 @@ describe("createTransform", () => {
         // the optimization must retain every served byte, including caveman text.
         // Re-pinned for the prefix-free wire (ctx_reduce v1: the digits stay in
         // the registry; nothing is prepended to part text).
-        expect(digest).toBe("343dca025447e252aa97bca42782a3a740e98dc072b3349cc2f71bd54f8420ce");
+        expect(digest).toBe("7e1d5e970ec632c601bdb400755d205d0be155690b1e19143a051b7f913ba201");
     });
 
     it("serves byte-identical hot passes while coalescing state and skipping all-hit token SQL", async () => {

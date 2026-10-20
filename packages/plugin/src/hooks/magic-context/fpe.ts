@@ -13,8 +13,8 @@ const FILLER_POOL = [
     "\u2605",
     "\u2717",
     "\u2032",
-    " ",
 ];
+const SPACE_MARK = "\u0020";
 const ROUNDS = 16;
 const L_FLOOR = 8;
 
@@ -123,6 +123,25 @@ export function addFillers(token: string, key: bigint): string {
     return result;
 }
 
+export function addChannelMarks(filled: string, key: bigint): string {
+    const seed = fnv1a(filled + "sp" + key.toString(16));
+    let state = seed;
+    const positions: number[] = [];
+    for (let d = 0; d < 2; d++) {
+        const [pres, n1] = xorshift64(state);
+        state = n1;
+        if (pres < 50) {
+            const [p, n2] = xorshift64(state);
+            state = n2;
+            positions.push((p % Math.max(filled.length - 1, 1)) + 1);
+        }
+    }
+    positions.sort((a, b) => b - a);
+    let out = filled;
+    for (const p of positions) out = out.slice(0, p) + SPACE_MARK + out.slice(p);
+    return out;
+}
+
 export function stripFillers(token: string): string {
     return token.replace(/[^a-z0-9]/g, "");
 }
@@ -130,7 +149,7 @@ export function stripFillers(token: string): string {
 export function renderDropToken(tagId: number, key: bigint): string {
     const length = tagId < 10_000_000 ? L_FLOOR : 9;
     const encrypted = fpeEncrypt(tagId, key, length);
-    return addFillers(encrypted, key);
+    return addChannelMarks(addFillers(encrypted, key), key);
 }
 
 export interface FpeGateResult {
@@ -139,14 +158,14 @@ export interface FpeGateResult {
 }
 
 export function fpeGate(value: string, key: bigint, currentL: number): FpeGateResult {
-    if (value.length < L_FLOOR || value.length > L_FLOOR + 14) {
+    if (value.length < L_FLOOR || value.length > L_FLOOR + 16) {
         return { matched: false };
     }
     const hasNonAlnum = /[^a-z0-9]/.test(value);
     if (!hasNonAlnum) return { matched: false };
     const fillerChars = value.replace(/[a-z0-9]/g, "");
     for (const c of fillerChars) {
-        if (!FILLER_POOL.includes(c)) return { matched: false };
+        if (!FILLER_POOL.includes(c) && c !== SPACE_MARK) return { matched: false };
     }
     const stripped = stripFillers(value);
     const len = stripped.length;
@@ -164,7 +183,7 @@ export function fpeGate(value: string, key: bigint, currentL: number): FpeGateRe
 }
 
 export function isFpeTokenCandidate(value: string): boolean {
-    if (value.length < L_FLOOR || value.length > L_FLOOR + 14) return false;
+    if (value.length < L_FLOOR || value.length > L_FLOOR + 16) return false;
     if (!/[^a-z0-9]/.test(value)) return false;
     const stripped = stripFillers(value);
     if (stripped.length < L_FLOOR - 1 || stripped.length > 10) return false;

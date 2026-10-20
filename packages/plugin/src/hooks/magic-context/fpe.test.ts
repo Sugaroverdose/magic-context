@@ -238,3 +238,94 @@ describe("FPE resolver contract (resolver, not gate)", () => {
         expect(output.args).toEqual({ command: token });
     });
 });
+
+describe("FPE v4 segmentation channel", () => {
+    const SP = String.fromCodePoint(0x20);
+
+    it("renders carry 0-2 segmentation marks, strictly interior", () => {
+        for (let t = 1; t <= 500; t++) {
+            const r = renderDropToken(t, KEY);
+            let marks = 0;
+            for (const [i, c] of [...r].entries()) {
+                if (c === SP) {
+                    marks++;
+                    expect(i > 0).toBe(true);
+                    expect(i < r.length - 1).toBe(true);
+                }
+            }
+            expect(marks <= 2).toBe(true);
+        }
+    });
+
+    it("mark presence follows the channel draws (~25% none, ~25% double)", () => {
+        let zero = 0;
+        let dbl = 0;
+        const N = 4000;
+        for (let t = 1; t <= N; t++) {
+            const m = [...renderDropToken(t, KEY)].filter((c) => c === SP).length;
+            if (m === 0) zero++;
+            if (m === 2) dbl++;
+        }
+        expect(zero / N > 0.15 && zero / N < 0.35).toBe(true);
+        expect(dbl / N > 0.15 && dbl / N < 0.35).toBe(true);
+    });
+
+    it("gate accepts the full v4 length range incl. channel marks (up to L_FLOOR+16)", () => {
+        let long: string | undefined;
+        for (let t = 1; t <= 300000 && !long; t++) {
+            const r = renderDropToken(t, KEY);
+            if (r.length >= 23) long = r;
+        }
+        expect(long).toBeDefined();
+        expect(fpeGate(long!, KEY, 8).matched).toBe(true);
+        expect(isFpeTokenCandidate(long!)).toBe(true);
+    });
+
+    it("the two channel draws are seeded from the filled payload (restart-stable)", () => {
+        for (let t = 1; t <= 500; t++) {
+            expect(renderDropToken(t, KEY)).toBe(renderDropToken(t, KEY));
+        }
+    });
+
+    it("v1-era gap-space renders decode under v4: strip is the boundary, not a permission list", () => {
+        // test-local v1 law: pool-5 glyphs + space as competing filler slots
+        const V1 = [0xb7, 0x2219, 0x2e31, 0x2023, 0x2022, 0x20].map((c) =>
+            String.fromCodePoint(c),
+        );
+        const fnv = (s: string): bigint => {
+            let h = 2166136261n;
+            for (let i = 0; i < s.length; i++) {
+                h ^= BigInt(s.charCodeAt(i));
+                h = (h * 0x100000001b3n) % (1n << 64n);
+            }
+            return h;
+        };
+        const xs = (st: bigint): [number, bigint] => {
+            let s = st;
+            s ^= (s << 13n) % (1n << 64n);
+            s ^= s >> 7n;
+            s ^= (s << 17n) % (1n << 64n);
+            return [Number(s % 100n), s];
+        };
+        for (const tag of [7, 42, 12345]) {
+            const payload = fpeEncrypt(tag, KEY, 8);
+            let state = fnv(payload + KEY.toString(16));
+            let v1 = "";
+            for (let i = 0; i < payload.length; i++) {
+                v1 += payload[i];
+                if (i === payload.length - 1) break;
+                const [pct, n1] = xs(state);
+                state = n1;
+                const count = pct < 50 ? 0 : pct < 80 ? 1 : 2;
+                for (let j = 0; j < count; j++) {
+                    const [fp, n2] = xs(state);
+                    state = n2;
+                    v1 += V1[fp % V1.length];
+                }
+            }
+            const res = fpeGate(v1, KEY, 8);
+            expect(res.matched).toBe(true);
+            expect(res.tagId).toBe(tag);
+        }
+    });
+});
