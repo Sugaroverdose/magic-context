@@ -121,6 +121,12 @@ export type ReduceInputOutcome =
           candidates?: SampleCandidate[];
           /** Set when the failure happened inside a range entry. */
           range?: { entry: string; which: "start" | "end" | "both" };
+          /**
+           * The entry tokenizes to zero tokens (pure punctuation/decoration):
+           * the index is mute about it and no scan runs (S-2). The report
+           * names the shape so the caller re-points by prose or call id.
+           */
+          zeroToken?: true;
       };
 
 export interface ReduceResolveResult {
@@ -157,6 +163,8 @@ export interface HandleResolverDeps extends ReduceResolverDeps {
 
 interface ReduceStatements {
     match: { all(...args: unknown[]): unknown[] };
+    /** S-2 byte-verify lane: MATCH shortlist narrowed by a literal substring. */
+    verify: { all(...args: unknown[]): unknown[] };
 }
 
 interface RegistryView {
@@ -260,6 +268,26 @@ function ftsPhraseQuery(sample: string): string {
     return `content : ("${escaped}")`;
 }
 
+/**
+ * S-2 byte-verify predicate. The shortlist is fetched by the same MATCH,
+ * then each row's full content is tested with a substring check. The check
+ * collapses whitespace runs to a single space on BOTH sides (the mirror
+ * normalizes the index text the same way, so a tab/spaces copy-drift is the
+ * accepted absorbed surface, not a survivor discriminator) and is
+ * ASCII-case-insensitive, matching the index lane's case absorption.
+ * Interior punctuation is faithful — that is where the identity signal lives,
+ * and the one case the head/tail-trim ruling does not cover. SQLite `LIKE`
+ * is not used: its `%`/`_` wildcards would need escaping and it cannot
+ * express the whitespace-collapse the index contract requires.
+ */
+function isByteSurvivor(content: string, entry: string): boolean {
+    return collapseWhitespace(content).includes(collapseWhitespace(entry));
+}
+
+function collapseWhitespace(text: string): string {
+    return text.toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 interface SampleRow {
     message_id: string;
     excerpt: string;
@@ -270,14 +298,18 @@ interface PhraseOutcome {
 }
 
 /**
- * The text lane for one full string: the LEXICAL lane only — one FTS5 phrase
+ * The text lane for one full string: the LEXICAL lane — one FTS5 phrase
  * query over the live `message_history_fts` mirror, which absorbs case,
  * morphology, and whitespace variance on both sides. The registry status
  * doubles as the visibility scope: rows whose message tag is `active` are the
- * in-window candidates (≥2 active is the ambiguity error); the same query's
- * non-active rows are the diagnostic — text whose item is out of the window
- * or queued is a noop, never an error. Only a phrase matching no row anywhere
- * "exists nowhere" (the caller may still fall through to the range lane).
+ * in-window candidates; the same query's non-active rows are the diagnostic —
+ * text whose item is out of the window or queued is a noop, never an error.
+ * Decision gate (S-2): unique skeleton hit stamps with no byte check;
+ * ≥2 hits run the substring verify over the shortlist and the SURVIVORS
+ * decide (1 → stamp, 0 → not-found without naming ghosts, ≥2 → found-twice
+ * listing survivors). Zero skeleton hits means byte-emptiness for a
+ * token-bearing entry (the index and LIKE share the tokenization boundary):
+ * not-found, no scan. The caller may still fall through to the range lane.
  */
 function resolvePhrase(
     deps: ReduceResolverDeps & { sessionId: string },
@@ -288,7 +320,12 @@ function resolvePhrase(
     const { sessionId } = deps;
     const query = ftsPhraseQuery(text);
     if (query.length === 0) {
-        return { outcome: { kind: "error", reason: "not-found", input: text } };
+        // Zero-token entry (pure punctuation/arrows/marks): the index has no
+        // terms to query and NO byte scan runs — decoration points via the
+        // call id of what it decorates (S-1 form law). Report names the shape.
+        return {
+            outcome: { kind: "error", reason: "not-found", input: text, zeroToken: true },
+        };
     }
     const rows = statements.match.all(
         SAMPLE_EXCERPT_CHARS,
@@ -297,47 +334,85 @@ function resolvePhrase(
         SAMPLE_MATCH_LIMIT,
     ) as unknown as SampleRow[];
 
-    const live: { tagNumber: number; candidate: SampleCandidate }[] = [];
-    const dead: { tagNumber: number }[] = [];
-    const seen = new Set<string>();
-    for (const row of rows) {
-        if (seen.has(row.message_id)) continue;
-        seen.add(row.message_id);
-        // Production registry keys are the suffixed content key `base:pK`;
-        // the mirror carries the bare base. The view map joins the domains.
-        const tags = (registry.tagNumbersByMessageBase.get(row.message_id) ?? []).map(
-            (tagNumber) => ({
-                tag_number: tagNumber,
-                status: registry.statusByTag.get(tagNumber) ?? "",
-            }),
-        );
-        const rowTag = tags.find(
-            (tag) =>
-                tag.status === "active" ||
-                tag.status === "dropped" ||
-                registry.pendingTags.has(tag.tag_number),
-        );
-        if (!rowTag || tags.length !== 1) continue;
-        if (rowTag.status === "active" && !registry.pendingTags.has(rowTag.tag_number)) {
-            live.push({
-                tagNumber: rowTag.tag_number,
-                candidate: { messageId: row.message_id, excerpt: row.excerpt },
-            });
-        } else {
-            dead.push({ tagNumber: rowTag.tag_number });
+    type LiveRow = { tagNumber: number; candidate: SampleCandidate };
+    const joinRows = (
+        source: SampleRow[],
+        live: LiveRow[],
+        dead: { tagNumber: number }[],
+    ): void => {
+        const seen = new Set<string>();
+        for (const row of source) {
+            if (seen.has(row.message_id)) continue;
+            seen.add(row.message_id);
+            // Production registry keys are the suffixed content key `base:pK`;
+            // the mirror carries the bare base. The view map joins the domains.
+            const tags = (registry.tagNumbersByMessageBase.get(row.message_id) ?? []).map(
+                (tagNumber) => ({
+                    tag_number: tagNumber,
+                    status: registry.statusByTag.get(tagNumber) ?? "",
+                }),
+            );
+            const rowTag = tags.find(
+                (tag) =>
+                    tag.status === "active" ||
+                    tag.status === "dropped" ||
+                    registry.pendingTags.has(tag.tag_number),
+            );
+            if (!rowTag || tags.length !== 1) continue;
+            if (rowTag.status === "active" && !registry.pendingTags.has(rowTag.tag_number)) {
+                live.push({
+                    tagNumber: rowTag.tag_number,
+                    candidate: { messageId: row.message_id, excerpt: row.excerpt },
+                });
+            } else {
+                dead.push({ tagNumber: rowTag.tag_number });
+            }
         }
-    }
+    };
+
+    const live: LiveRow[] = [];
+    const dead: { tagNumber: number }[] = [];
+    joinRows(rows, live, dead);
 
     if (live.length === 1) {
+        // Unique skeleton hit: stamp, byte-verify NEVER runs. The absorbed
+        // semantics (case/whitespace/morphology) are the accepted contract;
+        // verifying here would make the resolver stricter than the surface
+        // the echo teaches (copy-drift would become a ghost not-found).
         return { outcome: classifyRegistryTag(deps, registry, live[0].tagNumber) };
     }
     if (live.length > 1) {
+        // S-2: the skeleton can't discriminate — byte truth decides over the
+        // MATCH shortlist only (the index hands the scope; no table scan on
+        // any path). Substring predicate: head/tail trim passes free (models
+        // deliberately trim), interior punctuation is faithful.
+        const shortlist = statements.verify.all(
+            sessionId,
+            query,
+            SAMPLE_MATCH_LIMIT,
+        ) as unknown as { message_id: string; content: string }[];
+        const survivorRows: SampleRow[] = shortlist
+            .filter((row) => isByteSurvivor(row.content, text))
+            .map((row) => ({
+                message_id: row.message_id,
+                excerpt: row.content.slice(0, SAMPLE_EXCERPT_CHARS),
+            }));
+        const survivors: LiveRow[] = [];
+        const deadSurvivors: { tagNumber: number }[] = [];
+        joinRows(survivorRows, survivors, deadSurvivors);
+        if (survivors.length === 1) {
+            return { outcome: classifyRegistryTag(deps, registry, survivors[0].tagNumber) };
+        }
+        if (survivors.length === 0) {
+            // Ghosts (skeleton twins without the bytes) are not named.
+            return { outcome: { kind: "error", reason: "not-found", input: text } };
+        }
         return {
             outcome: {
                 kind: "error",
                 reason: "ambiguous",
                 input: text,
-                candidates: live
+                candidates: survivors
                     .slice(0, 8)
                     .map((entry) => ({ ...entry.candidate, tagNumber: entry.tagNumber })),
             },
@@ -382,7 +457,17 @@ export function resolveHandles(
           ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC
           LIMIT ?`,
     );
-    const statements = { match };
+    // S-2 byte-verify lane: the same MATCH (indexed seek = scope) over FULL
+    // content — the survivor test runs JS-side (the excerpt column would
+    // truncate targets past 120 chars into manufactured ghosts).
+    const verify = db.prepare(
+        `SELECT message_id, content
+           FROM message_history_fts
+          WHERE session_id = ? AND message_history_fts MATCH ?
+          ORDER BY bm25(message_history_fts), CAST(message_ordinal AS INTEGER) ASC
+          LIMIT ?`,
+    );
+    const statements = { match, verify };
     const registry = readRegistryView(db, sessionId);
     const tagsById = deps.callIdResolver.resolve(entries);
 
@@ -436,7 +521,11 @@ export function resolveHandles(
         }
         const range = splitRangeEntry(entry);
         if (!range) {
-            collect({ kind: "error", reason: "not-found", input: entry });
+            collect(
+                phrase.zeroToken
+                    ? { kind: "error", reason: "not-found", input: entry, zeroToken: true }
+                    : { kind: "error", reason: "not-found", input: entry },
+            );
             continue;
         }
         if (!deps.mint) {

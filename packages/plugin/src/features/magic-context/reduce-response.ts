@@ -112,7 +112,15 @@ function reportErrorFor(
     return {
         class: outcome.range ? "range-endpoint" : "not-found",
         entry: echoInput(outcome.input),
-        note: notFoundNote(outcome.range ? rangeEndpointHint(outcome.range) : undefined, closer),
+        note: [
+            // S-2 zero-token report clause: name the shape, teach the lane.
+            outcome.zeroToken
+                ? "Entry has no searchable text — point by prose words or the call id."
+                : undefined,
+            notFoundNote(outcome.range ? rangeEndpointHint(outcome.range) : undefined, closer),
+        ]
+            .filter((part) => part !== undefined)
+            .join(" "),
     };
 }
 

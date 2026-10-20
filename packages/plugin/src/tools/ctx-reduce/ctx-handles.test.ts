@@ -967,3 +967,289 @@ describe("ctx_reduce partial accept (S-4 ruling)", () => {
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 });
+
+describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
+    // Spec: docs/reports/ctx-reduce-surface-failures-2026-10.md (gate tree +
+    // test table). LIKE runs ONLY on collisions, over the MATCH shortlist.
+    const S2_SEED: WorldSpec = {
+        messages: [
+            {
+                id: "s2-uniq",
+                ordinal: 300,
+                role: "user",
+                tag: 70,
+                part: 0,
+                content: "tests failed silently on the nightly",
+            },
+        ],
+    };
+    runTable(S2_SEED, [
+        [
+            "row 1: unique skeleton hit, bytes do NOT match — stamps, verify never runs",
+            { ctx_handles: ["test failed"] },
+            {},
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.stamped).toEqual([300]);
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([70]);
+            },
+        ],
+        [
+            "row 2: collision, exactly one byte survivor — stamps the survivor, no found-twice",
+            { ctx_handles: ["test failed"] },
+            {
+                messages: [
+                    {
+                        id: "s2-byte",
+                        ordinal: 301,
+                        role: "user",
+                        tag: 71,
+                        part: 0,
+                        content: "the test failed on nightly run",
+                    },
+                    {
+                        id: "s2-twin",
+                        ordinal: 302,
+                        role: "assistant",
+                        tag: 72,
+                        part: 0,
+                        content: "tests failed overnight",
+                    },
+                ],
+            },
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.stamped).toEqual([301]);
+                expect(report.errors).toBeUndefined();
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([71]);
+            },
+        ],
+        [
+            "row 3: collision, skeleton twin 'testing failure' — stamps the byte one",
+            { ctx_handles: ["test failed"] },
+            {
+                messages: [
+                    {
+                        id: "s2-byte2",
+                        ordinal: 303,
+                        role: "user",
+                        tag: 73,
+                        part: 0,
+                        content: "the test failed again",
+                    },
+                    {
+                        id: "s2-twin2",
+                        ordinal: 304,
+                        role: "assistant",
+                        tag: 74,
+                        part: 0,
+                        content: "testing failure overnight",
+                    },
+                ],
+            },
+            (response) => {
+                expect(JSON.parse(response).stamped).toEqual([303]);
+            },
+        ],
+        [
+            "row 4: head/tail trim — 'test failed.' passes free (substring predicate)",
+            { ctx_handles: ["test failed"] },
+            {
+                messages: [
+                    {
+                        id: "s2-trim",
+                        ordinal: 305,
+                        role: "user",
+                        tag: 75,
+                        part: 0,
+                        content: "test failed.",
+                    },
+                    {
+                        id: "s2-trimtwin",
+                        ordinal: 306,
+                        role: "assistant",
+                        tag: 76,
+                        part: 0,
+                        content: "tests failed overnight",
+                    },
+                ],
+            },
+            (response) => {
+                expect(JSON.parse(response).stamped).toEqual([305]);
+            },
+        ],
+        [
+            "row 5: interior trim — 'test, failed' is NOT a survivor; 0 survivors, ghosts unnamed",
+            { ctx_handles: ["test failed"] },
+            {
+                messages: [
+                    {
+                        id: "s2-interior",
+                        ordinal: 307,
+                        role: "user",
+                        tag: 77,
+                        part: 0,
+                        content: "test, failed with timeout",
+                    },
+                    {
+                        id: "s2-interiortwin",
+                        ordinal: 308,
+                        role: "assistant",
+                        tag: 78,
+                        part: 0,
+                        content: "tests failed overnight",
+                    },
+                ],
+            },
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.errors[0].class).toBe("not-found");
+                expect(report.errors[0].candidates).toBeUndefined();
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            },
+        ],
+        [
+            "row 6: '50%' literal — LIKE wildcards escaped inert, stamps",
+            { ctx_handles: ["50%"] },
+            {
+                messages: [
+                    {
+                        id: "s2-pct",
+                        ordinal: 309,
+                        role: "user",
+                        tag: 79,
+                        part: 0,
+                        content: "the rollout is at 50% capacity",
+                    },
+                    {
+                        id: "s2-pcttwin",
+                        ordinal: 310,
+                        role: "assistant",
+                        tag: 80,
+                        part: 0,
+                        content: "capacity is 50 percent stable",
+                    },
+                ],
+            },
+            (response) => {
+                expect(JSON.parse(response).stamped).toEqual([309]);
+            },
+        ],
+        [
+            "row 7: zero-token entry — not-found naming the shape, no scan",
+            { ctx_handles: ["\u2192\u2192\u2192"] },
+            {},
+            (response) => {
+                const report = JSON.parse(response);
+                expect(report.errors[0].class).toBe("not-found");
+                expect(report.errors[0].note).toContain("no searchable text");
+            },
+        ],
+        [
+            "row 8: audit geometry '===== u90 =====' — collision, 0 survivors, not-found, no ghosts",
+            { ctx_handles: ["===== u90 ====="] },
+            {
+                messages: [
+                    {
+                        id: "s2-u90a",
+                        ordinal: 311,
+                        role: "user",
+                        tag: 81,
+                        part: 0,
+                        content: "the u90 constant appeared in logs",
+                    },
+                    {
+                        id: "s2-u90b",
+                        ordinal: 312,
+                        role: "assistant",
+                        tag: 82,
+                        part: 0,
+                        content: "we discussed u90 today",
+                    },
+                ],
+            },
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.errors[0].class).toBe("not-found");
+                expect(report.errors[0].candidates).toBeUndefined();
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            },
+        ],
+        [
+            "survivors >= 2 — found-twice lists survivors only",
+            { ctx_handles: ["test failed"] },
+            {
+                messages: [
+                    {
+                        id: "s2-two1",
+                        ordinal: 313,
+                        role: "user",
+                        tag: 83,
+                        part: 0,
+                        content: "test failed here",
+                    },
+                    {
+                        id: "s2-two2",
+                        ordinal: 314,
+                        role: "assistant",
+                        tag: 84,
+                        part: 0,
+                        content: "and test failed there",
+                    },
+                ],
+            },
+            (response) => {
+                const report = JSON.parse(response);
+                expect(report.errors[0].class).toBe("ambiguous");
+                expect(new Set<number>(report.errors[0].candidates)).toEqual(
+                    new Set([313, 314]),
+                );
+                expect(report.errors[0].note).toContain("Found twice");
+            },
+        ],
+        [
+            "S-4 interaction: ghost entry in a batch with a resolvable phrase — sibling stamps, ghost is a null slot",
+            {
+                ctx_handles: [
+                    "the test failed on nightly run",
+                    "===== u90 =====",
+                ],
+            },
+            {
+                messages: [
+                    {
+                        id: "s2-s4byte",
+                        ordinal: 315,
+                        role: "user",
+                        tag: 85,
+                        part: 0,
+                        content: "the test failed on nightly run",
+                    },
+                    {
+                        id: "s2-s4u90a",
+                        ordinal: 316,
+                        role: "assistant",
+                        tag: 86,
+                        part: 0,
+                        content: "the u90 constant appeared in logs",
+                    },
+                    {
+                        id: "s2-s4u90b",
+                        ordinal: 317,
+                        role: "user",
+                        tag: 87,
+                        part: 0,
+                        content: "we discussed u90 today",
+                    },
+                ],
+            },
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.ctx_handles).toEqual([315, null]);
+                expect(report.stamped).toEqual([315]);
+                expect(report.errors[0].class).toBe("not-found");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([85]);
+            },
+        ],
+    ]);
+});

@@ -79,7 +79,7 @@ teaching, not behavior fix).
 Signature for recurrence: not-found entries whose text is present in
 `part.data` of `tool`-type parts (raw LIKE hits, mirror = 0).
 
-### S-2 · FTS token-skeleton matching vs the "verbatim" contract — **OPEN (engine fix queued)**
+### S-2 · FTS token-skeleton matching vs the "verbatim" contract — **FIXED (2026-10-20, implemented red-first, test rows 1–8 + survivors≥2 + S-4 interaction, all green)**
 
 Symptom: `===== u90 =====` → "found twice" with candidates that do not
 visually contain the phrase; any phrase whose FTS tokenization collapses to
@@ -145,7 +145,7 @@ test row; nothing trimmed):
 
 ```
 index hits == 1   → stamp. LIKE never runs.
-index hits >= 2   → LIKE '%entry%' ESCAPE '!' over the hit rows:
+index hits >= 2   → byte substring over the hit rows (settled as `LIKE '%entry%' ESCAPE '!'`; landed as the collapse predicate — see predicate note):
       survivors == 1  → stamp that one, normal success echo
       survivors == 0  → not-found (ghost candidates not named)
       survivors >= 2  → found-twice, listing survivors only
@@ -156,6 +156,21 @@ zero-token entry  → not-found + "entry has no searchable text"
 Predicate: SQLite `LIKE` — ASCII-case-insensitive by default (case
 absorption matches the index lane); substring (boundary punctuation
 free, interior faithful).
+
+**Implementation note (predicate deviation, recorded at landing).** The byte
+truth landed as a JS substring check (`collapse(content).includes(collapse(entry))`
+— whitespace runs collapsed to one space, ASCII-lowered) over the MATCH
+shortlist's **full** content, not SQLite `LIKE`. SQLite LIKE was rejected on
+three grounds: (a) it cannot express the whitespace absorption the index lane
+provides — raw-byte LIKE would make tab/multi-space twin copies non-survivors,
+manufacturing exactly the copy-drift ghost not-founds the byte-verify-always
+rejection forbids; (b) `%`/`_` escaping — inert by construction in JS
+(no wildcards exist); (c) a `substr(…,120)` excerpt column truncates targets
+beyond 120 chars into false not-founds. Ruling semantics identical: case
+absorbed, head/tail trim free, interior punctuation faithful (whitespace is
+absorbed surface, not identity signal). Arbiter for the deviation: the two
+pre-existing absorption pins in `ctx-handles.test.ts` (whitespace-variance
+cases) — they are red under raw LIKE, green under the collapse predicate.
 
 Test table (red-first, one row per branch, all branches):
 
@@ -299,3 +314,15 @@ session). The v1 surface is the only one shipping; nothing to fix.
 - 2026-10-19: audit performed (this file); S-1 adopted (definition + report
   text, all 13 surfaces, goldens/gates/budget fixture regenerated); S-2,
   S-3, S-4 opened; S-5/S-6 closed no-action.
+- 2026-10-19: S-3 fixed (`7fdbe42d0`); S-1 blind probes P1–P4 ran (definition
+  site confirmed as the class-A manufacturer; adopted).
+- 2026-10-19: S-4 ruled (graceful noop for individual not-found; loud for
+  ranges / ambiguous / lone / all-failed) and implemented (`0ea75381a`).
+- 2026-10-20: S-2 implemented red-first (this commit): gate tree in
+  `reduce-resolver.ts` (unique hit stamps without verify; collision → byte
+  substring over the MATCH shortlist — collapse predicate, see the
+  implementation note; zero survivors → not-found, ghosts unnamed; survivors
+  ≥2 → found-twice, survivors only; zero-token → not-found + shape clause,
+  no scan). Test rows 1–8 + survivors-≥2 + S-4 interaction green; the two
+  pre-existing whitespace-variance pins are the predicate arbiter. All audit
+  surfaces now closed except S-5 (model-side, no engine fix).
