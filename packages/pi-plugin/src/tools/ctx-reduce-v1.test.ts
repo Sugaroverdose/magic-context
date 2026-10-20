@@ -111,13 +111,14 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			};
 			const first = await call(db, sessionId, { ctx_handles: ["call-b", "call-a"] }, mint);
 			expect(first.isError).toBe(false);
-			expect(first.text).toBe("ctx_handles: 7, 5");
+			expect(JSON.parse(first.text).stamped).toEqual([7, 5]);
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId).sort()).toEqual([5, 7]);
 
 			// Idempotent re-send: noop report, nothing new queued.
 			const second = await call(db, sessionId, { ctx_handles: ["call-a"] }, mint);
 			expect(second.isError).toBe(false);
-			expect(second.text).toContain("stamped, waiting for the sweep: 5");
+			expect(JSON.parse(second.text).noop).toEqual({ queued: [5] });
+			expect(second.text).toContain("already queued or processed");
 			expect(getPendingOps(db, sessionId)).toHaveLength(2);
 		} finally {
 			closeQuietly(db);
@@ -149,7 +150,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 				mint,
 			);
 			expect(result.isError).toBe(false);
-			expect(result.text).toBe("ctx_handles: 9");
+			expect(JSON.parse(result.text).stamped).toEqual([9]);
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([12]);
 		} finally {
 			closeQuietly(db);
@@ -202,7 +203,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 				mint,
 			);
 			expect(result.isError).toBe(false);
-			expect(result.text).toBe("ctx_handles: 1-2");
+			expect(JSON.parse(result.text).stamped).toEqual(["1-2"]);
 			// Registration span (D18): the endpoints' tag band; call-mid (15)
 			// registers after the end point and does not join.
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId).sort()).toEqual([
@@ -230,7 +231,10 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 				mint,
 			);
 			expect(result.isError).toBe(true);
-			expect(result.text).toContain('error: "nope-9" provided in ctx_handles was not found');
+			const report = JSON.parse(result.text);
+			expect(report.errors[0].class).toBe("not-found");
+			expect(report.errors[0].entry).toBe("nope-9");
+			expect(report.errors[0].note).toContain("Nothing was stamped; resend the corrected batch.");
 			expect(result.text).toContain("Nothing was stamped; resend the corrected batch.");
 			expect(getPendingOps(db, sessionId)).toHaveLength(0);
 		} finally {
@@ -259,7 +263,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			};
 			const result = await call(db, sessionId, {}, mint);
 			expect(result.isError).toBe(false);
-			expect(result.text).toContain("stamped everything you've responded past: 3");
+			expect(JSON.parse(result.text).stamped).toEqual([3]);
 			expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([5]);
 		} finally {
 			closeQuietly(db);

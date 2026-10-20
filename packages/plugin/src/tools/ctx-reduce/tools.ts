@@ -15,6 +15,12 @@ import {
     resolveHandles,
 } from "../../features/magic-context/reduce-resolver";
 import {
+    MINT_UNAVAILABLE,
+    renderBulkSuccess,
+    renderPointingError,
+    renderPointingSuccess,
+} from "../../features/magic-context/reduce-response";
+import {
     getOrCreateSessionMeta,
     getPendingOps,
     getTagsBySession,
@@ -30,11 +36,6 @@ import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import {
-    MINT_UNAVAILABLE,
-    renderPointingError,
-    renderBulkSuccess, renderPointingSuccess,
-} from "../../features/magic-context/reduce-response";
 import { renderCapabilityRefusal } from "../../shared/user-facing-codes";
 import { unwrapImitatedReducedArgs } from "../unwrap-imitated-reduced-args";
 import { CTX_REDUCE_DESCRIPTION } from "./constants";
@@ -233,8 +234,12 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         });
         if (result.releasedItems.length === 0) {
             return result.protectedItems.length > 0
-                ? "Nothing older to release; newer work is still protected."
-                : "Nothing to release: no consumed tool output is waiting.";
+                ? JSON.stringify({
+                      note: "Nothing older to release; newer work is still protected.",
+                  })
+                : JSON.stringify({
+                      note: "Nothing to release: no consumed tool output is waiting.",
+                  });
         }
         const apply = await applyReleasedTags(
             invokeContext,
@@ -244,7 +249,13 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             return apply.refused;
         }
         touchNudgeWatermark(sessionId);
-        return renderBulkSuccess(apply.deduped, result.releasedItems, result.inertItems, result.protectedItems.length, mint);
+        return renderBulkSuccess(
+            apply.deduped,
+            result.releasedItems,
+            result.inertItems,
+            result.protectedItems.length,
+            mint,
+        );
     };
 
     const executePointingLane = async (
@@ -273,7 +284,8 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 sessionId,
                 protectedTagNumbers: protectedSet,
                 inertTagNumbers,
-                callIdResolver: deps.callIdResolver ?? createRegistryCallIdResolver(deps.db, sessionId),
+                callIdResolver:
+                    deps.callIdResolver ?? createRegistryCallIdResolver(deps.db, sessionId),
                 mint,
             },
             handles,
@@ -294,7 +306,9 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             // failed (nothing stamped is the truth), and mint failure.
             const loud =
                 errors.length === result.outcomes.length ||
-                errors.some((outcome) => outcome.range !== undefined || outcome.reason === "ambiguous");
+                errors.some(
+                    (outcome) => outcome.range !== undefined || outcome.reason === "ambiguous",
+                );
             if (loud) {
                 return renderPointingError(errors[0]!, mint);
             }

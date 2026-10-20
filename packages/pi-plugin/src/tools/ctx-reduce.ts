@@ -230,8 +230,8 @@ export function createCtxReduceTool(
 		if (result.releasedItems.length === 0) {
 			return ok(
 				result.protectedItems.length > 0
-					? "Nothing older to release; newer work is still protected."
-					: "Nothing to release: no consumed tool output is waiting.",
+					? JSON.stringify({ note: "Nothing older to release; newer work is still protected." })
+					: JSON.stringify({ note: "Nothing to release: no consumed tool output is waiting." }),
 			);
 		}
 		try {
