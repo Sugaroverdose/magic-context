@@ -2,7 +2,21 @@ import { createHash } from "node:crypto";
 
 const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
 const BASE = 36n;
-const FILLER_POOL = ["\u00b7", "\u2219", "\u2e31", "\u2023", "\u2022", " "];
+const FILLER_POOL = [
+    "\u00b7",
+    "\u2219",
+    "\u2e31",
+    "\u2023",
+    "\u2022",
+    "\u2500",
+    "\u2248",
+    "\u2212",
+    "\u2605",
+    "\u2502",
+    "\u2717",
+    "\u2032",
+    " ",
+];
 const ROUNDS = 16;
 const L_FLOOR = 8;
 
