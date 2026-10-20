@@ -1208,6 +1208,36 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
             },
         ],
         [
+            "leading/trailing spaces in the entry are absorbed through the byte lane (collapse trims both sides)",
+            { ctx_handles: ["   run steps 1 5   "] },
+            {
+                messages: [
+                    {
+                        id: "s2-edge",
+                        ordinal: 331,
+                        role: "assistant",
+                        tag: 101,
+                        part: 0,
+                        content: "run steps 1 5 in parallel",
+                    },
+                    {
+                        id: "s2-edgetwin",
+                        ordinal: 332,
+                        role: "user",
+                        tag: 102,
+                        part: 0,
+                        content: "run steps 1 5 mapping",
+                    },
+                ],
+            },
+            (response) => {
+                // Edge-trimmed entry byte-matches BOTH rows (run steps 1 5) —
+                // the honest collision answer: found-twice, edges invisible.
+                const report = JSON.parse(response);
+                expect(report.errors[0].class).toBe("ambiguous");
+            },
+        ],
+        [
             "glyph form: en-dash entry, unique skeleton hit — stamps (10 real entries, all resolved this way)",
             { ctx_handles: ["run steps 1\u20135 in parallel"] },
             {
