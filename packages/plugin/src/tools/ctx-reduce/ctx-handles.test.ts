@@ -340,6 +340,7 @@ describe("ctx_reduce handles lane (ids)", () => {
             (response, db) => {
                 const report = JSON.parse(response);
                 expect(report.stamped).toEqual([5, 7]);
+                expect(report.ctx_handles).toEqual([5, 7, 11, 9]);
                 expect(report.noop).toEqual({ released: [11] });
                 expect(report.held).toEqual([9]);
                 // Protected items are queued deferred (upstream semantics), not refused.
@@ -353,6 +354,7 @@ describe("ctx_reduce handles lane (ids)", () => {
             (response, db) => {
                 expect(JSON.parse(response).stamped).toEqual([5]);
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([5]);
+                expect(JSON.parse(response).ctx_handles).toEqual([5, 5]);
             },
         ],
         [
@@ -363,6 +365,7 @@ describe("ctx_reduce handles lane (ids)", () => {
                 const report = JSON.parse(response);
                 expect(report.errors[0].class).toBe("not-found");
                 expect(report.errors[0].entry).toBe("call-e");
+                expect(report.ctx_handles).toBeUndefined();
                 expect(report.errors[0].note).toContain("current context window");
                 expect(report.errors[0].note).toContain(
                     "Nothing was stamped; resend the corrected batch.",
@@ -379,6 +382,7 @@ describe("ctx_reduce handles lane (ids)", () => {
             (response, db) => {
                 const report = JSON.parse(response);
                 expect(report.errors[0].entry).toBe("call-b");
+                expect(report.ctx_handles).toBeUndefined();
                 expect(report.stamped).toBeUndefined();
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
             },
@@ -391,6 +395,7 @@ describe("ctx_reduce handles lane (ids)", () => {
                 const report = JSON.parse(response);
                 expect(report.stamped).toEqual([5]);
                 expect(report.errors[0].class).toBe("not-found");
+                expect(report.ctx_handles).toEqual([5, null]);
                 expect(report.errors[0].entry).toBe("nope-1");
                 expect(report.errors[0].note).toContain("the rest of the batch was stamped");
                 expect(report.errors[0].note).not.toContain("Nothing was stamped");
@@ -412,6 +417,7 @@ describe("ctx_reduce handles lane (ids)", () => {
             { latestUserOrdinal: 11 },
             (response, db) => {
                 expect(JSON.parse(response).stamped).toEqual([5, 7, 9]);
+                expect(JSON.parse(response).ctx_handles).toBeUndefined();
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([5, 7, 9]);
             },
         ],
@@ -442,6 +448,7 @@ describe("ctx_reduce handles lane (ids)", () => {
         )) as string;
         const report = JSON.parse(response);
         expect(report.noop).toEqual({ queued: [5] });
+        expect(report.ctx_handles).toEqual([5]);
         expect(report.note).toContain("already queued or processed");
         expect(pendingTagNumbers(db, "ses-1")).toEqual(before);
     });
@@ -464,6 +471,7 @@ describe("ctx_reduce handles lane (ids)", () => {
         )) as string;
         expect(received).toBe("5,7");
         expect(JSON.parse(first).stamped).toEqual([5, 7]);
+        expect(JSON.parse(first).ctx_handles).toEqual([5, 7]);
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
 
         queued = 0;
@@ -473,6 +481,7 @@ describe("ctx_reduce handles lane (ids)", () => {
         )) as string;
         const report = JSON.parse(second);
         expect(report.noop).toEqual({ released: [5, 7] });
+        expect(report.ctx_handles).toEqual([5, 7]);
         expect(report.note).toContain("already queued or processed");
     });
 });
@@ -518,6 +527,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 (response, db) => {
                     expect(JSON.parse(response).stamped).toEqual([102]);
                     expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
+                    expect(JSON.parse(response).ctx_handles).toEqual([102]);
                 },
             ],
             [
@@ -528,6 +538,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
                     const report = JSON.parse(response);
                     expect(report.errors[0].class).toBe("ambiguous");
                     // Candidates are ordinals in bm25 relevance order.
+                    expect(report.ctx_handles).toBeUndefined();
                     expect(report.errors[0].candidates).toEqual([101, 100]);
                     expect(report.errors[0].note).toContain("Copy a longer run");
                     expect(report.errors[0].note).toContain(
@@ -568,6 +579,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 },
                 (response, db) => {
                     expect(JSON.parse(response).stamped).toEqual([100]);
+                    expect(JSON.parse(response).ctx_handles).toEqual([100]);
                     expect(pendingTagNumbers(db, "ses-1")).toEqual([40]);
                 },
             ],
@@ -605,6 +617,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 (response, db) => {
                     const report = JSON.parse(response);
                     expect(report.noop).toEqual({ released: [99] });
+                    expect(report.ctx_handles).toEqual([99]);
                     expect(report.note).toContain("already queued or processed");
                     expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
                 },
@@ -615,6 +628,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 { protectedSet: new Set<number>([42]) },
                 (response, db) => {
                     expect(JSON.parse(response).held).toEqual([102]);
+                    expect(JSON.parse(response).ctx_handles).toEqual([102]);
                     // Upstream semantics: protected drops are queued, applied on displacement.
                     expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
                 },
@@ -628,6 +642,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 },
                 (response, db) => {
                     expect(JSON.parse(response).stamped).toEqual([90, 102]);
+                    expect(JSON.parse(response).ctx_handles).toEqual([90, 102]);
                     expect(pendingTagNumbers(db, "ses-1")).toEqual([42, 55]);
                 },
             ],
@@ -674,6 +689,7 @@ describe("ctx_reduce range lane", () => {
             (response, db) => {
                 expect(JSON.parse(response).stamped).toEqual(["10-12"]);
                 // Registration span 1..3: the tag band, one event.
+                expect(JSON.parse(response).ctx_handles).toEqual(["10-12"]);
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
             },
         ],
@@ -740,6 +756,7 @@ describe("ctx_reduce range lane", () => {
             (response, db) => {
                 const report = JSON.parse(response);
                 expect(report.errors[0].class).toBe("range-endpoint");
+                expect(report.ctx_handles).toBeUndefined();
                 expect(report.errors[0].entry).toBe("purple platypus");
                 expect(report.errors[0].note).toContain(
                     'It is the end of the range "alpha task one..purple platypus".',
@@ -768,6 +785,7 @@ describe("ctx_reduce range lane", () => {
             },
             (response, db) => {
                 expect(JSON.parse(response).held).toEqual(["10-13"]);
+                expect(JSON.parse(response).ctx_handles).toEqual(["10-13"]);
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 4]);
             },
         ],
@@ -781,6 +799,7 @@ describe("ctx_reduce range lane", () => {
                 const report = JSON.parse(response);
                 expect(report.stamped).toEqual(["10-12"]);
                 expect(report.noop).toEqual({ queued: [11] });
+                expect(report.ctx_handles).toEqual(["10-12"]);
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3]);
             },
         ],
@@ -791,6 +810,7 @@ describe("ctx_reduce range lane", () => {
             (response, db) => {
                 // Positional mirror: entry 1 is the single id (ordinal 11), entry 2 the span.
                 expect(JSON.parse(response).stamped).toEqual([11, "10-12"]);
+                expect(JSON.parse(response).ctx_handles).toEqual([11, "10-12"]);
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([1, 2, 3, 22]);
             },
         ],
@@ -884,6 +904,7 @@ describe("ctx_reduce partial accept (S-4 ruling)", () => {
         )) as string;
         const report = JSON.parse(response);
         expect(report.stamped).toEqual([1]);
+        expect(report.ctx_handles).toEqual([1, null]);
         expect(report.errors[0].entry).toBe("purple platypus parliament");
         expect(report.errors[0].note).toContain("current context window");
         expect(report.errors[0].note).not.toContain("Nothing was stamped");
@@ -897,6 +918,7 @@ describe("ctx_reduce partial accept (S-4 ruling)", () => {
             ctx,
         )) as string;
         expect(JSON.parse(response).errors[0].note).toContain("Nothing was stamped");
+        expect(JSON.parse(response).ctx_handles).toBeUndefined();
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
@@ -919,6 +941,7 @@ describe("ctx_reduce partial accept (S-4 ruling)", () => {
             ctx,
         )) as string;
         expect(JSON.parse(response).errors[0].note).toContain("Nothing was stamped");
+        expect(JSON.parse(response).ctx_handles).toBeUndefined();
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
@@ -929,6 +952,7 @@ describe("ctx_reduce partial accept (S-4 ruling)", () => {
             ctx,
         )) as string;
         expect(JSON.parse(response).errors[0].note).toContain("Nothing was stamped");
+        expect(JSON.parse(response).ctx_handles).toBeUndefined();
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
@@ -939,6 +963,7 @@ describe("ctx_reduce partial accept (S-4 ruling)", () => {
             ctx,
         )) as string;
         expect(JSON.parse(response).errors[0].note).toContain("Nothing was stamped");
+        expect(JSON.parse(response).ctx_handles).toBeUndefined();
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 });

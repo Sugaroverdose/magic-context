@@ -11,7 +11,10 @@ import {
  * every pointing surface answers with identical bytes.
  *
  * Wire form (one-line JSON, keys in this order, all omitted when empty):
- *   {"stamped":[N|"a-b",...],
+ *   {"ctx_handles":[N|"a-b"|null,...],   // positional mirror: one slot PER
+ *    //  ENTRY in exact input order (user ruling 2026-10-20); a range slot is
+ *    //  its ordinal span; a failed entry's slot is null.
+ *   "stamped":[N|"a-b",...],
  *    "noop":{"queued":[N],"released":[N],"compacted":[N],"inert":[N]},
  *    "held":[N|"a-b",...],
  *    "errors":[{"class":"not-found"|"ambiguous"|"range-endpoint"|"mint-unavailable",
@@ -53,6 +56,7 @@ interface ReportError {
 }
 
 interface Report {
+    ctx_handles?: (number | string | null)[];
     stamped?: (number | string)[];
     noop?: Record<string, number[]>;
     held?: (number | string)[];
@@ -189,7 +193,17 @@ export function renderPointingSuccess(
         }
     }
 
-    const report: Report = {};
+    // Positional mirror: one slot per entry, exact input order.
+    const mirror: (number | string | null)[] = outcomes.map((outcome, index) => {
+        if (outcome.kind === "range")
+            return outcome.fromOrdinal !== undefined && outcome.toOrdinal !== undefined
+                ? `${outcome.fromOrdinal}-${outcome.toOrdinal}`
+                : echoInput(entries[index] ?? "");
+        if (outcome.kind === "error") return null;
+        return ordinalOf(outcome.messageId) ?? echoInput(entries[index] ?? "");
+    });
+
+    const report: Report = { ctx_handles: mirror };
     if (stamped.length > 0) report.stamped = stamped;
     if (Object.keys(noop).length > 0) report.noop = noop;
     if (held.length > 0) report.held = held;
