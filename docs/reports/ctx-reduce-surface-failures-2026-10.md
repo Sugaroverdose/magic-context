@@ -167,6 +167,22 @@ pins exercise fixture geometry the writer cannot produce — 0 real occurrences 
 and are contract codifications, not the arbiter). Leading/trailing-space
 entries: 0/545 (the JSON emit path trims).
 
+**Glyph-form fold (added same day, user's "exact line" case).** The collapse
+also folds look-alike punctuation to ASCII on both sides: curly quotes
+(`‘ ’ ‛` → `'`, `“ ”` → `"`), dashes (`– — −` → `-`), ellipsis (`…` → `...`).
+Rationale = index parity: unicode61 strips all of these as token separators,
+so the index is blind to the form; a verbatim copy carrying either form must
+resolve (plugin-failure ruling). Session evidence: the byte-exact-tool
+instances of the class (two anchor-mismatch no-ops in doc edits — outside the
+resolver, discipline surface: anchors from machine output, scripted, never
+retyped). Store census: 10 dash-form entries (all resolved — unique-hit rule
+1, byte lane never ran), 6 Cyrillic (resolved; no fold for letters — form
+folding is punctuation-only, letters stay faithful), curly quotes 0 in
+entries / 336 content rows (latent side). Red-first rows pinned: en-dash↔
+hyphen and straight↔curly collision pairs. `..` and all FTS-syntax handling
+unchanged (phrase-first precedence, range as strict fallback — pinned at
+ctx-handles.test.ts:724; endpoint ≥2 hits → loud per S-4).
+
 **Implementation note (predicate deviation, recorded at landing).** The byte
 truth landed as a JS substring check (`collapse(content).includes(collapse(entry))`
 — whitespace runs collapsed to one space, ASCII-lowered) over the MATCH

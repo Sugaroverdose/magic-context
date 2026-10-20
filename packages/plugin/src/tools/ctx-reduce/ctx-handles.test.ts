@@ -1208,6 +1208,166 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
             },
         ],
         [
+            "glyph form: en-dash entry, unique skeleton hit — stamps (10 real entries, all resolved this way)",
+            { ctx_handles: ["run steps 1\u20135 in parallel"] },
+            {
+                messages: [
+                    {
+                        id: "g-dash",
+                        ordinal: 320,
+                        role: "assistant",
+                        tag: 90,
+                        part: 0,
+                        content: "I'll run steps 1\u20135 in parallel now",
+                    },
+                ],
+            },
+            (response) => {
+                expect(JSON.parse(response).stamped).toEqual([320]);
+            },
+        ],
+        [
+            "glyph form: en-dash collision, exact bytes — stamps the survivor (byte lane faithful for exact copies)",
+            { ctx_handles: ["run steps 1\u20135"] },
+            {
+                messages: [
+                    {
+                        id: "g-dash2",
+                        ordinal: 321,
+                        role: "assistant",
+                        tag: 91,
+                        part: 0,
+                        content: "run steps 1\u20135 in parallel",
+                    },
+                    {
+                        id: "g-dash2twin",
+                        ordinal: 322,
+                        role: "user",
+                        tag: 92,
+                        part: 0,
+                        content: "run steps 1 5 mapping",
+                    },
+                ],
+            },
+            (response) => {
+                expect(JSON.parse(response).stamped).toEqual([321]);
+            },
+        ],
+        [
+            "glyph form MISMATCH: en-dash entry vs hyphen content — stamp, not a ghost (faithful copy must match: plugin-failure ruling)",
+            { ctx_handles: ["run steps 1\u20135"] },
+            {
+                messages: [
+                    {
+                        id: "g-dashmism",
+                        ordinal: 323,
+                        role: "assistant",
+                        tag: 93,
+                        part: 0,
+                        content: "run steps 1-5 in parallel",
+                    },
+                    {
+                        id: "g-dashmismtwin",
+                        ordinal: 324,
+                        role: "user",
+                        tag: 94,
+                        part: 0,
+                        content: "run steps 1 5 mapping",
+                    },
+                ],
+            },
+            (response) => {
+                expect(JSON.parse(response).stamped).toEqual([323]);
+            },
+        ],
+        [
+            "glyph form MISMATCH: straight-apostrophe entry vs curly content — stamp (curly content surface: 336/48236 mirror rows)",
+            { ctx_handles: ["don't fail"] },
+            {
+                messages: [
+                    {
+                        id: "g-curly",
+                        ordinal: 325,
+                        role: "assistant",
+                        tag: 95,
+                        part: 0,
+                        content: "we don\u2019t fail nightly",
+                    },
+                    {
+                        id: "g-curlytwin",
+                        ordinal: 326,
+                        role: "user",
+                        tag: 96,
+                        part: 0,
+                        content: "do don t fail nightly",
+                    },
+                ],
+            },
+            (response) => {
+                expect(JSON.parse(response).stamped).toEqual([325]);
+            },
+        ],
+        [
+            "cyrillic collision (SCADA geometry), exact bytes — stamps the survivor",
+            { ctx_handles: ["SCADA-\u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u042d\u041d\u0422\u0415\u041a"] },
+            {
+                messages: [
+                    {
+                        id: "g-cyr",
+                        ordinal: 327,
+                        role: "user",
+                        tag: 97,
+                        part: 0,
+                        content: "SCADA-\u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u042d\u041d\u0422\u0415\u041a \u0432 \u043b\u0435\u0432\u043e\u0439 \u043a\u043e\u043b\u043e\u043d\u043a\u0435",
+                    },
+                    {
+                        id: "g-cyrtwin",
+                        ordinal: 328,
+                        role: "assistant",
+                        tag: 98,
+                        part: 0,
+                        content: "SCADA \u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u042d\u041d\u0422\u0415\u0412 \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u044b",
+                    },
+                ],
+            },
+            (response) => {
+                expect(JSON.parse(response).stamped).toEqual([327]);
+            },
+        ],
+        [
+            "NBSP copy is absorbed by the collapse (JS \\s covers U+00A0 on both sides)",
+            { ctx_handles: ["budget\u00a0loc"] },
+            {
+                messages: [
+                    {
+                        id: "g-nbsp",
+                        ordinal: 329,
+                        role: "user",
+                        tag: 99,
+                        part: 0,
+                        content: "budget\u00a0loc table",
+                    },
+                    {
+                        id: "g-nbsptwin",
+                        ordinal: 330,
+                        role: "assistant",
+                        tag: 100,
+                        part: 0,
+                        content: "budget loc list",
+                    },
+                ],
+            },
+            (response) => {
+                const report = JSON.parse(response);
+                // Both rows are byte-survivors after NBSP collapse — the
+                // honest answer is found-twice, and NBSP is invisible.
+                expect(report.errors[0].class).toBe("ambiguous");
+                expect(new Set<number>(report.errors[0].candidates)).toEqual(
+                    new Set([329, 330]),
+                );
+            },
+        ],
+        [
             "real-data geometry: table-row copy with a double space, normalized mirror + collision — stamps the target (user ruling: a not-found on a faithful copy is a plugin failure)",
             { ctx_handles: ["budget  loc-i loc-e ref-i"] },
             {

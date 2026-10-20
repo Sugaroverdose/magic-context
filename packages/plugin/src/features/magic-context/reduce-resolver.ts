@@ -285,7 +285,21 @@ function isByteSurvivor(content: string, entry: string): boolean {
 }
 
 function collapseWhitespace(text: string): string {
-    return text.toLowerCase().replace(/\s+/g, " ").trim();
+    return (
+        text
+            .toLowerCase()
+            .replace(/\s+/g, " ")
+            // Form fold: look-alike punctuation twins collapse to their ASCII
+            // form on BOTH sides. unicode61 strips every one of these as a
+            // token separator, so the index lane is blind to the form — the
+            // byte lane must be blind to it too (index-parity; a verbatim
+            // copy of any form must resolve — plugin-failure ruling).
+            .replace(/[\u2018\u2019\u201B]/g, "'")
+            .replace(/[\u201C\u201D]/g, '"')
+            .replace(/[\u2013\u2014\u2212]/g, "-")
+            .replace(/\u2026/g, "...")
+            .trim()
+    );
 }
 
 interface SampleRow {
