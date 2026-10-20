@@ -844,14 +844,6 @@ export async function registerContext(context: V2Context) {
                 resolved = resolveReleasedToolInput(draft.input, draft.sessionID, {
                     lookupOriginal: (sessionId, tagId) =>
                         db ? lookupReleasedToolInput(db, sessionId, tagId) : undefined,
-                    maxTag: (sessionId) =>
-                        (
-                            db
-                                ?.prepare(
-                                    "SELECT MAX(tag_number) AS max_tag FROM tags WHERE session_id = ?",
-                                )
-                                .get(sessionId) as { max_tag: number | null } | undefined
-                        )?.max_tag ?? undefined,
                 });
             } catch (error) {
                 // Resolver, not gate: a resolver defect must never block a

@@ -51,11 +51,9 @@ export function createPiFpeResolution(
 			resolved = resolveReleasedToolInput(event.input, sessionID, {
 				lookupOriginal: (sessionId, tagNumber) =>
 					options.fpeLookup?.(ctx, sessionId, tagNumber),
-				maxTag: (sessionId) => options.fpeMaxTag?.(sessionId),
 			});
 		} catch {
-			// Corrupted-token reject (instruction to re-issue) is wired on the
-			// OpenCode `.before` surface; the Pi spike passes it through.
+			// Resolver, not gate: a resolver defect passes the call through.
 			return undefined;
 		}
 		if (

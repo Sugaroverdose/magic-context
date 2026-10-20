@@ -44,7 +44,7 @@ export function lookupReleasedToolInput(
 ): unknown | undefined {
     const tag = db
         .prepare(
-            "SELECT message_id, tool_owner_message_id FROM tags WHERE session_id = ? AND tag_number = ? AND type = 'tool' AND status = 'dropped'",
+            "SELECT message_id, tool_owner_message_id FROM tags WHERE session_id = ? AND tag_number = ? AND type = 'tool'",
         )
         .get(sessionId, tagNumber) as
         | { message_id: string; tool_owner_message_id: string | null }
@@ -97,31 +97,24 @@ export function lookupReleasedToolInput(
  */
 export interface FpeResolveDeps {
     lookupOriginal: (sessionId: string, tagId: number) => unknown | undefined;
-    /** Highest tag_number ever assigned to the session (index-served MAX).
-     *  Undefined = no registry access; FPE resolution stays inert. */
-    maxTag: (sessionId: string) => number | undefined;
 }
 
-function findFpeTagId(
-    value: unknown,
-    key: bigint,
-    maxTag: number,
-): number | undefined {
+function findFpeTagId(value: unknown, key: bigint, currentL: number): number | undefined {
     if (typeof value === "string") {
         if (!isFpeTokenCandidate(value)) return undefined;
-        const result = fpeGate(value, key, maxTag);
+        const result = fpeGate(value, key, currentL);
         return result.matched ? result.tagId : undefined;
     }
     if (Array.isArray(value)) {
         for (const item of value) {
-            const tagId = findFpeTagId(item, key, maxTag);
+            const tagId = findFpeTagId(item, key, currentL);
             if (tagId !== undefined) return tagId;
         }
         return undefined;
     }
     if (isRecord(value)) {
         for (const item of Object.values(value)) {
-            const tagId = findFpeTagId(item, key, maxTag);
+            const tagId = findFpeTagId(item, key, currentL);
             if (tagId !== undefined) return tagId;
         }
         return undefined;
@@ -135,28 +128,15 @@ function findFpeTagId(
  * ORIGINAL input that must run in its place, or undefined when the args
  * carry no resolvable token. Harness adapters log and assign; the
  * detection/replacement contract lives only here.
- *
- * Resolver, not gate: a token-shaped string that resolves to nothing
- * (corrupted, retired, synthesized) returns undefined and the call executes
- * as issued — the loud tool failure is the model's self-repair loop. This
- * function never rejects a command.
- *
- * Current format only: drop tokens are rendered live at every wire build
- * (tag-transcript), so after a build switch the session's wire carries the
- * new render exclusively and the model can never copy a retired shape into
- * args. No retired-format decode path exists.
  */
 export function resolveReleasedToolInput(
     args: unknown,
     sessionId: string,
     fpeResolve: FpeResolveDeps,
 ): unknown | undefined {
-    const key = deriveKey(sessionId);
-    const maxTag = fpeResolve.maxTag(sessionId);
-    if (maxTag === undefined) return undefined;
-    const tagId = findFpeTagId(args, key, maxTag);
-    if (tagId !== undefined) return fpeResolve.lookupOriginal(sessionId, tagId);
-    return undefined;
+    const tagId = findFpeTagId(args, deriveKey(sessionId), 8);
+    if (tagId === undefined) return undefined;
+    return fpeResolve.lookupOriginal(sessionId, tagId);
 }
 
 export interface FpeResolveDepsOption {
@@ -185,23 +165,20 @@ export function createToolExecuteBeforeHook(options: FpeResolveDepsOption = {}) 
             }
         }
         if (sessionId && args && options.fpeResolve) {
-            let original: unknown;
+            // Resolver, not gate: a resolver defect must never block a tool
+            // call. Log and execute the call as issued.
             try {
-                original = resolveReleasedToolInput(args, sessionId, options.fpeResolve);
+                const original = resolveReleasedToolInput(args, sessionId, options.fpeResolve);
+                if (original !== undefined) {
+                    sessionLog(sessionId, "fpe: resolved dropped token in tool call args", {
+                        tool: call.tool,
+                    });
+                    (output as { args: unknown }).args = original;
+                }
             } catch (error) {
-                // Resolver, not gate: a resolver defect must never block a
-                // tool call. Log and execute the call as issued.
                 sessionLog(sessionId, "fpe: resolver error, call passed through", {
-                    tool: call.tool,
                     error: error instanceof Error ? error.message : String(error),
                 });
-                return;
-            }
-            if (original !== undefined) {
-                sessionLog(sessionId, "fpe: resolved dropped token in tool call args", {
-                    tool: call.tool,
-                });
-                (output as { args: unknown }).args = original;
             }
         }
     };
