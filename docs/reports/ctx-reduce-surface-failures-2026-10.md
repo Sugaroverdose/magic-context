@@ -194,7 +194,9 @@ rejection forbids; (b) `%`/`_` escaping — inert by construction in JS
 (no wildcards exist); (c) a `substr(…,120)` excerpt column truncates targets
 beyond 120 chars into false not-founds. Ruling semantics identical: case
 absorbed, head/tail trim free, interior punctuation faithful (whitespace is
-absorbed surface, not identity signal). Contract codification: the two
+absorbed surface, not identity signal: runs collapse to one space, leading
+and trailing spaces are trimmed on both sides — pinned through the byte lane
+by the edge-space row, entry `"   run steps 1 5   "` matching both twins). Contract codification: the two
 pre-existing absorption pins in `ctx-handles.test.ts` (whitespace-variance
 cases) — red under raw LIKE, green under the collapse predicate.
 
