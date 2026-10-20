@@ -225,6 +225,17 @@ describe("FPE resolver contract (resolver, not gate)", () => {
         expect(output.args).toEqual({ command: "9\u2022\u2E3166\u2022\u2E314586\u2023\u20235" });
     });
 
+    it("replacement lands IN PLACE on the args object the executor re-reads (engine contract)", async () => {
+        // session/tools.ts triggers with a fresh { args } wrapper and then
+        // executes the ORIGINAL args object: replacing output.args is read by
+        // nobody. The replacement must mutate the object we were handed.
+        const hook = createToolExecuteBeforeHook({ fpeResolve: deps() });
+        const token = renderDropToken(8, RKEY);
+        const executorArgs: Record<string, unknown> = { command: token, stale: "x" };
+        await hook({ tool: "bash", sessionID: "ses_fpe_lookup" }, { args: executorArgs });
+        expect(executorArgs).toEqual({ command: "pwd" });
+    });
+
     it("hook never blocks a call on resolver internals failure", async () => {
         const broken = {
             lookupOriginal: () => {

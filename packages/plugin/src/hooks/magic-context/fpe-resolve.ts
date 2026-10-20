@@ -173,7 +173,15 @@ export function createToolExecuteBeforeHook(options: FpeResolveDepsOption = {}) 
                     sessionLog(sessionId, "fpe: resolved dropped token in tool call args", {
                         tool: call.tool,
                     });
-                    (output as { args: unknown }).args = original;
+                    // Engine contract (session/tools.ts): the executor re-reads the
+                    // SAME args object it handed us in a fresh { args } wrapper, so
+                    // the replacement must mutate that object in place. Replacing
+                    // output.args is read by nobody.
+                    if (args && typeof args === "object" && original && typeof original === "object") {
+                        const target = args as Record<string, unknown>;
+                        for (const key of Object.keys(target)) delete target[key];
+                        Object.assign(target, original as Record<string, unknown>);
+                    }
                 }
             } catch (error) {
                 sessionLog(sessionId, "fpe: resolver error, call passed through", {
