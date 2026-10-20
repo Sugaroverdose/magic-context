@@ -337,6 +337,32 @@ session). The v1 surface is the only one shipping; nothing to fix.
   desk (tool outputs + prose), dispatch fresh-context subagent, grade the
   produced `ctx_handles` array against the classes above.
 
+## Open questions (life-evidence gated — do not build on opinion)
+
+**Q1. An un-stamp verb (undo a release before the transform pass applies it).**
+Status: not built; decided by measured need, not design taste.
+- Current recovery: releases are `pending_ops` queue rows applied at the next
+  transform pass; content is never destroyed, so `ctx_expand` re-materializes
+  any released row on demand (read-only, new traffic). The pre-pass window is
+  mechanically trivial to undo (`DELETE FROM pending_ops WHERE tag_number IN
+  (queued...)`) — the verb is cheap; it is unshipped by choice, not difficulty.
+- Census (2026-10-20, `opencode.db` full history): stamp→expand adjacency
+  within 2 min = **0 pairs** across all Rev-6 stamps. Every observed
+  reduce→expand adjacency (9 pairs, Oct-18) is a FAILED-stamp recovery
+  (expand after `not-found`) — the model reaching for content after the stamp
+  died, never after a stamp that landed. Undo use case: zero events.
+- The risk the verb would actually serve is **mis-targeted stamps**: entry
+  resolves cleanly to the wrong row (silent by construction; null-slot
+  mis-targets are loud per S-4, wrong-row ones are invisible). Zero observed
+  post-Rev 6; the pre-Rev-6 era's 65% failure class was pre-mirror.
+- Cost if built: Rev 6 entry slot (`undo:` array), queue-status semantics
+  (queued → `noop.undone`; processed → loud "already swept, use ctx_expand"),
+  byte-pins, the 13-surface teaching pass.
+- **Re-open trigger:** the post-ctxv3 install-window check (memory #1844
+  method: `time > install`, tabulate failure classes) shows mis-targeted
+  stamps as a *recurring* class — same standard as every S-item in this doc:
+  a class earns a fix by measured occurrences, not by plausibility.
+
 ## Change log
 
 - 2026-10-19: audit performed (this file); S-1 adopted (definition + report
