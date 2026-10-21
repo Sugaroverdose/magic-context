@@ -8,11 +8,11 @@ const FILLER_POOL = [
     "\u2e31",
     "\u2023",
     "\u2022",
-    "\u2248",
-    "\u2212",
-    "\u2605",
-    "\u2717",
-    "\u2032",
+    "\u00b6",
+    "\u00ac",
+    "\u00a4",
+    "\u00aa",
+    "\u00ba",
 ];
 const SPACE_MARK = "\u0020";
 const ROUNDS = 16;
