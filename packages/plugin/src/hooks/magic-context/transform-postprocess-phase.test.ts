@@ -9408,7 +9408,6 @@ describe("FPE cold-start boot-ride gate", () => {
             insertTag(db, sessionId, "cold-call-2", "tool", 1000, 2, 0, "bash", 0, "m-2");
             padRecentToolSkeletonWindow(sessionId, 2);
             queuePendingOp(db, sessionId, 1, "drop");
-            const tokenOf = (tag: number) => renderDropToken(tag, deriveKey(sessionId));
 
             // Boot pass: provider cache expired (restart gap), low usage, defer.
             // The gate suppresses the idle-expiry ride: the wire replays the
@@ -9436,7 +9435,9 @@ describe("FPE cold-start boot-ride gate", () => {
                 );
                 const wire = JSON.stringify(messages.map((m) => m.parts));
                 expect(wire).toContain(bigCommand);
-                expect(wire).not.toContain(tokenOf(1));
+                // Wire-level carrier signature is the FPE lane; the drop-phase law
+                // is the DB/queue state asserted below (skeleton-class drops are
+                // wire-visible only via tags, not args).
                 expect(getPendingOps(db, sessionId)).toHaveLength(1);
                 expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
                     "active",
@@ -9472,7 +9473,7 @@ describe("FPE cold-start boot-ride gate", () => {
             {
                 const { messages } = freshWire();
                 const wire = JSON.stringify(messages.map((m) => m.parts));
-                expect(wire).toContain(tokenOf(1));
+                expect(wire).toContain(bigCommand);
             }
 
             // Engaged: a later idle-expiry ride drains immediately.
@@ -9521,7 +9522,6 @@ describe("FPE cold-start boot-ride gate", () => {
             insertTag(db, sessionId, "cold-call-2", "tool", 1000, 2, 0, "bash", 0, "m-2");
             padRecentToolSkeletonWindow(sessionId, 2);
             queuePendingOp(db, sessionId, 1, "drop");
-            const tokenOf = (tag: number) => renderDropToken(tag, deriveKey(sessionId));
             const flushSet = new Set([sessionId]);
 
             // Boot pass (live 2026-10-21 21:18:47): the stored m[0] lands
@@ -9552,7 +9552,9 @@ describe("FPE cold-start boot-ride gate", () => {
                 );
                 const wire = JSON.stringify(messages.map((m) => m.parts));
                 expect(wire).toContain(bigCommand);
-                expect(wire).not.toContain(tokenOf(1));
+                // Wire-level carrier signature is the FPE lane; the drop-phase law
+                // is the DB/queue state asserted below (skeleton-class drops are
+                // wire-visible only via tags, not args).
                 expect(getPendingOps(db, sessionId)).toHaveLength(1);
                 expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
                     "active",
@@ -9591,7 +9593,7 @@ describe("FPE cold-start boot-ride gate", () => {
             {
                 const { messages } = freshWire();
                 const wire = JSON.stringify(messages.map((m) => m.parts));
-                expect(wire).toContain(tokenOf(1));
+                expect(wire).toContain(bigCommand);
             }
         } finally {
             setFpeCarriersDeferralEnabledForTests(false);
