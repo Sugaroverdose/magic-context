@@ -57,7 +57,6 @@ import {
     getReasoningRemovalState,
     markDropLeavesReasoning,
 } from "../../features/magic-context/storage-reasoning-removal";
-
 import {
     getTagNumberByMessageId,
     markTagsCompactedByMessageIds,
@@ -106,6 +105,7 @@ import {
 } from "./dropped-token-estimate";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import { foldExecutesThisPass } from "./fold-execution-gate";
+import { engageFpeCarriers, isFpeCarriersCold } from "./fpe-engagement";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
     clearInjectionCache,
@@ -2014,9 +2014,29 @@ export async function runPostTransformPhase(
     // A retry after an aborted idle fold is still provider-cold even though its
     // persisted pair needs no second fold. Any newly queued work belongs on that
     // retry, not on the warm tool step after the provider finally answers.
-    const idleExpiryRebuild = !freezeM0M1 && args.m0M1?.hardSignals?.cacheExpired === true;
+    // Cold-start boot-ride gate (fpe-engagement.ts): a restart gap expires the
+    // provider cache, so the boot pass rides ttl_idle — the idle fold bust
+    // (reason=ttl_idle) and the idle rebuild — and drains the pre-restart drop
+    // backlog, minting the freshest, most-attended carriers onto the thinnest
+    // wire at t=0 (the measured start-burst flare class). While the session has
+    // not run a pressure sweep in this process, every cacheExpired-driven ride
+    // is suppressed: the boot pass serves the byte-identical pre-restart wire
+    // (LKG restore + deterministic replay of applied drop rows) and the backlog
+    // stays queued. Real priced work is never gated: marker-change fold busts,
+    // scheduler-execute, and the force/emergency band ride as today.
+    const coldBootRide =
+        !freezeM0M1 &&
+        args.m0M1?.hardSignals?.cacheExpired === true &&
+        isFpeCarriersCold(args.sessionId);
+    const idleExpiryRebuild =
+        !freezeM0M1 &&
+        args.m0M1?.hardSignals?.cacheExpired === true &&
+        !isFpeCarriersCold(args.sessionId);
     const rideSignals = {
-        hardFold: foldBustsServedPrefixThisPass || firstRenderBust || idleExpiryRebuild,
+        hardFold:
+            (foldBustsServedPrefixThisPass && foldDueDecision.reason !== "ttl_idle") ||
+            firstRenderBust ||
+            idleExpiryRebuild,
         force:
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||
@@ -2248,6 +2268,12 @@ export async function runPostTransformPhase(
             );
             if (pendingOpsDidMutate) {
                 droppedCount += pendingOps.length;
+                // Pressure mutations engage the warm carrier lane (the takeover
+                // rides this pass's own priced bust). Non-pressure rides (e.g. a
+                // post-engage ttl ride) mutate without re-arming; engagement is
+                // monotone per process. Cold sessions only mutate here under the
+                // force band, which is pressure by definition.
+                if (executePressureEligible) engageFpeCarriers(args.sessionId);
                 for (const pendingOp of pendingOps) {
                     const message = args.targets.get(pendingOp.tagId)?.message;
                     if (message) reasoningMutatedMessages.add(message);

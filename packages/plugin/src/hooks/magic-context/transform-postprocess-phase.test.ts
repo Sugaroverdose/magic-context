@@ -67,6 +67,10 @@ import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import * as staleReduce from "./drop-stale-reduce-calls";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
+import {
+    resetFpeCarriersEngagementForTests,
+    setFpeCarriersDeferralEnabledForTests,
+} from "./fpe-engagement";
 import * as compartmentInjection from "./inject-compartments";
 import {
     capturePrefixTrimSourceOrder,
@@ -9354,6 +9358,189 @@ it("four pure defer passes preserve served bytes and durable drop state", async 
         "RIDE_REPLAY_OC",
         createHash("sha256").update(JSON.stringify(snapshots)).digest("hex"),
     );
+});
+
+describe("FPE cold-start boot-ride gate", () => {
+    const bigCommand = `echo ${"x".repeat(3000)}`;
+    const makeCall = (id: string, callId: string, command: string): MessageLike =>
+        ({
+            info: { id, role: "assistant" },
+            parts: [
+                {
+                    type: "tool",
+                    tool: "bash",
+                    callID: callId,
+                    state: { status: "completed", input: { command }, output: "ok" },
+                },
+            ],
+        }) as unknown as MessageLike;
+
+    function coldWorld(sessionId: string): {
+        freshWire: () => { messages: MessageLike[]; targets: Map<number, TagTarget> };
+    } {
+        const make = () => {
+            const messages = [
+                makeCall("m-1", "cold-call-1", bigCommand),
+                makeCall("m-2", "cold-call-2", "ls -la"),
+                {
+                    info: { id: "m-next", role: "user" },
+                    parts: [{ type: "text", text: "next prompt" }],
+                } as unknown as MessageLike,
+            ];
+            const tagger = createTagger();
+            tagger.initFromDb(sessionId, db);
+            const tagged = tagMessages(sessionId, messages, tagger, db);
+            applyFlushedStatuses(sessionId, db, tagged.targets);
+            return { messages, targets: tagged.targets };
+        };
+        return { freshWire: make };
+    }
+
+    it("cold boot rides deferred: backlog queued, wire byte-identical, no engagement", async () => {
+        setFpeCarriersDeferralEnabledForTests(true);
+        resetFpeCarriersEngagementForTests();
+        try {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "fpe-ride-cold";
+            const { freshWire } = coldWorld(sessionId);
+            insertTag(db, sessionId, "cold-call-1", "tool", 1000, 1, 0, "bash", 0, "m-1");
+            insertTag(db, sessionId, "cold-call-2", "tool", 1000, 2, 0, "bash", 0, "m-2");
+            padRecentToolSkeletonWindow(sessionId, 2);
+            queuePendingOp(db, sessionId, 1, "drop");
+            const tokenOf = (tag: number) => renderDropToken(tag, deriveKey(sessionId));
+
+            // Boot pass: provider cache expired (restart gap), low usage, defer.
+            // The gate suppresses the idle-expiry ride: the wire replays the
+            // byte-identical restore and the queued op stays queued.
+            for (const pass of [1, 2]) {
+                const { messages, targets } = freshWire();
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, messages, {
+                        // Production boot geometry (transform_decisions census):
+                        // the boot pass arrives with scheduler=execute and
+                        // reason=ttl_idle — READ opens, the ride must be gated.
+                        schedulerDecision: "execute",
+                        schedulerDeferReason: null,
+                        contextUsage: { percentage: 40, inputTokens: 40000 },
+                        targets,
+                        m0M1: {
+                            hardSignals: {
+                                systemHash: "s",
+                                modelKey: "k",
+                                cacheExpired: true,
+                                lastResponseTime: 0,
+                            } as M0HardSignals,
+                        },
+                    }),
+                );
+                const wire = JSON.stringify(messages.map((m) => m.parts));
+                expect(wire).toContain(bigCommand);
+                expect(wire).not.toContain(tokenOf(1));
+                expect(getPendingOps(db, sessionId)).toHaveLength(1);
+                expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+                    "active",
+                );
+                void pass;
+            }
+
+            // Pressure pass drains: the backlog applies and engages.
+            {
+                const { messages, targets } = freshWire();
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, messages, {
+                        schedulerDecision: "execute",
+                        schedulerDeferReason: null,
+                        contextUsage: { percentage: 96, inputTokens: 96000 },
+                        forceMaterializationPercentage: 85,
+                        targets,
+                        m0M1: {
+                            hardSignals: {
+                                systemHash: "s",
+                                modelKey: "k",
+                                cacheExpired: true,
+                                lastResponseTime: 0,
+                            } as M0HardSignals,
+                        },
+                    }),
+                );
+            }
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+                "dropped",
+            );
+            {
+                const { messages } = freshWire();
+                const wire = JSON.stringify(messages.map((m) => m.parts));
+                expect(wire).toContain(tokenOf(1));
+            }
+
+            // Engaged: a later idle-expiry ride drains immediately.
+            queuePendingOp(db, sessionId, 2, "drop");
+            {
+                const { messages, targets } = freshWire();
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, messages, {
+                        // Production boot geometry (transform_decisions census):
+                        // the boot pass arrives with scheduler=execute and
+                        // reason=ttl_idle — READ opens, the ride must be gated.
+                        schedulerDecision: "execute",
+                        schedulerDeferReason: null,
+                        contextUsage: { percentage: 40, inputTokens: 40000 },
+                        targets,
+                        m0M1: {
+                            hardSignals: {
+                                systemHash: "s",
+                                modelKey: "k",
+                                cacheExpired: true,
+                                lastResponseTime: 0,
+                            } as M0HardSignals,
+                        },
+                    }),
+                );
+            }
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 2)?.status).toBe(
+                "dropped",
+            );
+        } finally {
+            setFpeCarriersDeferralEnabledForTests(false);
+            resetFpeCarriersEngagementForTests();
+        }
+    });
+
+    it("force band rides while cold: byte crisis is never gated", async () => {
+        setFpeCarriersDeferralEnabledForTests(true);
+        resetFpeCarriersEngagementForTests();
+        try {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "fpe-ride-force";
+            const { freshWire } = coldWorld(sessionId);
+            insertTag(db, sessionId, "cold-call-1", "tool", 1000, 1, 0, "bash", 0, "m-1");
+            insertTag(db, sessionId, "cold-call-2", "tool", 1000, 2, 0, "bash", 0, "m-2");
+            padRecentToolSkeletonWindow(sessionId, 2);
+            queuePendingOp(db, sessionId, 1, "drop");
+
+            const { messages, targets } = freshWire();
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: "defer",
+                    contextUsage: { percentage: 96, inputTokens: 96000 },
+                    pendingMaterializationSessions: new Set([sessionId]),
+                    targets,
+                    forceMaterializationPercentage: 85,
+                }),
+            );
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+                "dropped",
+            );
+        } finally {
+            setFpeCarriersDeferralEnabledForTests(false);
+            resetFpeCarriersEngagementForTests();
+        }
+    });
 });
 
 describe("postprocess defer instrumentation and scaling", () => {
