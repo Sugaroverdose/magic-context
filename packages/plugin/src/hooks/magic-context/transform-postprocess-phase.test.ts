@@ -9509,6 +9509,96 @@ describe("FPE cold-start boot-ride gate", () => {
         }
     });
 
+    it("cold materialization flush ride deferred: boot restores, request survives, warm flush rides", async () => {
+        setFpeCarriersDeferralEnabledForTests(true);
+        resetFpeCarriersEngagementForTests();
+        try {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "fpe-flush-cold";
+            const { freshWire } = coldWorld(sessionId);
+            insertTag(db, sessionId, "cold-call-1", "tool", 1000, 1, 0, "bash", 0, "m-1");
+            insertTag(db, sessionId, "cold-call-2", "tool", 1000, 2, 0, "bash", 0, "m-2");
+            padRecentToolSkeletonWindow(sessionId, 2);
+            queuePendingOp(db, sessionId, 1, "drop");
+            const tokenOf = (tag: number) => renderDropToken(tag, deriveKey(sessionId));
+            const flushSet = new Set([sessionId]);
+
+            // Boot pass (live 2026-10-21 21:18:47): the stored m[0] lands
+            // outside the replayed window, the host requests re-materialization,
+            // and the pass arrives as an explicit flush on a cold, healthy
+            // session. The flush ride folds and drops the backlog; the gate
+            // suppresses it: the wire replays the byte-identical restore, the
+            // queued op stays queued, and the flush request SURVIVES for the
+            // first pass that can materialize (drain is never reached).
+            {
+                const { messages, targets } = freshWire();
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, messages, {
+                        schedulerDecision: "defer",
+                        schedulerDeferReason: null,
+                        contextUsage: { percentage: 49, inputTokens: 127_000 },
+                        targets,
+                        pendingMaterializationSessions: flushSet,
+                        m0M1: {
+                            hardSignals: {
+                                systemHash: "s",
+                                modelKey: "k",
+                                cacheExpired: true,
+                                lastResponseTime: 0,
+                            } as M0HardSignals,
+                        },
+                    }),
+                );
+                const wire = JSON.stringify(messages.map((m) => m.parts));
+                expect(wire).toContain(bigCommand);
+                expect(wire).not.toContain(tokenOf(1));
+                expect(getPendingOps(db, sessionId)).toHaveLength(1);
+                expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+                    "active",
+                );
+                expect(flushSet.has(sessionId)).toBe(true);
+            }
+
+            // Pressure pass engages; the flush request (still pending) rides
+            // the warm lane: ops apply, carriers mint, the request is consumed.
+            {
+                const { messages, targets } = freshWire();
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, messages, {
+                        schedulerDecision: "execute",
+                        schedulerDeferReason: null,
+                        contextUsage: { percentage: 96, inputTokens: 96_000 },
+                        forceMaterializationPercentage: 85,
+                        targets,
+                        pendingMaterializationSessions: flushSet,
+                        m0M1: {
+                            hardSignals: {
+                                systemHash: "s",
+                                modelKey: "k",
+                                cacheExpired: true,
+                                lastResponseTime: 0,
+                            } as M0HardSignals,
+                        },
+                    }),
+                );
+            }
+            expect(getPendingOps(db, sessionId)).toHaveLength(0);
+            expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
+                "dropped",
+            );
+            expect(flushSet.has(sessionId)).toBe(false);
+            {
+                const { messages } = freshWire();
+                const wire = JSON.stringify(messages.map((m) => m.parts));
+                expect(wire).toContain(tokenOf(1));
+            }
+        } finally {
+            setFpeCarriersDeferralEnabledForTests(false);
+            resetFpeCarriersEngagementForTests();
+        }
+    });
+
     it("force band rides while cold: byte crisis is never gated", async () => {
         setFpeCarriersDeferralEnabledForTests(true);
         resetFpeCarriersEngagementForTests();

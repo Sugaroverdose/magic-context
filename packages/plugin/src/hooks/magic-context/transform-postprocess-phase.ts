@@ -2041,7 +2041,19 @@ export async function runPostTransformPhase(
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||
                 getEmergencyInputSample(args.db, args.sessionId) === 0),
-        explicitFlush: isExplicitFlush || (deferredMaterialize && !prefixPreflightFailed),
+        // Cold-start boot-ride gate, flush lane (live 2026-10-21 21:18:47):
+        // the stored m[0] lands outside the window the host replays after a
+        // restart, so the boot pass arrives as an explicit materialization
+        // flush — a fold ride that re-decides drops and mints carriers on a
+        // cold, healthy wire. Same law as the idle lane: while the session is
+        // cold the flush ride is suppressed (the LKG restore serves the
+        // byte-identical pre-restart wire); the request is NOT consumed —
+        // the drain lives behind materialization success, so the first warm
+        // pass rides the flush. The force/emergency signal is separate and
+        // stays ungated.
+        explicitFlush:
+            (isExplicitFlush || (deferredMaterialize && !prefixPreflightFailed)) &&
+            !isFpeCarriersCold(args.sessionId),
         publishedHistory:
             publishedM1RefreshedThisPass ||
             (!m0M1EnabledForFold &&
