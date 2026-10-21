@@ -82,7 +82,7 @@ const ctxReduceArgsShape = {
         .array(tool.schema.string())
         .optional()
         .describe(
-            "Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from a message's text (prose — a tool call releases by its call id, never by its output text) that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
+            "Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from a message's text (prose — a tool call is released ONLY by its call id; its arguments and its output are never stamp identifiers, copy the id from the call) that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model
