@@ -212,7 +212,7 @@ function createHarness(sessionIds: string[], client: (sessionId: string) => unkn
 }
 
 const TAG = /§\d+§/;
-const REDUCE_GUIDANCE = "`ctx_reduce` with its tag";
+const REDUCE_GUIDANCE = "stamp as soon as an item has served its purpose";
 
 for (const order of ["messages-first", "system-first"] as const) {
     describe(`ctx_reduce verdict honours agent and session permissions before it freezes (${order})`, () => {

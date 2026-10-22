@@ -91,7 +91,6 @@ import {
 	maybeChannel1ReminderForToolResult,
 	setPiChannel1Baseline,
 } from "./ctx-reduce-nudge-pi";
-import { GOLDEN_FULL_DROP_OUTPUT } from "./fpe-wire-golden";
 import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
 import {
 	assistantMessage,
@@ -1778,6 +1777,8 @@ describe("registerPiContextHandler", () => {
 			const output = result.messages as unknown as ReturnType<
 				typeof buildMessages
 			>;
+			const truncatedSentinel = `[dropped §${truncatedTool.tagNumber}§]`;
+			const editSentinel = `[dropped §${editTool.tagNumber}§]`;
 			const toolArguments = (index: number): Record<string, unknown> => {
 				const content = (output[index] as { content?: unknown }).content;
 				if (!Array.isArray(content))
@@ -1791,23 +1792,16 @@ describe("registerPiContextHandler", () => {
 				return call?.arguments ?? {};
 			};
 
-			// Dropped text renders the constant placeholder; released pairs
-			// keep their rows. The carrier token is session-keyed and opaque
-			// (shape pinned by overwall-wire-shapes); this layer pins the seat
-			// structure and the `...` result slot.
-			expect(textOf(output[0])).toBe("...");
-			expect(output).toHaveLength(8);
-			expect(textOf(output[2])).toBe("...");
-			expect(textOf(output[4])).toBe("...");
-			expect(textOf(output[6])).toBe("...");
-			expect(JSON.stringify(output)).toContain(GOLDEN_FULL_DROP_OUTPUT);
-			expect(Object.keys(toolArguments(1))).toEqual(["filePath"]);
-			expect(Object.keys(toolArguments(3))).toEqual(["filePath"]);
-			// `edit_marker` keeps the truncated edit args verbatim.
-			expect(toolArguments(5).filePath).toBe("/tmp/edit.ts");
-			expect(String(toolArguments(5).oldString)).toEndWith("...[truncated]");
-			expect(String(toolArguments(5).newString)).toEndWith("...[truncated]");
-			expect(textOf(output[7])).toBe("keep this active");
+			expect(textOf(output[0])).toBe(`[dropped §${droppedText.tagNumber}§]`);
+			expect(output).toHaveLength(6);
+			expect(toolArguments(1)).toEqual({ dropped: truncatedSentinel });
+			expect(textOf(output[2])).toBe(truncatedSentinel);
+			expect(toolArguments(3).filePath).toBe("/tmp/edit.ts");
+			expect(String(toolArguments(3).oldString)).toEndWith("...[truncated]");
+			expect(textOf(output[4])).toBe(editSentinel);
+			expect(textOf(output[5])).toBe(
+				`keep this active`,
+			);
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
@@ -2215,7 +2209,7 @@ describe("registerPiContextHandler", () => {
 				overThresholdCtx as never,
 			);
 
-			expect(textOf(result.messages[1] as never)).toBe("...");
+			expect(textOf(result.messages[1] as never)).toBe("[dropped \u00a72\u00a7]");
 			expect(getPendingOps(db, "ses-context")).toEqual([]);
 			expect(
 				getPiChannel1Baseline("ses-context")?.agentDropsAppliedThisPass,
@@ -2868,7 +2862,7 @@ describe("registerPiContextHandler", () => {
 				}),
 			} as never);
 
-			expect(textOf(result.messages[1] as never)).toBe("...");
+			expect(textOf(result.messages[1] as never)).toBe("[dropped \u00a72\u00a7]");
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
@@ -3175,7 +3169,7 @@ describe("registerPiContextHandler", () => {
 			reduceStatus: "dropped",
 			// The released pair replays: the result slot carries the constant
 			// released placeholder instead of the old emptied row.
-			replayedToolResult: "...",
+			replayedToolResult: "",
 		});
 	});
 
@@ -4852,25 +4846,11 @@ describe("registerPiContextHandler", () => {
 					lastInputTokens: 4_000,
 				});
 
-				// Legacy stored markers replay through the shape-table renderers:
-				// the released pair keeps its rows, the copy-source seat holds an
-				// opaque session-keyed FPE token (pinned by overwall-wire-shapes
-				// and compared across passes), the result slot the constant `...`
-				// (golden fragment).
-				const wire = (bytes: string) =>
-					JSON.parse(bytes) as Array<Record<string, any>>;
-				const argsOf = (bytes: string, callId: string) => {
-					for (const m of wire(bytes))
-						for (const p of (m.content ?? []) as Array<Record<string, any>>)
-							if (p.type === "toolCall" && p.id === callId)
-								return p.arguments as Record<string, string>;
-					return undefined;
-				};
+				// Defer passes replay the legacy marker byte-identically.
 				const deferA = await pass();
 				const deferB = await pass();
-				expect(deferA).toContain(GOLDEN_FULL_DROP_OUTPUT);
-				expect(argsOf(deferA, "call-small")).toBeDefined();
-				expect(argsOf(deferA, "call-large")).toBeDefined();
+				expect(deferA).toContain(`{"dropped":"[dropped §${small}§]"}`);
+				expect(deferA).toContain(`{"dropped":"[dropped §${large}§]"}`);
 				expect(deferB).toBe(deferA);
 				expect(modeOf(small)).toBe("truncated");
 
@@ -4894,19 +4874,15 @@ describe("registerPiContextHandler", () => {
 				expect(modeOf(small)).toBe("truncated");
 				expect(modeOf(large)).toBe("truncated");
 
-				// The executed HARD fold converts them to real-or-absent: the small
-				// pair serves its real arguments, the large pair stays released —
-				// the same session-keyed token it carried on the defer passes.
+				// The executed HARD fold converts them to real-or-absent.
 				recordPiLiveModel(sessionId, HARD_MODEL);
 				const hard = await pass();
 				expect(modeOf(small)).toBe("skeleton_real");
 				expect(modeOf(large)).toBe("full");
 				expect(hard).not.toContain('"dropped":');
 				expect(hard).toContain('"arguments":{"command":"ls -la"}');
-				expect(hard).toContain(GOLDEN_FULL_DROP_OUTPUT);
-				expect(argsOf(hard, "call-large")).toEqual(
-					argsOf(deferA, "call-large"),
-				);
+				expect(hard).toContain(`[dropped §${small}§]`);
+				expect(hard).not.toContain("call-large");
 
 				// The following defer pass replays the converted bytes identically.
 				updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
@@ -7395,7 +7371,7 @@ describe("Pi proactive strip of invalidated thinking", () => {
 			updateTagStatus(db, sessionId, dropped.tagNumber, "dropped");
 			signalPiPendingMaterialization(sessionId);
 			const busting = await pass(false);
-			expect(textOf(busting[0] as never)).toBe("...");
+			expect(textOf(busting[0] as never)).toBe("[dropped \u00a71\u00a7]");
 			expect(busting.map(thinkingIn)).toEqual([0, 0, 0, 0, 0]);
 			expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
 				new Set([
