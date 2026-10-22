@@ -299,18 +299,18 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 outcome.kind === "error",
         );
         if (errors.length > 0) {
-            // S-4 ruling: a plain not-found among resolvable siblings is a
-            // graceful noop (siblings stamp, the slot reports). Loud whole-call
-            // failure stays for: dead RANGE endpoints (the span is a guess),
-            // AMBIGUOUS entries (the engine refuses to guess), everything
-            // failed (nothing stamped is the truth), and mint failure.
+            // S-4 ruling + 2026-10-22 Rev 6.1 amendment: a plain not-found OR
+            // a plain ambiguous entry among resolvable siblings is a graceful
+            // noop (siblings stamp, the slot reports). Loud whole-call failure
+            // stays for: anything inside a RANGE entry — dead endpoints and
+            // ambiguous endpoints alike (the span is a guess) — everything
+            // failed (nothing stamped is the truth), and mint failure. The
+            // loud path reports EVERY failing entry, grouped by class+note.
             const loud =
                 errors.length === result.outcomes.length ||
-                errors.some(
-                    (outcome) => outcome.range !== undefined || outcome.reason === "ambiguous",
-                );
+                errors.some((outcome) => outcome.range !== undefined);
             if (loud) {
-                return renderPointingError(errors[0]!, mint);
+                return renderPointingError(errors);
             }
         }
 

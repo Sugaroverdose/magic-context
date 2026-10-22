@@ -5,10 +5,12 @@ import {
 } from "./reduce-resolver";
 
 /**
- * The ctx_reduce response grammar (Rev 6 — structured JSON report, user ruling
- * 2026-10-20: arrays for ordinals, structured error objects, prose confined to
- * `note`; replaces the Rev 5.2/5.3 + D18 prose-line grammar). Harness-neutral:
- * every pointing surface answers with identical bytes.
+ * The ctx_reduce response grammar (Rev 6.1 — structured JSON report, Rev 6
+ * user ruling 2026-10-20: arrays for ordinals, structured error objects, prose
+ * confined to `note`; Rev 6.1 user ruling 2026-10-22: errors grouped by
+ * class+identical note with an `entries` array, candidate ordinals no longer
+ * published — bare numbers are ctx_expand bait, the opposite of reducing).
+ * Harness-neutral: every pointing surface answers with identical bytes.
  *
  * Wire form (one-line JSON, keys in this order, all omitted when empty):
  *   {"ctx_handles":[N|"a-b"|null,...],   // positional mirror: one slot PER
@@ -18,7 +20,11 @@ import {
  *    "noop":{"queued":[N],"released":[N],"compacted":[N],"inert":[N]},
  *    "held":[N|"a-b",...],
  *    "errors":[{"class":"not-found"|"ambiguous"|"range-endpoint"|"mint-unavailable",
- *               "entry":E,"candidates":[N,...],"note":T}],
+ *               "entries":[E,...],"note":T}],
+ *    //  Rev 6.1: errors are grouped by (class + byte-identical note), in
+ *    //  first-appearance order; the teaching note rides exactly once per
+ *    //  group. A duplicate echo appears once inside `entries` — the mirror
+ *    //  keeps the per-entry positions, so nothing is lost.
  *    "note":T}
  * Every bare number is a message ordinal (the number ctx_expand(message=N)
  * eats). Teaching sentences ride `note` values in compact form: the S-1 form
@@ -50,8 +56,7 @@ export const MINT_UNAVAILABLE = JSON.stringify({
 
 interface ReportError {
     class: "not-found" | "ambiguous" | "range-endpoint" | "mint-unavailable";
-    entry: string;
-    candidates?: number[];
+    entries: string[];
     note: string;
 }
 
@@ -87,21 +92,16 @@ function rangeEndpointHint(range: { entry: string; which: "start" | "end" | "bot
 
 function reportErrorFor(
     outcome: Extract<ReduceInputOutcome, { kind: "error" }>,
-    mint: OrdinalMint,
     closer: string,
 ): ReportError {
     if (outcome.reason === "ambiguous") {
-        const candidates = (outcome.candidates ?? [])
-            .map((candidate) => ordinalForRegistryKey(mint, candidate.messageId))
-            .filter((ordinal): ordinal is number => typeof ordinal === "number");
         return {
             class: "ambiguous",
-            entry: echoInput(outcome.input),
-            ...(candidates.length > 0 ? { candidates } : {}),
+            entries: [echoInput(outcome.input)],
             note: [
-                `Found twice: the text matches more than one item in your context${
-                    candidates.length > 0 ? ` (candidates: ${candidates.join(", ")})` : ""
-                }.`,
+                // Rev 6.1: candidate ordinals are not published — a bare
+                // number is ctx_expand bait, the opposite of reducing.
+                "Found twice: the text matches more than one item in your context.",
                 outcome.range ? rangeEndpointHint(outcome.range) : undefined,
                 `Copy a longer run that contains the one you mean. ${closer}`,
             ]
@@ -111,7 +111,7 @@ function reportErrorFor(
     }
     return {
         class: outcome.range ? "range-endpoint" : "not-found",
-        entry: echoInput(outcome.input),
+        entries: [echoInput(outcome.input)],
         note: [
             // S-2 zero-token report clause: name the shape, teach the lane.
             outcome.zeroToken
@@ -124,12 +124,42 @@ function reportErrorFor(
     };
 }
 
+/**
+ * Rev 6.1: collapse per-entry errors into one object per (class + byte-
+ * identical note), first-appearance order. Duplicate echoes merge into a single
+ * `entries` group entry; the positional mirror keeps per-entry positions.
+ * Each input error carries exactly one entry (reportErrorFor builds it).
+ */
+function groupErrors(errors: readonly ReportError[]): ReportError[] {
+    const groups: ReportError[] = [];
+    const index = new Map<string, ReportError>();
+    for (const error of errors) {
+        for (const entry of error.entries) {
+            const key = `${error.class}\u0000${error.note}`;
+            const existing = index.get(key);
+            if (existing) {
+                if (!existing.entries.includes(entry)) existing.entries.push(entry);
+            } else {
+                const group: ReportError = {
+                    class: error.class,
+                    entries: [entry],
+                    note: error.note,
+                };
+                index.set(key, group);
+                groups.push(group);
+            }
+        }
+    }
+    return groups;
+}
+
 export function renderPointingError(
-    outcome: Extract<ReduceInputOutcome, { kind: "error" }>,
-    mint: OrdinalMint,
+    outcomes: readonly Extract<ReduceInputOutcome, { kind: "error" }>[],
 ): string {
     return serialize({
-        errors: [reportErrorFor(outcome, mint, NOTHING_RELEASED_CLOSER)],
+        errors: groupErrors(
+            outcomes.map((outcome) => reportErrorFor(outcome, NOTHING_RELEASED_CLOSER)),
+        ),
     });
 }
 
@@ -196,7 +226,7 @@ export function renderPointingSuccess(
                 break;
             }
             case "error":
-                errors.push(reportErrorFor(outcome, mint, REST_STAMPED_CLOSER));
+                errors.push(reportErrorFor(outcome, REST_STAMPED_CLOSER));
                 break;
         }
     }
@@ -215,7 +245,7 @@ export function renderPointingSuccess(
     if (stamped.length > 0) report.stamped = stamped;
     if (Object.keys(noop).length > 0) report.noop = noop;
     if (held.length > 0) report.held = held;
-    if (errors.length > 0) report.errors = errors;
+    if (errors.length > 0) report.errors = groupErrors(errors);
     if (fresh === 0) {
         report.note =
             "All requested tags were already queued or processed. No new action is needed.";

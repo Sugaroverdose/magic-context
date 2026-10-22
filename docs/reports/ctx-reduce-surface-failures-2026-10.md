@@ -118,8 +118,10 @@ emptiness. Zero new structures.**
    retries. The index never touches bytes; it only ranks the work.
 2. **Multiple hits → `LIKE … ESCAPE` over the shortlisted rows.**
    Byte truth exists exactly where the skeleton can't discriminate;
-   survivors decide, ghosts die (u90), "found twice" names messages
-   that visibly contain the text. Predicate = **substring** (`%entry%`),
+   survivors decide, ghosts die (u90), "found twice" declares the
+   collision without publishing positions (Rev 6.1, 2026-10-22: candidate
+   ordinals were dropped — a bare number is ctx_expand bait, the opposite
+   of reducing). Predicate = **substring** (`%entry%`),
    not equality: boundary punctuation is free (models deliberately
    trim head/tail punctuation — `test failed` matches `test failed.`
    for free), interior punctuation is faithful (that's where the
@@ -299,8 +301,11 @@ which has exactly two reasons:
   construction; the safe verbose-noop class. Re-issue safety: a later
   re-issue of a sibling that did stamp lands as noop `queued` — dedupe is
   per-tag, no double-queue.
-- `ambiguous` (found-twice) — stamps nothing by construction; the report
-  already lists the colliding candidates. Same re-issue safety.
+- `ambiguous` (found-twice) — stamps nothing by construction. Re-issue
+  safety. (Rev 6.1, 2026-10-22: plain ambiguous became a graceful noop —
+  sibling stamps, the slot reports — and the report no longer lists the
+  colliding candidates, since a bare ordinal is ctx_expand bait; only an
+  ambiguous *range endpoint* stays loud, where the span itself is a guess.)
 
 Every other class is *already* a verbose noop. The mint-failure global error
 ("positions could not be resolved") must stay atomic — it means the

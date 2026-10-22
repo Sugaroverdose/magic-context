@@ -364,7 +364,7 @@ describe("ctx_reduce handles lane (ids)", () => {
             (response, db) => {
                 const report = JSON.parse(response);
                 expect(report.errors[0].class).toBe("not-found");
-                expect(report.errors[0].entry).toBe("call-e");
+                expect(report.errors[0].entries).toEqual(["call-e"]);
                 expect(report.ctx_handles).toBeUndefined();
                 expect(report.errors[0].note).toContain("current context window");
                 expect(report.errors[0].note).toContain(
@@ -376,12 +376,13 @@ describe("ctx_reduce handles lane (ids)", () => {
             },
         ],
         [
-            "rejects the whole batch when the bridge cannot pair ANY id (all-failed stays loud, S-4)",
+            "rejects the whole batch when the bridge cannot pair ANY id, reporting EVERY dead id at once (all-failed stays loud, S-4 + Rev 6.1)",
             { ctx_handles: ["call-b", "call-a"] },
             { resolver: { resolve: () => new Map() } },
             (response, db) => {
                 const report = JSON.parse(response);
-                expect(report.errors[0].entry).toBe("call-b");
+                expect(report.errors[0].entries).toEqual(["call-b", "call-a"]);
+                expect(report.errors.length).toBe(1);
                 expect(report.ctx_handles).toBeUndefined();
                 expect(report.stamped).toBeUndefined();
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
@@ -396,7 +397,7 @@ describe("ctx_reduce handles lane (ids)", () => {
                 expect(report.stamped).toEqual([5]);
                 expect(report.errors[0].class).toBe("not-found");
                 expect(report.ctx_handles).toEqual([5, null]);
-                expect(report.errors[0].entry).toBe("nope-1");
+                expect(report.errors[0].entries).toEqual(["nope-1"]);
                 expect(report.errors[0].note).toContain("the rest of the batch was stamped");
                 expect(report.errors[0].note).not.toContain("Nothing was stamped");
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([5]);
@@ -537,9 +538,11 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 (response, db) => {
                     const report = JSON.parse(response);
                     expect(report.errors[0].class).toBe("ambiguous");
-                    // Candidates are ordinals in bm25 relevance order.
+                    // Candidate ordinals are not published (2026-10-22 ruling:
+                    // bare numbers are ctx_expand bait — the opposite of reducing).
+                    expect(report.errors[0].candidates).toBeUndefined();
+                    expect(report.errors[0].entries).toEqual(["revenue climbing twelve percent"]);
                     expect(report.ctx_handles).toBeUndefined();
-                    expect(report.errors[0].candidates).toEqual([101, 100]);
                     expect(report.errors[0].note).toContain("Copy a longer run");
                     expect(report.errors[0].note).toContain(
                         "Nothing was stamped; resend the corrected batch.",
@@ -548,16 +551,18 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 },
             ],
             [
-                "ambiguity rejects the whole call, other handles in the same batch unapplied",
+                "ambiguity nulls its own slot; sibling handles in the same batch stamp (2026-10-22 ruling: plain ambiguous is a graceful noop)",
                 { ctx_handles: ["revenue climbing twelve percent", "unrelated deployment"] },
                 {},
                 (response, db) => {
                     const report = JSON.parse(response);
                     expect(report.errors[0].class).toBe("ambiguous");
-                    expect(report.errors[0].note).toContain(
-                        "Nothing was stamped; resend the corrected batch.",
-                    );
-                    expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+                    expect(report.errors[0].entries).toEqual(["revenue climbing twelve percent"]);
+                    expect(report.ctx_handles).toEqual([null, 102]);
+                    expect(report.stamped).toEqual([102]);
+                    expect(report.errors[0].note).toContain("the rest of the batch was stamped");
+                    expect(report.errors[0].note).not.toContain("Nothing was stamped");
+                    expect(pendingTagNumbers(db, "ses-1")).toEqual([42]);
                 },
             ],
             [
@@ -590,7 +595,7 @@ describe("ctx_reduce handles lane (quotes)", () => {
                 (response, db) => {
                     const report = JSON.parse(response);
                     expect(report.errors[0].class).toBe("not-found");
-                    expect(report.errors[0].entry).toBe("purple platypus parliament");
+                    expect(report.errors[0].entries).toEqual(["purple platypus parliament"]);
                     expect(report.errors[0].note).toContain("current context window");
                     expect(report.errors[0].note).toContain(
                         "Nothing was stamped; resend the corrected batch.",
@@ -757,7 +762,7 @@ describe("ctx_reduce range lane", () => {
                 const report = JSON.parse(response);
                 expect(report.errors[0].class).toBe("range-endpoint");
                 expect(report.ctx_handles).toBeUndefined();
-                expect(report.errors[0].entry).toBe("purple platypus");
+                expect(report.errors[0].entries).toEqual(["purple platypus"]);
                 expect(report.errors[0].note).toContain(
                     'It is the end of the range "alpha task one..purple platypus".',
                 );
@@ -905,7 +910,7 @@ describe("ctx_reduce partial accept (S-4 ruling)", () => {
         const report = JSON.parse(response);
         expect(report.stamped).toEqual([1]);
         expect(report.ctx_handles).toEqual([1, null]);
-        expect(report.errors[0].entry).toBe("purple platypus parliament");
+        expect(report.errors[0].entries).toEqual(["purple platypus parliament"]);
         expect(report.errors[0].note).toContain("current context window");
         expect(report.errors[0].note).not.toContain("Nothing was stamped");
         expect(pendingTagNumbers(db, "ses-1")).toEqual([50]);
@@ -922,7 +927,7 @@ describe("ctx_reduce partial accept (S-4 ruling)", () => {
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
     });
 
-    it("an ambiguous entry keeps failing the whole call loudly", async () => {
+    it("an ambiguous plain entry is a graceful noop; siblings stamp (2026-10-22 ruling)", async () => {
         const { db, tools } = buildWorld({
             messages: [
                 { id: "m1", ordinal: 1, role: "user", content: "the cache ttl is fine", tag: 40 },
@@ -940,9 +945,87 @@ describe("ctx_reduce partial accept (S-4 ruling)", () => {
             { ctx_handles: ["call-a", "cache ttl"] },
             ctx,
         )) as string;
-        expect(JSON.parse(response).errors[0].note).toContain("Nothing was stamped");
-        expect(JSON.parse(response).ctx_handles).toBeUndefined();
+        const report = JSON.parse(response);
+        expect(report.stamped).toEqual([1]);
+        expect(report.ctx_handles).toEqual([1, null]);
+        expect(report.errors[0].class).toBe("ambiguous");
+        expect(report.errors[0].entries).toEqual(["cache ttl"]);
+        expect(report.errors[0].candidates).toBeUndefined();
+        expect(report.errors[0].note).toContain("Found twice");
+        expect(report.errors[0].note).toContain("the rest of the batch was stamped");
+        expect(report.errors[0].note).not.toContain("Nothing was stamped");
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([50]);
+    });
+
+    it("ambiguous as a range endpoint still fails the whole call loudly", async () => {
+        const { db, tools } = buildWorld({
+            messages: [
+                { id: "m1", ordinal: 1, role: "user", content: "the cache ttl is fine", tag: 40 },
+                {
+                    id: "m2",
+                    ordinal: 2,
+                    role: "assistant",
+                    content: "the cache ttl caused the login failure",
+                    tag: 41,
+                },
+                {
+                    id: "m3",
+                    ordinal: 3,
+                    role: "user",
+                    content: "unrelated deployment checklist for staging",
+                    tag: 42,
+                },
+            ],
+            tools: [{ callId: "call-a", tag: 50, owner: "m1" }],
+        });
+        const response = (await tools.ctx_reduce!.execute(
+            { ctx_handles: ["call-a", "cache ttl..unrelated deployment checklist"] },
+            ctx,
+        )) as string;
+        const report = JSON.parse(response);
+        expect(report.errors[0].class).toBe("ambiguous");
+        expect(report.errors[0].note).toContain("It is the start of the range");
+        expect(report.errors[0].note).toContain("Nothing was stamped");
+        expect(report.ctx_handles).toBeUndefined();
         expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+    });
+
+    it("the loud path reports every failing entry, grouped by class+note (no note duplication)", async () => {
+        const { db, tools } = world();
+        const response = (await tools.ctx_reduce!.execute(
+            {
+                ctx_handles: [
+                    "call-a",
+                    "ghost one",
+                    "ghost one",
+                    "ghost two",
+                    "call-a..ghost missing",
+                ],
+            },
+            ctx,
+        )) as string;
+        const report = JSON.parse(response);
+        expect(report.ctx_handles).toBeUndefined();
+        expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+        // Two groups, first-appearance order; duplicate echo deduped inside its group.
+        expect(report.errors.map((e: { class: string }) => e.class)).toEqual([
+            "not-found",
+            "range-endpoint",
+        ]);
+        expect(report.errors[0].entries).toEqual(["ghost one", "ghost two"]);
+        // The endpoint echo names the failing ENDPOINT; the full range entry
+        // rides once inside the note's range hint.
+        expect(report.errors[1].entries).toEqual(["ghost missing"]);
+        expect(report.errors[1].note).toContain("It is the end of the range");
+        expect(report.errors[1].note).toContain('"call-a..ghost missing"');
+        // Grouping proof: 4 failing entries (one a duplicate echo) answer in
+        // 2 objects — the naive per-entry shape would carry 3 copies of the
+        // identical not-found note. The shared base clause rides once per
+        // GROUP (the groups differ: plain vs range-hinted note).
+        expect(report.errors.length).toBe(2);
+        expect(report.errors[0].note).not.toBe(report.errors[1].note);
+        expect((response.match(/No tool call id/g) ?? []).length).toBe(2);
+        expect((response.match(/Endpoints inside tool output/g) ?? []).length).toBe(1);
     });
 
     it("a lone entry that is the only pointer still fails as an error", async () => {
@@ -1176,7 +1259,7 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
             },
         ],
         [
-            "survivors >= 2 — found-twice lists survivors only",
+            "survivors >= 2 — found-twice teaches without publishing candidate ordinals (ctx_expand bait, 2026-10-22)",
             { ctx_handles: ["test failed"] },
             {
                 messages: [
@@ -1201,10 +1284,11 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
             (response) => {
                 const report = JSON.parse(response);
                 expect(report.errors[0].class).toBe("ambiguous");
-                expect(new Set<number>(report.errors[0].candidates)).toEqual(
-                    new Set([313, 314]),
-                );
+                expect(report.errors[0].candidates).toBeUndefined();
+                expect(report.errors[0].entries).toEqual(["test failed"]);
                 expect(report.errors[0].note).toContain("Found twice");
+                expect(report.errors[0].note).not.toContain("313");
+                expect(report.errors[0].note).not.toContain("314");
             },
         ],
         [
@@ -1392,9 +1476,8 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
                 // Both rows are byte-survivors after NBSP collapse — the
                 // honest answer is found-twice, and NBSP is invisible.
                 expect(report.errors[0].class).toBe("ambiguous");
-                expect(new Set<number>(report.errors[0].candidates)).toEqual(
-                    new Set([329, 330]),
-                );
+                expect(report.errors[0].candidates).toBeUndefined();
+                expect(report.errors[0].entries).toEqual(["budget loc"]);
             },
         ],
         [
