@@ -112,10 +112,10 @@ describe("storage-ops", () => {
             queuePendingOp(db, "ses-live", 5, "drop", now - 5 * DAY);
             db.prepare(
                 "INSERT INTO session_meta (session_id, last_response_time) VALUES (?, ?)",
-            ).run("ses-dead", (now - 40 * DAY) / 1000);
+            ).run("ses-dead", now - 40 * DAY);
             db.prepare(
                 "INSERT INTO session_meta (session_id, last_response_time) VALUES (?, ?)",
-            ).run("ses-live", (now - 1 * DAY) / 1000);
+            ).run("ses-live", now - 1 * DAY);
 
             expect(purgeDormantSessionPendingOps(db, now)).toBe(1);
             expect(getPendingOps(db, "ses-dead")).toEqual([]);
