@@ -2,16 +2,16 @@ import type { PromptSurfacePreset } from "../shared/prompt-surface";
 
 export const FULL_PARAMETER_DESCRIPTIONS = {
     ctx_reduce: {
-        drop: 'Tag IDs to drop: "3-5", "1,2,9", "1-5,8,12-15".',
+        ctx_handles:
+            "Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from a message's text (prose — a tool call is released ONLY by its call id; its arguments and its output are never stamp identifiers, copy the id from the call) that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
     },
     ctx_expand: {
-        tag: "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
-        start: "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
+        start: "First message ordinal of the range (a <session-history> heading's start, a ctx_search hit, or a ctx_reduce echo), not a tag number.",
         end: "Last message ordinal of the range, inclusive, not a tag number.",
         verbose:
             "With start/end: one entry per message with ordinal and per-part preview instead of the transcript.",
         message:
-            "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
+            "Message ordinal from a <session-history> heading, a ctx_search hit, or a ctx_reduce echo. Returns that one message in full. Use alone.",
     },
     ctx_note: {
         action: "write | read | update | dismiss. Defaults to write when content is given, else read.",
@@ -44,15 +44,15 @@ export const FULL_PARAMETER_DESCRIPTIONS = {
 
 export const LIGHT_PARAMETER_DESCRIPTIONS = {
     ctx_reduce: {
-        drop: 'Tag IDs: "3-5", "1,2,9", "1-5,8,12-15".',
+        ctx_handles:
+            "Release targets copied from context: a tool call id, a verbatim text run, or a `<start>..<end>` stretch of such handles.",
     },
     ctx_expand: {
-        tag: "Tag number from a §N§ tag, not a message ordinal. Returns that one item in full. Use alone.",
-        start: "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
+        start: "First message ordinal of the range (a <session-history> heading's start, a ctx_search hit, or a ctx_reduce echo), not a tag number.",
         end: "Last message ordinal of the range, inclusive, not a tag number.",
         verbose: "With start/end: one entry per message with previews instead of the transcript.",
         message:
-            "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
+            "Message ordinal from a <session-history> heading, a ctx_search hit, or a ctx_reduce echo. Returns that one message in full. Use alone.",
     },
     ctx_note: {
         action: "write | read | update | dismiss (default: write with content, else read).",

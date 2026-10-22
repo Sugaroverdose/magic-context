@@ -1,4 +1,5 @@
 import { createTestTempDir } from "../../src/shared/test-temp-dir";
+import { getTagById } from "../../src/features/magic-context/storage";
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { forbiddenOpenPaths, isolate } from "./bootstrap";
 import type * as Engine from "./engine";
@@ -27,14 +28,18 @@ describe("self-tag trial real tagging", () => {
     test("parallel completed tool outputs consume numbers before later text", () => {
         const result = engine.probe([{ type: "tool", callID: "a", state: { output: "A" } }, { type: "tool", callID: "b", state: { output: "B" } }, { type: "text", text: "last" }]);
         expect(result.assignments.map(([, n]) => n)).toEqual([1, 2, 3, 4]);
-        expect((result.messages[1].parts[2] as { text: string }).text).toBe("§4§ last");
+        // ctx_reduce v1: the wire serves the raw part text; the digits above
+        // are the numbers the parts consumed.
+        expect((result.messages[1].parts[2] as { text: string }).text).toBe("last");
     });
     test("persistence strip and next-pass retag yield exact bytes only for canonical replies", async () => {
         const t = new engine.Trial("byte-test", "B", "control");
         try {
             t.user("prompt"); await t.pass();
-            const [good] = await t.accept({ texts: ["§2§ Seven fruit."], calls: [] });
-            expect(good.correct).toBe(true); expect(good.byteIdentity).toBe(true);
+            // ctx_reduce v1: the canonical reply is prefix-free and the wire
+            // serves its bytes verbatim; the row carries the tag.
+            const [good] = await t.accept({ texts: ["Seven fruit."], calls: [] });
+            expect(good.assignedTag).toBe(2); expect(good.byteIdentity).toBe(true);
             t.user("next"); await t.pass();
             const [wrong] = await t.accept({ texts: ["§9002§ Seven fruit. "], calls: [] });
             expect(wrong.assignedTag).toBe(4); expect(wrong.delta).toBe(8998); expect(wrong.byteIdentity).toBe(false);
@@ -48,7 +53,10 @@ describe("self-tag trial real tagging", () => {
             t.user("fixture"); await t.accept({ texts: [], calls: [{ id: "read", name: "read", input: {} }] });
             for (let n = 0; n < 10; n++) { t.user(`turn ${n}`); await t.accept({ texts: ["seven"], calls: [] }); }
             await t.accept({ texts: [], calls: [{ id: "reduce", name: "ctx_reduce", input: { drop: "2" } }] });
-            expect(JSON.stringify(await t.pass())).toContain('"output":"§2§ ..."');
+            // ctx_reduce v1: the skeleton serves the plain placeholder; the
+            // drop is carried by the registry row, not a tag prefix.
+            expect(JSON.stringify(await t.pass())).toContain('"output":"..."');
+            expect(getTagById(t.db, "drop-test", 2)?.status).toBe("dropped");
         } finally { t.close(); }
     });
 });
