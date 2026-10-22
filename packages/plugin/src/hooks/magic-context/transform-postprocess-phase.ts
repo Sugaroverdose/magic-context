@@ -105,7 +105,6 @@ import {
 } from "./dropped-token-estimate";
 import { EmergencyFailClosedError } from "./emergency-fail-closed";
 import { foldExecutesThisPass } from "./fold-execution-gate";
-import { engageFpeCarriers, isFpeCarriersCold } from "./fpe-engagement";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
     clearInjectionCache,
@@ -139,6 +138,7 @@ import {
     selectReasoningRemovals,
     settleDroppedReasoningParts,
 } from "./reasoning-removal";
+import { isRestoreOnlyBootPass } from "./restore-only-boot-pass";
 import {
     isNeutralizedReasoningPart,
     modelAcceptsEmptyContent,
@@ -1417,6 +1417,11 @@ interface RunPostTransformPhaseArgs {
     activeAgent?: string;
     batch: { finalize: () => void } | null;
     contextUsage: { percentage: number; inputTokens: number };
+    /** True when provider usage was unknown at pass entry (inputTokens <= 0
+     *  before the persisted session_meta seed). This is the boot-pass signal
+     *  itself — the in-memory usage map is the process epoch (see
+     *  restore-only-boot-pass.ts). */
+    usageUnknownAtPassStart?: boolean;
     /** Usable tokens available for soft scheduling thresholds and usage-ratio calculation. */
     usableWindow: number;
     schedulerDecision: "execute" | "defer";
@@ -1786,6 +1791,14 @@ export async function runPostTransformPhase(
     const emergencyDropEligible =
         !compactionOff && args.contextUsage.percentage >= args.forceMaterializationPercentage;
     const executePressureEligible = args.schedulerDecision === "execute" || emergencyDropEligible;
+    // Restore-only boot pass (restore-only-boot-pass.ts): a pass that entered
+    // this process without provider usage serves bytes and mutates nothing —
+    // unless the seeded reading itself prices a byte crisis (the force/
+    // emergency band). Scheduler-execute is not admission at boot.
+    const restoreOnlyBootPass = isRestoreOnlyBootPass({
+        usageUnknownAtPassStart: args.usageUnknownAtPassStart === true,
+        emergencyDropEligible,
+    });
     if (!executePressureEligible) {
         routinePressureAppliedBySession.delete(args.sessionId);
     } else if (args.fullFeatureMode && alreadyRanThisTurn) {
@@ -2014,46 +2027,41 @@ export async function runPostTransformPhase(
     // A retry after an aborted idle fold is still provider-cold even though its
     // persisted pair needs no second fold. Any newly queued work belongs on that
     // retry, not on the warm tool step after the provider finally answers.
-    // Cold-start boot-ride gate (fpe-engagement.ts): a restart gap expires the
-    // provider cache, so the boot pass rides ttl_idle — the idle fold bust
-    // (reason=ttl_idle) and the idle rebuild — and drains the pre-restart drop
-    // backlog, minting the freshest, most-attended carriers onto the thinnest
-    // wire at t=0 (the measured start-burst flare class). While the session has
-    // not run a pressure sweep in this process, every cacheExpired-driven ride
-    // is suppressed: the boot pass serves the byte-identical pre-restart wire
-    // (LKG restore + deterministic replay of applied drop rows) and the backlog
-    // stays queued. Real priced work is never gated: marker-change fold busts,
-    // scheduler-execute, and the force/emergency band ride as today.
-    const coldBootRide =
-        !freezeM0M1 &&
-        args.m0M1?.hardSignals?.cacheExpired === true &&
-        isFpeCarriersCold(args.sessionId);
+    // Restore-only boot pass on the idle lane: the restart gap expires the
+    // provider cache, so the boot pass would ride ttl_idle — the idle fold
+    // bust (reason=ttl_idle) and the idle rebuild — draining the pre-restart
+    // drop backlog onto the thinnest wire at t=0. Boot-expiry is an artifact,
+    // not reclaim permission: while the pass is restore-only the
+    // cacheExpired-driven rides are suppressed, the pass serves the
+    // byte-identical pre-restart wire (LKG restore + deterministic replay of
+    // applied drop rows), and the backlog stays queued. Real priced work is
+    // never gated: marker-change fold busts, scheduler-execute, and the
+    // force/emergency band ride as today.
     const idleExpiryRebuild =
-        !freezeM0M1 &&
-        args.m0M1?.hardSignals?.cacheExpired === true &&
-        !isFpeCarriersCold(args.sessionId);
+        !freezeM0M1 && args.m0M1?.hardSignals?.cacheExpired === true && !restoreOnlyBootPass;
     const rideSignals = {
         hardFold:
-            (foldBustsServedPrefixThisPass && foldDueDecision.reason !== "ttl_idle") ||
+            (foldBustsServedPrefixThisPass &&
+                (foldDueDecision.reason !== "ttl_idle" || !restoreOnlyBootPass)) ||
             firstRenderBust ||
             idleExpiryRebuild,
         force:
             emergencyDropEligible &&
             (args.contextUsage.percentage >= 95 ||
                 getEmergencyInputSample(args.db, args.sessionId) === 0),
-        // Cold-start boot-ride gate, flush lane (live 2026-10-21 21:18:47):
+        // Restore-only boot pass on the flush lane (live 2026-10-21 21:18:47):
         // the stored m[0] lands outside the window the host replays after a
         // restart, so the boot pass arrives as an explicit materialization
-        // flush — a fold ride that re-decides drops and mints carriers on a
-        // cold, healthy wire. Same law as the idle lane: while the session is
-        // cold the flush ride is suppressed (the LKG restore serves the
-        // byte-identical pre-restart wire); the request is NOT consumed —
-        // the drain lives behind materialization success, so the first warm
-        // pass rides the flush. The force/emergency signal is separate and
-        // stays ungated.
+        // flush — a fold ride that re-decides drops on a healthy wire at half
+        // a window. A positional re-anchor is not fold permission: while the
+        // pass is restore-only the flush ride is suppressed (the LKG restore
+        // serves the byte-identical pre-restart wire); the request is NOT
+        // consumed — the drain lives behind materialization success, so the
+        // first pass with real usage rides the flush. The force/emergency
+        // signal is separate and stays ungated.
         explicitFlush:
             (isExplicitFlush || (deferredMaterialize && !prefixPreflightFailed)) &&
-            !isFpeCarriersCold(args.sessionId),
+            !restoreOnlyBootPass,
         publishedHistory:
             publishedM1RefreshedThisPass ||
             (!m0M1EnabledForFold &&
@@ -2280,12 +2288,6 @@ export async function runPostTransformPhase(
             );
             if (pendingOpsDidMutate) {
                 droppedCount += pendingOps.length;
-                // Pressure mutations engage the warm carrier lane (the takeover
-                // rides this pass's own priced bust). Non-pressure rides (e.g. a
-                // post-engage ttl ride) mutate without re-arming; engagement is
-                // monotone per process. Cold sessions only mutate here under the
-                // force band, which is pressure by definition.
-                if (executePressureEligible) engageFpeCarriers(args.sessionId);
                 for (const pendingOp of pendingOps) {
                     const message = args.targets.get(pendingOp.tagId)?.message;
                     if (message) reasoningMutatedMessages.add(message);

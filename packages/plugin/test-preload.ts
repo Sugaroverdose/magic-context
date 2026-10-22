@@ -22,7 +22,7 @@
 import { afterAll } from "bun:test";
 import { readdirSync } from "node:fs";
 import { join } from "node:path";
-import { setFpeCarriersDeferralEnabledForTests } from "./src/hooks/magic-context/fpe-engagement";
+import { setRestoreOnlyBootPassEnabledForTests } from "./src/hooks/magic-context/restore-only-boot-pass";
 import {
     createTestTempDir,
     installTestTempDirCleanup,
@@ -31,10 +31,10 @@ import {
 
 // The FPE cold-start boot-ride gate (suppress the idle-expiry boot ride while
 // a session has not run a pressure sweep in this process; see
-// fpe-engagement.ts) is ON in production. Suites construct cacheExpired
+// restore-only-boot-pass.ts) is ON in production. Suites construct cacheExpired
 // fixtures that expect drops applied on the first pass, so the law is
 // disabled process-wide here and the law's own tests re-enable it locally.
-setFpeCarriersDeferralEnabledForTests(false);
+setRestoreOnlyBootPassEnabledForTests(false);
 
 // Retry cleanup from interrupted earlier runs before creating this process's root.
 // `bun test --parallel` launches separate worker processes, so include the PID to

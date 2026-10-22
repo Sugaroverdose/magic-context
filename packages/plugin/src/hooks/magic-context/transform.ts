@@ -2505,6 +2505,10 @@ export function createTransform(deps: TransformDeps) {
             bustReason: calibrationBustReason,
             onAdopt: (message) => sessionLog(sessionId, message),
         });
+        // The boot-pass signal must be captured BEFORE the seed below rewrites
+        // contextUsage: "usage unknown at pass entry" is the process epoch the
+        // restore-only boot law keys on (restore-only-boot-pass.ts).
+        const usageUnknownAtPassStart = contextUsage.inputTokens <= 0;
         // A cache-busting pass can lack input-token usage for the selected model
         // after a switch or overflow. Estimate from the transformed payload so
         // emergency tool-output reclaim does not skip the pass as unknown usage.
@@ -2606,6 +2610,7 @@ export function createTransform(deps: TransformDeps) {
             activeAgent,
             batch,
             contextUsage,
+            usageUnknownAtPassStart,
             usableWindow: resolvedContextLimit ?? 0,
             schedulerDecision,
             schedulerDeferReason,

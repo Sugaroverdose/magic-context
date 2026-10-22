@@ -67,10 +67,6 @@ import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import * as staleReduce from "./drop-stale-reduce-calls";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
-import {
-    resetFpeCarriersEngagementForTests,
-    setFpeCarriersDeferralEnabledForTests,
-} from "./fpe-engagement";
 import * as compartmentInjection from "./inject-compartments";
 import {
     capturePrefixTrimSourceOrder,
@@ -80,6 +76,7 @@ import {
 import * as noteNudger from "./note-nudger";
 import { createPassOutcome } from "./pass-outcome";
 import * as readSessionFormatting from "./read-session-formatting";
+import { setRestoreOnlyBootPassEnabledForTests } from "./restore-only-boot-pass";
 import { snapshotTrailingBlankSourceDecisions } from "./strip-content";
 import { stripStructuralNoise } from "./strip-structural-noise";
 import {
@@ -9360,7 +9357,7 @@ it("four pure defer passes preserve served bytes and durable drop state", async 
     );
 });
 
-describe("FPE cold-start boot-ride gate", () => {
+describe("restore-only boot pass (rust-law port)", () => {
     const bigCommand = `echo ${"x".repeat(3000)}`;
     const makeCall = (id: string, callId: string, command: string): MessageLike =>
         ({
@@ -9396,9 +9393,8 @@ describe("FPE cold-start boot-ride gate", () => {
         return { freshWire: make };
     }
 
-    it("cold boot rides deferred: backlog queued, wire byte-identical, no engagement", async () => {
-        setFpeCarriersDeferralEnabledForTests(true);
-        resetFpeCarriersEngagementForTests();
+    it("boot rides deferred: backlog queued, wire byte-identical; warm idle rides", async () => {
+        setRestoreOnlyBootPassEnabledForTests(true);
         try {
             db = new Database(":memory:");
             initializeDatabase(db);
@@ -9421,6 +9417,7 @@ describe("FPE cold-start boot-ride gate", () => {
                         // reason=ttl_idle — READ opens, the ride must be gated.
                         schedulerDecision: "execute",
                         schedulerDeferReason: null,
+                        usageUnknownAtPassStart: true,
                         contextUsage: { percentage: 40, inputTokens: 40000 },
                         targets,
                         m0M1: {
@@ -9487,6 +9484,7 @@ describe("FPE cold-start boot-ride gate", () => {
                         // reason=ttl_idle — READ opens, the ride must be gated.
                         schedulerDecision: "execute",
                         schedulerDeferReason: null,
+                        usageUnknownAtPassStart: false,
                         contextUsage: { percentage: 40, inputTokens: 40000 },
                         targets,
                         m0M1: {
@@ -9505,14 +9503,12 @@ describe("FPE cold-start boot-ride gate", () => {
                 "dropped",
             );
         } finally {
-            setFpeCarriersDeferralEnabledForTests(false);
-            resetFpeCarriersEngagementForTests();
+            setRestoreOnlyBootPassEnabledForTests(false);
         }
     });
 
-    it("cold materialization flush ride deferred: boot restores, request survives, warm flush rides", async () => {
-        setFpeCarriersDeferralEnabledForTests(true);
-        resetFpeCarriersEngagementForTests();
+    it("boot flush ride deferred: restore serves, request survives; warm flush rides", async () => {
+        setRestoreOnlyBootPassEnabledForTests(true);
         try {
             db = new Database(":memory:");
             initializeDatabase(db);
@@ -9537,6 +9533,7 @@ describe("FPE cold-start boot-ride gate", () => {
                     basePostTransformArgs(db, sessionId, messages, {
                         schedulerDecision: "defer",
                         schedulerDeferReason: null,
+                        usageUnknownAtPassStart: true,
                         contextUsage: { percentage: 49, inputTokens: 127_000 },
                         targets,
                         pendingMaterializationSessions: flushSet,
@@ -9570,6 +9567,7 @@ describe("FPE cold-start boot-ride gate", () => {
                     basePostTransformArgs(db, sessionId, messages, {
                         schedulerDecision: "execute",
                         schedulerDeferReason: null,
+                        usageUnknownAtPassStart: false,
                         contextUsage: { percentage: 96, inputTokens: 96_000 },
                         forceMaterializationPercentage: 85,
                         targets,
@@ -9596,14 +9594,12 @@ describe("FPE cold-start boot-ride gate", () => {
                 expect(wire).toContain(bigCommand);
             }
         } finally {
-            setFpeCarriersDeferralEnabledForTests(false);
-            resetFpeCarriersEngagementForTests();
+            setRestoreOnlyBootPassEnabledForTests(false);
         }
     });
 
-    it("force band rides while cold: byte crisis is never gated", async () => {
-        setFpeCarriersDeferralEnabledForTests(true);
-        resetFpeCarriersEngagementForTests();
+    it("force band admitted on a boot pass: byte crisis is never gated", async () => {
+        setRestoreOnlyBootPassEnabledForTests(true);
         try {
             db = new Database(":memory:");
             initializeDatabase(db);
@@ -9618,6 +9614,7 @@ describe("FPE cold-start boot-ride gate", () => {
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     schedulerDecision: "defer",
+                    usageUnknownAtPassStart: true,
                     contextUsage: { percentage: 96, inputTokens: 96000 },
                     pendingMaterializationSessions: new Set([sessionId]),
                     targets,
@@ -9629,8 +9626,7 @@ describe("FPE cold-start boot-ride gate", () => {
                 "dropped",
             );
         } finally {
-            setFpeCarriersDeferralEnabledForTests(false);
-            resetFpeCarriersEngagementForTests();
+            setRestoreOnlyBootPassEnabledForTests(false);
         }
     });
 });
