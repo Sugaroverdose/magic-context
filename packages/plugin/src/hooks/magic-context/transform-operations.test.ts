@@ -86,7 +86,13 @@ describe("tagMessages", () => {
         ];
         const first = structuredClone(raw);
         tagMessages("tool-loop", first, tagger, db);
-        expect((first[1].parts[1] as TextPart).text).toBe(toolLoopGolden.expected_text);
+        // ctx_reduce v1: the TS wire is prefix-free. The golden still pins the
+        // Rust-side byte shape; TS must serve the golden's content verbatim and
+        // register the same digit the golden's prefix records.
+        const goldenDigit = /^§(\d+)§ /.exec(toolLoopGolden.expected_text)?.[1];
+        expect(goldenDigit).toBeDefined();
+        expect((first[1].parts[1] as TextPart).text).toBe(toolLoopGolden.text);
+        expect(getTagById(db, "tool-loop", Number(goldenDigit))?.messageId).toContain("message-52");
         expect(first[1].parts[0]).toEqual(target.parts[0]);
         raw.push({
             info: { id: "message-56", role: "assistant" },

@@ -89,9 +89,21 @@ test("whitespace replay reads only visible rows in a 100K-tag session, including
                 },
             ];
             tagMessages(session, messages, tagger, db);
-            expect((messages[0].parts[0] as { text: string }).text).toContain("§100001§");
+            // The wire carries no prefix; the bounded visible-row reads still
+            // replay the visible inert row without rebinding it.
+            expect((messages[0].parts[0] as { text: string }).text).toBe(" ");
             expect(counter.rows()).toBeLessThan(20);
         }
+        expect(
+            db
+                .prepare(
+                    "SELECT message_id, status FROM tags WHERE session_id = ? AND tag_number = 100001",
+                )
+                .get(session),
+        ).toEqual({
+            message_id: "__mc_whitespace_assistant_inert__:100001",
+            status: "compacted",
+        });
     } finally {
         counter?.restore();
         db.close();

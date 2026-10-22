@@ -1,10 +1,25 @@
 import { createHash } from "node:crypto";
 import { type ToolDefinition, tool } from "@opencode-ai/plugin";
+import { createHostOrdinalMint } from "../../features/magic-context/message-ordinal-mint";
 import {
     getProtectionWindowForSession,
     type ProtectionWindowResult,
 } from "../../features/magic-context/protection-window";
 import { parseRangeString } from "../../features/magic-context/range-parser";
+import {
+    type HandleItemRef,
+    type OrdinalMint,
+    ordinalForRegistryKey,
+    type ReduceInputOutcome,
+    resolveBulkDefault,
+    resolveHandles,
+} from "../../features/magic-context/reduce-resolver";
+import {
+    MINT_UNAVAILABLE,
+    renderBulkSuccess,
+    renderPointingError,
+    renderPointingSuccess,
+} from "../../features/magic-context/reduce-response";
 import {
     getOrCreateSessionMeta,
     getPendingOps,
@@ -13,6 +28,10 @@ import {
     updateSessionMeta,
 } from "../../features/magic-context/storage";
 import { getInertWhitespaceAssistantTags } from "../../features/magic-context/storage-tags";
+import {
+    type CallIdTagResolver,
+    createRegistryCallIdResolver,
+} from "../../features/magic-context/tool-call-registry";
 import type { RustToolBackends } from "../../plugin/rust-tool-backends";
 import { getErrorMessage } from "../../shared/error-message";
 import { sessionLog } from "../../shared/logger";
@@ -33,6 +52,10 @@ export interface CtxReduceToolDeps {
      * requested drops apply immediately, and non-tool tags are never reclaim targets.
      */
     protectedSet?: ReadonlySet<number> | ((sessionId: string) => ReadonlySet<number>);
+    /** DI seam for the ids lane's wire-call-id -> registry pairing (tests). */
+    callIdResolver?: CallIdTagResolver;
+    /** DI seam for the canonical message-ordinal mint (tests). */
+    ordinalMint?: OrdinalMint | ((sessionId: string) => OrdinalMint | undefined);
     getProtectionWindow?: (sessionId: string) => ProtectionWindowResult;
     floor?: number;
     getSessionTokens?: (sessionId: string) => number;
@@ -51,10 +74,16 @@ function formatRawDropForAck(rawDrop: string): string {
 }
 
 const ctxReduceArgsShape = {
-    drop: tool.schema
-        .string()
+    // ctx_reduce v1 (Rev 5.3): the numeric 'drop' parameter is no longer
+    // advertised to the model. The schema below is passthrough, so old-shaped
+    // or imitated calls still reach execute() and the upstream numeric path
+    // stays intact.
+    ctx_handles: tool.schema
+        .array(tool.schema.string())
         .optional()
-        .describe('Tag IDs to drop: "3-5", "1,2,9", "1-5,8,12-15".'),
+        .describe(
+            "Exact targets of the stamp, copied from your context: a tool call id, the shortest phrase copied word-for-word from a message's text (prose — a tool call is released ONLY by its call id; its arguments and its output are never stamp identifiers, copy the id from the call) that only that one item on the desk matches, or a span of two such pointers joined by `..`.",
+        ),
 };
 // The tool definition exposes only the documented argument shape to the model
 // provider, but older callers may still send extra arguments. Parse with
@@ -84,6 +113,236 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             : `oc-${createHash("sha256").update(monotonicId).digest("hex")}`;
     };
 
+    const resolveProtectionContext = (
+        sessionId: string,
+    ): {
+        protectedSet: ReadonlySet<number>;
+        inertTagNumbers: Set<number>;
+    } => {
+        let protectedSet: ReadonlySet<number>;
+        if (deps.protectedSet) {
+            protectedSet =
+                typeof deps.protectedSet === "function"
+                    ? deps.protectedSet(sessionId)
+                    : deps.protectedSet;
+        } else if (deps.getProtectionWindow) {
+            protectedSet = deps.getProtectionWindow(sessionId).protectedTagNumbers;
+        } else {
+            protectedSet = getProtectionWindowForSession(
+                deps.db,
+                sessionId,
+                deps.floor,
+            ).protectedTagNumbers;
+        }
+        const inertTagNumbers = new Set(
+            getInertWhitespaceAssistantTags(deps.db, sessionId).map((tag) => tag.tagNumber),
+        );
+        return { protectedSet, inertTagNumbers };
+    };
+
+    const touchNudgeWatermark = (sessionId: string) => {
+        const currentInputTokens =
+            deps.getSessionTokens?.(sessionId) ??
+            getOrCreateSessionMeta(deps.db, sessionId).lastInputTokens;
+        updateSessionMeta(deps.db, sessionId, { lastNudgeTokens: currentInputTokens });
+    };
+
+    const ordinalMintFor = (sessionId: string): OrdinalMint | undefined => {
+        if (deps.ordinalMint) {
+            return typeof deps.ordinalMint === "function"
+                ? deps.ordinalMint(sessionId)
+                : deps.ordinalMint;
+        }
+        return createHostOrdinalMint(deps.db, sessionId);
+    };
+
+    /** One apply event: route the released set through the active backend. */
+    const applyReleasedTags = async (
+        invokeContext: { sessionID: string; directory: string },
+        tagNumbers: readonly number[],
+    ): Promise<{ refused?: string; deduped: boolean }> => {
+        const sessionId = invokeContext.sessionID;
+        const rustReduce = deps.rustToolBackends?.reduce;
+        if (rustReduce) {
+            try {
+                const response = await rustReduce({
+                    sessionId,
+                    projectRoot: invokeContext.directory,
+                    drop: tagNumbers.join(","),
+                    commandId: commandIdForInvocation(sessionId, invokeContext),
+                });
+                const value =
+                    response !== null && typeof response === "object" && "result" in response
+                        ? (response as { result?: unknown }).result
+                        : response;
+                const record =
+                    value !== null && typeof value === "object"
+                        ? (value as Record<string, unknown>)
+                        : null;
+                if (record === null || record.ok !== true) {
+                    return { refused: renderCapabilityRefusal("context_cleanup"), deduped: false };
+                }
+                return {
+                    deduped: typeof record.queued === "number" && record.queued === 0,
+                };
+            } catch {
+                return { refused: renderCapabilityRefusal("context_cleanup"), deduped: false };
+            }
+        }
+        try {
+            const now = Date.now();
+            deps.db
+                .transaction(() => {
+                    for (const tagNumber of tagNumbers) {
+                        queuePendingOp(deps.db, sessionId, tagNumber, "drop", now);
+                    }
+                })
+                .immediate();
+        } catch (error) {
+            return {
+                refused: `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`,
+                deduped: false,
+            };
+        }
+        return { deduped: false };
+    };
+
+    const distinctOrdinals = (items: readonly HandleItemRef[], mint: OrdinalMint): number[] => [
+        ...new Set(
+            items.flatMap((item) => {
+                const ordinal = ordinalForRegistryKey(mint, item.messageId);
+                return typeof ordinal === "number" ? [ordinal] : [];
+            }),
+        ),
+    ];
+
+    /** No-arg default: release everything already responded past. */
+    const executeBulkRelease = async (invokeContext: {
+        sessionID: string;
+        directory: string;
+    }): Promise<string> => {
+        const sessionId = invokeContext.sessionID;
+        const { protectedSet, inertTagNumbers } = resolveProtectionContext(sessionId);
+        const mint = ordinalMintFor(sessionId);
+        if (!mint) return MINT_UNAVAILABLE;
+        const result = resolveBulkDefault({
+            db: deps.db,
+            sessionId,
+            protectedTagNumbers: protectedSet,
+            inertTagNumbers,
+            mint,
+        });
+        if (result.releasedItems.length === 0) {
+            return result.protectedItems.length > 0
+                ? JSON.stringify({
+                      note: "Nothing older to release; newer work is still protected.",
+                  })
+                : JSON.stringify({
+                      note: "Nothing to release: no consumed tool output is waiting.",
+                  });
+        }
+        const apply = await applyReleasedTags(
+            invokeContext,
+            result.releasedItems.map((item) => item.tagNumber),
+        );
+        if (apply.refused) {
+            return apply.refused;
+        }
+        touchNudgeWatermark(sessionId);
+        return renderBulkSuccess(
+            apply.deduped,
+            result.releasedItems,
+            result.inertItems,
+            result.protectedItems.length,
+            mint,
+        );
+    };
+
+    const executePointingLane = async (
+        invokeContext: { sessionID: string; directory: string },
+        rawHandles: string[],
+    ): Promise<string> => {
+        const sessionId = invokeContext.sessionID;
+        const handles = rawHandles
+            .map((handle) => handle.trim())
+            .filter((handle) => handle.length > 0);
+        if (handles.length === 0) {
+            return "Error: 'ctx_handles' must contain entries.";
+        }
+
+        const { protectedSet, inertTagNumbers } = resolveProtectionContext(sessionId);
+        const mint = ordinalMintFor(sessionId);
+        if (!mint) return MINT_UNAVAILABLE;
+
+        // Validation completes BEFORE any enqueue: the batch resolves against
+        // the registry without touching it; any error class rejects the whole
+        // batch, so the forced retry is application-free (one apply event per
+        // reduce intent, ≤1 contiguous cache divergence).
+        const result = resolveHandles(
+            {
+                db: deps.db,
+                sessionId,
+                protectedTagNumbers: protectedSet,
+                inertTagNumbers,
+                callIdResolver:
+                    deps.callIdResolver ?? createRegistryCallIdResolver(deps.db, sessionId),
+                mint,
+            },
+            handles,
+        );
+        if (result.internalError) {
+            return result.internalError;
+        }
+
+        const errors = result.outcomes.filter(
+            (outcome): outcome is Extract<ReduceInputOutcome, { kind: "error" }> =>
+                outcome.kind === "error",
+        );
+        if (errors.length > 0) {
+            // S-4 ruling + 2026-10-22 Rev 6.1 amendment: a plain not-found OR
+            // a plain ambiguous entry among resolvable siblings is a graceful
+            // noop (siblings stamp, the slot reports). Loud whole-call failure
+            // stays for: anything inside a RANGE entry — dead endpoints and
+            // ambiguous endpoints alike (the span is a guess) — everything
+            // failed (nothing stamped is the truth), and mint failure. The
+            // loud path reports EVERY failing entry, grouped by class+note.
+            const loud =
+                errors.length === result.outcomes.length ||
+                errors.some((outcome) => outcome.range !== undefined);
+            if (loud) {
+                return renderPointingError(errors);
+            }
+        }
+
+        if (result.queueTagNumbers.length > 0) {
+            const apply = await applyReleasedTags(invokeContext, result.queueTagNumbers);
+            if (apply.refused) {
+                return apply.refused;
+            }
+            if (apply.deduped) {
+                // Module-side dedupe beat the registry read: those inputs are
+                // already released; report, do not claim a fresh release.
+                const remap = (outcome: ReduceInputOutcome): ReduceInputOutcome =>
+                    outcome.kind === "released"
+                        ? {
+                              kind: "noop",
+                              reason: "released",
+                              tagNumber: outcome.tagNumber,
+                              messageId: outcome.messageId,
+                          }
+                        : outcome;
+                result.outcomes = result.outcomes.map((outcome) =>
+                    outcome.kind === "range"
+                        ? { ...outcome, items: outcome.items.map(remap) }
+                        : remap(outcome),
+                );
+            }
+            touchNudgeWatermark(sessionId);
+        }
+
+        return renderPointingSuccess(handles, result.outcomes, mint);
+    };
+
     return tool({
         description: CTX_REDUCE_DESCRIPTION,
         args: ctxReduceArgsShape,
@@ -93,7 +352,23 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             args = unwrapImitatedReducedArgs(args, ["drop"], { drop: "string" });
             const sessionId = toolContext.sessionID;
 
-            if (!args.drop) {
+            const hasHandles = Array.isArray(args.ctx_handles) && args.ctx_handles.length > 0;
+            if (hasHandles && args.drop) {
+                return "Error: 'ctx_handles' and 'drop' cannot be combined in one call.";
+            }
+            if (!hasHandles && !args.drop) {
+                if ("drop" in args) {
+                    return "Error: 'drop' must be a non-empty list of tag ids.";
+                }
+                return await executeBulkRelease(toolContext);
+            }
+
+            if (hasHandles) {
+                return await executePointingLane(toolContext, args.ctx_handles as string[]);
+            }
+
+            const dropArg = args.drop;
+            if (!dropArg) {
                 return "Error: 'drop' must be provided.";
             }
 
@@ -103,7 +378,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     const response = await rustReduce({
                         sessionId,
                         projectRoot: toolContext.directory,
-                        drop: args.drop,
+                        drop: dropArg,
                         commandId: commandIdForInvocation(sessionId, toolContext),
                     });
                     const value =
@@ -138,10 +413,10 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                     if (queued <= 0) {
                         return "All requested tags were already queued or processed. No new action is needed.";
                     }
-                    // The module owns range parsing and tag canonicalization. Keep the
-                    // existing queued acknowledgement shape without reimplementing that
-                    // parsing in the OpenCode tool.
-                    return `Queued: drop ${formatRawDropForAck(args.drop)}.`;
+                    // The module owns range parsing and tag canonicalization. Keep
+                    // the existing queued acknowledgement shape without
+                    // reimplementing that parsing in the OpenCode tool.
+                    return `Queued: drop ${formatRawDropForAck(dropArg)}.`;
                 } catch (error) {
                     sessionLog(sessionId, "ctx_reduce capability refusal", error);
                     return renderCapabilityRefusal("context_cleanup");
@@ -151,7 +426,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             let dropIds: number[] = [];
 
             try {
-                dropIds = parseRangeString(args.drop);
+                dropIds = parseRangeString(dropArg);
             } catch (e) {
                 return `Error: Invalid range syntax. ${(e as Error).message}`;
             }

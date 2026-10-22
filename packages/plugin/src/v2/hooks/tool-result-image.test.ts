@@ -125,10 +125,7 @@ describe("a tool result carrying an image, through the tagging pass", () => {
             .find((part) => part.type === "tool-result");
         expect(result?.result).toEqual({
             type: "content",
-            value: [
-                { type: "text", text: `§${tag.tag_number}§ Image read successfully` },
-                fileEntry,
-            ],
+            value: [{ type: "text", text: "Image read successfully" }, fileEntry],
         });
         expect((result?.result as { value: unknown[] }).value[1]).toBe(fileEntry);
         for (const message of draft.messages) expect(() => Message.make(message)).not.toThrow();
@@ -163,7 +160,7 @@ describe("a tool result carrying an image, through the tagging pass", () => {
         const state = (message.parts[0] as { state: { output: string; attachments: unknown[] } })
             .state;
 
-        expect(state.output).toBe(`§${tag.tag_number}§ Image read successfully`);
+        expect(state.output).toBe("Image read successfully");
         expect(state.attachments).toEqual([attachment]);
         expect(state.attachments[0]).toBe(attachment);
         expect(tag.token_count).toBe(textOnlyTokens() + IMAGE_TOKENS);

@@ -17,17 +17,11 @@ export interface CtxExpandToolDeps {
 }
 
 const ctxExpandArgsShape = {
-    tag: tool.schema
-        .union([tool.schema.number(), tool.schema.string()])
-        .optional()
-        .describe(
-            "Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
-        ),
     start: tool.schema
         .number()
         .optional()
         .describe(
-            "First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
+            "First message ordinal of the range (a <session-history> heading's start, a ctx_search hit, or a ctx_reduce echo), not a tag number.",
         ),
     end: tool.schema
         .number()
@@ -43,7 +37,7 @@ const ctxExpandArgsShape = {
         .number()
         .optional()
         .describe(
-            "Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
+            "Message ordinal from a <session-history> heading, a ctx_search hit, or a ctx_reduce echo. Returns that one message in full. Use alone.",
         ),
 };
 // The tool definition exposes only the documented argument shape to the model

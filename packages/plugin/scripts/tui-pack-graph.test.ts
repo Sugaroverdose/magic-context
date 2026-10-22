@@ -5,7 +5,12 @@ import { join } from "node:path";
 import { createTestTempDir } from "../src/shared/test-temp-dir";
 import { checkPackedTuiGraph } from "./tui-pack-graph";
 
-test("published TUI runtime import graph is closed over the npm pack list", () => {
+// The real npm pack of the published package takes ~5-7s warm; the bun test
+// default 5s per-test budget races it (observed: green one morning, red the
+// next, with an empty-stderr spawn failure = the timeout kill).
+test(
+    "published TUI runtime import graph is closed over the npm pack list",
+    () => {
     const packageRoot = join(import.meta.dir, "..");
     const pack = spawnSync("npm", ["pack", "--dry-run", "--ignore-scripts", "--json"], {
         cwd: packageRoot,
@@ -14,8 +19,10 @@ test("published TUI runtime import graph is closed over the npm pack list", () =
     });
     if (pack.status !== 0) throw new Error(`npm pack failed: ${pack.stderr}`);
     const packed = JSON.parse(pack.stdout) as Array<{ files: Array<{ path: string }> }>;
-    expect(checkPackedTuiGraph(packageRoot, new Set(packed[0]?.files.map(({ path }) => path)))).toBeGreaterThan(0);
-});
+        expect(checkPackedTuiGraph(packageRoot, new Set(packed[0]?.files.map(({ path }) => path)))).toBeGreaterThan(0);
+    },
+    60_000,
+);
 
 test("TUI pack graph checks lazy, transitive and re-exported runtime imports but not types", () => {
     const { dir } = createTestTempDir("tui-pack-graph-");

@@ -69,6 +69,8 @@ describe("createPiTranscript", () => {
 			expect([...targets.values()][0]?.drop()).toBe("removed");
 			transcript.commit();
 			transcript.finalizeToolRemovals();
+			// The dropped tool arc is removed; the unrelated reasoning-only
+			// assistant row is preserved.
 			expect(transcript.getOutputMessages()).toEqual([reasoning]);
 			console.log(
 				"SCOPED_GATE Pi removed tool arc; unrelated reasoning retained",

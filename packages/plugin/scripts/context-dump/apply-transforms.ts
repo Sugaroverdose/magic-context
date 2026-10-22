@@ -71,6 +71,7 @@ export function applyTransforms(
 		ordinalFallbackCount: 0,
 		missingDroppedTags: [],
 	},
+	sessionId = "",
 ): TransformDiagnostics {
 	const matcher = createTagMatcher(tags)
 	const targets = new Map<number, TagTarget>()
@@ -206,7 +207,16 @@ export function applyTransforms(
 
 	for (const [callId, tagNumber] of toolTagByCallId) {
 		const thinkingParts = toolThinkingByCallId.get(callId) ?? []
-		targets.set(tagNumber, createToolDropTarget(callId, thinkingParts, toolCallIndex, batch, tagNumber))
+		targets.set(
+			tagNumber,
+			createToolDropTarget(
+				callId,
+				thinkingParts,
+				toolCallIndex,
+				batch,
+				tagNumber,
+			),
+		)
 	}
 
 	const missingDroppedTags = tags.filter(

@@ -167,7 +167,7 @@ import {
     buildSupersessionReclaimOps,
     recentSupersessionOwnerMessageIds,
 } from "./supersession-reclaim";
-import { byteSize, prependTag } from "./tag-content-primitives";
+import { byteSize } from "./tag-content-primitives";
 import {
     assertTailHygieneContentUnchanged,
     countRealUserMessages,
@@ -1258,7 +1258,7 @@ export function reconcileMarkerRepresentation(
     if (removedSummary) messages.splice(0, messages.length, ...retainedMessages);
     if (persistedMarkerState === null) return removedSummary;
 
-    const summaryTagNumber = options.tagger.assignTag(
+    options.tagger.assignTag(
         options.sessionId,
         `${persistedMarkerState.summaryMessageId}:p0`,
         "message",
@@ -1274,10 +1274,7 @@ export function reconcileMarkerRepresentation(
             reasoningTokenCount: null,
         }),
     );
-    const summaryText =
-        options.ctxReduceAvailability.frozen && options.ctxReduceAvailability.callable
-            ? prependTag(summaryTagNumber, MARKER_SUMMARY_TEXT)
-            : MARKER_SUMMARY_TEXT;
+    const summaryText = MARKER_SUMMARY_TEXT;
     const summaryMessage: MessageLike = {
         info: {
             id: persistedMarkerState.summaryMessageId,

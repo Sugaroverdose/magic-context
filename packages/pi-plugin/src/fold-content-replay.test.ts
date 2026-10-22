@@ -118,7 +118,7 @@ describe("Pi fold content replay", () => {
 				textOf(m as never).includes("+9h 30m"),
 			);
 			expect(reminder).toBeDefined();
-			expect(textOf(reminder as never)).toMatch(/^§\d+§ <!-- \+9h 30m -->$/);
+			expect(textOf(reminder as never)).toMatch(/^<!-- \+9h 30m -->$/); // v1 ruling: content persists raw — the tag prefix is a registry construct, never baked
 			expect(textOf(reminder as never)).not.toContain("BACKGROUND BASH");
 			updateSessionMeta(db, sessionId, {
 				lastResponseTime: Date.now(),
@@ -271,8 +271,8 @@ describe("Pi fold content replay", () => {
 		try {
 			const preDeploy = await pass(70);
 			const preDeployReminder = textOf(preDeploy.messages[3] as never);
-			expect(preDeployReminder).toMatch(/^§\d+§ <!-- \+10h 30m -->$/);
-			expect(preDeployReminder).toHaveLength(24);
+			expect(preDeployReminder).toMatch(/^<!-- \+10h 30m -->$/);
+			expect(preDeployReminder).toHaveLength(17); // marker-only wire (v1 geometry)
 			const tag = getTagsBySession(db, sessionId).find(
 				(candidate) => candidate.messageId === "legacy-reminder:p0",
 			);

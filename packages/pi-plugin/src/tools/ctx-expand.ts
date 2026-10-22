@@ -41,16 +41,10 @@ import { readPiSessionMessages } from "../read-session-pi";
 
 const ParamsSchema = Type.Object(
 	{
-		tag: Type.Optional(
-			Type.Union([Type.Number(), Type.String()], {
-				description:
-					"Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
-			}),
-		),
 		start: Type.Optional(
 			Type.Number({
 				description:
-					"First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
+					"First message ordinal of the range (a <session-history> heading's start, a ctx_search hit, or a ctx_reduce echo), not a tag number.",
 			}),
 		),
 		end: Type.Optional(
@@ -68,7 +62,7 @@ const ParamsSchema = Type.Object(
 		message: Type.Optional(
 			Type.Number({
 				description:
-					"Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
+					"Message ordinal from a <session-history> heading, a ctx_search hit, or a ctx_reduce echo. Returns that one message in full. Use alone.",
 			}),
 		),
 	},

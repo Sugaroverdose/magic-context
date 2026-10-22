@@ -6,7 +6,7 @@
 	"passes": [
 		{
 			"pass": 0,
-			"sha256": "41a05bbd255f9737780bee967187d339d15ff3b7a902cc6c58a1b1b35d954166",
+			"sha256": "5f3e35dd29b4f569513e9b049459dc710482c85c95a44320e5a5fdeb95c2424b",
 			"tools": [],
 			"prompt": "",
 			"served": [
@@ -32,7 +32,7 @@
 				},
 				{
 					"role": "user",
-					"content": "§1§ old",
+					"content": "old",
 					"timestamp": 1
 				},
 				{
@@ -40,7 +40,7 @@
 					"content": [
 						{
 							"type": "text",
-							"text": "§2§ answer"
+							"text": "answer"
 						}
 					],
 					"api": "test-api",
@@ -65,14 +65,14 @@
 				},
 				{
 					"role": "user",
-					"content": "§3§ tail",
+					"content": "tail",
 					"timestamp": 3
 				}
 			]
 		},
 		{
 			"pass": 1,
-			"sha256": "41a05bbd255f9737780bee967187d339d15ff3b7a902cc6c58a1b1b35d954166",
+			"sha256": "5f3e35dd29b4f569513e9b049459dc710482c85c95a44320e5a5fdeb95c2424b",
 			"tools": [],
 			"prompt": "",
 			"served": [
@@ -98,7 +98,7 @@
 				},
 				{
 					"role": "user",
-					"content": "§1§ old",
+					"content": "old",
 					"timestamp": 1
 				},
 				{
@@ -106,7 +106,7 @@
 					"content": [
 						{
 							"type": "text",
-							"text": "§2§ answer"
+							"text": "answer"
 						}
 					],
 					"api": "test-api",
@@ -131,14 +131,14 @@
 				},
 				{
 					"role": "user",
-					"content": "§3§ tail",
+					"content": "tail",
 					"timestamp": 3
 				}
 			]
 		},
 		{
 			"pass": 2,
-			"sha256": "41a05bbd255f9737780bee967187d339d15ff3b7a902cc6c58a1b1b35d954166",
+			"sha256": "5f3e35dd29b4f569513e9b049459dc710482c85c95a44320e5a5fdeb95c2424b",
 			"tools": [],
 			"prompt": "",
 			"served": [
@@ -164,7 +164,7 @@
 				},
 				{
 					"role": "user",
-					"content": "§1§ old",
+					"content": "old",
 					"timestamp": 1
 				},
 				{
@@ -172,7 +172,7 @@
 					"content": [
 						{
 							"type": "text",
-							"text": "§2§ answer"
+							"text": "answer"
 						}
 					],
 					"api": "test-api",
@@ -197,14 +197,14 @@
 				},
 				{
 					"role": "user",
-					"content": "§3§ tail",
+					"content": "tail",
 					"timestamp": 3
 				}
 			]
 		},
 		{
 			"pass": 3,
-			"sha256": "41a05bbd255f9737780bee967187d339d15ff3b7a902cc6c58a1b1b35d954166",
+			"sha256": "5f3e35dd29b4f569513e9b049459dc710482c85c95a44320e5a5fdeb95c2424b",
 			"tools": [],
 			"prompt": "",
 			"served": [
@@ -230,7 +230,7 @@
 				},
 				{
 					"role": "user",
-					"content": "§1§ old",
+					"content": "old",
 					"timestamp": 1
 				},
 				{
@@ -238,7 +238,7 @@
 					"content": [
 						{
 							"type": "text",
-							"text": "§2§ answer"
+							"text": "answer"
 						}
 					],
 					"api": "test-api",
@@ -263,14 +263,14 @@
 				},
 				{
 					"role": "user",
-					"content": "§3§ tail",
+					"content": "tail",
 					"timestamp": 3
 				}
 			]
 		},
 		{
 			"pass": 4,
-			"sha256": "41a05bbd255f9737780bee967187d339d15ff3b7a902cc6c58a1b1b35d954166",
+			"sha256": "5f3e35dd29b4f569513e9b049459dc710482c85c95a44320e5a5fdeb95c2424b",
 			"tools": [],
 			"prompt": "",
 			"served": [
@@ -296,7 +296,7 @@
 				},
 				{
 					"role": "user",
-					"content": "§1§ old",
+					"content": "old",
 					"timestamp": 1
 				},
 				{
@@ -304,7 +304,7 @@
 					"content": [
 						{
 							"type": "text",
-							"text": "§2§ answer"
+							"text": "answer"
 						}
 					],
 					"api": "test-api",
@@ -329,14 +329,14 @@
 				},
 				{
 					"role": "user",
-					"content": "§3§ tail",
+					"content": "tail",
 					"timestamp": 3
 				}
 			]
 		},
 		{
 			"pass": 5,
-			"sha256": "41a05bbd255f9737780bee967187d339d15ff3b7a902cc6c58a1b1b35d954166",
+			"sha256": "5f3e35dd29b4f569513e9b049459dc710482c85c95a44320e5a5fdeb95c2424b",
 			"tools": [],
 			"prompt": "",
 			"served": [
@@ -362,7 +362,7 @@
 				},
 				{
 					"role": "user",
-					"content": "§1§ old",
+					"content": "old",
 					"timestamp": 1
 				},
 				{
@@ -370,7 +370,7 @@
 					"content": [
 						{
 							"type": "text",
-							"text": "§2§ answer"
+							"text": "answer"
 						}
 					],
 					"api": "test-api",
@@ -395,7 +395,7 @@
 				},
 				{
 					"role": "user",
-					"content": "§3§ tail",
+					"content": "tail",
 					"timestamp": 3
 				}
 			]

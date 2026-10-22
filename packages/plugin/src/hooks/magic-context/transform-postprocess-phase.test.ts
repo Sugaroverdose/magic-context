@@ -1741,8 +1741,11 @@ describe("deferred compaction marker representation", () => {
             ...options,
             ctxReduceAvailability: { callable: true, frozen: true },
         });
-        const taggedText = (frozen[0]?.parts[0] as { text?: string }).text;
-        expect(taggedText).toMatch(/^§\d+§ /);
+        const markerText = (frozen[0]?.parts[0] as { text?: string }).text;
+        // ctx_reduce v1: freezing the callable choice still reserves the tag
+        // row, but the summary text rides the wire prefix-free.
+        expect(markerText).toBe(MARKER_SUMMARY_TEXT);
+        expect(options.tagger.getTag(sessionId, "summary:p0", "message")).toBeGreaterThan(0);
         const stable = structuredClone(frozen);
         reconcileMarkerRepresentation(stable, state, {
             ...options,

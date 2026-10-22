@@ -142,8 +142,8 @@ describe("registerMagicContextTools", () => {
 					"limit",
 					"offset",
 				],
-				ctx_expand: ["start", "end", "verbose", "message", "tag"],
-				ctx_reduce: ["drop"],
+				ctx_expand: ["start", "end", "verbose", "message"],
+				ctx_reduce: ["ctx_handles"],
 			};
 			for (const [name, fields] of Object.entries(expectedFields)) {
 				const definition = registered.get(name);

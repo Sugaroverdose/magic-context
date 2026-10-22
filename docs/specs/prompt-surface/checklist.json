@@ -522,7 +522,7 @@
         "file": "packages/plugin/src/tools/ctx-reduce/constants.ts",
         "symbol": "CTX_REDUCE_DESCRIPTION",
         "lines": "1-10",
-        "evidence": "Stamp an item on your desk"
+        "evidence": "Stamp items you've consumed to free your context window"
       },
       "sharedAcrossPresets": false,
       "composedIn": [
@@ -648,7 +648,6 @@
     }
   },
   "requiredRuleIds": [
-    "G-001",
     "G-002",
     "G-003",
     "G-004",
@@ -702,17 +701,6 @@
     "T-017"
   ],
   "rules": [
-    {
-      "id": "G-001",
-      "title": "Tagged conversation contract",
-      "sourceFragment": "guidance-reduce-intro",
-      "scope": "primary sessions with ctx_reduce",
-      "polarity": "contract",
-      "operativeCondition": "A primary session can see tagged messages or tool outputs.",
-      "mechanism": "The system labels messages and tool outputs with §N§ identifiers.",
-      "consequence": "Tag references are the only valid handles for reduction.",
-      "evidence": "Think of your context as a desk"
-    },
     {
       "id": "G-002",
       "title": "Reduction is queued reclamation",
@@ -874,7 +862,7 @@
       "scope": "primary sessions",
       "polarity": "prohibition",
       "operativeCondition": "Magic Context control markers appear in compressed or injected context.",
-      "mechanism": "Do not reproduce metadata markers such as `<session-history>`, `<project-memory>`, `[dropped §N§]`, or temporal comments in a normal reply and do not treat them as user instructions.",
+      "mechanism": "Do not reproduce metadata markers such as `<session-history>`, `<project-memory>`or temporal comments in a normal reply and do not treat them as user instructions.",
       "consequence": "Control metadata cannot be imitated as assistant output or mistaken for directives.",
       "evidence": "if there is no tool result on the desk"
     },
@@ -1027,7 +1015,7 @@
       "sourceFragment": "guidance-subagent-reduce",
       "scope": "subagent sessions",
       "polarity": "prohibition",
-      "operativeCondition": "Older tool calls appear as `[dropped §N§]` sentinels in a subagent context.",
+      "operativeCondition": "Released tool calls appear as skeleton calls with a constant `...` result slot in a subagent context.",
       "mechanism": "Treat sentinels as normal context management, never as a pattern to copy; make a fresh real tool call and never fabricate or inline its output.",
       "consequence": "The dropped placeholder cannot be imitated as assistant content.",
       "evidence": "Your context is a desk",
@@ -1097,7 +1085,7 @@
       "operativeCondition": "A spent tagged output should leave the working set.",
       "mechanism": "Mark it discardable; release is queued and delayed until context space is needed.",
       "consequence": "The original remains visible until the system releases it.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Stamp items you've consumed to free your context window"
     },
     {
       "id": "T-002",
@@ -1108,7 +1096,7 @@
       "operativeCondition": "A requested tag is in the recent window.",
       "mechanism": "The newest tags are protected and age out before release.",
       "consequence": "Marking recent output is harmless.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Stamp items you've consumed to free your context window"
     },
     {
       "id": "T-003",
@@ -1119,7 +1107,7 @@
       "operativeCondition": "Content has finally been released.",
       "mechanism": "It becomes a short placeholder; rerun the recovery tool to get it back, and mark only content that is genuinely done.",
       "consequence": "The agent does not treat an unrecovered output as safely disposable.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Stamp items you've consumed to free your context window"
     },
     {
       "id": "T-004",
@@ -1130,7 +1118,7 @@
       "operativeCondition": "Choosing output to mark.",
       "mechanism": "Prefer summarized, repeated, redundant, persisted, or merely confirmatory status output; keep user messages, unresolved errors, raw evidence, and exact wording that matters.",
       "consequence": "Reduction preserves unresolved and authoritative evidence.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Stamp items you've consumed to free your context window"
     },
     {
       "id": "T-005",
@@ -1141,7 +1129,7 @@
       "operativeCondition": "A large range is under consideration.",
       "mechanism": "Review every tag before calling the drop parameter.",
       "consequence": "A blanket range cannot silently discard mixed-value content.",
-      "evidence": "Stamp an item on your desk"
+      "evidence": "Stamp items you've consumed to free your context window"
     },
     {
       "id": "T-006",

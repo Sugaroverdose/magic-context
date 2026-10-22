@@ -22,7 +22,16 @@ function createTestDb(): Database {
       harness TEXT NOT NULL DEFAULT 'opencode',
       tool_owner_message_id TEXT DEFAULT NULL,
       token_count INTEGER DEFAULT NULL,
+      input_token_count INTEGER DEFAULT NULL,
       entry_fingerprint TEXT DEFAULT NULL
+    );
+    CREATE VIRTUAL TABLE message_history_fts USING fts5(
+      session_id UNINDEXED,
+      message_ordinal UNINDEXED,
+      message_id UNINDEXED,
+      role,
+      content,
+      tokenize='porter unicode61'
     );
     CREATE TABLE pending_ops (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -107,23 +116,30 @@ describe("createCtxReduceTools", () => {
 
     beforeEach(() => {
         db = createTestDb();
-        tools = createCtxReduceTools({ db });
+        tools = createCtxReduceTools({
+            db,
+            // Empty-world mint: no positioned messages, no user boundary.
+            // Bulk with no newest user message has nothing "responded past".
+            ordinalMint: () => ({
+                ordinalByMessageId: new Map(),
+                ordinalByCallId: new Map(),
+                latestUserOrdinal: undefined,
+            }),
+        });
     });
 
     describe("ctx_reduce", () => {
-        it("requires the drop parameter", async () => {
+        it("no-arg invocation is the bulk default, not an error", async () => {
             const result = await tools.ctx_reduce.execute({}, toolContext());
 
-            expect(result).toContain("Error");
-            expect(result).toContain("'drop' must be provided");
+            expect(result).toContain("Nothing to release");
+            expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         });
 
         it("refuses empty drop filler without queuing a phantom command", async () => {
             seedTags(db, [{ id: 1, sessionId: "ses-1" }]);
-            const omitted = await tools.ctx_reduce.execute({}, toolContext());
             const empty = await tools.ctx_reduce.execute({ drop: "" }, toolContext());
-            expect(empty).toBe(omitted);
-            expect(empty).toContain("'drop' must be provided");
+            expect(empty).toContain("non-empty");
             expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         });
 

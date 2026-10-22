@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Scheduler } from "../../features/magic-context/scheduler";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
+import { getTagsBySession } from "../../features/magic-context/storage-tags";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
@@ -211,7 +212,7 @@ function createHarness(sessionIds: string[], client: (sessionId: string) => unkn
 }
 
 const TAG = /§\d+§/;
-const REDUCE_GUIDANCE = "`ctx_reduce` with its tag";
+const REDUCE_GUIDANCE = "stamp as soon as an item has served its purpose";
 
 for (const order of ["messages-first", "system-first"] as const) {
     describe(`ctx_reduce verdict honours agent and session permissions before it freezes (${order})`, () => {
@@ -239,7 +240,10 @@ for (const order of ["messages-first", "system-first"] as const) {
                 const allowedServed = await pass(allowed, turns, order);
                 const unreadServed = await pass(unread, turns, order);
                 expect(allowedServed).toEqual(unreadServed);
-                expect(allowedServed.messages).toMatch(TAG);
+                // ctx_reduce v1: the wire is prefix-free for every verdict;
+                // what the callable session keeps is its registry rows.
+                expect(allowedServed.messages).not.toMatch(TAG);
+                expect(getTagsBySession(openDatabase(), allowed).length).toBeGreaterThan(0);
                 expect(allowedServed.system).toContain(REDUCE_GUIDANCE);
             }
             // The callable session gets the Channel 1 baseline the denied session must not.
@@ -283,7 +287,10 @@ for (const order of ["messages-first", "system-first"] as const) {
             for (let turns = 2; turns <= 4; turns += 1) {
                 const flippedServed = await pass(flipped, turns, order);
                 expect(flippedServed).toEqual(await pass(steady, turns, order));
-                expect(flippedServed.messages).toMatch(TAG);
+                // ctx_reduce v1: prefix-free wire; the frozen verdict keeps
+                // minting rows for the session it froze as callable.
+                expect(flippedServed.messages).not.toMatch(TAG);
+                expect(getTagsBySession(openDatabase(), flipped).length).toBeGreaterThan(0);
                 expect(flippedServed.system).toContain(REDUCE_GUIDANCE);
             }
             // Permissions were read once, before the freeze, and never again.
