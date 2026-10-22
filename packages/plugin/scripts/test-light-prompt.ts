@@ -74,12 +74,12 @@ The next step uses only the unresolved compiler error. Continue with normal desk
                     parameters: {
                         type: "object",
                         properties: {
-                            ctx_handles: {
+                            drop: {
                                 type: "string",
-                                description: LIGHT_PARAMETER_DESCRIPTIONS.ctx_reduce.ctx_handles,
+                                description: LIGHT_PARAMETER_DESCRIPTIONS.ctx_reduce.drop,
                             },
                         },
-                        required: ["ctx_handles"],
+                        required: ["drop"],
                         additionalProperties: false,
                     },
                 },
