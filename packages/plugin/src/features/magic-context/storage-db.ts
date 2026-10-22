@@ -46,7 +46,6 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import { importPluginModule } from "../../shared/stale-plugin-build";
 import { shouldEnforcePrivateStoragePermissions } from "../../shared/storage-permissions";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
-
 import { ensureContextStoreUuid } from "./context-store-uuid";
 import {
     attachFailClosedBlockingProcessEvidence,
@@ -67,6 +66,7 @@ import {
     runMigrationsWithRetry,
 } from "./migrations";
 import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
+import { purgeDormantSessionPendingOps } from "./storage-ops";
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
 import {
     loadToolDefinitionMeasurements,
@@ -1073,6 +1073,11 @@ function finishDatabaseOpen(
     // cached-handle reuses both run this TTL-scoped heal so long-lived
     // processes eventually unwind stuck stale claims without a restart.
     healWedgedChannel2Claims(db);
+    // Sweep the queues of sessions dormant past the TTL. A finished subagent
+    // or abandoned chat never revisits its pending_ops, and every lane that
+    // consumes the queue requires the session to run again — without this
+    // sweep those rows accumulate forever (see purgeDormantSessionPendingOps).
+    purgeDormantSessionPendingOps(db);
     // Initial boot-time backfill populates tool_owner_message_id on legacy tool
     // tags. The module short-circuits when every session is already complete or
     // skipped, so re-running it is cheap.

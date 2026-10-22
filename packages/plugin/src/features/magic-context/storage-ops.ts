@@ -122,6 +122,44 @@ export function clearPendingOps(db: Database, sessionId: string): void {
     getClearPendingOpsStatement(db).run(sessionId);
 }
 
+const DORMANT_SESSION_GC_MS = 30 * 86_400_000;
+const dormantGcStatements = new WeakMap<Database, PreparedStatement>();
+
+/**
+ * A queued drop lives in `pending_ops` until the owning session's apply lane
+ * consumes it. A session that never runs again — the finished subagent, the
+ * abandoned chat — never revisits its queue, so its rows are unreachable
+ * bookkeeping that only grows. Clearing a dormant session's queue is safe on
+ * resurrection: the scheduler re-derives drop candidates from tag state, and
+ * a month-old stamp costs one re-stamp — against unbounded accumulation.
+ * Idempotent and TTL-scoped, re-run from every database open, mirroring the
+ * lease-heal law.
+ */
+export function purgeDormantSessionPendingOps(
+    db: Database,
+    nowMs: number = Date.now(),
+    dormantMs: number = DORMANT_SESSION_GC_MS,
+): number {
+    const cutoffSeconds = Math.floor((nowMs - dormantMs) / 1000);
+    try {
+        let statement = dormantGcStatements.get(db);
+        if (!statement) {
+            statement = db.prepare(
+                `DELETE FROM pending_ops
+                 WHERE session_id IN (
+                   SELECT session_id FROM session_meta
+                   WHERE last_response_time > 0 AND last_response_time < ?
+                 )`,
+            );
+            dormantGcStatements.set(db, statement);
+        }
+        return statement.run(cutoffSeconds).changes;
+    } catch {
+        // Boot maintenance must never fail an open over a swept queue.
+        return 0;
+    }
+}
+
 export function removePendingOp(db: Database, sessionId: string, tagId: number): void {
     getRemovePendingOpStatement(db).run(sessionId, tagId);
 }
