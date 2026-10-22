@@ -9507,7 +9507,7 @@ describe("restore-only boot pass (rust-law port)", () => {
         }
     });
 
-    it("boot flush ride deferred: restore serves, request survives; warm flush rides", async () => {
+    it("boot flush deferred: restore serves, request discharged as moot", async () => {
         setRestoreOnlyBootPassEnabledForTests(true);
         try {
             db = new Database(":memory:");
@@ -9556,11 +9556,15 @@ describe("restore-only boot pass (rust-law port)", () => {
                 expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
                     "active",
                 );
-                expect(flushSet.has(sessionId)).toBe(true);
+                // The restore already served m[0] byte-identically, so the
+                // boot-raised re-anchor request is moot: it is DISCHARGED,
+                // not parked. Parking would let a later ride rewrite bytes
+                // the restore made identical and drag the stale backlog.
+                expect(flushSet.has(sessionId)).toBe(false);
             }
 
-            // Pressure pass engages; the flush request (still pending) rides
-            // the warm lane: ops apply, carriers mint, the request is consumed.
+            // Pressure pass: ops apply on the priced pass (the discharged
+            // request stays gone — nothing re-adds it).
             {
                 const { messages, targets } = freshWire();
                 await runPostTransformPhase(

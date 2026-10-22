@@ -27,6 +27,15 @@
  * and boot execute is exactly the reading this law distrusts. Explicit user
  * flushes and published history are never gated (separate signals).
  *
+ * Discharge, not parking: the restore serves the persisted bytes — m[0]
+ * included — so a re-anchor request raised by the host's post-restart replay
+ * is moot on the restore-only pass and is CLEARED there. A parked request
+ * would ride a later bust and rewrite bytes the restore already made
+ * identical. Warm starvation drains (a queued drop landing on the next
+ * genuine bust — marker change, explicit user flush) are a separate,
+ * deliberate design and stay untouched: this law removes boot artifacts
+ * from the permission set, not busts from the drain rules.
+ *
  * The flag defaults ON; the plugin test-preload disables it process-wide
  * (fixtures expect drops applied on the first pass) and the law's own tests
  * re-enable it locally.

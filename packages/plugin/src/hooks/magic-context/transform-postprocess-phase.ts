@@ -1841,6 +1841,16 @@ export async function runPostTransformPhase(
         (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory) &&
         (args.fullFeatureMode || compactionOff);
     const freezeM0M1 = args.freezeM0M1 === true;
+    // The restore-only pass serves the persisted bytes — m[0] included — so
+    // a re-anchor request raised by the host's post-restart replay is moot
+    // on it: discharge it instead of parking it. A parked request would
+    // ride a later bust, rewrite bytes the restore already made identical,
+    // and drag the stale backlog with it. (Local flags above are snapshotted
+    // from the set at pass start, so clearing it changes nothing this pass.)
+    if (restoreOnlyBootPass && pendingMaterializationAtPassStart && !freezeM0M1) {
+        args.pendingMaterializationSessions.delete(args.sessionId);
+    }
+
     const foldDueDecision =
         m0M1EnabledForFold && args.m0M1 && !freezeM0M1
             ? mustMaterialize({
