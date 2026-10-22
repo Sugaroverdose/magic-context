@@ -1400,6 +1400,34 @@ describe("createEventHandler", () => {
         });
     });
 
+    it("idle discharge clears a finished child session's queue; top-level keeps its backlog", async () => {
+        useTempDataHome("context-event-idle-discharge-");
+        const deps = createDeps(new Map<string, { usage: ContextUsage; updatedAt: number }>());
+        const handler = createEventHandler(deps);
+        const now = Date.now();
+        updateSessionMeta(deps.db, "ses-child", { isSubagent: true, lastResponseTime: now });
+        updateSessionMeta(deps.db, "ses-top", { lastResponseTime: now });
+        const queueStamp = deps.db.prepare(
+            "INSERT INTO pending_ops (session_id, tag_id, operation, queued_at) VALUES (?, ?, 'drop', ?)",
+        );
+        queueStamp.run("ses-child", 1, now);
+        queueStamp.run("ses-top", 2, now);
+        insertTag(deps.db, "ses-child", "call-1", "tool", 500, 1);
+
+        await handler({ event: { type: "session.idle", properties: { sessionID: "ses-child" } } });
+        await handler({ event: { type: "session.idle", properties: { sessionID: "ses-top" } } });
+
+        const count = (sessionId: string) =>
+            (
+                deps.db
+                    .prepare("SELECT COUNT(*) AS n FROM pending_ops WHERE session_id = ?")
+                    .get(sessionId) as { n: number }
+            ).n;
+        expect(count("ses-child")).toBe(0);
+        expect(count("ses-top")).toBe(1);
+        expect(getTagsBySession(openDatabase(), "ses-child")).toHaveLength(1);
+    });
+
     it("handles compaction and session cleanup lifecycle events", async () => {
         useTempDataHome("context-event-lifecycle-");
         const contextUsageMap = new Map<string, { usage: ContextUsage; updatedAt: number }>([

@@ -157,9 +157,39 @@ export function purgeDormantSessionPendingOps(
             );
             dormantGcStatements.set(db, statement);
         }
-        return statement.run(cutoffSeconds).changes;
+        return statement.run(cutoffMs).changes;
     } catch {
         // Boot maintenance must never fail an open over a swept queue.
+        return 0;
+    }
+}
+
+const idleSubagentPendingOpsStatements = new WeakMap<Database, PreparedStatement>();
+
+/**
+ * Prevention-side complement of the dormancy sweep. A subagent run that goes
+ * idle never gets another pass unless it is explicitly resumed, and a resume
+ * re-derives drop candidates from tag state anyway — so rows still queued
+ * when the child idles are unreachable from the moment the run ends. The
+ * top-level control returns 0 by construction: primary sessions idle after
+ * every turn, and their backlog is owed work (starvation drain).
+ */
+export function purgeIdleSubagentPendingOps(db: Database, sessionId: string): number {
+    try {
+        const meta = db
+            .prepare("SELECT is_subagent FROM session_meta WHERE session_id = ?")
+            .get(sessionId) as { is_subagent: number | null } | undefined;
+        if (meta?.is_subagent !== 1) {
+            return 0;
+        }
+        let statement = idleSubagentPendingOpsStatements.get(db);
+        if (!statement) {
+            statement = db.prepare("DELETE FROM pending_ops WHERE session_id = ?");
+            idleSubagentPendingOpsStatements.set(db, statement);
+        }
+        return statement.run(sessionId).changes;
+    } catch {
+        // Event-side maintenance must never fail the host over a cleared queue.
         return 0;
     }
 }
