@@ -233,7 +233,7 @@ describe("Pi ctx_reduce v1 (ctx_handles)", () => {
 			expect(result.isError).toBe(true);
 			const report = JSON.parse(result.text);
 			expect(report.errors[0].class).toBe("not-found");
-			expect(report.errors[0].entry).toBe("nope-9");
+			expect(report.errors[0].entries).toEqual(["nope-9"]);
 			expect(report.errors[0].note).toContain("Nothing was stamped; resend the corrected batch.");
 			expect(result.text).toContain("Nothing was stamped; resend the corrected batch.");
 			expect(getPendingOps(db, sessionId)).toHaveLength(0);

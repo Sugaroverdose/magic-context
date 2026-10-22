@@ -290,12 +290,12 @@ export function createCtxReduceTool(
 			return err(result.internalError);
 		}
 
-		const failure = result.outcomes.find(
+		const failures = result.outcomes.filter(
 			(outcome): outcome is Extract<ReduceInputOutcome, { kind: "error" }> =>
 				outcome.kind === "error",
 		);
-		if (failure) {
-			return err(renderPointingError(failure, mint));
+		if (failures.length > 0) {
+			return err(renderPointingError(failures));
 		}
 
 		if (result.queueTagNumbers.length > 0) {
