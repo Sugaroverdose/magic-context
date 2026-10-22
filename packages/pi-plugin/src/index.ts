@@ -180,7 +180,8 @@ import {
 	backfillPiSessionActivity,
 	observePiMessageActivity,
 } from "./dreamer/session-activity-pi";
-import { registerPiDroppedInputGuard } from "./dropped-input-guard-pi";
+import { registerPiFpeResolution } from "./fpe-resolution-pi";
+import { lookupReleasedToolInputPi, maxTagPi } from "./fpe-resolve-pi";
 import {
 	ensureProjectRegisteredFromPiDirectory,
 	unregisterPiProjectEmbeddings,
@@ -1797,7 +1798,11 @@ async function startPiMagicContextRuntime(
 			onAdjunctsRefreshNeeded: signalPiSystemPromptRefreshForProject,
 		});
 	}
-	registerPiDroppedInputGuard(pi);
+	registerPiFpeResolution(pi, {
+		fpeLookup: (ctx, sessionId, tagNumber) =>
+			lookupReleasedToolInputPi(db, ctx?.sessionManager, sessionId, tagNumber),
+		fpeMaxTag: (sessionId) => maxTagPi(db, sessionId),
+	});
 	const todowriteEnabled = bootProjectDeps.config.todowrite.enabled;
 	const todowriteOverlayEnabled =
 		todowriteEnabled && bootProjectDeps.config.todowrite.overlay;

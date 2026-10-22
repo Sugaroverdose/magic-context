@@ -16,6 +16,7 @@ import {
 import { createTagger } from "../../features/magic-context/tagger";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { createDroppedInputGuard } from "./dropped-input-guard";
+import { deriveKey, renderDropToken } from "./fpe";
 import {
     isSmallToolInput,
     SKELETON_REAL_INPUT_MAX_BYTES,
@@ -110,13 +111,21 @@ describe("real-or-absent drops inside the newest-call window", () => {
         expect(getTagById(db, "ses-1", tag)?.dropMode).toBe("skeleton_real");
         const part = servedPart(messages, "call-1");
         expect(part?.state.input).toEqual(input);
-        expect(part?.state.output).toBe(`[dropped \u00a7${tag}\u00a7]`);
+        expect(part?.state.output).toBe("...");
     });
 
-    it("removes the call and its result for an input of 1025 bytes", () => {
+    it("releases the call and its result in the full shape for an input of 1025 bytes", () => {
         const { db, tag, messages } = dropOne({ content: "a".repeat(1025) }, false);
         expect(getTagById(db, "ses-1", tag)?.dropMode).toBe("full");
-        expect(servedPart(messages, "call-1")).toBeUndefined();
+        // Removal is gone: the pair survives with the token in the first
+        // string-valued argument seat and the `...` result.
+        const part = servedPart(messages, "call-1");
+        expect(part?.state).toEqual({
+            status: "completed",
+            input: { content: renderDropToken(tag, deriveKey("ses-1")) },
+            output: "...",
+            attachments: [],
+        });
     });
 
     it("keeps the call whose result ends the request, with its real arguments", () => {
@@ -125,7 +134,7 @@ describe("real-or-absent drops inside the newest-call window", () => {
         expect(getTagById(db, "ses-1", tag)?.dropMode).toBe("skeleton_real");
         const part = servedPart(messages, "call-1");
         expect(part?.state.input).toEqual(input);
-        expect(part?.state.output).toBe(`[dropped \u00a7${tag}\u00a7]`);
+        expect(part?.state.output).toBe("...");
         expect(JSON.stringify(messages)).not.toContain('"dropped":');
     });
 
@@ -152,9 +161,13 @@ describe("real-or-absent drops inside the newest-call window", () => {
         }
         expect(applyPendingOperations("ses-1", db, tagged.targets, new Set())).toBe(true);
         tagged.batch.finalize();
-        // Rule 1 (small), rule 2 (large, removed) and rule 3 (large, ends the request).
+        // Rule 1 (small, real args), rule 2 (large, full carrier) and rule 3
+        // (large, ends the request, real args).
         expect(servedPart(passA, "call-small")?.state.input).toEqual(smallInput);
-        expect(servedPart(passA, "call-mid")).toBeUndefined();
+        const midTag = tagger.getToolTag("ses-1", "call-mid", "m-mid")!;
+        expect(servedPart(passA, "call-mid")?.state.input).toEqual({
+            content: renderDropToken(midTag, deriveKey("ses-1")),
+        });
         expect(servedPart(passA, "call-large")?.state.input).toEqual(largeInput);
 
         const passB = build(true);

@@ -55,10 +55,11 @@ import {
     updateTagTokenCount,
 } from "../features/magic-context/storage-tags";
 import { makeToolCompositeKey, type Tagger } from "../features/magic-context/tagger";
-import { droppedInputMarker } from "../hooks/magic-context/dropped-input-guard";
 import { applyEditMarkerToInput } from "../hooks/magic-context/edit-marker";
+import { deriveKey, renderDropToken } from "../hooks/magic-context/fpe";
 import { estimateImageTokensFromDataUrl } from "../hooks/magic-context/image-token-estimate";
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
+import { TOOL_RELEASED_SENTINEL } from "../hooks/magic-context/sentinel";
 import {
     byteSize,
     prependTag,
@@ -66,6 +67,7 @@ import {
     stripWellFormedLeadingTagPrefix,
 } from "../hooks/magic-context/tag-content-primitives";
 import type { TagTarget } from "../hooks/magic-context/tag-messages";
+import { carrierInput } from "../hooks/magic-context/tool-drop-target";
 import { toolInputStringBytes } from "../hooks/magic-context/tool-input-size";
 import { TEXT_TAG_IDENTITY_MARKER } from "./tag-owner-id";
 import type { Transcript, TranscriptMessage, TranscriptPart } from "./transcript";
@@ -448,6 +450,7 @@ export function tagTranscript(
                         targets,
                         timing,
                         conversationEnd,
+                        sessionKey: deriveKey(sessionId),
                     });
                     if (part.kind === "tool_result") {
                         markToolAggregateResolved(
@@ -579,6 +582,7 @@ export function tagTranscript(
                     targets,
                     timing,
                     conversationEnd,
+                    sessionKey: deriveKey(sessionId),
                 });
                 if (part.kind === "tool_result") {
                     markToolAggregateResolved(callId, aggregateKey, openToolAggregateKeysByCallId);
@@ -692,6 +696,7 @@ interface ApplyToolPrefixAndTargetArgs {
     targets: Map<number, TagTarget>;
     timing: TagTranscriptTiming | undefined;
     conversationEnd: ConversationEndGuard;
+    sessionKey: bigint;
 }
 
 function partHasContent(part: TranscriptPart): boolean {
@@ -760,6 +765,7 @@ function applyToolPrefixAndTarget(args: ApplyToolPrefixAndTargetArgs): void {
             args.aggregate.occurrences,
             args.aggregate.requiresToolArcSkeleton,
             args.conversationEnd,
+            args.sessionKey,
         ),
     );
     if (args.timing) args.timing.targets += performance.now() - targetStart;
@@ -1062,7 +1068,10 @@ function applySingleToolPrefixAndTarget(args: TagToolPartArgs, tagId: number, te
     }
 
     const targetStart = args.timing ? performance.now() : 0;
-    args.targets.set(tagId, buildToolTarget(args.part, args.message, tagId));
+    args.targets.set(
+        tagId,
+        buildToolTarget(args.part, args.message, tagId, deriveKey(args.sessionId)),
+    );
     if (args.timing) args.timing.targets += performance.now() - targetStart;
 }
 
@@ -1097,23 +1106,24 @@ function buildAggregateTarget(
     tagId: number,
     occurrences: ToolOccurrence[],
     requiresToolArcSkeleton: boolean,
-    conversationEnd?: ConversationEndGuard,
+    conversationEnd: ConversationEndGuard | undefined,
+    sessionKey: bigint,
 ): TagTarget {
+    const token = renderDropToken(tagId, sessionKey);
     const role = occurrences[0]?.message.info.role ?? "user";
     const messageId = occurrences[0]?.message.info.id;
 
     const truncate = (): "truncated" | "absent" => {
-        // Keep the tool call and its result, but replace the call arguments with
-        // a non-executable marker and the result content with the dropped marker.
-        // Legacy render, replayed only for `drop_mode = 'truncated'` tags until a
-        // HARD fold converts them; new drops use skeletonReal().
-        const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+        // Legacy `truncated` tags normalize to the `full` shape on replay:
+        // args become the FPE carrier, the result `...`. Deterministic — the
+        // token recomputes from tag id + session key, byte-identical across
+        // passes.
         let any = false;
         for (const occ of occurrences) {
             if (occ.kind === "tool_use" && occ.part.setToolInput) {
                 occ.originalInput ??= occ.part.getToolInput?.() ?? undefined;
-                if (occ.part.setToolInput(droppedInputMarker(tagId))) any = true;
-            } else if (setToolContentOrText(occ.part, sentinel)) {
+                if (occ.part.setToolInput(carrierInput(occ.originalInput, token))) any = true;
+            } else if (setToolContentOrText(occ.part, TOOL_RELEASED_SENTINEL)) {
                 any = true;
             }
         }
@@ -1130,7 +1140,7 @@ function buildAggregateTarget(
         // into the argument position unless an earlier render this pass did,
         // in which case the real input goes back.
         if (!complete()) return "incomplete";
-        const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+        const sentinel = TOOL_RELEASED_SENTINEL;
         let any = false;
         for (const occ of occurrences) {
             if (occ.kind === "tool_use") {
@@ -1173,7 +1183,7 @@ function buildAggregateTarget(
                 beforeTools += estimateTokens(before);
                 if (skeleton || !removable) {
                     // A kept call keeps its real arguments; only the result shrinks.
-                    const after = occ.kind === "tool_use" ? before : `[dropped §${tagId}§]`;
+                    const after = occ.kind === "tool_use" ? before : TOOL_RELEASED_SENTINEL;
                     afterTools += estimateTokens(after);
                 }
             }
@@ -1227,20 +1237,29 @@ function buildAggregateTarget(
                     // (The sentinel fallback below keeps call and result in place,
                     // so it needs no exception.)
                     if (conversationEnd?.wouldStrand(occurrences)) return skeletonReal();
-                    let removed = false;
-                    for (const occ of occurrences) removed = occ.part.remove?.() || removed;
-                    if (removed) conversationEnd?.noteRemoved(occurrences);
-                    return removed ? "removed" : "absent";
+                    let any = false;
+                    for (const occ of occurrences) {
+                        if (occ.kind === "tool_use") {
+                            occ.originalInput ??= occ.part.getToolInput?.() ?? undefined;
+                            if (occ.part.setToolInput?.(carrierInput(occ.originalInput, token)))
+                                any = true;
+                        } else if (setToolContentOrText(occ.part, TOOL_RELEASED_SENTINEL)) {
+                            any = true;
+                        }
+                    }
+                    return any ? "removed" : "absent";
                 }
             }
-            // Adapters without structural removal retain paired sentinels. This
-            // writes a marker into the call's arguments, so only replays of
-            // existing `full` tags reach it: new drops check cannotRemove() and
-            // use skeletonReal(), and a HARD fold converts the existing ones.
-            const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+            // Adapters without structural removal keep the pair and write the
+            // `full` shape: carrier args on the call, `...` on the result.
             let any = false;
             for (const occ of occurrences) {
-                if (occ.part.replaceWithSentinel(sentinel)) any = true;
+                if (occ.kind === "tool_use" && occ.part.setToolInput) {
+                    occ.originalInput ??= occ.part.getToolInput?.() ?? undefined;
+                    if (occ.part.setToolInput(carrierInput(occ.originalInput, token))) any = true;
+                } else if (occ.part.replaceWithSentinel(TOOL_RELEASED_SENTINEL)) {
+                    any = true;
+                }
             }
             return any ? "removed" : "absent";
         },
@@ -1263,7 +1282,7 @@ function buildAggregateTarget(
             // truncate() so the existing skeleton bytes are never touched.
             // Deterministic + idempotent (re-derived from source each pass; the
             // region-hint clamp self-guards via ...[truncated]).
-            const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+            const sentinel = TOOL_RELEASED_SENTINEL;
             let any = false;
             for (const occ of occurrences) {
                 if (occ.kind === "tool_use") {
@@ -1345,7 +1364,9 @@ function buildToolTarget(
     part: TranscriptPart,
     message: { info: { id?: string; role: string } },
     tagId: number,
+    sessionKey: bigint,
 ): TagTarget {
+    const token = renderDropToken(tagId, sessionKey);
     return {
         setContent(content: string): boolean {
             return setToolContentOrText(part, content);
@@ -1361,23 +1382,29 @@ function buildToolTarget(
             // For Pi the current Transcript contract treats both
             // invocation and result parts symmetrically — both expose
             // setText / setToolOutput.
-            const replaced = part.replaceWithSentinel(`[dropped \u00a7${tagId}\u00a7]`);
-            return replaced ? "removed" : "absent";
+            // `full` shape: invocation part becomes the carrier, result part
+            // becomes `...`. No structural removal on any path.
+            if (part.setToolInput) {
+                return part.setToolInput(carrierInput(part.getToolInput?.() ?? null, token))
+                    ? "removed"
+                    : "absent";
+            }
+            return part.replaceWithSentinel(TOOL_RELEASED_SENTINEL) ? "removed" : "absent";
         },
         truncate(): "truncated" | "absent" {
-            // Legacy render, replayed only for unconverted `truncated` tags.
-            const changed = part.setToolInput
-                ? part.setToolInput(droppedInputMarker(tagId))
-                : setToolContentOrText(part, `[dropped \u00a7${tagId}\u00a7]`);
-            return changed ? "truncated" : "absent";
+            // Legacy `truncated` tags normalize to the `full` shape on replay.
+            if (part.setToolInput) {
+                return part.setToolInput(carrierInput(part.getToolInput?.() ?? null, token))
+                    ? "truncated"
+                    : "absent";
+            }
+            return setToolContentOrText(part, TOOL_RELEASED_SENTINEL) ? "truncated" : "absent";
         },
         skeletonReal(): "truncated" | "absent" {
             // An invocation part keeps its real arguments untouched; a result
-            // part's content becomes the dropped marker.
+            // part's content becomes `...`.
             if (part.setToolInput) return "truncated";
-            return setToolContentOrText(part, `[dropped \u00a7${tagId}\u00a7]`)
-                ? "truncated"
-                : "absent";
+            return setToolContentOrText(part, TOOL_RELEASED_SENTINEL) ? "truncated" : "absent";
         },
         // drop() replaces an invocation part's arguments with a marker, so a
         // new drop of one keeps its real arguments instead.

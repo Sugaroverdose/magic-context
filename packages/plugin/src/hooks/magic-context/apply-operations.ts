@@ -14,6 +14,7 @@ import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import type { TagTarget } from "./tag-messages";
 import type { ToolDropResult } from "./tool-drop-target";
 import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
+import { TOOL_RELEASED_SENTINEL } from "./sentinel";
 
 // Max characters kept from the original user content when a user-message tag
 // is dropped. ~250 characters maps to ~50 Claude tokens (1 token ≈ 4-5 chars
@@ -50,18 +51,21 @@ import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
 export const RECENT_TOOL_SKELETON_WINDOW = 20;
 
 // ONE canonical placeholder for every non-tool (message) drop, on every path,
-// every pass. It is a PURE function of tagId — it reads NO message content, role,
+// every pass. Constant bytes — it reads NO message content, role, tag number,
 // or window state. That is the whole point: any version that derived bytes from
 // the current (already-mutated) content re-derived a DIFFERENT placeholder across
 // passes (e.g. `[dropped §N§]` on one pass, `[truncated §N§]\n…` on the next),
 // which on a defer pass changes a tail message's bytes and busts the entire
 // prompt-cache prefix after it. This exact divergence caused repeated cache
-// catastrophes. The bytes here are byte-identical to heuristic-cleanup.ts's
-// `[dropped §${n}§]`, so the two drop paths can never disagree. (We deliberately
-// dropped the old user-text preview variant — a minor nicety that was the sole
-// source of the instability.)
-export function buildReplacementContent(tagId: number): string {
-    return `[dropped \u00a7${tagId}\u00a7]`;
+// catastrophes. The numeral shape is gone on this branch: the released-tag
+// pattern must not be a permanently resident string in the transcript, so the
+// placeholder is the same constant "content omitted" filler the tool-result
+// slot uses. It must NOT be WHOLE_MESSAGE_PLACEHOLDER_TEXT: that is the
+// post-neutralization sentinel, and isSentinel would pre-skip these messages
+// out of the persisted neutralization set. heuristic-cleanup.ts calls this
+// function, so the two drop paths can never disagree.
+export function buildReplacementContent(_tagId: number): string {
+    return TOOL_RELEASED_SENTINEL;
 }
 export interface NewToolDropOutcome {
     result: ToolDropResult;

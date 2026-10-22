@@ -20,6 +20,14 @@ import { isRecord } from "../../shared/record-type-guard";
 export const WHOLE_MESSAGE_PLACEHOLDER_TEXT = "[dropped]";
 
 /**
+ * Canonical released-tool-result content on every tool skeleton path.
+ * Constant bytes: no tag id, no status word, nothing interpretable — the
+ * result block stays present (protocol pairing + template integrity) and
+ * reads as plainly truncated output. FPE branch shape rule.
+ */
+export const TOOL_RELEASED_SENTINEL = "...";
+
+/**
  * Decide whether empty-text sentinels are safe for the provider's wire path.
  *
  * The gate is deliberately canonical-Anthropic only. OpenCode filters empty

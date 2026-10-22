@@ -1,6 +1,6 @@
 import { describe, expect, mock, test } from "bun:test";
 import { refuseBudgetedToolCall } from "../features/magic-context/dreamer/token-budget";
-import { createDroppedInputToolExecuteBeforeHook } from "../hooks/magic-context/dropped-input-guard";
+import { createToolExecuteBeforeHook } from "../hooks/magic-context/fpe-resolve";
 import { promptSyncWithValidatedOutputRetry } from "./model-suggestion-retry";
 import {
     createPromptAsyncTransport,
@@ -555,7 +555,7 @@ describe("dreamer budget on an async child", () => {
         );
         // Wait for the follow-up to be enqueued before simulating the tool hook.
         while (prompts.length < 2) await new Promise((resolve) => setTimeout(resolve, 1));
-        const before = createDroppedInputToolExecuteBeforeHook();
+        const before = createToolExecuteBeforeHook();
         await expect(
             before({ sessionID: "ses-child", tool: "read" }, { args: { path: "a" } }),
         ).rejects.toThrow("Out of token budget");

@@ -17,6 +17,7 @@ import {
 	registerPiContextHandler,
 	signalPiPendingMaterialization,
 } from "./context-handler";
+import { GOLDEN_FULL_DROP_OUTPUT } from "./fpe-wire-golden";
 import { NATIVE_TOOL_REMOVAL_MARKER } from "./native-replay-pi";
 import {
 	applyNativeReasoningReplayPi,
@@ -195,9 +196,12 @@ describe("native upgrade application", () => {
 				content: [
 					{ type: "thinking", thinking: "" },
 					{},
-					{ arguments: { dropped: expect.any(String) } },
+					{ arguments: { path: expect.any(String) } },
 				],
 			});
+			// The released pair replays with the constant `...` result slot
+			// (golden fragment; the carrier shape is overwall-wire-shapes' pin).
+			expect(JSON.stringify(first)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			expect(nativeBytes(await f.pass(0))).toBe(a);
 			f.restart();
 			expect(nativeBytes(await f.pass(0))).toBe(a);
@@ -209,7 +213,11 @@ describe("native upgrade application", () => {
 			expect(b).not.toContain(ciphertext);
 			expect(b).toContain("visible answer");
 			expect(b).toContain("image_generation_call");
-			expect(b).not.toContain("call-old");
+			// The authorized transition rewrites the raw lane's function_call
+			// args to the removal marker and drops the reasoning item; the
+			// call identity itself stays on the lane.
+			expect(b).toContain(JSON.stringify(NATIVE_TOOL_REMOVAL_MARKER));
+			expect(b).toContain("call-old");
 			expect(getNativeToolInputs(f.db, sessionId).has(callId)).toBe(true);
 			expect(getNativeReasoningIds(f.db, sessionId).has("entry-old")).toBe(
 				true,
@@ -296,9 +304,13 @@ describe("native upgrade application", () => {
 						content: [
 							{ type: "thinking", thinking: "", thinkingSignature: undefined },
 							{},
-							{ arguments: { dropped: expect.any(String) } },
+							{ arguments: { path: expect.any(String) } },
 						],
 					});
+					// With the native lane unreadable the raw payload keeps the
+					// original bytes, while the Pi pair replays with the `...`
+					// result slot (golden fragment).
+					expect(JSON.stringify(messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 				}
 				expect(
 					f.db
@@ -337,9 +349,14 @@ describe("native upgrade application", () => {
 					content: [
 						{ type: "thinking", thinking: "", thinkingSignature: undefined },
 						{},
-						{ arguments: { dropped: expect.any(String) } },
+						{ arguments: { path: expect.any(String) } },
 					],
 				});
+				// An unreadable future document suspends the native lanes (raw
+				// bytes untouched) but never blocks the local pair rendering:
+				// the result slot carries the `...` placeholder (golden
+				// fragment).
+				expect(JSON.stringify(messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			}
 			expect(
 				f.db

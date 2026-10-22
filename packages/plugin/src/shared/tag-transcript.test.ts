@@ -210,8 +210,8 @@ describe("tagTranscript tool aggregation", () => {
         expect(targets.size).toBe(2);
 
         expect(targets.get(firstTag ?? -1)?.drop()).toBe("removed");
-        expect(firstUse.getText()).toBe(`[dropped §${firstTag}§]`);
-        expect(firstResult.getText()).toBe(`[dropped §${firstTag}§]`);
+        expect(firstUse.getText()).toBe("...");
+        expect(firstResult.getText()).toBe("...");
         expect(secondUse.getText()).toBe('{"file":"long-b"}');
         expect(secondResult.getText()).toContain("r2");
     });
@@ -238,9 +238,9 @@ describe("tagTranscript tool aggregation", () => {
             result = targets.get(tag ?? -1)?.truncate?.();
         }).not.toThrow();
         expect(result).toBe("truncated");
-        // Skeleton-drop now renders the one canonical placeholder, not a
+        // Skeleton-drop now renders the one canonical `...` placeholder, not a
         // separate "[truncated]" vocabulary.
-        expect(toolUse.getText()).toBe(`[dropped \u00a7${tag}\u00a7]`);
+        expect(toolUse.getText()).toBe("...");
     });
 
     it("drops every contiguous folded tool_result block for the paired callId", () => {
@@ -267,9 +267,9 @@ describe("tagTranscript tool aggregation", () => {
 
         expect(targets.size).toBe(1);
         expect(targets.get(tag ?? -1)?.drop()).toBe("removed");
-        expect(toolUse.getText()).toBe(`[dropped §${tag}§]`);
-        expect(firstResult.getText()).toBe(`[dropped §${tag}§]`);
-        expect(secondResult.getText()).toBe(`[dropped §${tag}§]`);
+        expect(toolUse.getText()).toBe("...");
+        expect(firstResult.getText()).toBe("...");
+        expect(secondResult.getText()).toBe("...");
     });
 
     it("pairs a reused callId result with the nearest previous unresolved owner", () => {
@@ -302,8 +302,8 @@ describe("tagTranscript tool aggregation", () => {
 
         expect(targets.get(nearestTag ?? -1)?.drop()).toBe("removed");
         expect(olderUse.getText()).toBe('{"file":"older"}');
-        expect(nearestUse.getText()).toBe(`[dropped §${nearestTag}§]`);
-        expect(result.getText()).toBe(`[dropped §${nearestTag}§]`);
+        expect(nearestUse.getText()).toBe("...");
+        expect(result.getText()).toBe("...");
     });
 
     it("reuses owner-scoped identities without collapsing duplicate callIds", () => {

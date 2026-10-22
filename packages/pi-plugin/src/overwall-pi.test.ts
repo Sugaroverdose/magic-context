@@ -11,6 +11,10 @@ import {
 	applyPendingOperations,
 } from "@magic-context/core/hooks/magic-context/apply-operations";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
+import {
+	GOLDEN_FULL_DROP_CARRIER,
+	GOLDEN_FULL_DROP_OUTPUT,
+} from "./fpe-wire-golden";
 import { computePiPressure } from "./pi-pressure";
 import { measurePiTailHygiene } from "./tail-hygiene-walk-pi";
 import { createTestDb } from "./test-utils.test";
@@ -92,8 +96,11 @@ for (const native of [false, true]) {
 					: [],
 			);
 			const results = served.filter((m) => m.role === "toolResult");
-			expect(calls).toHaveLength(20);
-			expect(results).toHaveLength(20);
+			// Released pairs are never removed from the wire: all 25 survive,
+			// the first five in `full` shape (token carrier), the rest as
+			// `skeleton_real` with their real arguments.
+			expect(calls).toHaveLength(25);
+			expect(results).toHaveLength(25);
 			expect(calls.map((c) => ("id" in c ? c.id : undefined))).toEqual(
 				results.map((r) => ("toolCallId" in r ? r.toolCallId : undefined)),
 			);
@@ -160,18 +167,40 @@ for (const native of [false, true]) {
 							.filter((p) => p.type === "tool_result")
 							.map((p) => p.tool_use_id),
 					);
-			expect(wireCalls).toHaveLength(20);
+			expect(wireCalls).toHaveLength(25);
 			expect(wireResults).toEqual(wireCalls);
-			for (let i = 0; i < 5; i++) expect(wireBytes).not.toContain(`call_${i}"`);
 			const bytes = JSON.stringify(served);
-			for (let i = 0; i < 5; i++) expect(bytes).not.toContain(`call_${i}"`);
+			// The released-pair wire bytes (token carrier, `...` slot) are the
+			// shape canonical's pin; this layer pins them as golden fragments.
+			expect(wireBytes).toContain(GOLDEN_FULL_DROP_OUTPUT);
+			expect(bytes).toContain(GOLDEN_FULL_DROP_OUTPUT);
+			expect(bytes).toContain(GOLDEN_FULL_DROP_CARRIER);
+			// `skeleton_real`: the call keeps its real arguments.
+			for (let i = 5; i < 25; i++) {
+				const callPart = served[i * 2].content.find(
+					(p: unknown) => p.type === "toolCall",
+				);
+				expect(callPart.arguments).toEqual({ path: `original-${i}` });
+			}
 			if (native) {
+				// The raw Responses lane is preserved byte-for-byte even for
+				// `full` drops: the carrier lives in the Pi args, not in the
+				// provider payload items.
 				const items = served.flatMap((m) =>
 					"providerPayload" in m ? (m.providerPayload?.items ?? []) : [],
 				);
 				expect(
 					items.filter((i) => i.type === "function_call").map((i) => i.call_id),
-				).toEqual(Array.from({ length: 20 }, (_, i) => `call_${i + 5}`));
+				).toEqual(Array.from({ length: 25 }, (_, i) => `call_${i}`));
+				expect(
+					items
+						.filter((i) => i.type === "function_call")
+						.map((i) => i.arguments),
+				).toEqual(
+					Array.from({ length: 25 }, (_, i) =>
+						JSON.stringify({ path: `original-${i}` }),
+					),
+				);
 			}
 			expect(JSON.stringify(serve(true))).toBe(bytes);
 		} finally {
