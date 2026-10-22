@@ -9510,7 +9510,12 @@ describe("restore-only boot pass (rust-law port)", () => {
             {
                 const { messages } = freshWire();
                 const wire = JSON.stringify(messages.map((m) => m.parts));
-                expect(wire).toContain(bigCommand);
+                // Assembly drop law = the carrier: the materialized drop keeps the
+                // call structurally intact with a tokenized argument and collapsed
+                // output; skeleton-real args are lane-only bytes (Rev split).
+                expect(wire).not.toContain(bigCommand);
+                expect(wire).toContain('"callID":"cold-call-1"');
+                expect(wire).toContain('"output":"..."');
             }
 
             // Engaged: a later idle-expiry ride drains immediately.
@@ -9635,7 +9640,12 @@ describe("restore-only boot pass (rust-law port)", () => {
             {
                 const { messages } = freshWire();
                 const wire = JSON.stringify(messages.map((m) => m.parts));
-                expect(wire).toContain(bigCommand);
+                // Assembly drop law = the carrier: the materialized drop keeps the
+                // call structurally intact with a tokenized argument and collapsed
+                // output; skeleton-real args are lane-only bytes (Rev split).
+                expect(wire).not.toContain(bigCommand);
+                expect(wire).toContain('"callID":"cold-call-1"');
+                expect(wire).toContain('"output":"..."');
             }
         } finally {
             setRestoreOnlyBootPassEnabledForTests(false);
