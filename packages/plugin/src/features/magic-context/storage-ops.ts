@@ -140,7 +140,11 @@ export function purgeDormantSessionPendingOps(
     nowMs: number = Date.now(),
     dormantMs: number = DORMANT_SESSION_GC_MS,
 ): number {
-    const cutoffSeconds = Math.floor((nowMs - dormantMs) / 1000);
+    // `session_meta.last_response_time` is written in Date.now() milliseconds
+    // (see storage-meta-persisted.ts, `last_response_time || Date.now()`); the
+    // cutoff must stay in the writer's unit. A seconds cutoff here is silently
+    // inert: every ms value is above it.
+    const cutoffMs = nowMs - dormantMs;
     try {
         let statement = dormantGcStatements.get(db);
         if (!statement) {
