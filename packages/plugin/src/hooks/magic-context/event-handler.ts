@@ -37,6 +37,7 @@ import {
     getPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
 import { clearSession } from "../../features/magic-context/storage-meta-session";
+import { purgeIdleSubagentPendingOps } from "../../features/magic-context/storage-ops";
 import type { Tagger } from "../../features/magic-context/tagger";
 import {
     clearTransformDecisionSession,
@@ -1201,6 +1202,27 @@ export function createEventHandler(deps: EventHandlerDeps) {
             clearMessageTokensCache(sessionId);
             invalidateTrueRawTokenCache({ sessionId, reason: "session.compacted" });
             deps.onSessionCacheInvalidated?.(sessionId);
+            return;
+        }
+
+        if (input.event.type === "session.idle") {
+            // Discharge a finished child session's queued stamps. A subagent
+            // run that goes idle never gets another pass unless explicitly
+            // resumed, and any resume re-derives drop candidates from tag
+            // state — rows left in its queue at idle are unreachable from the
+            // moment the run ends (the accumulation reported upstream in
+            // cortexkit/magic-context#763). Top-level sessions idle after
+            // every turn and KEEP their backlog: that queue is owed work on a
+            // future lawful bust, so the predicate is child-only.
+            const sessionId = resolveSessionId(properties);
+            if (!sessionId) {
+                return;
+            }
+            try {
+                purgeIdleSubagentPendingOps(deps.db, sessionId);
+            } catch (error) {
+                sessionLog(sessionId, "event session.idle queue discharge failed:", error);
+            }
             return;
         }
 
