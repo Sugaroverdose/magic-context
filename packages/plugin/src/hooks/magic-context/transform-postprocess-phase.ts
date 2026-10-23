@@ -2076,6 +2076,14 @@ export async function runPostTransformPhase(
                 (args.historyRebuiltThisPass ||
                     args.rebuiltHistoryFromInitialPrepare ||
                     (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
+        // Upstream issue 619 backport (TS-only): a subagent has no historian and
+        // no history fold, so its execute pass is the shared ride for its queued
+        // drops. The extra conjunct upstream lacks: on a restore-only pass
+        // (usage unknown at entry) the ride is suppressed, so a restarted child
+        // never folds its stale queue at boot — the same law that holds the
+        // flush and idle-expiry rides until the wire is real.
+        subagentExecute:
+            !args.fullFeatureMode && args.schedulerDecision === "execute" && !restoreOnlyBootPass,
     };
     const publishedWorkDrainAllowed = !compactionOff && hasReclaimRide(rideSignals);
     const shouldApplyPendingOps = publishedWorkDrainAllowed;

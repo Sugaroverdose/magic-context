@@ -10548,3 +10548,82 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
         for (const m of stripped.slice(1)) expect(reasoningCount(m)).toBe(0);
     });
 });
+
+// Upstream issue 619 (fixed in 0.46.0, backported TS-only): subagents have no
+// historian or history fold, so their execute pass is the shared ride for
+// queued ctx_reduce drops. Ported with the boot-law conjunct the upstream
+// version lacks: on a restore-only pass (usage unknown at entry) the ride is
+// suppressed, so a restarted child never folds its stale queue at boot.
+describe("issue 619 subagent execute ride", () => {
+    for (const [name, fullFeatureMode, schedulerDecision, queued, applies] of [
+        ["subagent execute drains queued drops", false, "execute", true, true],
+        ["primary execute holds queued drops", true, "execute", true, false],
+        ["subagent defer holds queued drops", false, "defer", true, false],
+        ["subagent empty execute is byte-identical", false, "execute", false, false],
+    ] as const) {
+        it(`issue 619 ${name}`, async () => {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = `issue-619-${schedulerDecision}-${queued}-${fullFeatureMode}`;
+            getOrCreateSessionMeta(db, sessionId);
+            const message = makeToolMessage("issue-619-tool");
+            insertTag(
+                db,
+                sessionId,
+                "issue-619-call",
+                "tool",
+                1000,
+                1,
+                0,
+                "bash",
+                0,
+                message.info.id,
+            );
+            if (queued) padRecentToolSkeletonWindow(sessionId, 1);
+            const args = basePostTransformArgs(db, sessionId, [message], {
+                fullFeatureMode,
+                schedulerDecision: "defer",
+                schedulerDeferReason: undefined,
+                contextUsage: { percentage: 40, inputTokens: 40000 },
+                targets: new Map([[1, makeDropTarget(message)]]),
+                protectedTagIds: new Set(queued ? [] : [1]),
+            });
+            await runPostTransformPhase(args);
+            if (applies) {
+                const aged = makeToolMessage("issue-619-aged-tool");
+                insertTag(
+                    db,
+                    sessionId,
+                    "issue-619-aged-call",
+                    "tool",
+                    1000,
+                    22,
+                    0,
+                    "bash",
+                    0,
+                    aged.info.id,
+                );
+                args.messages.push(aged);
+                args.targets.set(22, makeDropTarget(aged));
+                // The queued drop and a distinct eligible age candidate must
+                // consume the same permission, not bust on successive passes.
+                args.sessionMeta.toolReclaimWatermark = 22;
+            }
+            const baseline = JSON.stringify(args.messages);
+            if (queued) queuePendingOp(db, sessionId, 1, "drop");
+            await runPostTransformPhase({ ...args, schedulerDecision });
+            expect(getPendingOps(db, sessionId)).toHaveLength(queued && !applies ? 1 : 0);
+            if (applies) {
+                expect(JSON.stringify(args.messages)).not.toBe(baseline);
+                expect(
+                    getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 22)?.status,
+                ).toBe("dropped");
+            } else expect(JSON.stringify(args.messages)).toBe(baseline);
+            const appliedBytes = JSON.stringify(args.messages);
+            for (let pass = 0; pass < 3; pass++) {
+                await runPostTransformPhase({ ...args, schedulerDecision });
+                expect(JSON.stringify(args.messages)).toBe(appliedBytes);
+            }
+        });
+    }
+});

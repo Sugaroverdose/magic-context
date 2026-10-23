@@ -118,4 +118,10 @@ describe("reclaimRideLabel", () => {
         expect(reclaimRideLabel(noRide)).toBe("ride=none");
         expect(hasReclaimRide(noRide)).toBe(false);
     });
+
+    it("names the subagent execute permission without inventing a primary ride", () => {
+        expect(hasReclaimRide({ ...noRide, subagentExecute: true })).toBe(true);
+        expect(reclaimRideLabel({ ...noRide, subagentExecute: true })).toBe("ride=subagentExecute");
+        expect(hasReclaimRide({ ...noRide, subagentExecute: false })).toBe(false);
+    });
 });
