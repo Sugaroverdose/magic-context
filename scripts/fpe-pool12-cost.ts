@@ -2,7 +2,9 @@ import { Database } from "bun:sqlite"
 import { deriveKey, renderDropToken } from "../packages/plugin/src/hooks/magic-context/fpe.ts"
 
 const db = new Database(`${process.env.HOME}/.local/share/cortexkit/magic-context/context.db`, { readonly: true })
-const key = deriveKey("ses_f8d5630e9ffe62EbC0BG9dkwZJ")
+const sessionId = process.argv[2]
+if (!sessionId) throw new Error("usage: fpe-pool12-cost.ts <session-id>")
+const key = deriveKey(sessionId)
 const tags = [1, 500, 2000, 19820]
 const renders = tags.map((t) => renderDropToken(t, key))
 for (const r of renders) console.log(`len=${r.length} chars`)
