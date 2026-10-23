@@ -129,7 +129,7 @@ const corpus = [
 	"import ünïcødé from 'unicodedata'",
 	"SELECT * FROM café_mart WHERE año = 2026",
 	"The model emitted 41 passed in 6.24s after the fix",
-	"curl -sS http://station.hq.pe:8080/v1/chat/completions",
+	"curl -sS http://localhost:8080/v1/chat/completions",
 	"bun test src/hooks/magic-context/fpe.test.ts",
 	"SELECT tag_number, status FROM tags WHERE session_id = 'ses_1' ORDER BY 1",
 	"sed -n '100,195p' fpe-resolve.ts",
