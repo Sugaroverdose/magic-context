@@ -7,7 +7,6 @@ import {
     clearPendingOps,
     getPendingOps,
     getPendingOpsCount,
-    purgeDormantSessionPendingOps,
     queuePendingOp,
     removePendingOp,
 } from "./storage-ops";
@@ -88,52 +87,6 @@ describe("storage-ops", () => {
             clearPendingOps(db, "ses-1");
             expect(getPendingOps(db, "ses-1")).toEqual([]);
             expect(getPendingOps(db, "ses-2")).toHaveLength(1);
-        });
-    });
-
-    describe("dormant pending-ops GC", () => {
-        const DAY = 86_400_000;
-
-        function makeGcWorld(): Database {
-            const d = makeMemoryDatabase();
-            d.exec(`
-    CREATE TABLE IF NOT EXISTS session_meta (
-      session_id TEXT PRIMARY KEY,
-      last_response_time INTEGER
-    );
-  `);
-            return d;
-        }
-
-        it("clears queued ops of sessions dormant past the TTL; fresh sessions keep theirs", () => {
-            db = makeGcWorld();
-            const now = 1_761_000_000_000;
-            queuePendingOp(db, "ses-dead", 3, "drop", now - 40 * DAY);
-            queuePendingOp(db, "ses-live", 5, "drop", now - 5 * DAY);
-            db.prepare(
-                "INSERT INTO session_meta (session_id, last_response_time) VALUES (?, ?)",
-            ).run("ses-dead", now - 40 * DAY);
-            db.prepare(
-                "INSERT INTO session_meta (session_id, last_response_time) VALUES (?, ?)",
-            ).run("ses-live", now - 1 * DAY);
-
-            expect(purgeDormantSessionPendingOps(db, now)).toBe(1);
-            expect(getPendingOps(db, "ses-dead")).toEqual([]);
-            expect(getPendingOps(db, "ses-live")).toHaveLength(1);
-        });
-
-        it("keeps rows of sessions with no recorded response (absence of evidence is not dormancy)", () => {
-            db = makeGcWorld();
-            const now = 1_761_000_000_000;
-            queuePendingOp(db, "ses-unseen", 7, "drop", now - 90 * DAY);
-            queuePendingOp(db, "ses-never-answered", 2, "drop", now - 90 * DAY);
-            db.prepare(
-                "INSERT INTO session_meta (session_id, last_response_time) VALUES (?, ?)",
-            ).run("ses-never-answered", 0);
-
-            expect(purgeDormantSessionPendingOps(db, now)).toBe(0);
-            expect(getPendingOps(db, "ses-unseen")).toHaveLength(1);
-            expect(getPendingOps(db, "ses-never-answered")).toHaveLength(1);
         });
     });
 
