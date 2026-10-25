@@ -14,6 +14,10 @@ import {
 import { updateSessionMeta } from "../features/magic-context/storage-meta-session";
 import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
 import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
+import {
+    applyEmptyAssistantWireGuard,
+    type GuardableMessage,
+} from "../hooks/magic-context/empty-wire-guard";
 import { replayLkg, resolveLkgModelKeys } from "../hooks/magic-context/lkg-replay";
 import { dropSlot, getSlot, noteEntry } from "../hooks/magic-context/lkg-slot";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
@@ -611,7 +615,27 @@ export function createMessagesTransformHandler(args: {
             const inputTailRole = wireTailRole(output.messages);
             enforcePersistedUserTerminatedTail(output.messages);
             try {
-                return await run(input, output);
+                const result = await run(input, output);
+                const targets =
+                    result === output.messages
+                        ? [output.messages as unknown as GuardableMessage[]]
+                        : [
+                              output.messages as unknown as GuardableMessage[],
+                              result as unknown as GuardableMessage[],
+                          ];
+                let removed = 0;
+                let stripped = 0;
+                for (const target of targets) {
+                    const guardStats = applyEmptyAssistantWireGuard(target);
+                    removed += guardStats.removedMessages;
+                    stripped += guardStats.strippedParts;
+                }
+                if (removed > 0 || stripped > 0) {
+                    log(
+                        `[magic-context] empty-assistant wire guard: removed ${removed} assistant(s), stripped ${stripped} part(s) (opencode-go 400 class)`,
+                    );
+                }
+                return result;
             } finally {
                 preserveUserTerminatedTail(output.messages, inputMessages);
                 reportAssistantTerminatedTail(

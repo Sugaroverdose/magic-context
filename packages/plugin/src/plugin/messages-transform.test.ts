@@ -183,6 +183,100 @@ describe("createMessagesTransformHandler — error boundary (issue #23)", () => 
     });
 });
 
+describe("createMessagesTransformHandler — empty assistant wire guard (opencode-go 400)", () => {
+    const ses = "ses_test";
+
+    it("strips a parts-bearing assistant the converter would render empty", async () => {
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {},
+            },
+        });
+        const output = makeOutput();
+        output.messages.push({
+            info: { id: "poison", role: "assistant", sessionID: ses },
+            parts: [{ type: "step-start" }, { type: "step-finish", cost: 0, tokens: {} }],
+        });
+        const served = await handler({}, output);
+        expect(served.map((m: any) => m.info.id)).toEqual(["m1"]);
+        expect(output.messages).toHaveLength(1);
+    });
+
+    it("keeps a zero-part pending shell (issue #327 continuation)", async () => {
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {},
+            },
+        });
+        const output = makeOutput();
+        output.messages.push({
+            info: { id: "shell", role: "assistant", sessionID: ses },
+            parts: [],
+        });
+        const served = await handler({}, output);
+        // The #327 tail law moves the user to the tail around an incomplete
+        // trailing assistant; the guard must not delete the shell itself.
+        expect(served.map((m: any) => m.info.id)).toEqual(["shell", "m1"]);
+    });
+
+    it("strips the empty first step block from a restored poison row (LKG-restore shape)", async () => {
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async (_input, out) => {
+                    // LKG restore replaces the array wholesale with persisted bytes.
+                    (out.messages as any[]).splice(
+                        1,
+                        0,
+                        {
+                            info: { id: "split", role: "assistant", sessionID: ses },
+                            parts: [
+                                { type: "step-start" },
+                                { type: "reasoning", text: "" },
+                                { type: "step-start" },
+                                { type: "reasoning", text: "thinking" },
+                                { type: "text", text: "real answer" },
+                                { type: "tool", callID: "bash_1", state: { status: "completed" } },
+                            ],
+                        },
+                        {
+                            info: { id: "tail-user", role: "user", sessionID: ses },
+                            parts: [{ type: "text", text: "next" }],
+                        },
+                    );
+                },
+            },
+        });
+        const served = await handler({}, makeOutput());
+        const split = served.find((m: any) => m.info.id === "split");
+        expect(split.parts.map((p: any) => p.type)).toEqual([
+            "step-start",
+            "reasoning",
+            "text",
+            "tool",
+        ]);
+    });
+
+    it("leaves a healthy array byte-identical", async () => {
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {},
+            },
+        });
+        const output = makeOutput();
+        output.messages.push({
+            info: { id: "healthy", role: "assistant", sessionID: ses },
+            parts: [
+                { type: "step-start" },
+                { type: "reasoning", text: "thinking" },
+                { type: "text", text: "answer" },
+            ],
+        });
+        const served = await handler({}, output);
+        expect(served).toHaveLength(2);
+        expect(served[1].parts).toHaveLength(3);
+    });
+});
+
 describe("createMessagesTransformHandler — fail-closed blocking (note #906)", () => {
     it("throws fence mismatch with both versions + recovery command on primary sessions", async () => {
         const failClosed = createFailClosedController();
