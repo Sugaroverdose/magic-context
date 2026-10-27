@@ -65,8 +65,17 @@ interface Report {
     stamped?: (number | string)[];
     noop?: Record<string, number[]>;
     held?: (number | string)[];
+    /** Stamps refused because they targeted ctx_reduce's own reports. */
+    refused?: { self_stamps: (number | string)[] };
     errors?: ReportError[];
     note?: string;
+}
+
+/** Upstream law: ctx_reduce's own outputs are housekeeping, cleaned automatically. */
+export function selfStampSentence(count: number): string {
+    return count === 1
+        ? "1 was a ctx_reduce call; leave those alone, they are cleaned up automatically."
+        : `${count} were ctx_reduce calls; leave those alone, they are cleaned up automatically.`;
 }
 
 function serialize(report: Report): string {
@@ -167,6 +176,7 @@ export function renderPointingSuccess(
     entries: readonly string[],
     outcomes: readonly ReduceInputOutcome[],
     mint: OrdinalMint,
+    selfStampedTagNumbers?: ReadonlySet<number>,
 ): string {
     const ordinalOf = (messageId: string): number | undefined =>
         ordinalForRegistryKey(mint, messageId);
@@ -174,8 +184,12 @@ export function renderPointingSuccess(
     const flat = outcomes.flatMap((outcome) =>
         outcome.kind === "range" ? outcome.items : [outcome],
     );
+    const isSelfStamp = (tagNumber: number): boolean =>
+        selfStampedTagNumbers?.has(tagNumber) ?? false;
     const fresh = flat.filter(
-        (outcome) => outcome.kind === "released" || outcome.kind === "deferred",
+        (outcome) =>
+            (outcome.kind === "released" || outcome.kind === "deferred") &&
+            !isSelfStamp(outcome.tagNumber),
     ).length;
 
     const rangeSlot = (outcome: Extract<ReduceInputOutcome, { kind: "range" }>) =>
@@ -185,6 +199,7 @@ export function renderPointingSuccess(
 
     const stamped: (number | string)[] = [];
     const held: (number | string)[] = [];
+    const refusedSelf: (number | string)[] = [];
     const noop: Record<string, number[]> = {};
     const errors: ReportError[] = [];
 
@@ -200,12 +215,14 @@ export function renderPointingSuccess(
         switch (outcome.kind) {
             case "released": {
                 const ordinal = ordinalOf(outcome.messageId);
-                if (typeof ordinal === "number") pushUnique(stamped, ordinal);
+                if (typeof ordinal === "number")
+                    pushUnique(isSelfStamp(outcome.tagNumber) ? refusedSelf : stamped, ordinal);
                 break;
             }
             case "deferred": {
                 const ordinal = ordinalOf(outcome.messageId);
-                if (typeof ordinal === "number") pushUnique(held, ordinal);
+                if (typeof ordinal === "number")
+                    pushUnique(isSelfStamp(outcome.tagNumber) ? refusedSelf : held, ordinal);
                 break;
             }
             case "noop": {
@@ -214,6 +231,25 @@ export function renderPointingSuccess(
                 break;
             }
             case "range": {
+                const actionable = outcome.items.filter(
+                    (item) =>
+                        (item.kind === "released" || item.kind === "deferred") &&
+                        !isSelfStamp(item.tagNumber),
+                );
+                const selfOnly =
+                    outcome.items.every(
+                        (item) =>
+                            item.kind === "noop" ||
+                            ("tagNumber" in item && isSelfStamp(item.tagNumber)),
+                    ) &&
+                    outcome.items.some(
+                        (item) => "tagNumber" in item && isSelfStamp(item.tagNumber),
+                    );
+                if (selfOnly) {
+                    pushUnique(refusedSelf, rangeSlot(outcome));
+                    break;
+                }
+                if (actionable.length === 0) break;
                 const hasDeferred = outcome.items.some((item) => item.kind === "deferred");
                 pushUnique(hasDeferred ? held : stamped, rangeSlot(outcome));
                 // Noop facts nested inside a stretch report as class entries.
@@ -246,10 +282,15 @@ export function renderPointingSuccess(
     if (Object.keys(noop).length > 0) report.noop = noop;
     if (held.length > 0) report.held = held;
     if (errors.length > 0) report.errors = groupErrors(errors);
-    if (fresh === 0) {
-        report.note =
-            "All requested tags were already queued or processed. No new action is needed.";
+    const notes: string[] = [];
+    if (refusedSelf.length > 0) {
+        report.refused = { self_stamps: refusedSelf };
+        notes.push(selfStampSentence(refusedSelf.length));
     }
+    if (fresh === 0) {
+        notes.push("All requested tags were already queued or processed. No new action is needed.");
+    }
+    if (notes.length > 0) report.note = notes.join(" ");
     return serialize(report);
 }
 
@@ -260,6 +301,7 @@ export function renderBulkSuccess(
     inertItems: readonly { messageId: string }[],
     protectedCount: number,
     mint: OrdinalMint,
+    selfStampedCount = 0,
 ): string {
     const distinct = (items: readonly { messageId: string }[]): number[] => [
         ...new Set(
@@ -274,12 +316,15 @@ export function renderBulkSuccess(
     if (!deduped && stamped.length > 0) report.stamped = stamped;
     const inert = distinct(inertItems);
     if (inert.length > 0) report.noop = { inert };
+    const notes: string[] = [];
     if (deduped) {
-        report.note =
-            "All requested tags were already queued or processed. No new action is needed.";
+        notes.push("All requested tags were already queued or processed. No new action is needed.");
     } else if (protectedCount > 0) {
-        report.note =
-            "Newer items are inside the protected working set; they apply once your work displaces them.";
+        notes.push(
+            "Newer items are inside the protected working set; they apply once your work displaces them.",
+        );
     }
+    if (selfStampedCount > 0) notes.push(selfStampSentence(selfStampedCount));
+    if (notes.length > 0) report.note = notes.join(" ");
     return serialize(report);
 }

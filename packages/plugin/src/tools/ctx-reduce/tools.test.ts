@@ -74,17 +74,24 @@ function createTestDb(): Database {
 
 function seedTags(
     db: Database,
-    tags: Array<{ id: number; sessionId: string; status?: string; type?: string }>,
+    tags: Array<{
+        id: number;
+        sessionId: string;
+        status?: string;
+        type?: string;
+        toolName?: string;
+    }>,
 ) {
     for (const [index, tag] of tags.entries()) {
         const rowId = 10_000 + tag.id + index;
         db.prepare(
-            "INSERT INTO tags (id, message_id, type, status, byte_size, session_id, tag_number) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tags (id, message_id, type, status, tool_name, byte_size, session_id, tag_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
             rowId,
             `msg-${tag.id}`,
             tag.type ?? "message",
             tag.status ?? "active",
+            tag.toolName ?? null,
             100,
             tag.sessionId,
             tag.id,
@@ -187,6 +194,32 @@ describe("createCtxReduceTools", () => {
                 expect.objectContaining({ tag_id: 4, operation: "drop" }),
                 expect.objectContaining({ tag_id: 5, operation: "drop" }),
             ]);
+        });
+
+        it("refuses stamps on ctx_reduce's own reports and stamps the siblings", async () => {
+            seedTags(db, [
+                { id: 3, sessionId: "ses-1" },
+                { id: 4, sessionId: "ses-1", toolName: "ctx_reduce" },
+                { id: 5, sessionId: "ses-1", toolName: "CTX_REDUCE" },
+            ]);
+
+            const result = await tools.ctx_reduce.execute({ drop: "3-5" }, toolContext());
+
+            expect(result).toContain("Queued: drop §3§");
+            expect(result).toContain("2 were ctx_reduce calls; leave those alone");
+            expect(getPendingOps(db, "ses-1")).toEqual([
+                expect.objectContaining({ tag_id: 3, operation: "drop" }),
+            ]);
+        });
+
+        it("reports an all-self-stamp request as refused without queueing", async () => {
+            seedTags(db, [{ id: 4, sessionId: "ses-1", toolName: "ctx_reduce" }]);
+
+            const result = await tools.ctx_reduce.execute({ drop: "4" }, toolContext());
+
+            expect(result).toContain("1 was a ctx_reduce call");
+            expect(result).not.toContain("Queued");
+            expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         });
 
         it("resets the rolling nudge anchor to the current token count", async () => {

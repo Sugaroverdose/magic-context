@@ -19,10 +19,12 @@ import {
     renderBulkSuccess,
     renderPointingError,
     renderPointingSuccess,
+    selfStampSentence,
 } from "../../features/magic-context/reduce-response";
 import {
     getOrCreateSessionMeta,
     getPendingOps,
+    getTagsByNumbers,
     getTagsBySession,
     queuePendingOp,
     updateSessionMeta,
@@ -160,15 +162,26 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
     const applyReleasedTags = async (
         invokeContext: { sessionID: string; directory: string },
         tagNumbers: readonly number[],
-    ): Promise<{ refused?: string; deduped: boolean }> => {
+    ): Promise<{ refused?: string; deduped: boolean; selfStamped: Set<number> }> => {
         const sessionId = invokeContext.sessionID;
+        // Self-stamp refusal: ctx_reduce's own reports are housekeeping —
+        // keep-count exemplars plus the aged strip clean them automatically.
+        // Stamping one only burns a slot and hides the trail of what was
+        // already released. Never reaches a backend.
+        const numbers = [...new Set(tagNumbers)];
+        const selfStamped = new Set(
+            getTagsByNumbers(deps.db, sessionId, numbers)
+                .filter((tag) => tag.toolName?.toLowerCase() === "ctx_reduce")
+                .map((tag) => tag.tagNumber),
+        );
+        const queueable = numbers.filter((n) => !selfStamped.has(n));
         const rustReduce = deps.rustToolBackends?.reduce;
         if (rustReduce) {
             try {
                 const response = await rustReduce({
                     sessionId,
                     projectRoot: invokeContext.directory,
-                    drop: tagNumbers.join(","),
+                    drop: queueable.join(","),
                     commandId: commandIdForInvocation(sessionId, invokeContext),
                 });
                 const value =
@@ -180,20 +193,29 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                         ? (value as Record<string, unknown>)
                         : null;
                 if (record === null || record.ok !== true) {
-                    return { refused: renderCapabilityRefusal("context_cleanup"), deduped: false };
+                    return {
+                        refused: renderCapabilityRefusal("context_cleanup"),
+                        deduped: false,
+                        selfStamped,
+                    };
                 }
                 return {
                     deduped: typeof record.queued === "number" && record.queued === 0,
+                    selfStamped,
                 };
             } catch {
-                return { refused: renderCapabilityRefusal("context_cleanup"), deduped: false };
+                return {
+                    refused: renderCapabilityRefusal("context_cleanup"),
+                    deduped: false,
+                    selfStamped,
+                };
             }
         }
         try {
             const now = Date.now();
             deps.db
                 .transaction(() => {
-                    for (const tagNumber of tagNumbers) {
+                    for (const tagNumber of queueable) {
                         queuePendingOp(deps.db, sessionId, tagNumber, "drop", now);
                     }
                 })
@@ -202,9 +224,10 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             return {
                 refused: `Error: Failed to queue ctx_reduce operations. ${getErrorMessage(error)}`,
                 deduped: false,
+                selfStamped,
             };
         }
-        return { deduped: false };
+        return { deduped: false, selfStamped };
     };
 
     const distinctOrdinals = (items: readonly HandleItemRef[], mint: OrdinalMint): number[] => [
@@ -255,6 +278,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             result.inertItems,
             result.protectedItems.length,
             mint,
+            apply.selfStamped.size,
         );
     };
 
@@ -314,16 +338,18 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             }
         }
 
+        let selfStampedToReport: ReadonlySet<number> | undefined;
         if (result.queueTagNumbers.length > 0) {
             const apply = await applyReleasedTags(invokeContext, result.queueTagNumbers);
             if (apply.refused) {
                 return apply.refused;
             }
+            if (apply.selfStamped.size > 0) selfStampedToReport = apply.selfStamped;
             if (apply.deduped) {
                 // Module-side dedupe beat the registry read: those inputs are
                 // already released; report, do not claim a fresh release.
                 const remap = (outcome: ReduceInputOutcome): ReduceInputOutcome =>
-                    outcome.kind === "released"
+                    outcome.kind === "released" && !apply.selfStamped.has(outcome.tagNumber)
                         ? {
                               kind: "noop",
                               reason: "released",
@@ -340,7 +366,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             touchNudgeWatermark(sessionId);
         }
 
-        return renderPointingSuccess(handles, result.outcomes, mint);
+        return renderPointingSuccess(handles, result.outcomes, mint, selfStampedToReport);
     };
 
     return tool({
@@ -440,6 +466,23 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 return `Error: Unknown tag(s) ${formatIds(unknownIds)}. Check available tags in conversation.`;
             }
 
+            // Self-stamp refusal: ctx_reduce's own reports are housekeeping,
+            // cleaned automatically (keep-count exemplars + aged strip).
+            const ctxReduceSelfStampIds = new Set(
+                allTags
+                    .filter((tag) => tag.toolName?.toLowerCase() === "ctx_reduce")
+                    .map((tag) => tag.tagNumber),
+            );
+            const ctxReduceSelfStampCount = new Set(
+                dropIds.filter((id) => ctxReduceSelfStampIds.has(id)),
+            ).size;
+            dropIds = dropIds.filter((id) => !ctxReduceSelfStampIds.has(id));
+            const selfStampNote =
+                ctxReduceSelfStampCount > 0 ? ` ${selfStampSentence(ctxReduceSelfStampCount)}` : "";
+            if (dropIds.length === 0 && ctxReduceSelfStampCount > 0) {
+                return selfStampSentence(ctxReduceSelfStampCount);
+            }
+
             // Form: protectedSet (tag-number set form). Coordinate space: tag-number space.
             // Empty-window behavior: empty set means zero tool tags are protected by the window;
             // non-tool tags never become reclaim targets.
@@ -499,6 +542,7 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 return [
                     inertNote,
                     "All requested tags were already queued or processed. No new action is needed.",
+                    ctxReduceSelfStampCount > 0 ? selfStampSentence(ctxReduceSelfStampCount) : "",
                 ]
                     .filter(Boolean)
                     .join(" ");
@@ -538,15 +582,15 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
             }
 
             if (immediateDropIds.length > 0 && heldSentence.length > 0) {
-                return `Queued: drop ${formatIds(immediateDropIds)}.${skippedNote}${inertNote ? ` ${inertNote}` : ""} ${heldSentence}`;
+                return `Queued: drop ${formatIds(immediateDropIds)}.${skippedNote}${inertNote ? ` ${inertNote}` : ""} ${heldSentence}${selfStampNote}`;
             }
             if (immediateDropIds.length > 0) {
-                return `Queued: drop ${formatIds(immediateDropIds)}.${skippedNote}${inertNote ? ` ${inertNote}` : ""}`;
+                return `Queued: drop ${formatIds(immediateDropIds)}.${skippedNote}${inertNote ? ` ${inertNote}` : ""}${selfStampNote}`;
             }
             if (heldSentence.length > 0) {
-                return `${heldSentence}${skippedNote}${inertNote ? ` ${inertNote}` : ""}`;
+                return `${heldSentence}${skippedNote}${inertNote ? ` ${inertNote}` : ""}${selfStampNote}`;
             }
-            return `Queued: drop ${formatIds(dropIds)}.${skippedNote}${inertNote ? ` ${inertNote}` : ""}`;
+            return `Queued: drop ${formatIds(dropIds)}.${skippedNote}${inertNote ? ` ${inertNote}` : ""}${selfStampNote}`;
         },
     });
 }

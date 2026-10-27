@@ -108,6 +108,7 @@ interface SeedTag {
     status?: string;
     tagType?: "message" | "tool";
     tokens?: number | null;
+    toolName?: string;
 }
 
 interface SeedMessage {
@@ -121,12 +122,13 @@ interface SeedMessage {
 function seedTags(db: Database, tags: SeedTag[]) {
     for (const tag of tags) {
         db.prepare(
-            "INSERT INTO tags (message_id, type, status, tool_owner_message_id, byte_size, token_count, session_id, tag_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO tags (message_id, type, status, tool_owner_message_id, tool_name, byte_size, token_count, session_id, tag_number) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         ).run(
             tag.messageId,
             tag.tagType ?? "tool",
             tag.status ?? "active",
             tag.owner ?? null,
+            tag.toolName ?? null,
             100,
             tag.tokens ?? null,
             tag.sessionId,
@@ -215,6 +217,7 @@ type ToolRow = {
     status?: string;
     tokens?: number | null;
     session?: string;
+    toolName?: string;
 };
 /** Rows spec + DI boundaries for the parameterized production-key world. */
 type WorldSpec = {
@@ -289,6 +292,7 @@ function buildWorld(spec: WorldSpec): {
             sessionId: t.session ?? "ses-1",
             status: t.status,
             tokens: t.tokens,
+            toolName: t.toolName,
         })),
     ]);
     for (const tagId of spec.prequeued ?? []) {
@@ -1423,7 +1427,11 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
         ],
         [
             "cyrillic collision (SCADA geometry), exact bytes — stamps the survivor",
-            { ctx_handles: ["SCADA-\u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u042d\u041d\u0422\u0415\u041a"] },
+            {
+                ctx_handles: [
+                    "SCADA-\u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u042d\u041d\u0422\u0415\u041a",
+                ],
+            },
             {
                 messages: [
                     {
@@ -1432,7 +1440,8 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
                         role: "user",
                         tag: 97,
                         part: 0,
-                        content: "SCADA-\u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u042d\u041d\u0422\u0415\u041a \u0432 \u043b\u0435\u0432\u043e\u0439 \u043a\u043e\u043b\u043e\u043d\u043a\u0435",
+                        content:
+                            "SCADA-\u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u042d\u041d\u0422\u0415\u041a \u0432 \u043b\u0435\u0432\u043e\u0439 \u043a\u043e\u043b\u043e\u043d\u043a\u0435",
                     },
                     {
                         id: "g-cyrtwin",
@@ -1440,7 +1449,8 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
                         role: "assistant",
                         tag: 98,
                         part: 0,
-                        content: "SCADA \u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u042d\u041d\u0422\u0415\u0412 \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u044b",
+                        content:
+                            "SCADA \u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u042d\u041d\u0422\u0415\u0412 \u043e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u044b",
                     },
                 ],
             },
@@ -1510,10 +1520,7 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
         [
             "S-4 interaction: ghost entry in a batch with a resolvable phrase — sibling stamps, ghost is a null slot",
             {
-                ctx_handles: [
-                    "the test failed on nightly run",
-                    "===== u90 =====",
-                ],
+                ctx_handles: ["the test failed on nightly run", "===== u90 ====="],
             },
             {
                 messages: [
@@ -1549,6 +1556,44 @@ describe("ctx_reduce phrase lane S-2 (substring verify)", () => {
                 expect(report.stamped).toEqual([315]);
                 expect(report.errors[0].class).toBe("not-found");
                 expect(pendingTagNumbers(db, "ses-1")).toEqual([85]);
+            },
+        ],
+    ]);
+});
+
+describe("ctx_reduce self-stamp refusal", () => {
+    // Stamping ctx_reduce's own report is refused at the shared apply choke:
+    // the reports are housekeeping (keep-count exemplars + aged strip).
+    const SELF_SEED: WorldSpec = {
+        tools: [
+            { tag: 5, callId: "call-a", owner: "msg-5" },
+            { tag: 7, callId: "call-red", owner: "msg-7", toolName: "ctx_reduce" },
+        ],
+        mintExtra: { "msg-5": 5, "msg-7": 7 },
+    };
+    runTable(SELF_SEED, [
+        [
+            "refuses a stamp on the tool's own report: nothing queued, slot reported as refused",
+            { ctx_handles: ["call-red"] },
+            {},
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.stamped).toBeUndefined();
+                expect(report.refused?.self_stamps).toEqual([7]);
+                expect(report.ctx_handles).toEqual([7]);
+                expect(report.note).toContain("ctx_reduce call");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            },
+        ],
+        [
+            "stamps siblings and refuses only the self-stamp",
+            { ctx_handles: ["call-a", "call-red"] },
+            {},
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.stamped).toEqual([5]);
+                expect(report.refused?.self_stamps).toEqual([7]);
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([5]);
             },
         ],
     ]);
