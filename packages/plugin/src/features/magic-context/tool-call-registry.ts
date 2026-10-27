@@ -6,9 +6,13 @@ export interface CallIdTagRow {
     status: string;
     type: string;
     /**
-     * The call id names more than one visible occurrence (a provider reused
-     * the id and both rows are still on the wire). The pointing lane reports
-     * this as `ambiguous` instead of picking an instance by preference.
+     * The row names more than one visible occurrence of this id. Not
+     * observed on this install (census 2026-10-27: 0 duplicate (session,
+     * call-id) pairs across 55,512 opencode tool tags; Pi's 152 duplicate
+     * pairs are same-call re-mints and resolve through the Pi resolver's
+     * live-preference path). Kept as defensive law: a loose OpenAI-compatible
+     * serve that mints turn-local ids would otherwise resolve silently to the
+     * wrong occurrence.
      */
     ambiguous?: boolean;
 }
