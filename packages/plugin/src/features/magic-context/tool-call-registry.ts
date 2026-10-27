@@ -5,6 +5,12 @@ export interface CallIdTagRow {
     message_id: string;
     status: string;
     type: string;
+    /**
+     * The call id names more than one visible occurrence (a provider reused
+     * the id and both rows are still on the wire). The pointing lane reports
+     * this as `ambiguous` instead of picking an instance by preference.
+     */
+    ambiguous?: boolean;
 }
 
 export interface CallIdTagResolver {
@@ -18,9 +24,10 @@ export interface CallIdTagResolver {
 /**
  * Wire call id -> registry tag: tool rows key themselves by the wire call id
  * in `message_id` (`idx_tags_session_message_id`), so the pairing is one
- * indexed equality per id — no host-store access. The ORDER BY prefers the
- * live instance when a call id was reused across turns (the composite-
- * identity hazard) — the model points at what it can see.
+ * indexed equality per id — no host-store access. A call id reused across
+ * turns is never resolved by preference: with more than one occurrence still
+ * visible (not `compacted`) the row is flagged `ambiguous` and the pointing
+ * lane refuses; a closed (compacted) twin leaves the visible one resolved.
  */
 export function createRegistryCallIdResolver(db: Database, sessionId: string): CallIdTagResolver {
     return {
@@ -31,12 +38,21 @@ export function createRegistryCallIdResolver(db: Database, sessionId: string): C
                    FROM tags
                   WHERE session_id = ? AND message_id = ? AND type = 'tool'
                   ORDER BY CASE status WHEN 'active' THEN 0 ELSE 1 END, tag_number DESC
-                  LIMIT 1`,
+                  LIMIT 2`,
             );
             for (const callId of callIds) {
                 if (map.has(callId)) continue;
-                const row = statement.get(sessionId, callId) as CallIdTagRow | null | undefined;
-                map.set(callId, row ?? undefined);
+                const rows = statement.all(sessionId, callId) as CallIdTagRow[];
+                if (rows.length === 0) {
+                    map.set(callId, undefined);
+                    continue;
+                }
+                const visible = rows.filter((row) => row.status !== "compacted");
+                if (visible.length > 1) {
+                    map.set(callId, { ...visible[0], ambiguous: true });
+                    continue;
+                }
+                map.set(callId, visible[0] ?? rows[0]);
             }
             return map;
         },

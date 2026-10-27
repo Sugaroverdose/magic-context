@@ -7,7 +7,6 @@ import {
 } from "../../features/magic-context/protection-window";
 import { parseRangeString } from "../../features/magic-context/range-parser";
 import {
-    type HandleItemRef,
     type OrdinalMint,
     ordinalForRegistryKey,
     type ReduceInputOutcome,
@@ -230,15 +229,6 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         return { deduped: false, selfStamped };
     };
 
-    const distinctOrdinals = (items: readonly HandleItemRef[], mint: OrdinalMint): number[] => [
-        ...new Set(
-            items.flatMap((item) => {
-                const ordinal = ordinalForRegistryKey(mint, item.messageId);
-                return typeof ordinal === "number" ? [ordinal] : [];
-            }),
-        ),
-    ];
-
     /** No-arg default: release everything already responded past. */
     const executeBulkRelease = async (invokeContext: {
         sessionID: string;
@@ -287,9 +277,10 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
         rawHandles: string[],
     ): Promise<string> => {
         const sessionId = invokeContext.sessionID;
-        const handles = rawHandles
-            .map((handle) => handle.trim())
-            .filter((handle) => handle.length > 0);
+        // Slot parity (review 2026-10-27): every sent entry keeps its slot in
+        // the report — empty/blank entries are not filtered out, they resolve
+        // to their own zero-token error. The mirror answers slot for slot.
+        const handles = rawHandles.map((handle) => handle.trim());
         if (handles.length === 0) {
             return "Error: 'ctx_handles' must contain entries.";
         }
