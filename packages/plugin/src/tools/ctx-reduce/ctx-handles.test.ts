@@ -1598,3 +1598,89 @@ describe("ctx_reduce self-stamp refusal", () => {
         ],
     ]);
 });
+
+describe("ctx_reduce pointing bundle (review 2026-10-27)", () => {
+    // 1) call-id reuse: >1 visible occurrence never resolves by guessing;
+    // 2) a phrase naming a multi-tag message gets its own honest class;
+    // 3) the report answers slot for slot — empty entries keep their slot.
+    const REUSE_SEED: WorldSpec = {
+        tools: [
+            { tag: 7, callId: "call-reuse", owner: "msg-7", status: "active" },
+            { tag: 9, callId: "call-reuse", owner: "msg-9", status: "dropped" },
+            { tag: 11, callId: "call-reuse-2", owner: "msg-11", status: "active" },
+            { tag: 13, callId: "call-reuse-2", owner: "msg-13", status: "compacted" },
+            { tag: 21, callId: "call-ok", owner: "msg-21" },
+        ],
+        mintExtra: { "msg-7": 7, "msg-9": 9, "msg-11": 11, "msg-13": 13, "msg-21": 21 },
+    };
+    runTable(REUSE_SEED, [
+        [
+            "a reused call id with two visible occurrences is ambiguous, never resolved by preference",
+            { ctx_handles: ["call-reuse"] },
+            {},
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.stamped).toBeUndefined();
+                expect(report.errors?.[0]?.class).toBe("ambiguous");
+                expect(report.errors?.[0]?.entries).toEqual(["call-reuse"]);
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            },
+        ],
+        [
+            "a reused call id whose other occurrence is compacted resolves to the visible one",
+            { ctx_handles: ["call-reuse-2"] },
+            {},
+            (response, db) => {
+                const report = JSON.parse(response);
+                // The echo ordinal for a reused id is itself ambiguous (the
+                // mint's id->owner map carries one entry per id); the law
+                // rides the queue: the ACTIVE occurrence was stamped.
+                expect(report.stamped?.length).toBe(1);
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([11]);
+            },
+        ],
+        [
+            "an empty entry keeps its slot: the batch answers slot for slot",
+            { ctx_handles: ["", "call-ok"] },
+            {},
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.stamped).toEqual([21]);
+                expect(report.ctx_handles).toEqual([null, 21]);
+                expect(report.errors?.[0]?.note).toContain("no searchable text");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([21]);
+            },
+        ],
+    ]);
+    const DUP_SEED: WorldSpec = {
+        messages: [
+            {
+                id: "msg-dup",
+                ordinal: 3,
+                role: "assistant",
+                content: "deploy the widget factory tonight",
+                tag: 40,
+            },
+            {
+                id: "msg-dup",
+                ordinal: 3,
+                role: "assistant",
+                content: "deploy the widget factory tonight",
+                tag: 41,
+            },
+        ],
+    };
+    runTable(DUP_SEED, [
+        [
+            "a phrase whose message is carried as two tag rows reports shape-not-addressable, not not-found",
+            { ctx_handles: ["deploy the widget factory tonight"] },
+            {},
+            (response, db) => {
+                const report = JSON.parse(response);
+                expect(report.errors?.[0]?.class).toBe("shape-not-addressable");
+                expect(report.errors?.[0]?.note).toContain("call id");
+                expect(pendingTagNumbers(db, "ses-1")).toEqual([]);
+            },
+        ],
+    ]);
+});

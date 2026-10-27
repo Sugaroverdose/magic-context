@@ -116,7 +116,7 @@ export type ReduceInputOutcome =
     /** Broken entry: the whole batch is rejected, nothing is enqueued. */
     | {
           kind: "error";
-          reason: "ambiguous" | "not-found";
+          reason: "ambiguous" | "not-found" | "shape-not-addressable";
           input: string;
           candidates?: SampleCandidate[];
           /** Set when the failure happened inside a range entry. */
@@ -127,6 +127,12 @@ export type ReduceInputOutcome =
            * names the shape so the caller re-points by prose or call id.
            */
           zeroToken?: true;
+          /**
+           * Ambiguity raised on the call-id lane (provider id reuse): the
+           * entry is atomic, so the phrase-lane correction ("copy a longer
+           * run") cannot apply — the report teaches re-pointing by prose.
+           */
+          fromCallId?: true;
       };
 
 export interface ReduceResolveResult {
@@ -353,6 +359,7 @@ function resolvePhrase(
         source: SampleRow[],
         live: LiveRow[],
         dead: { tagNumber: number }[],
+        unaddressed: LiveRow[],
     ): void => {
         const seen = new Set<string>();
         for (const row of source) {
@@ -372,7 +379,18 @@ function resolvePhrase(
                     tag.status === "dropped" ||
                     registry.pendingTags.has(tag.tag_number),
             );
-            if (!rowTag || tags.length !== 1) continue;
+            if (!rowTag) continue;
+            if (tags.length !== 1) {
+                // A message the registry carries as more than one call: no
+                // phrase can pin a single one of them, and the not-found
+                // correction ("copy a longer run") can never work here —
+                // named as its own class instead of silence (review 2026-10-27).
+                unaddressed.push({
+                    tagNumber: rowTag.tag_number,
+                    candidate: { messageId: row.message_id, excerpt: row.excerpt },
+                });
+                continue;
+            }
             if (rowTag.status === "active" && !registry.pendingTags.has(rowTag.tag_number)) {
                 live.push({
                     tagNumber: rowTag.tag_number,
@@ -386,7 +404,8 @@ function resolvePhrase(
 
     const live: LiveRow[] = [];
     const dead: { tagNumber: number }[] = [];
-    joinRows(rows, live, dead);
+    const unaddressed: LiveRow[] = [];
+    joinRows(rows, live, dead, unaddressed);
 
     if (live.length === 1) {
         // Unique skeleton hit: stamp, byte-verify NEVER runs. The absorbed
@@ -413,12 +432,16 @@ function resolvePhrase(
             }));
         const survivors: LiveRow[] = [];
         const deadSurvivors: { tagNumber: number }[] = [];
-        joinRows(survivorRows, survivors, deadSurvivors);
+        const unaddressedSurvivors: LiveRow[] = [];
+        joinRows(survivorRows, survivors, deadSurvivors, unaddressedSurvivors);
         if (survivors.length === 1) {
             return { outcome: classifyRegistryTag(deps, registry, survivors[0].tagNumber) };
         }
         if (survivors.length === 0) {
             // Ghosts (skeleton twins without the bytes) are not named.
+            if (deadSurvivors.length === 0 && unaddressedSurvivors.length === 1) {
+                return { outcome: { kind: "error", reason: "shape-not-addressable", input: text } };
+            }
             return { outcome: { kind: "error", reason: "not-found", input: text } };
         }
         return {
@@ -438,6 +461,9 @@ function resolvePhrase(
     const diagnostic = dead.find((entry) => registry.statusByTag.has(entry.tagNumber));
     if (diagnostic) {
         return { outcome: classifyRegistryTag(deps, registry, diagnostic.tagNumber) };
+    }
+    if (dead.length === 0 && unaddressed.length === 1) {
+        return { outcome: { kind: "error", reason: "shape-not-addressable", input: text } };
     }
     return { outcome: { kind: "error", reason: "not-found", input: text } };
 }
@@ -514,6 +540,10 @@ export function resolveHandles(
         | { tagNumber: number; messageId: string }
         | { error: Extract<ReduceInputOutcome, { kind: "error" }> } => {
         const direct = deps.callIdResolver.resolve([text]).get(text);
+        if (direct?.ambiguous)
+            return {
+                error: { kind: "error", reason: "ambiguous", input: text, fromCallId: true },
+            };
         if (direct) return { tagNumber: direct.tag_number, messageId: direct.message_id };
         const phrase = resolvePhrase(deps, registry, statements, text).outcome;
         if (phrase.kind === "error") return { error: phrase };
@@ -525,11 +555,29 @@ export function resolveHandles(
     for (const entry of entries) {
         const direct = tagsById.get(entry);
         if (direct) {
+            if (direct.ambiguous) {
+                // Provider id reuse: both occurrences are visible, no
+                // instance may be picked by preference (review 2026-10-27).
+                collect({
+                    kind: "error",
+                    reason: "ambiguous",
+                    input: entry,
+                    fromCallId: true,
+                });
+                continue;
+            }
             collect(classifyRegistryTag(deps, registry, direct.tag_number));
             continue;
         }
         const phrase = resolvePhrase(deps, registry, statements, entry).outcome;
-        if (phrase.kind !== "error" || phrase.reason === "ambiguous") {
+        if (
+            phrase.kind !== "error" ||
+            phrase.reason === "ambiguous" ||
+            phrase.reason === "shape-not-addressable"
+        ) {
+            // Terminal classes: ambiguity and the multi-tag shape are truths
+            // about THIS entry — a range retry would re-report them as
+            // not-found, whose correction can never work.
             collect(phrase);
             continue;
         }

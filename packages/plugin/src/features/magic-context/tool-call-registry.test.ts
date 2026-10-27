@@ -1,9 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Database } from "../../shared/sqlite";
-import {
-    createRegistryCallIdResolver,
-    enrichReclaimHintsWithCallIds,
-} from "./tool-call-registry";
+import { createRegistryCallIdResolver, enrichReclaimHintsWithCallIds } from "./tool-call-registry";
 
 const SESSION = "ses_registry";
 
@@ -48,13 +45,23 @@ describe("registry call-id resolver", () => {
         expect(map.get("call_a")?.tag_number).toBe(1);
     });
 
-    it("prefers the live instance when a call id was reused", () => {
+    it("flags a reused call id with two visible occurrences instead of preferring", () => {
         const db = world();
         db.prepare(
             "INSERT INTO tags (session_id, message_id, type, status, tag_number) VALUES (?, ?, ?, ?, ?)",
         ).run(SESSION, "call_b", "tool", "active", 9);
-        const map = createRegistryCallIdResolver(db, SESSION).resolve(["call_b"]);
-        expect(map.get("call_b")?.tag_number).toBe(9);
+        const row = createRegistryCallIdResolver(db, SESSION).resolve(["call_b"]).get("call_b");
+        expect(row?.ambiguous).toBe(true);
+    });
+
+    it("resolves the visible occurrence when the reused twin is compacted", () => {
+        const db = world();
+        db.prepare(
+            "INSERT INTO tags (session_id, message_id, type, status, tag_number) VALUES (?, ?, ?, ?, ?)",
+        ).run(SESSION, "call_b", "tool", "compacted", 9);
+        const row = createRegistryCallIdResolver(db, SESSION).resolve(["call_b"]).get("call_b");
+        expect(row?.ambiguous).toBeUndefined();
+        expect(row?.tag_number).toBe(2);
     });
 });
 

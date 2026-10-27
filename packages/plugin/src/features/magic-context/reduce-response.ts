@@ -19,7 +19,7 @@ import {
  *   "stamped":[N|"a-b",...],
  *    "noop":{"queued":[N],"released":[N],"compacted":[N],"inert":[N]},
  *    "held":[N|"a-b",...],
- *    "errors":[{"class":"not-found"|"ambiguous"|"range-endpoint"|"mint-unavailable",
+ *    "errors":[{"class":"not-found"|"ambiguous"|"range-endpoint"|"mint-unavailable"|"shape-not-addressable",
  *               "entries":[E,...],"note":T}],
  *    //  Rev 6.1: errors are grouped by (class + byte-identical note), in
  *    //  first-appearance order; the teaching note rides exactly once per
@@ -55,7 +55,12 @@ export const MINT_UNAVAILABLE = JSON.stringify({
 });
 
 interface ReportError {
-    class: "not-found" | "ambiguous" | "range-endpoint" | "mint-unavailable";
+    class:
+        | "not-found"
+        | "ambiguous"
+        | "range-endpoint"
+        | "mint-unavailable"
+        | "shape-not-addressable";
     entries: string[];
     note: string;
 }
@@ -104,6 +109,18 @@ function reportErrorFor(
     closer: string,
 ): ReportError {
     if (outcome.reason === "ambiguous") {
+        if (outcome.fromCallId) {
+            // Call-id lane: the entry is atomic — "copy a longer run" is a
+            // correction that cannot exist. Teach the lane that can work.
+            return {
+                class: "ambiguous",
+                entries: [echoInput(outcome.input)],
+                note: [
+                    "This call id appears twice: it was re-used and both calls are still in your context.",
+                    `Name the one you mean with a phrase from it instead of the id. ${closer}`,
+                ].join(" "),
+            };
+        }
         return {
             class: "ambiguous",
             entries: [echoInput(outcome.input)],
@@ -116,6 +133,16 @@ function reportErrorFor(
             ]
                 .filter((part) => part && part.length > 0)
                 .join(" "),
+        };
+    }
+    if (outcome.reason === "shape-not-addressable") {
+        return {
+            class: "shape-not-addressable",
+            entries: [echoInput(outcome.input)],
+            note: [
+                "That text names a message carried as more than one call: no phrase pins a single one.",
+                `Point with the call id of the call you mean. ${closer}`,
+            ].join(" "),
         };
     }
     return {
