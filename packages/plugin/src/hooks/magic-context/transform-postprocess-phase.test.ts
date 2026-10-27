@@ -9510,12 +9510,12 @@ describe("restore-only boot pass (rust-law port)", () => {
             {
                 const { messages } = freshWire();
                 const wire = JSON.stringify(messages.map((m) => m.parts));
-                // Assembly drop law = the carrier: the materialized drop keeps the
-                // call structurally intact with a tokenized argument and collapsed
-                // output; skeleton-real args are lane-only bytes (Rev split).
+                // Assembly drop law is source-gated: a model stamp releases the
+                // call entirely (no token, no args) — the queuePendingOp backlog
+                // drained here is the stamp class, so the call leaves the wire
+                // outright. The carrier remains the automatic bash shape.
                 expect(wire).not.toContain(bigCommand);
-                expect(wire).toContain('"callID":"cold-call-1"');
-                expect(wire).toContain('"output":"..."');
+                expect(wire).not.toContain('"callID":"cold-call-1"');
             }
 
             // Engaged: a later idle-expiry ride drains immediately.
@@ -9640,12 +9640,12 @@ describe("restore-only boot pass (rust-law port)", () => {
             {
                 const { messages } = freshWire();
                 const wire = JSON.stringify(messages.map((m) => m.parts));
-                // Assembly drop law = the carrier: the materialized drop keeps the
-                // call structurally intact with a tokenized argument and collapsed
-                // output; skeleton-real args are lane-only bytes (Rev split).
+                // Assembly drop law is source-gated: a model stamp releases the
+                // call entirely (no token, no args) — the queuePendingOp backlog
+                // drained here is the stamp class, so the call leaves the wire
+                // outright. The carrier remains the automatic bash shape.
                 expect(wire).not.toContain(bigCommand);
-                expect(wire).toContain('"callID":"cold-call-1"');
-                expect(wire).toContain('"output":"..."');
+                expect(wire).not.toContain('"callID":"cold-call-1"');
             }
         } finally {
             setRestoreOnlyBootPassEnabledForTests(false);
