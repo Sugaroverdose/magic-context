@@ -47,13 +47,19 @@ function freshDb() {
     return openDatabase();
 }
 
-function toolTurn(id: string, callId: string, input: unknown, output: string): MessageLike {
+function toolTurn(
+    id: string,
+    callId: string,
+    input: unknown,
+    output: string,
+    tool = "write",
+): MessageLike {
     return {
         info: { id, role: "assistant", sessionID: "ses-1" },
         parts: [
             {
                 type: "tool",
-                tool: "write",
+                tool,
                 callID: callId,
                 state: { status: "completed", input, output },
             },
@@ -94,13 +100,16 @@ describe("real-or-absent drops inside the newest-call window", () => {
         const db = freshDb();
         const tagger = createTagger();
         const messages: MessageLike[] = [
-            toolTurn("m-call", "call-1", input, "the output"),
+            toolTurn("m-call", "call-1", input, "the output", "bash"),
             ...(endsRequest ? [] : [userTurn("m-next", "next prompt")]),
         ];
         const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
         const tag = tagger.getToolTag("ses-1", "call-1", "m-call")!;
-        queuePendingOp(db, "ses-1", tag, "drop");
-        applyPendingOperations("ses-1", db, targets, new Set());
+        // Sweeper source: these rows pin the automatic real-or-absent tiers
+        // (model stamps erase; see apply-operations.source-modes.test.ts).
+        applyPendingOperations("ses-1", db, targets, new Set(), undefined, undefined, [
+            { id: 0, sessionId: "ses-1", tagId: tag, operation: "drop", queuedAt: 0 },
+        ]);
         batch.finalize();
         return { db, tag, messages };
     }
@@ -144,22 +153,32 @@ describe("real-or-absent drops inside the newest-call window", () => {
         const largeInput = { content: "c".repeat(3000) };
         const build = (withNewer: boolean): MessageLike[] => [
             userTurn("m-u1", "start"),
-            toolTurn("m-small", "call-small", smallInput, "listing"),
-            toolTurn("m-mid", "call-mid", { content: "m".repeat(2000) }, "mid output"),
-            toolTurn("m-large", "call-large", largeInput, "large output"),
+            toolTurn("m-small", "call-small", smallInput, "listing", "bash"),
+            toolTurn("m-mid", "call-mid", { content: "m".repeat(2000) }, "mid output", "bash"),
+            toolTurn("m-large", "call-large", largeInput, "large output", "bash"),
             ...(withNewer ? [userTurn("m-u2", "a newer message")] : []),
         ];
         const tagger = createTagger();
         const passA = build(false);
         const tagged = tagMessages("ses-1", passA, tagger, db);
-        for (const [callId, owner] of [
-            ["call-small", "m-small"],
-            ["call-mid", "m-mid"],
-            ["call-large", "m-large"],
-        ] as const) {
-            queuePendingOp(db, "ses-1", tagger.getToolTag("ses-1", callId, owner)!, "drop");
-        }
-        expect(applyPendingOperations("ses-1", db, tagged.targets, new Set())).toBe(true);
+        const syntheticOps = (
+            [
+                ["call-small", "m-small"],
+                ["call-mid", "m-mid"],
+                ["call-large", "m-large"],
+            ] as const
+        ).map(([callId, owner], i) => ({
+            id: i,
+            sessionId: "ses-1",
+            tagId: tagger.getToolTag("ses-1", callId, owner)!,
+            operation: "drop" as const,
+            queuedAt: 0,
+        }));
+        expect(
+            applyPendingOperations("ses-1", db, tagged.targets, new Set(), undefined, undefined, [
+                ...syntheticOps,
+            ]),
+        ).toBe(true);
         tagged.batch.finalize();
         // Rule 1 (small, real args), rule 2 (large, full carrier) and rule 3
         // (large, ends the request, real args).

@@ -73,6 +73,7 @@ export interface ModuleWorkspacePayload {
 
 export type ModuleDropMode =
     | "full"
+    | "erased"
     | "truncated"
     | "skeleton_real"
     | "skeleton_stripped"

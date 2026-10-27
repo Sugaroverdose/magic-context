@@ -1491,6 +1491,9 @@ interface RunPostTransformPhaseArgs {
     didMutateFromFlushedStatuses: boolean;
     watermark: number;
     forceMaterializationPercentage: number;
+    /** Config execute band; the sweeper stops at threshold − 15pp below it.
+     * Absent (test hosts / hosts that predate the law) = unbudgeted sweep. */
+    executeThresholdPercentage?: number;
     hasRecentReduceCall: boolean;
     projectPath?: string;
     sessionDirectory?: string;
@@ -2576,12 +2579,24 @@ export async function runPostTransformPhase(
         let autoReclaimTargetCount = 0;
         let autoReclaimDidMutate = false;
         if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
+            const usableForBudget =
+                args.contextUsage.percentage > 0
+                    ? (args.contextUsage.inputTokens * 100) / args.contextUsage.percentage
+                    : 0;
             const syntheticPendingOps = buildSyntheticToolReclaimOps({
                 db: args.db,
                 sessionId: args.sessionId,
                 targets: args.targets,
                 watermark: args.sessionMeta.toolReclaimWatermark ?? 0,
                 pendingOps,
+                budget:
+                    usableForBudget > 0 && args.executeThresholdPercentage !== undefined
+                        ? {
+                              currentUsagePercentage: args.contextUsage.percentage,
+                              executeThresholdPercentage: args.executeThresholdPercentage,
+                              usableContextTokens: usableForBudget,
+                          }
+                        : undefined,
             });
             // Smart-drops: reclaim spent control-plane outputs that a later
             // call supersedes (older todowrite/ctx_reduce/meta), and compress
@@ -2655,7 +2670,9 @@ export async function runPostTransformPhase(
         // Advance whenever reclaim could have applied, even if no tags were
         // selected. Plain execute-band residency does not advance the watermark;
         // otherwise each newly eligible tag could drop separately instead of
-        // waiting for the next independently priced batch.
+        // waiting for the next independently priced batch. The stop-line budget
+        // gates SELECTION independently: an overdue tag still only drops while
+        // the projected usage sits above the stop line.
         if (toolReclaimApplicationOpportunity) {
             const maxTagNumber = advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
             args.sessionMeta.toolReclaimWatermark = Math.max(

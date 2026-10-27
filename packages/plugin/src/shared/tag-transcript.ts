@@ -1267,6 +1267,26 @@ function buildAggregateTarget(
             }
             return any ? "removed" : "absent";
         },
+        erase(): "removed" | "truncated" | "absent" | "incomplete" {
+            // Erase (stamp-only): both halves leave the wire. Same guards as
+            // drop(); anything that cannot be structurally removed falls back
+            // to the real-argument skeleton instead of breaking pairing.
+            if (!complete()) return "incomplete";
+            const authorization = occurrences.map((occ) => occ.part.canRemove?.());
+            if (authorization.includes("defer")) return "incomplete";
+            if (
+                !requiresToolArcSkeleton &&
+                occurrences.every((occ, index) => occ.part.remove && authorization[index] !== false)
+            ) {
+                if (conversationEnd?.wouldStrand(occurrences)) return skeletonReal();
+                let any = false;
+                for (const occ of occurrences) {
+                    if (occ.part.remove?.()) any = true;
+                }
+                return any ? "removed" : "absent";
+            }
+            return skeletonReal();
+        },
         truncate,
         skeletonReal,
         cannotRemove,

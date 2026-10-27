@@ -152,7 +152,8 @@ describe("FPE released-input lookup (registry spine)", () => {
             CREATE TABLE tags (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT, message_id TEXT, type TEXT, status TEXT,
-                tag_number INTEGER, tool_owner_message_id TEXT
+                tag_number INTEGER, tool_owner_message_id TEXT,
+                drop_mode TEXT DEFAULT 'full'
             );
         `);
         const insertTag = mc.prepare(

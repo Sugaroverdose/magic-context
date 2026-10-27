@@ -21,6 +21,7 @@ export interface TagEntry {
      */
     dropMode:
         | "full"
+        | "erased"
         | "truncated"
         | "skeleton_real"
         | "skeleton_stripped"

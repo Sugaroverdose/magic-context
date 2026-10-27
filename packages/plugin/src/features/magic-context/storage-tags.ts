@@ -837,8 +837,10 @@ function toTagEntry(row: TagRow): TagEntry {
         type,
         status,
         dropMode:
-            row.drop_mode === "truncated"
-                ? "truncated"
+            row.drop_mode === "erased"
+                ? "erased"
+                : row.drop_mode === "truncated"
+                  ? "truncated"
                 : row.drop_mode === "skeleton_real"
                   ? "skeleton_real"
                   : row.drop_mode === "skeleton_stripped"

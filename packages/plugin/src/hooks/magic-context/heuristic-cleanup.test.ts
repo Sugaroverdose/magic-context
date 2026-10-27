@@ -102,6 +102,20 @@ function makeTarget(message: { parts: unknown[] }): TagTarget {
             }
             return "absent" as const;
         },
+        // Mirrors the real target's skeleton capability: output replaced,
+        // arguments stay on the wire.
+        skeletonReal: () => {
+            const toolPart = message.parts.find((p: any) => p.type === "tool") as any;
+            if (!toolPart) return "absent" as const;
+            toolPart.state = { ...toolPart.state, output: "[dropped]" };
+            return "removed" as const;
+        },
+        skeletonStripped: () => {
+            const toolPart = message.parts.find((p: any) => p.type === "tool") as any;
+            if (!toolPart) return "absent" as const;
+            toolPart.state = { ...toolPart.state, output: "[dropped]" };
+            return "removed" as const;
+        },
         // Mirrors the real target: droppable iff there's a tool part present
         // (drop() would return "removed"). The emergency planner filters on this.
         canDrop: () => message.parts.some((p: any) => p.type === "tool"),

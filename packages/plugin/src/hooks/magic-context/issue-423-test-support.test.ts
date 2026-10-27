@@ -127,11 +127,23 @@ export function registerIssue423Tests(
                         ? ["call-12", "call-13", "call-14", "call-15"]
                         : ["call-12", "call-13", "call-14"],
                 );
+                // The automatic tier keeps the carrier surface to bash alone:
+                // bash drops are recoverable carriers, everything else is a
+                // skeleton whose arguments stay on the wire.
                 expect(
                     tools
                         .filter((tag) => tag.status === "dropped")
-                        .every((tag) => tag.dropMode === "full"),
+                        .every((tag) =>
+                            tag.toolName === "bash"
+                                ? tag.dropMode === "full"
+                                : tag.dropMode === "skeleton_real",
+                        ),
                 ).toBe(true);
+                expect(
+                    tools.filter(
+                        (tag) => tag.status === "dropped" && tag.toolName === "bash",
+                    ).length,
+                ).toBeGreaterThan(0);
             } finally {
                 closeQuietly(db);
             }
