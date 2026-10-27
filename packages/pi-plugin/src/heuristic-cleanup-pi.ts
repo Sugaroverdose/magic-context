@@ -531,9 +531,7 @@ export function applyPiHeuristicCleanup(
 				if (strippedSource.trim().length === 0) {
 					const dropResult = target.drop?.() ?? "absent";
 					const didReplace =
-						dropResult === "absent"
-							? target.setContent("...")
-							: false;
+						dropResult === "absent" ? target.setContent("...") : false;
 					if (dropResult === "removed" || dropResult === "absent") {
 						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
 						if (dropResult === "removed" || didReplace) {
