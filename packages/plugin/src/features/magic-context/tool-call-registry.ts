@@ -6,13 +6,16 @@ export interface CallIdTagRow {
     status: string;
     type: string;
     /**
-     * The row names more than one visible occurrence of this id. Not
-     * observed on this install (census 2026-10-27: 0 duplicate (session,
-     * call-id) pairs across 55,512 opencode tool tags; Pi's 152 duplicate
-     * pairs are same-call re-mints and resolve through the Pi resolver's
-     * live-preference path). Kept as defensive law: a loose OpenAI-compatible
-     * serve that mints turn-local ids would otherwise resolve silently to the
-     * wrong occurrence.
+     * The row names more than one visible occurrence of this id.
+     * Class-targeted insurance against server/harness-minted turn-local
+     * index ids — kimi-native `functions.{name}:{idx}` / `read:N` serves
+     * (opencode #54588, open + reproduced) and the historical Gemini adapter
+     * counter (opencode #43940, fixed upstream 2026-10-20). Unobserved on
+     * this install: census 2026-10-27 found 0 duplicate (session, call-id)
+     * pairs across 55,512 opencode tool tags, issuer-random shapes only
+     * (`call_`/`toolu_`/`chatcmpl-tool-` + hex); the only duplicates in the
+     * store are same-call re-mints in the two ruled-out pi-desktop test
+     * sessions. See docs/research/fpe-source-gated-drop-modes.md.
      */
     ambiguous?: boolean;
 }
