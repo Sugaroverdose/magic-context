@@ -11,10 +11,10 @@ import type { PendingOp, TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
+import { TOOL_RELEASED_SENTINEL } from "./sentinel";
 import type { TagTarget } from "./tag-messages";
 import type { ToolDropResult } from "./tool-drop-target";
 import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
-import { TOOL_RELEASED_SENTINEL } from "./sentinel";
 
 // Max characters kept from the original user content when a user-message tag
 // is dropped. ~250 characters maps to ~50 Claude tokens (1 token ≈ 4-5 chars
@@ -70,7 +70,7 @@ export function buildReplacementContent(_tagId: number): string {
 export interface NewToolDropOutcome {
     result: ToolDropResult;
     /** The drop mode to persist so every later pass replays the same bytes. */
-    mode: "skeleton_real" | "skeleton_stripped" | "full";
+    mode: "skeleton_real" | "skeleton_stripped" | "full" | "erased";
 }
 
 /**
@@ -78,7 +78,10 @@ export interface NewToolDropOutcome {
  * the mode to persist:
  *  1. inside the newest-call window with a small input: keep the call with its
  *     real arguments, output -> `[dropped §N§]` (`skeleton_real`);
- *  2. otherwise remove the call and its result (`full`);
+ *  2. otherwise the source decides: a model stamp erases the call and its
+ *     result (`erased`); the sweeper takes the bash-only carrier (`full`),
+ *     and every other sweeper tool keeps real arguments with the output gone
+ *     (`skeleton_real` / `skeleton_stripped`);
  *  3. except when the call cannot be removed: its result ends the request
  *     (drop() then keeps it, see ToolMutationBatch.wouldStrandConversationEnd),
  *     the host adapter cannot remove it structurally, or the caller requires a
@@ -87,7 +90,17 @@ export interface NewToolDropOutcome {
  */
 export function applyNewToolDrop(
     target: TagTarget | undefined,
-    options: { inWindow: boolean; keepSkeleton?: boolean },
+    options: {
+        inWindow: boolean;
+        keepSkeleton?: boolean;
+        /** Who asked for this drop. `stamp` = the model's own ctx_reduce
+         * intent (erases the call); `sweeper` = the automatic reclaim
+         * (carrier only for bash, skeleton for everything else).
+         * Omitted = legacy shape decision (no source gate). */
+        source?: "stamp" | "sweeper";
+        /** Registry tool name of the target, required for the sweeper gate. */
+        toolName?: string | null;
+    },
 ): NewToolDropOutcome {
     if (!target) return { result: "absent", mode: "full" };
     if (
@@ -95,6 +108,34 @@ export function applyNewToolDrop(
         options.keepSkeleton === true ||
         target.cannotRemove?.() === true
     ) {
+        const strip = target.hasAttachments?.() === true;
+        return {
+            result: (strip ? target.skeletonStripped?.() : target.skeletonReal?.()) ?? "absent",
+            mode: strip ? "skeleton_stripped" : "skeleton_real",
+        };
+    }
+    if (options.source === "stamp") {
+        // The model asked for this one by handle: it is gone from the wire
+        // entirely. Only the structural guards (request end, arc pairing,
+        // adapter capability) can keep it, as a readable skeleton.
+        if (target.erase) {
+            const eraseResult = target.erase();
+            if (eraseResult === "removed") return { result: "removed", mode: "erased" };
+            if (eraseResult === "truncated") return { result: "truncated", mode: "skeleton_real" };
+            return { result: eraseResult, mode: "full" };
+        }
+        // Host adapter without an erase capability (Pi pre-port, test stubs):
+        // the stamp still means removal — take the structural drop, which is
+        // upstream's removal semantics for a model stamp.
+        const dropResult = target.drop?.() ?? "absent";
+        if (dropResult === "removed") return { result: "removed", mode: "full" };
+        if (dropResult === "truncated") return { result: "truncated", mode: "skeleton_real" };
+        return { result: dropResult, mode: "full" };
+    }
+    if (options.source === "sweeper" && options.toolName !== "bash") {
+        // Automatic reclaim keeps the carrier surface to bash alone; every
+        // other tool leaves real arguments on the wire and only its output
+        // goes, with no token to imitate.
         const strip = target.hasAttachments?.() === true;
         return {
             result: (strip ? target.skeletonStripped?.() : target.skeletonReal?.()) ?? "absent",
@@ -347,6 +388,11 @@ export function applyPendingOperations(
                     .sort((left, right) => right - left)
                     .slice(0, RECENT_TOOL_SKELETON_WINDOW),
             );
+            const toolNameById = new Map(
+                tags
+                    .filter((tag) => tag.type === "tool")
+                    .map((tag) => [tag.tagNumber, tag.toolName] as const),
+            );
 
             for (const { op: pendingOp, synthetic } of opsToApply) {
                 let operationMutated = false;
@@ -413,6 +459,8 @@ export function applyPendingOperations(
                         // applied so replays match this pass.
                         const { result: dropResult, mode: appliedMode } = applyNewToolDrop(target, {
                             inWindow: skeletonWindow.has(pendingOp.tagId),
+                            source: synthetic ? "sweeper" : "stamp",
+                            toolName: toolNameById.get(pendingOp.tagId),
                         });
                         if (
                             dropResult === "incomplete" ||
@@ -426,7 +474,10 @@ export function applyPendingOperations(
                             operationMutated = true;
                             onTagReduced?.({
                                 tagNumber: pendingOp.tagId,
-                                mode: appliedMode === "full" ? "full" : "truncated",
+                                mode:
+                                    appliedMode === "full" || appliedMode === "erased"
+                                        ? "full"
+                                        : "truncated",
                             });
                         } else {
                             reject(`drop_${dropResult}`);
@@ -533,6 +584,14 @@ export function applyFlushedStatuses(
                 } else if (tag.dropMode === "skeleton_real") {
                     const result = target?.skeletonReal?.() ?? "absent";
                     if (result === "truncated") {
+                        didMutateMessage = true;
+                    }
+                } else if (tag.dropMode === "erased") {
+                    // Stamped calls leave the wire on every pass: the host store
+                    // keeps the real bytes, so the pair is removed again each time
+                    // it is rebuilt. Guards inside erase() match the apply pass.
+                    const eraseResult = target?.erase?.() ?? "absent";
+                    if (eraseResult === "removed" || eraseResult === "truncated") {
                         didMutateMessage = true;
                     }
                 } else if (tag.dropMode === "truncated") {

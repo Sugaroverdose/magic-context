@@ -195,6 +195,8 @@ export function applyHeuristicCleanup(
                     const { result, mode } = applyNewToolDrop(target, {
                         inWindow: recent,
                         keepSkeleton: target?.requiresToolArcSkeleton === true,
+                        source: "sweeper",
+                        toolName: tag.toolName,
                     });
                     if (result === "removed" || result === "truncated") {
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
@@ -336,7 +338,11 @@ export function applyHeuristicCleanup(
                     // Deduplication remains a full drop; only the emergency newest-window
                     // arm preserves skeleton bytes. A call that cannot be removed keeps
                     // its real arguments.
-                    const { result, mode } = applyNewToolDrop(target, { inWindow: false });
+                    const { result, mode } = applyNewToolDrop(target, {
+                        inWindow: false,
+                        source: "sweeper",
+                        toolName: tag.toolName,
+                    });
                     if (result === "incomplete") continue;
                     updateTagDropMode(db, sessionId, tag.tagNumber, mode);
                     updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
@@ -344,7 +350,12 @@ export function applyHeuristicCleanup(
                         deduplicatedTools++;
                         droppedTokenReductions.push({
                             tagNumber: tag.tagNumber,
-                            mode: result === "removed" ? "full" : "truncated",
+                            mode:
+                                result === "truncated"
+                                    ? "truncated"
+                                    : mode === "full"
+                                      ? "full"
+                                      : "skeleton",
                         });
                     }
                 }

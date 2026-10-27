@@ -37,11 +37,29 @@ function partToolInput(part: Record<string, unknown>): unknown | undefined {
  * transforms, so stored parts keep their real input. No schema, no writes.
  * An unresolvable tag yields undefined and the token stays as it is.
  */
+/**
+ * The accept surface of a carrier token: only tags that ever RENDERED a token
+ * may resolve one — dropped tags in the carrier shapes (`full`, and the
+ * legacy `truncated` which normalizes to it). Erased and skeleton tags never
+ * minted a token, so a token-shaped argument pointing at one is by
+ * construction not something the model copied from the wire.
+ */
+export function isReleasedCarrier(db: Database, sessionId: string, tagNumber: number): boolean {
+    return (
+        db
+            .prepare(
+                "SELECT 1 AS ok FROM tags WHERE session_id = ? AND tag_number = ? AND type = 'tool' AND status = 'dropped' AND drop_mode IN ('full', 'truncated')",
+            )
+            .get(sessionId, tagNumber) != null
+    );
+}
+
 export function lookupReleasedToolInput(
     db: Database,
     sessionId: string,
     tagNumber: number,
 ): unknown | undefined {
+    if (!isReleasedCarrier(db, sessionId, tagNumber)) return undefined;
     const tag = db
         .prepare(
             "SELECT message_id, tool_owner_message_id FROM tags WHERE session_id = ? AND tag_number = ? AND type = 'tool'",

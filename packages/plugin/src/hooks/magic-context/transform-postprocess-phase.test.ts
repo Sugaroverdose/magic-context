@@ -6058,12 +6058,12 @@ describe("final message representation", () => {
                 sessionMeta: getOrCreateSessionMeta(db, sessionId),
             }),
         );
-        // The tool row survives on its released skeleton (pinned as a golden
-        // fragment), so the two assistant runs never merge into one and no
-        // adjacency strip is triggered.
+        // Stamp erasure: both halves of the call leave the wire. The empty
+        // host message still sits between the two assistant runs, so they
+        // never merge into one and no adjacency strip is triggered.
         const dropOnly = foldMessages.find((message) => message.info.id === "drop-only");
         expect(dropOnly).toBeDefined();
-        expect(JSON.stringify(dropOnly?.parts)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+        expect(JSON.stringify(dropOnly?.parts)).toBe("[]");
         expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
             "dropped",
         );

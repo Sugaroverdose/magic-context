@@ -470,6 +470,7 @@ export function createToolDropTarget(
 ): {
     setContent: (content: string) => boolean;
     drop: () => ToolDropResult;
+    erase: () => ToolDropResult;
     truncate: () => ToolDropResult;
     skeletonReal: () => ToolDropResult;
     editMarker: () => ToolDropResult;
@@ -514,6 +515,23 @@ export function createToolDropTarget(
         // these bytes (the token recomputes identically from tag id + key).
         for (const occurrence of entry.occurrences) {
             clampCloneInPlace(occurrence, (part) => fullToolPart(part, tagId, sessionKey));
+        }
+        clearThinkingParts(thinkingParts);
+        index.delete(compositeKey);
+        return "removed";
+    };
+
+    const erase = (): ToolDropResult => {
+        const entry = index.get(compositeKey);
+        if (!entry || entry.occurrences.length === 0) return "absent";
+        if (!entry.hasResult) return "incomplete";
+        // Same structural guard as drop(): a call whose removal would end the
+        // request on an assistant turn keeps its real arguments + placeholder.
+        if (batch.wouldStrandConversationEnd(entry.occurrences)) return skeletonReal();
+        for (const occurrence of entry.occurrences) {
+            const served = (occurrence.served ?? occurrence.part) as never;
+            const at = occurrence.message.parts.indexOf(served);
+            if (at >= 0) occurrence.message.parts.splice(at, 1);
         }
         clearThinkingParts(thinkingParts);
         index.delete(compositeKey);
@@ -638,6 +656,7 @@ export function createToolDropTarget(
             return changed;
         },
         drop,
+        erase,
         truncate,
         skeletonReal,
         skeletonStripped,

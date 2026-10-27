@@ -96,11 +96,12 @@ for (const native of [false, true]) {
 					: [],
 			);
 			const results = served.filter((m) => m.role === "toolResult");
-			// Released pairs are never removed from the wire: all 25 survive,
-			// the first five in `full` shape (token carrier), the rest as
-			// `skeleton_real` with their real arguments.
-			expect(calls).toHaveLength(25);
-			expect(results).toHaveLength(25);
+			// Stamp erasure: the five out-of-window stamps leave the wire
+			// entirely (no token, no args); the twenty newest-call stamps
+			// keep their readable skeleton (window precedence), with their
+			// real arguments.
+			expect(calls).toHaveLength(20);
+			expect(results).toHaveLength(20);
 			expect(calls.map((c) => ("id" in c ? c.id : undefined))).toEqual(
 				results.map((r) => ("toolCallId" in r ? r.toolCallId : undefined)),
 			);
@@ -167,38 +168,46 @@ for (const native of [false, true]) {
 							.filter((p) => p.type === "tool_result")
 							.map((p) => p.tool_use_id),
 					);
-			expect(wireCalls).toHaveLength(25);
+			expect(wireCalls).toHaveLength(20);
 			expect(wireResults).toEqual(wireCalls);
 			const bytes = JSON.stringify(served);
-			// The released-pair wire bytes (token carrier, `...` slot) are the
-			// shape canonical's pin; this layer pins them as golden fragments.
+			// The skeleton `...` slot is the shape canonical's pin; stamped
+			// erasures carry no bytes at all — the five erased pairs are
+			// absent entirely (no token, no arguments, no result).
 			expect(wireBytes).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			expect(bytes).toContain(GOLDEN_FULL_DROP_OUTPUT);
-			expect(bytes).toContain(GOLDEN_FULL_DROP_CARRIER);
+			expect(bytes).not.toContain("original-0");
+			expect(bytes).not.toContain("call_0");
 			// `skeleton_real`: the call keeps its real arguments.
 			for (let i = 5; i < 25; i++) {
-				const callPart = served[i * 2].content.find(
-					(p: unknown) => p.type === "toolCall",
-				);
-				expect(callPart.arguments).toEqual({ path: `original-${i}` });
+				const callPart = served
+					.flatMap((m) => (m.role === "assistant" ? m.content : []))
+					.find(
+						(p: unknown) =>
+							p.type === "toolCall" &&
+							"id" in p &&
+							String((p as { id?: string }).id).startsWith(`call_${i}|`) ||
+								(p as { id?: string }).id === `call_${i}`,
+					);
+				expect(callPart?.arguments).toEqual({ path: `original-${i}` });
 			}
 			if (native) {
-				// The raw Responses lane is preserved byte-for-byte even for
-				// `full` drops: the carrier lives in the Pi args, not in the
-				// provider payload items.
+				// The raw Responses lane mirrors the erase: an erased stamp
+				// leaves no function_call item behind; skeletons keep their
+				// original arguments there byte-for-byte.
 				const items = served.flatMap((m) =>
 					"providerPayload" in m ? (m.providerPayload?.items ?? []) : [],
 				);
 				expect(
 					items.filter((i) => i.type === "function_call").map((i) => i.call_id),
-				).toEqual(Array.from({ length: 25 }, (_, i) => `call_${i}`));
+				).toEqual(Array.from({ length: 20 }, (_, i) => `call_${i + 5}`));
 				expect(
 					items
 						.filter((i) => i.type === "function_call")
 						.map((i) => i.arguments),
 				).toEqual(
-					Array.from({ length: 25 }, (_, i) =>
-						JSON.stringify({ path: `original-${i}` }),
+					Array.from({ length: 20 }, (_, i) =>
+						JSON.stringify({ path: `original-${i + 5}` }),
 					),
 				);
 			}

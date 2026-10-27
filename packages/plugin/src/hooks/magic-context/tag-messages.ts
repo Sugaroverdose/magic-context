@@ -286,6 +286,10 @@ export type TagTarget = {
      */
     textPrefix?: string;
     drop?: () => ToolDropResult;
+    /** Erase (stamp-only shape): both halves leave the wire entirely.
+     * Structural guards match drop(); a call that cannot be removed falls
+     * back to the real-argument skeleton. (`drop_mode = 'erased'`) */
+    erase?: () => ToolDropResult;
     /** Legacy skeleton: arguments replaced by the `{"dropped": …}` marker.
      * Replay-only, for `drop_mode = 'truncated'` tags not yet converted. */
     truncate?: () => ToolDropResult;

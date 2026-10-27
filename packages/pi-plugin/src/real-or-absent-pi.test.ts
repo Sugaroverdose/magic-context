@@ -4,7 +4,6 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import {
 	getTagsBySession,
-	queuePendingOp,
 } from "@magic-context/core/features/magic-context/storage";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
@@ -28,12 +27,12 @@ const SESSION = "ses-real-or-absent";
 const call = (id: string, args: Record<string, unknown>) => ({
 	role: "assistant",
 	timestamp: 1,
-	content: [{ type: "toolCall", id, name: "write", arguments: args }],
+	content: [{ type: "toolCall", id, name: "bash", arguments: args }],
 });
 const result = (id: string, text: string) => ({
 	role: "toolResult",
 	toolCallId: id,
-	toolName: "write",
+	toolName: "bash",
 	content: [{ type: "text", text }],
 	timestamp: 2,
 });
@@ -57,9 +56,17 @@ function serve(db: Db, source: unknown[], dropCallIds?: string[]): unknown[] {
 	tagger.initFromDb(SESSION, db);
 	const { targets } = tagTranscript(SESSION, transcript, tagger, db);
 	if (dropCallIds) {
-		for (const id of dropCallIds)
-			queuePendingOp(db, SESSION, toolTag(db, id), "drop");
-		applyPendingOperations(SESSION, db, targets, new Set());
+		// Sweeper source: these rows pin the automatic real-or-absent tiers
+		// (model stamps erase; see apply-operations.source-modes law tests).
+		applyPendingOperations(SESSION, db, targets, new Set(), undefined, undefined, [
+			...dropCallIds.map((id, i) => ({
+				id: i,
+				sessionId: SESSION,
+				tagId: toolTag(db, id),
+				operation: "drop" as const,
+				queuedAt: 0,
+			})),
+		]);
 	} else {
 		applyFlushedStatuses(SESSION, db, targets);
 	}
@@ -212,7 +219,7 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 				createPiDroppedInputGuard()({
 					type: "tool_call",
 					toolCallId: "call-new",
-					toolName: "write",
+					toolName: "bash",
 					input: copied,
 				}),
 			).toBeUndefined();

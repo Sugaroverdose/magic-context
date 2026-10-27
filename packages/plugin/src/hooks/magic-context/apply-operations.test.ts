@@ -156,12 +156,16 @@ describe("applyPendingOperations with protection window set form", () => {
             canDrop: () => true,
             truncate: () => "truncated",
             drop: () => "removed",
+            skeletonReal: () => "truncated" as const,
+            skeletonStripped: () => "truncated" as const,
             setContent: () => true,
         });
         targets.set(2, {
             canDrop: () => true,
             truncate: () => "truncated",
             drop: () => "removed",
+            skeletonReal: () => "truncated" as const,
+            skeletonStripped: () => "truncated" as const,
             setContent: () => true,
         });
 

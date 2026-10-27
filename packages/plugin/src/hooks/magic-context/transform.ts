@@ -2586,6 +2586,7 @@ export function createTransform(deps: TransformDeps) {
         const postTransformResult = await runPostTransformPhase({
             compactionMarkerStrategy:
                 deps.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy,
+            executeThresholdPercentage: effectiveExecuteThresholdPercentage,
             sessionId,
             db,
             messages,

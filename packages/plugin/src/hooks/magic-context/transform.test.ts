@@ -1879,7 +1879,14 @@ describe("createTransform", () => {
             },
             {
                 info: { id: "m-assistant", role: "assistant" },
-                parts: [{ type: "tool", callID: "call-1", state: { output: bigOutput } }],
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-1",
+                        name: "bash",
+                        state: { output: bigOutput },
+                    },
+                ],
             },
             // A later prompt, so this call does not end the conversation (drop()
             // keeps that one as a skeleton instead of removing it).
@@ -1905,6 +1912,68 @@ describe("createTransform", () => {
         expect(toolTag?.status).toBe("dropped");
         expect(toolTag?.dropMode).toBe("full");
         expect(JSON.stringify(messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+    });
+
+    it("reclaims non-bash emergency drops as skeletons with their real arguments", async () => {
+        //#given the same 96% world but a non-bash call: the carrier gate keeps
+        // the token surface to bash alone, so the automatic tier frees only the
+        // output and the arguments stay on the wire.
+        useTempDataHome("context-transform-force-materialize-");
+        const scheduler: Scheduler = { shouldExecute: mock(() => "defer" as const) };
+        const db = openDatabase();
+        const bigOutput = "const value = compute(input, options); // step output line\n".repeat(
+            3400,
+        );
+        const transform = createTransform({
+            tagger: createTagger(),
+            scheduler,
+            contextUsageMap: new Map<string, { usage: ContextUsage; updatedAt: number }>([
+                [
+                    "ses-force-materialize",
+                    { usage: { percentage: 96, inputTokens: 192_000 }, updatedAt: Date.now() },
+                ],
+            ]),
+            db,
+            historyRefreshSessions: new Set<string>(),
+            pendingMaterializationSessions: new Set<string>(),
+            lastHeuristicsTurnId: new Map<string, string>(),
+            clearReasoningAge: 50,
+            protectedTokens: 0,
+        });
+        const bigInput = { content: "x".repeat(4096) };
+        const messages: TestMessage[] = [
+            {
+                info: { id: "m-user", role: "user", sessionID: "ses-force-materialize" },
+                parts: [{ type: "text", text: "continue" }],
+            },
+            {
+                info: { id: "m-assistant", role: "assistant" },
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-1",
+                        name: "write",
+                        state: { input: bigInput, output: bigOutput },
+                    },
+                ],
+            },
+            {
+                info: { id: "m-next", role: "user", sessionID: "ses-force-materialize" },
+                parts: [{ type: "text", text: "next prompt" }],
+            },
+        ];
+
+        //#when
+        await transform({}, { messages });
+
+        //#then
+        const tags = getTagsBySession(db, "ses-force-materialize");
+        const toolTag = tags.find((tag) => tag.type === "tool");
+        expect(toolTag?.status).toBe("dropped");
+        expect(toolTag?.dropMode).toBe("skeleton_real");
+        const served = JSON.stringify(messages);
+        expect(served).toContain(GOLDEN_FULL_DROP_OUTPUT);
+        expect(served).toContain("x".repeat(4096));
     });
 
     it("strips structural noise even when scheduler defers", async () => {
@@ -2284,8 +2353,9 @@ describe("createTransform", () => {
         expect(userShellText).toBe("...");
         expect(getTagById(db, "ses-1", 1)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.status).toBe("dropped");
-        expect(getTagById(db, "ses-1", 2)?.dropMode).toBe("full");
-        expect(JSON.stringify(secondPass)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+        expect(getTagById(db, "ses-1", 2)?.dropMode).toBe("erased");
+        // Stamped calls leave the wire entirely (no carrier, no marker).
+        expect(JSON.stringify(secondPass)).not.toContain("call-1");
         expect(channel1StateBySession.get("ses-1")?.agentDropsAppliedThisPass).toBe(true);
         expect(clearPendingOps(db, "ses-1")).toBeUndefined();
     });

@@ -97,11 +97,11 @@ describe("apply operations for tool drops", () => {
         const messages: MessageLike[] = [
             {
                 info: { id: "m-assistant", role: "assistant", sessionID: "ses-1" },
-                parts: [{ type: "tool-invocation", callID: "call-1" }],
+                parts: [{ type: "tool-invocation", callID: "call-1", toolName: "bash" }],
             },
             {
                 info: { id: "m-tool", role: "tool", sessionID: "ses-1" },
-                parts: [{ type: "tool", callID: "call-1", state: { output: "result" } }],
+                parts: [{ type: "tool", callID: "call-1", toolName: "bash", state: { output: "result" } }],
             },
             // A later prompt, so this call does not end the conversation (drop()
             // keeps that one as a skeleton instead of removing it).
@@ -118,8 +118,11 @@ describe("apply operations for tool drops", () => {
         // exercises the FULL shape path (deep-history drop).
         padSkeletonWindow(db, toolTagId!);
 
-        queuePendingOp(db, "ses-1", toolTagId!, "drop");
-        const didMutate = applyPendingOperations("ses-1", db, targets, new Set());
+        // Sweeper source: the `full` carrier is the automatic shape; model
+        // stamps erase instead (see apply-operations.source-modes.test.ts).
+        const didMutate = applyPendingOperations("ses-1", db, targets, new Set(), undefined, undefined, [
+            { id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 },
+        ]);
         batch.finalize();
 
         expect(didMutate).toBe(true);
@@ -605,7 +608,7 @@ describe("apply operations for tool drops", () => {
                 parts: [
                     { type: "step-start", snapshot: "snap-1" },
                     { type: "text", text: "keep this explanation" },
-                    { type: "tool", callID: "call-3", state: { output: "result" } },
+                    { type: "tool", callID: "call-3", toolName: "bash", state: { output: "result" } },
                     { type: "step-finish", reason: "tool-calls" },
                 ],
             },
@@ -622,8 +625,10 @@ describe("apply operations for tool drops", () => {
         expect(toolTagId).toBeDefined();
         padSkeletonWindow(db, toolTagId!);
 
-        queuePendingOp(db, "ses-1", toolTagId!, "drop");
-        const didMutate = applyPendingOperations("ses-1", db, targets, new Set());
+        // Sweeper source: full carrier shape (stamps erase; source-modes test).
+        const didMutate = applyPendingOperations("ses-1", db, targets, new Set(), undefined, undefined, [
+            { id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 },
+        ]);
         batch.finalize();
 
         expect(didMutate).toBe(true);
@@ -655,7 +660,7 @@ describe("apply operations for tool drops", () => {
                 info: { id: "m-assistant", role: "assistant", sessionID: "ses-1" },
                 parts: [
                     { type: "step-start", snapshot: "snap-1" },
-                    { type: "tool", callID: "call-4", state: { output: "result" } },
+                    { type: "tool", callID: "call-4", toolName: "bash", state: { output: "result" } },
                     { type: "step-finish", reason: "tool-calls" },
                 ],
             },
@@ -672,8 +677,10 @@ describe("apply operations for tool drops", () => {
         expect(toolTagId).toBeDefined();
         padSkeletonWindow(db, toolTagId!);
 
-        queuePendingOp(db, "ses-1", toolTagId!, "drop");
-        const didMutate = applyPendingOperations("ses-1", db, targets, new Set());
+        // Sweeper source: full carrier shape (stamps erase; source-modes test).
+        const didMutate = applyPendingOperations("ses-1", db, targets, new Set(), undefined, undefined, [
+            { id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 },
+        ]);
         batch.finalize();
 
         expect(didMutate).toBe(true);
