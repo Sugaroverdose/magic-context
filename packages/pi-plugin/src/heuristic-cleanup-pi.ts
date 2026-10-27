@@ -439,6 +439,8 @@ export function applyPiHeuristicCleanup(
 					const { result, mode } = applyNewToolDrop(target, {
 						inWindow: recent,
 						keepSkeleton: target?.requiresToolArcSkeleton === true,
+						source: "sweeper",
+						toolName: tag.toolName,
 					});
 					if (result === "removed" || result === "truncated") {
 						// Persist the mode applied (including drop() keeping the
@@ -493,7 +495,11 @@ export function applyPiHeuristicCleanup(
 				if (!matched) continue;
 				const target = targets.get(tag.tagNumber);
 				if (target?.canDrop?.() === false) continue;
-				const { result, mode } = applyNewToolDrop(target, { inWindow: false });
+				const { result, mode } = applyNewToolDrop(target, {
+					inWindow: false,
+					source: "sweeper",
+					toolName: tag.toolName,
+				});
 				if (result === "incomplete") continue;
 				updateTagDropMode(db, sessionId, tag.tagNumber, mode);
 				updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
@@ -605,6 +611,8 @@ export function applyPiHeuristicCleanup(
 					// skeletons. A call that cannot be removed keeps real arguments.
 					const { result, mode } = applyNewToolDrop(target, {
 						inWindow: false,
+						source: "sweeper",
+						toolName: tag.toolName,
 					});
 					if (result === "incomplete") continue;
 					updateTagDropMode(db, sessionId, tag.tagNumber, mode);

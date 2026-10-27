@@ -404,7 +404,7 @@ describe("applyPiHeuristicCleanup", () => {
 		}
 	});
 
-	it("persists full drops for stale ctx_reduce calls and paired tool results", () => {
+	it("persists skeleton drops for stale ctx_reduce calls and paired tool results", () => {
 		const db = createTestDb();
 		try {
 			const sessionId = "ses-heuristic";
@@ -452,7 +452,7 @@ describe("applyPiHeuristicCleanup", () => {
 				getTagsBySession(db, sessionId)
 					.filter((tag) => tag.messageId === "reduce-1")
 					.map((tag) => [tag.status, tag.dropMode]),
-			).toEqual([["dropped", "full"]]);
+			).toEqual([["dropped", "skeleton_real"]]);
 
 			const replayMessages = [
 				userMessage("older request", 1),
@@ -486,21 +486,17 @@ describe("applyPiHeuristicCleanup", () => {
 			applyFlushedStatuses(sessionId, db, replay.targets);
 			replayTranscript.commit();
 
-			// The released pair replays on the `full` shape: the empty-input
-			// call carries the FPE token under the carrier key `d`, and the
-			// paired result takes the constant `...` released slot. Tokens are
-			// session-keyed, so the value is pinned as shape, never as bytes.
+			// The released pair replays on the sweeper's non-bash shape: the
+			// automatic tier keeps the carrier surface to bash alone, so the
+			// ctx_reduce call keeps its real (empty) arguments and only the
+			// paired result takes the constant `...` released slot.
 			const replayed = replayTranscript.getOutputMessages();
 			const reducedCall = (
 				replayed[1] as {
 					content: Array<{ type: string; arguments?: Record<string, unknown> }>;
 				}
 			).content.find((p) => p.type === "toolCall")!;
-			expect(Object.keys(reducedCall.arguments!)).toEqual(["d"]);
-			expect(typeof reducedCall.arguments!.d).toBe("string");
-			expect(((reducedCall.arguments!.d as string) ?? "").length).toBeLessThan(
-				64,
-			);
+			expect(Object.keys(reducedCall.arguments!)).toEqual([]);
 			expect(textOf(replayed[2] as never)).toBe("...");
 		} finally {
 			closeQuietly(db);
