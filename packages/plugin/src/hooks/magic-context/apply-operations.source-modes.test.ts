@@ -344,7 +344,7 @@ describe("compartment-originated queue rows (operation=auto_drop)", () => {
         // never-dropped tag; the wire is the discriminator).
         expect(hasCall(messages, "call-1")).toBe(true);
         const toolPart = messages[1]?.parts[0] as Record<string, unknown>;
-        expect((toolPart.state as Record<string, unknown>).output).toBe("§1§ result");
+        expect((toolPart.state as Record<string, unknown>).output).toBe("result");
         expect(rawQueueCount(db)).toBe(0);
     });
 });
