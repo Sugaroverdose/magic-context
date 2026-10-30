@@ -70,7 +70,7 @@ function isPendingOpRow(row: unknown): row is PendingOpRow {
 }
 
 function toPendingOp(row: PendingOpRow): PendingOp | null {
-    if (row.operation !== "drop") {
+    if (row.operation !== "drop" && row.operation !== "auto_drop") {
         sessionLog(row.session_id, `unknown pending operation "${row.operation}"; ignoring`);
         return null;
     }

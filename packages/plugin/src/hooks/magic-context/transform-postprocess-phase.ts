@@ -3781,7 +3781,11 @@ export async function runPostTransformPhase(
                 // still-rendered bytes in T, but exclude it from the actionable U backlog.
                 const pendingDropTagNumbers = new Set(
                     getPendingOps(args.db, args.sessionId)
-                        .filter((operation) => operation.operation === "drop")
+                        .filter(
+                            (operation) =>
+                                operation.operation === "drop" ||
+                                operation.operation === "auto_drop",
+                        )
                         .map((operation) => operation.tagId),
                 );
                 const previous = args.channel1StateBySession.get(args.sessionId);

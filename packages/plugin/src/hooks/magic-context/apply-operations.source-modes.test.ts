@@ -82,9 +82,7 @@ function hasCall(messages: MessageLike[], callId: string): boolean {
 }
 
 function wireBytes(messages: MessageLike[]): string {
-    return JSON.stringify(
-        messages.map((m) => m.parts.map((p) => JSON.stringify(p))),
-    );
+    return JSON.stringify(messages.map((m) => m.parts.map((p) => JSON.stringify(p))));
 }
 
 /** One assistant tool pair + a later user turn so the call does not end the conversation. */
@@ -170,15 +168,9 @@ describe("source-gated drop modes", () => {
         expect(toolTagId).toBeDefined();
         padSkeletonWindow(db, toolTagId!);
 
-        applyPendingOperations(
-            "ses-1",
-            db,
-            targets,
-            new Set(),
-            undefined,
-            undefined,
-            [{ id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 }],
-        );
+        applyPendingOperations("ses-1", db, targets, new Set(), undefined, undefined, [
+            { id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 },
+        ]);
         batch.finalize();
 
         expect(hasCall(messages, "call-1")).toBe(true);
@@ -200,15 +192,9 @@ describe("source-gated drop modes", () => {
         expect(toolTagId).toBeDefined();
         padSkeletonWindow(db, toolTagId!);
 
-        applyPendingOperations(
-            "ses-1",
-            db,
-            targets,
-            new Set(),
-            undefined,
-            undefined,
-            [{ id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 }],
-        );
+        applyPendingOperations("ses-1", db, targets, new Set(), undefined, undefined, [
+            { id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 },
+        ]);
         batch.finalize();
 
         expect(hasCall(messages, "call-1")).toBe(true);
@@ -268,13 +254,12 @@ describe("carrier accept surface", () => {
             [13, "skeleton_real"],
         ] as const) {
             insertTag(db, "ses-1", `call-accept-${tagNumber}`, "tool", 10, tagNumber, 0, "bash");
-            db.prepare("UPDATE tags SET status = 'dropped' WHERE session_id = 'ses-1' AND tag_number = ?").run(
-                tagNumber,
-            );
-            db.prepare("UPDATE tags SET drop_mode = ? WHERE session_id = 'ses-1' AND tag_number = ?").run(
-                mode,
-                tagNumber,
-            );
+            db.prepare(
+                "UPDATE tags SET status = 'dropped' WHERE session_id = 'ses-1' AND tag_number = ?",
+            ).run(tagNumber);
+            db.prepare(
+                "UPDATE tags SET drop_mode = ? WHERE session_id = 'ses-1' AND tag_number = ?",
+            ).run(mode, tagNumber);
         }
 
         expect(isReleasedCarrier(db, "ses-1", 11)).toBe(true);
@@ -283,5 +268,83 @@ describe("carrier accept surface", () => {
         // A token minted for a live (never dropped) tag resolves to nothing.
         insertTag(db, "ses-1", "call-accept-live", "tool", 10, 14, 0, "bash");
         expect(isReleasedCarrier(db, "ses-1", 14)).toBe(false);
+    });
+});
+
+describe("compartment-originated queue rows (operation=auto_drop)", () => {
+    function rawQueueCount(db: ReturnType<typeof openDatabase> & object): number {
+        const row = (db.query as (sql: string) => { get?: (p: unknown) => unknown }[])(
+            "SELECT COUNT(*) AS n FROM pending_ops",
+        ).get?.(undefined) as { n: number } | undefined;
+        return row?.n ?? -1;
+    }
+
+    it("queues as sweeper shape: auto_drop bash call becomes the full carrier, not erased", () => {
+        useTempDataHome("context-source-modes-autodrop-bash-");
+        const db = openDatabase();
+        const tagger = createTagger();
+        const { messages } = toolFixture("bash", { command: "ls -la" });
+        const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
+        const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
+        expect(toolTagId).toBeDefined();
+        padSkeletonWindow(db, toolTagId!);
+
+        queuePendingOp(db, "ses-1", toolTagId!, "auto_drop");
+        applyPendingOperations("ses-1", db, targets, new Set());
+        batch.finalize();
+
+        expect(hasCall(messages, "call-1")).toBe(true);
+        const invocation = messages[0]?.parts[0] as Record<string, unknown>;
+        expect(invocation.args).toEqual({ command: renderDropToken(toolTagId!, sessionKey) });
+        expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("dropped");
+        expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("full");
+        expect(getPendingOps(db, "ses-1")).toHaveLength(0);
+    });
+
+    it("queues as sweeper shape: auto_drop non-bash call becomes skeleton_real, not erased", () => {
+        useTempDataHome("context-source-modes-autodrop-read-");
+        const db = openDatabase();
+        const tagger = createTagger();
+        const { messages } = toolFixture("read", { filePath: "/tmp/x" });
+        const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
+        const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
+        expect(toolTagId).toBeDefined();
+        padSkeletonWindow(db, toolTagId!);
+
+        queuePendingOp(db, "ses-1", toolTagId!, "auto_drop");
+        applyPendingOperations("ses-1", db, targets, new Set());
+        batch.finalize();
+
+        expect(hasCall(messages, "call-1")).toBe(true);
+        const invocation = messages[0]?.parts[0] as Record<string, unknown>;
+        expect(invocation.args).toEqual({ filePath: "/tmp/x" });
+        expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("dropped");
+        expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("skeleton_real");
+        expect(getPendingOps(db, "ses-1")).toHaveLength(0);
+    });
+
+    it("preserves ctx_reduce receipts: auto_drop on a receipt skips the drop and consumes the row", () => {
+        useTempDataHome("context-source-modes-autodrop-receipt-");
+        const db = openDatabase();
+        const tagger = createTagger();
+        const { messages } = toolFixture("ctx_reduce", { ctx_handles: ["call-9"] });
+        const { targets, batch } = tagMessages("ses-1", messages, tagger, db);
+        const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
+        expect(toolTagId).toBeDefined();
+        padSkeletonWindow(db, toolTagId!);
+
+        queuePendingOp(db, "ses-1", toolTagId!, "auto_drop");
+        expect(rawQueueCount(db)).toBe(1);
+        applyPendingOperations("ses-1", db, targets, new Set());
+        batch.finalize();
+
+        expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("active");
+        // The receipt keeps its bytes: original args and its report output are
+        // still on the wire (drop_mode stays at the column default for a
+        // never-dropped tag; the wire is the discriminator).
+        expect(hasCall(messages, "call-1")).toBe(true);
+        const toolPart = messages[1]?.parts[0] as Record<string, unknown>;
+        expect((toolPart.state as Record<string, unknown>).output).toBe("§1§ result");
+        expect(rawQueueCount(db)).toBe(0);
     });
 });
