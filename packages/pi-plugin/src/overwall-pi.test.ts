@@ -171,10 +171,16 @@ for (const native of [false, true]) {
 			expect(wireCalls).toHaveLength(20);
 			expect(wireResults).toEqual(wireCalls);
 			const bytes = JSON.stringify(served);
-			// The skeleton `...` slot is the shape canonical's pin; stamped
+			// The skeleton empty slot is the shape canonical's pin; stamped
 			// erasures carry no bytes at all — the five erased pairs are
-			// absent entirely (no token, no arguments, no result).
-			expect(wireBytes).toContain(GOLDEN_FULL_DROP_OUTPUT);
+			// absent entirely (no token, no arguments, no result). The
+			// provider protocols render MC's empty result differently: the
+			// Responses adapter substitutes its own "(no tool output)" filler
+			// for empty function_call_output, Anthropic passes the empty
+			// tool_result content through.
+			expect(wireBytes).toContain(
+				native ? '"output":"(no tool output)"' : '"content":""',
+			);
 			expect(bytes).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			expect(bytes).not.toContain("original-0");
 			expect(bytes).not.toContain("call_0");
@@ -184,10 +190,10 @@ for (const native of [false, true]) {
 					.flatMap((m) => (m.role === "assistant" ? m.content : []))
 					.find(
 						(p: unknown) =>
-							p.type === "toolCall" &&
-							"id" in p &&
-							String((p as { id?: string }).id).startsWith(`call_${i}|`) ||
-								(p as { id?: string }).id === `call_${i}`,
+							(p.type === "toolCall" &&
+								"id" in p &&
+								String((p as { id?: string }).id).startsWith(`call_${i}|`)) ||
+							(p as { id?: string }).id === `call_${i}`,
 					);
 				expect(callPart?.arguments).toEqual({ path: `original-${i}` });
 			}

@@ -1794,12 +1794,12 @@ describe("registerPiContextHandler", () => {
 			// Dropped text renders the constant placeholder; released pairs
 			// keep their rows. The carrier token is session-keyed and opaque
 			// (shape pinned by overwall-wire-shapes); this layer pins the seat
-			// structure and the `...` result slot.
-			expect(textOf(output[0])).toBe("...");
+			// structure and the empty result slot.
+			expect(textOf(output[0])).toBe("[content omitted]");
 			expect(output).toHaveLength(8);
-			expect(textOf(output[2])).toBe("...");
-			expect(textOf(output[4])).toBe("...");
-			expect(textOf(output[6])).toBe("...");
+			expect(textOf(output[2])).toBe("");
+			expect(textOf(output[4])).toBe("");
+			expect(textOf(output[6])).toBe("");
 			expect(JSON.stringify(output)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			expect(Object.keys(toolArguments(1))).toEqual(["filePath"]);
 			expect(Object.keys(toolArguments(3))).toEqual(["filePath"]);
@@ -2294,7 +2294,7 @@ describe("registerPiContextHandler", () => {
 				overThresholdCtx as never,
 			);
 
-			expect(textOf(result.messages[1] as never)).toBe("...");
+			expect(textOf(result.messages[1] as never)).toBe("[content omitted]");
 			expect(getPendingOps(db, "ses-context")).toEqual([]);
 			expect(
 				getPiChannel1Baseline("ses-context")?.agentDropsAppliedThisPass,
@@ -2947,7 +2947,7 @@ describe("registerPiContextHandler", () => {
 				}),
 			} as never);
 
-			expect(textOf(result.messages[1] as never)).toBe("...");
+			expect(textOf(result.messages[1] as never)).toBe("[content omitted]");
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
@@ -3252,9 +3252,9 @@ describe("registerPiContextHandler", () => {
 		});
 		await expect(runProviderScenario("anthropic", "openai")).resolves.toEqual({
 			reduceStatus: "dropped",
-			// The released pair replays: the result slot carries the constant
+			// The released pair replays: the result slot carries the empty
 			// released placeholder instead of the old emptied row.
-			replayedToolResult: "...",
+			replayedToolResult: "",
 		});
 	});
 
@@ -7474,7 +7474,7 @@ describe("Pi proactive strip of invalidated thinking", () => {
 			updateTagStatus(db, sessionId, dropped.tagNumber, "dropped");
 			signalPiPendingMaterialization(sessionId);
 			const busting = await pass(false);
-			expect(textOf(busting[0] as never)).toBe("...");
+			expect(textOf(busting[0] as never)).toBe("[content omitted]");
 			expect(busting.map(thinkingIn)).toEqual([0, 0, 0, 0, 0]);
 			expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
 				new Set([

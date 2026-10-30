@@ -132,7 +132,7 @@ describe("apply operations for tool drops", () => {
         const invocation = messages[0]?.parts[0] as Record<string, unknown>;
         expect(invocation.args).toEqual({ d: token });
         const toolPart = messages[1]?.parts[0] as { state: Record<string, unknown> };
-        expect(toolPart.state).toEqual({ output: "...", attachments: [], input: { d: token } });
+        expect(toolPart.state).toEqual({ output: "", attachments: [], input: { d: token } });
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("full");
@@ -169,7 +169,7 @@ describe("apply operations for tool drops", () => {
         const toolPart = messages
             .flatMap((m) => m.parts)
             .find((p: any) => p.callID === "call-1" && p.type === "tool") as any;
-        expect(toolPart.state.output).toBe("...");
+        expect(toolPart.state.output).toBe("");
         // skeleton_real never writes the argument seat: the invocation keeps its
         // (empty) real args untouched.
         expect((messages[0]?.parts[0] as Record<string, unknown>).args).toBeUndefined();
@@ -266,7 +266,7 @@ describe("apply operations for tool drops", () => {
             state: { input: Record<string, unknown>; output: string };
         };
         expect(wire).not.toBe(taskPart);
-        expect(wire.state.output).toBe("...");
+        expect(wire.state.output).toBe("");
         expect(wire.state.input).toEqual({ prompt: longPrompt, subagent_type: "mason" });
 
         // ...but the LIVE object OpenCode still holds is byte-identical (the long
@@ -327,7 +327,7 @@ describe("apply operations for tool drops", () => {
         // filePath preserved verbatim; diff clamped; output → canonical sentinel.
         expect(editPart.state.input.filePath).toBe("/Users/me/proj/spec.md");
         expect(editPart.state.input.oldString.endsWith("...[truncated]")).toBe(true);
-        expect(editPart.state.output).toBe("...");
+        expect(editPart.state.output).toBe("");
 
         // Snapshot the frozen bytes, then replay via applyFlushedStatuses (the
         // defer-pass path) on a FRESHLY re-tagged copy of the ORIGINAL message:
@@ -475,7 +475,7 @@ describe("apply operations for tool drops", () => {
         expect(didMutate).toBe(true);
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", messageTagId!)?.status).toBe("dropped");
-        expect(messages[2]?.parts).toEqual([{ type: "text", text: "..." }]);
+        expect(messages[2]?.parts).toEqual([{ type: "text", text: "[content omitted]" }]);
     });
 
     it("treats missing tool call as absent and finalizes pending drop", () => {
@@ -531,7 +531,7 @@ describe("apply operations for tool drops", () => {
         const toolPart = messages
             .flatMap((m) => m.parts)
             .find((p: any) => p.callID === "call-2" && p.type === "tool") as any;
-        expect(toolPart.state).toEqual({ output: "...", attachments: [], input: { d: token } });
+        expect(toolPart.state).toEqual({ output: "", attachments: [], input: { d: token } });
         const invocation = messages[0]?.parts[0] as Record<string, unknown>;
         expect(invocation.args).toEqual({ d: token });
     });
@@ -588,7 +588,7 @@ describe("apply operations for tool drops", () => {
         expect(pair[0]?.args).toEqual({ filePath: token });
         expect(pair[1]?.state).toEqual({
             input: { filePath: token },
-            output: "...",
+            output: "",
             attachments: [],
         });
         expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("full");
@@ -644,7 +644,7 @@ describe("apply operations for tool drops", () => {
         ]);
         const token = renderDropToken(toolTagId!, sessionKey);
         const toolPart = messages[1]?.parts[2] as { state: Record<string, unknown> };
-        expect(toolPart.state).toEqual({ output: "...", attachments: [], input: { d: token } });
+        expect(toolPart.state).toEqual({ output: "", attachments: [], input: { d: token } });
     });
 
     it("keeps tool-only step wrapper messages alive on the released skeleton after dropping the tool", () => {
@@ -695,7 +695,7 @@ describe("apply operations for tool drops", () => {
         ]);
         const token = renderDropToken(toolTagId!, sessionKey);
         const toolPart = messages[1]?.parts[1] as { state: Record<string, unknown> };
-        expect(toolPart.state).toEqual({ output: "...", attachments: [], input: { d: token } });
+        expect(toolPart.state).toEqual({ output: "", attachments: [], input: { d: token } });
     });
 
     it("clears stale drop ops for compacted tags", () => {
@@ -759,7 +759,7 @@ describe("apply operations for tool drops", () => {
             const text = (messages[0]?.parts[0] as { text: string }).text;
             // ONE canonical placeholder — byte-identical regardless of role/content
             // so it can never flip across passes and bust the prompt cache.
-            expect(text).toBe("...");
+            expect(text).toBe("[content omitted]");
         });
 
         it("preserves user message shell when flushed dropped status is re-applied", () => {
@@ -793,7 +793,7 @@ describe("apply operations for tool drops", () => {
             const text = (messages[0]?.parts[0] as { text: string }).text;
             // Flushed-status replay produces the SAME canonical placeholder as the
             // execute-pass drop — byte-identical, no flip across passes.
-            expect(text).toBe("...");
+            expect(text).toBe("[content omitted]");
         });
 
         it("keeps the full drop as the constant placeholder for assistant messages (no regression)", () => {
@@ -820,7 +820,7 @@ describe("apply operations for tool drops", () => {
 
             expect(didMutate).toBe(true);
             expect(messages[1]?.parts).toEqual([
-                { type: "text", text: "..." },
+                { type: "text", text: "[content omitted]" },
             ]);
         });
 
@@ -846,7 +846,7 @@ describe("apply operations for tool drops", () => {
             applyPendingOperations("ses-1", db, targets, new Set());
 
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            expect(text).toBe("...");
+            expect(text).toBe("[content omitted]");
         });
     });
 });

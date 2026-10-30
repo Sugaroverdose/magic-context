@@ -9,5 +9,7 @@
 // carrying the opaque token (canonical fixture seat: "path").
 export const GOLDEN_FULL_DROP_CARRIER = '{"path":"';
 
-// Released result slot: the constant `...` placeholder as JSON-rendered.
-export const GOLDEN_FULL_DROP_OUTPUT = '"..."';
+// Released result slot: empty content as JSON-rendered (anti-imitation: the
+// `...` sentinel was reproduced by models as assistant text; the slot is now
+// byte-free).
+export const GOLDEN_FULL_DROP_OUTPUT = '{"type":"text","text":""}';

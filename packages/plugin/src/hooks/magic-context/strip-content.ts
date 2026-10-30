@@ -13,7 +13,7 @@ import { stripWellFormedLeadingTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
 const MARKER_ONLY_PATTERN =
-    /^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\]|\.\.\.)\s*)+$/;
+    /^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\]|\[content omitted\]|\.\.\.)\s*)+$/;
 
 export function isMarkerOnlyText(text: string): boolean {
     const trimmed = text.trim();

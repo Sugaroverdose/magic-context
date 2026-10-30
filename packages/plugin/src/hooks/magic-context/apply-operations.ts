@@ -11,7 +11,7 @@ import type { PendingOp, TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
-import { TOOL_RELEASED_SENTINEL } from "./sentinel";
+import { MESSAGE_DROP_PLACEHOLDER } from "./sentinel";
 import type { TagTarget } from "./tag-messages";
 import type { ToolDropResult } from "./tool-drop-target";
 import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
@@ -58,14 +58,16 @@ export const RECENT_TOOL_SKELETON_WINDOW = 20;
 // which on a defer pass changes a tail message's bytes and busts the entire
 // prompt-cache prefix after it. This exact divergence caused repeated cache
 // catastrophes. The numeral shape is gone on this branch: the released-tag
-// pattern must not be a permanently resident string in the transcript, so the
-// placeholder is the same constant "content omitted" filler the tool-result
-// slot uses. It must NOT be WHOLE_MESSAGE_PLACEHOLDER_TEXT: that is the
+// pattern must not be a permanently resident string in the transcript. The
+// message placeholder is a distinct constant from the tool-result slot: the
+// slot is empty (nothing to imitate), while message text cannot be emptied on
+// non-Anthropic routes, so it keeps a constant non-empty bracketed filler.
+// It must NOT be WHOLE_MESSAGE_PLACEHOLDER_TEXT: that is the
 // post-neutralization sentinel, and isSentinel would pre-skip these messages
 // out of the persisted neutralization set. heuristic-cleanup.ts calls this
 // function, so the two drop paths can never disagree.
 export function buildReplacementContent(_tagId: number): string {
-    return TOOL_RELEASED_SENTINEL;
+    return MESSAGE_DROP_PLACEHOLDER;
 }
 export interface NewToolDropOutcome {
     result: ToolDropResult;

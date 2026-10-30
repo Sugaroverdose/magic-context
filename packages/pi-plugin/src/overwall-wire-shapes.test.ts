@@ -141,8 +141,11 @@ for (const native of [false, true])
 				expect(results).toContain("drop");
 				if (!thinking || native) {
 					// `full` shape: the released pair survives serialization with
-					// the FPE token carrier in the args seat and `...` in the
-					// result slot — never removed from the wire.
+					// the FPE token carrier in the args seat and an empty
+					// result slot — never removed from the wire. The Responses
+					// converter substitutes its own "(no tool output)" filler
+					// for any empty output (pi-ai openai-responses-shared),
+					// Anthropic passes the empty content through.
 					const dropCall = parts.find(
 						(p: unknown) =>
 							p.type === (native ? "function_call" : "tool_use") &&
@@ -150,20 +153,17 @@ for (const native of [false, true])
 					);
 					const dropResult = parts.find(
 						(p: unknown) =>
-							p.type ===
-								(native ? "function_call_output" : "tool_result") &&
-								(native ? p.call_id : p.tool_use_id) === "drop",
+							p.type === (native ? "function_call_output" : "tool_result") &&
+							(native ? p.call_id : p.tool_use_id) === "drop",
 					);
-					const args = native
-						? JSON.parse(dropCall.arguments)
-						: dropCall.input;
+					const args = native ? JSON.parse(dropCall.arguments) : dropCall.input;
 					expect(Object.keys(args)).toEqual(["path"]);
 					expect(typeof args.path).toBe("string");
 					expect(args.path).not.toBe("drop");
 					expect(args.path.length).toBeLessThan(64);
-					expect(
-						native ? dropResult.output : dropResult.content,
-					).toBe("...");
+					expect(native ? dropResult.output : dropResult.content).toBe(
+						native ? "(no tool output)" : "",
+					);
 				} else {
 					expect(
 						w.messages
@@ -378,7 +378,7 @@ test("Q8 indices survive marking and commit; identity finalizer tolerates interv
 		expect(oldCall.arguments.path).not.toBe("old");
 		expect(oldCall.arguments.path.length).toBeLessThan(64);
 		expect(byRef.get(messages[2])).toBe("result-entry");
-		expect(messages[2].content[0].text).toBe("...");
+		expect(messages[2].content[0].text).toBe("");
 		expect(byRef.get(messages[3])).toBe("tail-entry");
 		expect(messages[3].content).toContain("tail");
 	} finally {

@@ -1064,7 +1064,7 @@ describe("createTransform", () => {
         for (const mode of ["full", "truncated", "edit_marker"]) {
             const message = served.find((message) => message.info.id === `tool-${mode}`);
             expect(message).toBeDefined();
-            expect(toolOutput(message!, 0)).toBe("...");
+            expect(toolOutput(message!, 0)).toBe("");
         }
         const compressed = served.find((message) => message.info.id === "compressed");
         expect(compressed).toBeDefined();
@@ -1074,8 +1074,10 @@ describe("createTransform", () => {
         // Pinned from the full-target reader before narrowing the replay query:
         // the optimization must retain every served byte, including caveman text.
         // Re-pinned for the prefix-free wire (ctx_reduce v1: the digits stay in
-        // the registry; nothing is prepended to part text).
-        expect(digest).toBe("13326e262bee2662e6a9e901cf89d552de894d751901879f1409fc9c6505e987");
+        // the registry; nothing is prepended to part text). Re-pinned again for
+        // the empty released-result slot (anti-imitation: the `...` sentinel was
+        // reproduced by the model as assistant text; the slot now carries none).
+        expect(digest).toBe("bd00ab0c80f801e3907aee91dbf85c7e131556ab8b68d4dcdfef035d5993fddb");
     });
 
     it("serves byte-identical hot passes while coalescing state and skipping all-hit token SQL", async () => {
@@ -2350,7 +2352,7 @@ describe("createTransform", () => {
         ]);
         expect(secondPass[0]?.info.role).toBe("user");
         const userShellText = (secondPass[0]?.parts[0] as { text: string }).text;
-        expect(userShellText).toBe("...");
+        expect(userShellText).toBe("[content omitted]");
         expect(getTagById(db, "ses-1", 1)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.dropMode).toBe("erased");
@@ -2997,7 +2999,7 @@ describe("createTransform", () => {
         decision = "execute";
         await transform({}, { messages });
 
-        expect(text(messages[0], 0)).toBe("...");
+        expect(text(messages[0], 0)).toBe("[content omitted]");
         expect(text(messages[1], 0)).not.toBe(compressibleOriginal);
         expect(text(messages[1], 0)).not.toContain("[dropped");
         expect(getTagById(db, sessionId, 1)?.cavemanDepth).toBe(0);
@@ -3204,7 +3206,7 @@ describe("createTransform", () => {
         // across passes); the user-role message is never whole-message stripped (the
         // role guard in stripDroppedPlaceholderMessages), so the turn boundary
         // survives for AI SDK's Anthropic adapter. The sibling part is untouched.
-        expect(text(secondPass[0], 0)).toBe("...");
+        expect(text(secondPass[0], 0)).toBe("[content omitted]");
         expect(text(secondPass[0], 1)).toBe("actual user message");
     });
 
@@ -3516,7 +3518,7 @@ describe("createTransform", () => {
         // tool ends the conversation, so the drop keeps its skeleton: removing it
         // would leave a text-only assistant as the last message, which providers
         // without assistant prefill support reject.
-        expect(toolOutput(messages[1], 1)).toBe("...");
+        expect(toolOutput(messages[1], 1)).toBe("");
     });
 });
 

@@ -83,7 +83,7 @@ describe("tool input preservation", () => {
         expect(invocation.args).toEqual({ d: token });
         const toolPart = messages[1]?.parts[0] as { state: Record<string, unknown> };
         expect(toolPart.state).toEqual({
-            output: "...",
+            output: "",
             attachments: [],
             input: { path: token },
         });

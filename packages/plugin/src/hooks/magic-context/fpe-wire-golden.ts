@@ -9,5 +9,9 @@
 // carrying the opaque token (canonical fixture seat: "command").
 export const GOLDEN_FULL_DROP_CARRIER = '{"command":"';
 
-// Released result slot: the constant `...` placeholder as JSON-rendered.
-export const GOLDEN_FULL_DROP_OUTPUT = '"..."';
+// Released result slot: the empty placeholder as JSON-rendered, per layer.
+// (The old constant `...` was key-agnostic; empty content is identified by
+// the slot's key, so the plugin layer pins `output` and the v2 payload layer
+// pins the `text` result wrapper.)
+export const GOLDEN_FULL_DROP_OUTPUT = '"output":""';
+export const GOLDEN_V2_DROP_RESULT = '{"type":"text","value":""}';

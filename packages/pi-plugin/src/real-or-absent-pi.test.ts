@@ -157,7 +157,7 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 					?.dropMode,
 			).toBe("skeleton_real");
 			expect(callArguments(served, "call-end")).toEqual(large);
-			expect(resultText(served, "call-end")).toBe("...");
+			expect(resultText(served, "call-end")).toBe("");
 			expect(JSON.stringify(served)).not.toContain('"dropped":');
 		} finally {
 			db.close();

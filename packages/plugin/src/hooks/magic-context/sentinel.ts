@@ -21,11 +21,30 @@ export const WHOLE_MESSAGE_PLACEHOLDER_TEXT = "[dropped]";
 
 /**
  * Canonical released-tool-result content on every tool skeleton path.
- * Constant bytes: no tag id, no status word, nothing interpretable — the
- * result block stays present (protocol pairing + template integrity) and
- * reads as plainly truncated output. FPE branch shape rule.
+ * Empty: the result block stays present (protocol pairing + template
+ * integrity) but carries no bytes, because any imitable constant there
+ * leaks into model output as a habit (host-DB census 2026-10-30: 160
+ * assistant text parts of exactly `...` over 5 days, 159 of them in one
+ * session — once the habit is learned it is consistent, and old tool
+ * slots are style fuel the model copies without reading).
+ * Old tool slots are style fuel, never content — so the slot must be
+ * uninhabitable, not merely unremarkable. Empty is the shape Anthropic
+ * routes already accepted for whole-message sentinels.
  */
-export const TOOL_RELEASED_SENTINEL = "...";
+export const TOOL_RELEASED_SENTINEL = "";
+
+/**
+ * Canonical placeholder for a dropped NON-tool (message) part. Unlike the
+ * tool-result slot, message text cannot be emptied on non-Anthropic routes
+ * (empty text sentinels survive onto those wires and break provider
+ * non-empty/adjacency invariants — see `modelAcceptsEmptyContent`), so this
+ * stays constant non-empty bytes. Bracketed literal, no numeral, nothing the
+ * model produces as its own prose: the released-slot lesson is that any
+ * imitable constant leaks into output as a habit. Deliberately NOT
+ * `WHOLE_MESSAGE_PLACEHOLDER_TEXT` — `isSentinel` recognizes that shape and
+ * would pre-skip these messages out of the persisted neutralization set.
+ */
+export const MESSAGE_DROP_PLACEHOLDER = "[content omitted]";
 
 /**
  * Decide whether empty-text sentinels are safe for the provider's wire path.
