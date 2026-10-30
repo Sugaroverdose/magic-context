@@ -4041,7 +4041,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(deferA.result.materialized).toBe(false);
         expect(legacyWire).toContain(`{"command":"${tokenOf(small)}"}`);
         expect(legacyWire).toContain(`{"filePath":"${tokenOf(large)}"}`);
-        expect(legacyWire).toContain('"output":"..."');
+        expect(legacyWire).toContain('"output":""');
         expect(tailOnly(deferB.messages)).toBe(legacyWire);
         expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === small)?.dropMode).toBe(
             "truncated",
@@ -4062,7 +4062,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             state: { input: unknown; output: string };
         };
         expect(smallPart.state.input).toEqual({ command: "ls -la" });
-        expect(smallPart.state.output).toBe("...");
+        expect(smallPart.state.output).toBe("");
 
         // The following defer pass replays the converted bytes identically.
         const after = await pass(hardSignals);
@@ -8160,7 +8160,7 @@ describe("marker-drain reasoning representation", () => {
         expect(deferredPredecessor).toBeDefined();
         expect(
             (deferredPredecessor?.parts as Array<Record<string, any>>).some(
-                (part) => part.type === "tool" && part.state.output === "...",
+                (part) => part.type === "tool" && part.state.output === "",
             ),
         ).toBe(true);
         await runPostTransformPhase(

@@ -122,7 +122,7 @@ describe("tool release shape table", () => {
         expect(toolPart.state).toEqual({
             status: "completed",
             input: { command: token },
-            output: "...",
+            output: "",
             attachments: [],
         });
         const invocation = messages[0]!.parts[0] as Record<string, unknown>;

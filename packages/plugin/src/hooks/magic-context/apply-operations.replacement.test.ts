@@ -3,7 +3,7 @@
 import { describe, expect, it } from "bun:test";
 import { buildReplacementContent } from "./apply-operations";
 import { isMarkerOnlyText } from "./strip-content";
-import { TOOL_RELEASED_SENTINEL, WHOLE_MESSAGE_PLACEHOLDER_TEXT } from "./sentinel";
+import { MESSAGE_DROP_PLACEHOLDER, WHOLE_MESSAGE_PLACEHOLDER_TEXT } from "./sentinel";
 
 describe("buildReplacementContent — one canonical placeholder", () => {
     // The whole point: buildReplacementContent returns the SAME constant bytes
@@ -13,20 +13,22 @@ describe("buildReplacementContent — one canonical placeholder", () => {
     // preview) re-derived a DIFFERENT placeholder across passes, which on a
     // defer pass changed a tail message's bytes and busted the whole
     // prompt-cache prefix after it. These tests lock the byte-identity that
-    // makes that class impossible. On this branch the bytes are also the
-    // identifier-free `...` filler: the released-tag numeral pattern must not
-    // be a permanently resident string in the transcript.
+    // makes that class impossible. On this branch the message placeholder is
+    // a distinct constant from the tool-result slot: the slot is empty
+    // (TOOL_RELEASED_SENTINEL === "" — an imitable constant there leaked into
+    // model output as a habit), while message text cannot be emptied on
+    // non-Anthropic routes, so it keeps an identifier-free bracketed filler.
 
     it("is a constant — no tagId, target, or content dependency", () => {
-        expect(buildReplacementContent(42)).toBe(TOOL_RELEASED_SENTINEL);
-        expect(buildReplacementContent(100413)).toBe(TOOL_RELEASED_SENTINEL);
+        expect(buildReplacementContent(42)).toBe(MESSAGE_DROP_PLACEHOLDER);
+        expect(buildReplacementContent(100413)).toBe(MESSAGE_DROP_PLACEHOLDER);
         expect(buildReplacementContent(7)).toBe(buildReplacementContent(42));
     });
 
     it("is byte-identical to heuristic-cleanup's message placeholder", () => {
         // heuristic-cleanup.ts calls buildReplacementContent — the two drop
         // paths cannot disagree by construction.
-        expect(buildReplacementContent(591)).toBe(TOOL_RELEASED_SENTINEL);
+        expect(buildReplacementContent(591)).toBe(MESSAGE_DROP_PLACEHOLDER);
     });
 
     it("is deterministic across repeated calls (defer-replay stability)", () => {

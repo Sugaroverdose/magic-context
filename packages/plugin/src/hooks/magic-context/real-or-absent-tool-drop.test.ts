@@ -120,7 +120,7 @@ describe("real-or-absent drops inside the newest-call window", () => {
         expect(getTagById(db, "ses-1", tag)?.dropMode).toBe("skeleton_real");
         const part = servedPart(messages, "call-1");
         expect(part?.state.input).toEqual(input);
-        expect(part?.state.output).toBe("...");
+        expect(part?.state.output).toBe("");
     });
 
     it("releases the call and its result in the full shape for an input of 1025 bytes", () => {
@@ -132,7 +132,7 @@ describe("real-or-absent drops inside the newest-call window", () => {
         expect(part?.state).toEqual({
             status: "completed",
             input: { content: renderDropToken(tag, deriveKey("ses-1")) },
-            output: "...",
+            output: "",
             attachments: [],
         });
     });
@@ -143,7 +143,7 @@ describe("real-or-absent drops inside the newest-call window", () => {
         expect(getTagById(db, "ses-1", tag)?.dropMode).toBe("skeleton_real");
         const part = servedPart(messages, "call-1");
         expect(part?.state.input).toEqual(input);
-        expect(part?.state.output).toBe("...");
+        expect(part?.state.output).toBe("");
         expect(JSON.stringify(messages)).not.toContain('"dropped":');
     });
 

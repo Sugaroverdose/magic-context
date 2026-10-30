@@ -6,7 +6,7 @@ import { estimateMessageTokens } from "../../hooks/magic-context/final-wire-toke
 import { deriveKey } from "../../hooks/magic-context/fpe";
 import {
     GOLDEN_FULL_DROP_CARRIER,
-    GOLDEN_FULL_DROP_OUTPUT,
+    GOLDEN_V2_DROP_RESULT,
 } from "../../hooks/magic-context/fpe-wire-golden";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import {
@@ -123,7 +123,7 @@ describe("adaptPayload", () => {
             expect(results).toHaveLength(1);
             expect(results[0]).toMatchObject({ type: "tool-result", id: "call-1" });
             expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_CARRIER);
-            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_V2_DROP_RESULT);
             // The result stays in its own tool-role carrier after the assistant row.
             expect(context.messages.map((message) => message.role)).toEqual(["assistant", "tool"]);
         });
@@ -150,7 +150,7 @@ describe("adaptPayload", () => {
                 expect(() => Message.make(message)).not.toThrow();
             const { results } = callsAndResults(context.messages);
             expect(results).toHaveLength(1);
-            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_V2_DROP_RESULT);
         });
     });
 
@@ -216,7 +216,7 @@ describe("adaptPayload", () => {
             expect(calls[0]).toMatchObject({ type: "tool-call", id: "call-1" });
             expect(results[0]).toMatchObject({ type: "tool-result", id: "call-1" });
             expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_CARRIER);
-            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_V2_DROP_RESULT);
         });
     });
 
@@ -268,7 +268,7 @@ describe("adaptPayload", () => {
                 id: "call-converted",
                 name: "read",
             });
-            expect(JSON.stringify(context.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+            expect(JSON.stringify(context.messages)).toContain(GOLDEN_V2_DROP_RESULT);
             for (const message of context.messages)
                 expect(() => Message.make(message)).not.toThrow();
         });
@@ -649,7 +649,7 @@ describe("adaptPayload", () => {
 
             // The released shape drops the attachment with the text: the result
             // is the plain `...` sentinel, no image content remains.
-            expect(resultOf(context)?.result).toEqual({ type: "text", value: "..." });
+            expect(resultOf(context)?.result).toEqual({ type: "text", value: "" });
         });
 
         it("#then the token estimate counts the image by its pixels, not its base64 length", () => {
@@ -690,5 +690,5 @@ it("OpenCode 2 question fallback vetoes automatic drops but preserves explicit r
     mapped.commit();
     // The question's answer is preserved by veto; the explicit reduction still
     // renders the released skeleton (`...`) into the result.
-    expect(JSON.stringify(payload.messages)).toContain(GOLDEN_FULL_DROP_OUTPUT);
+    expect(JSON.stringify(payload.messages)).toContain(GOLDEN_V2_DROP_RESULT);
 });

@@ -489,7 +489,7 @@ describe("applyPiHeuristicCleanup", () => {
 			// The released pair replays on the sweeper's non-bash shape: the
 			// automatic tier keeps the carrier surface to bash alone, so the
 			// ctx_reduce call keeps its real (empty) arguments and only the
-			// paired result takes the constant `...` released slot.
+			// paired result takes the empty released slot.
 			const replayed = replayTranscript.getOutputMessages();
 			const reducedCall = (
 				replayed[1] as {
@@ -497,7 +497,7 @@ describe("applyPiHeuristicCleanup", () => {
 				}
 			).content.find((p) => p.type === "toolCall")!;
 			expect(Object.keys(reducedCall.arguments!)).toEqual([]);
-			expect(textOf(replayed[2] as never)).toBe("...");
+			expect(textOf(replayed[2] as never)).toBe("");
 		} finally {
 			closeQuietly(db);
 		}

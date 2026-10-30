@@ -131,7 +131,7 @@ describe("user-answer automatic protection", () => {
         queuePendingOp(db, session, 1, "drop");
         expect(applyPendingOperations(session, db, targets, new Set())).toBe(true);
         expect(getTagsBySession(db, session)[0].status).toBe("dropped");
-        expect(JSON.stringify(messages)).toContain('"output":"..."');
+        expect(JSON.stringify(messages)).toContain('"output":""');
     });
 
     it("previously dropped answers remain dropped on defer replay", () => {
@@ -142,7 +142,7 @@ describe("user-answer automatic protection", () => {
         expect(targets.get(1)?.canDrop?.()).toBe(false);
         expect(applyFlushedStatuses(session, db, targets)).toBe(true);
         // skeleton_real replays `...` with the real (empty) args intact.
-        expect(JSON.stringify(messages)).toContain('"output":"..."');
+        expect(JSON.stringify(messages)).toContain('"output":""');
     });
 
     it("dedup preserves host-marked answers on duplicate-safe tools", () => {

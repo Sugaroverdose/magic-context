@@ -163,7 +163,7 @@ describe("createTransform index staleness regressions", () => {
         // errored part stays at its original index.
         expect(secondPass).toHaveLength(5);
         const dropToolPart = secondPass[2]!.parts[0] as ToolPart;
-        expect(dropToolPart.state.output).toBe("...");
+        expect(dropToolPart.state.output).toBe("");
         const keepToolPart = secondPass[4]!.parts[0] as ToolPart;
         expect(keepToolPart.state.error).toBe("x".repeat(150));
     });
