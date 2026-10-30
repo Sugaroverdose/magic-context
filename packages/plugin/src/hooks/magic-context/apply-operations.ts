@@ -413,6 +413,22 @@ export function applyPendingOperations(
                 const target = targets.get(pendingOp.tagId);
                 const isToolTag = tagTypeById.get(pendingOp.tagId) === "tool";
 
+                if (
+                    pendingOp.operation === "auto_drop" &&
+                    isToolTag &&
+                    toolNameById.get(pendingOp.tagId)?.toLowerCase() === "ctx_reduce"
+                ) {
+                    // Receipt preservation for system-originated queues: the
+                    // compartment runner stamps whatever sits in an archived
+                    // stretch, including the model's own ctx_reduce receipts.
+                    // The aged strip cleans those with the right shape; an
+                    // auto_drop here would erase the model's release trail
+                    // under a claimed intent the model never expressed.
+                    reject("receipt_preserved");
+                    removePendingOp(db, sessionId, pendingOp.tagId);
+                    continue;
+                }
+
                 if (synthetic) {
                     // Synthetic two-pass reclaim must never persist a DB-only drop for
                     // a tag that is absent/incomplete on this pass's visible wire. It
@@ -461,7 +477,10 @@ export function applyPendingOperations(
                         // applied so replays match this pass.
                         const { result: dropResult, mode: appliedMode } = applyNewToolDrop(target, {
                             inWindow: skeletonWindow.has(pendingOp.tagId),
-                            source: synthetic ? "sweeper" : "stamp",
+                            source:
+                                synthetic || pendingOp.operation === "auto_drop"
+                                    ? "sweeper"
+                                    : "stamp",
                             toolName: toolNameById.get(pendingOp.tagId),
                         });
                         if (

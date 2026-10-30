@@ -525,7 +525,8 @@ function createCtxReduceTool(deps: CtxReduceToolDeps): ToolDefinition {
                 (id) =>
                     !inertWhitespaceTagNumbers.has(id) &&
                     tagStatusMap.get(id) !== "dropped" &&
-                    pendingMap.get(id) !== "drop",
+                    pendingMap.get(id) !== "drop" &&
+                    pendingMap.get(id) !== "auto_drop",
             );
             const skippedCount = preFilterDropCount - dropIds.length;
 
