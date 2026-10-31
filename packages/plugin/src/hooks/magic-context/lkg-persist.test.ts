@@ -8,11 +8,12 @@ import type { Database } from "../../shared/sqlite";
 import {
     clearPersistedLkgSlot,
     drainStaleLkgSlots,
+    lkgReplayStateLabel,
     loadPersistedLkgSlot,
     pruneStaleLkgSlots,
     saveLkgSlotToDb,
 } from "./lkg-persist";
-import type { LkgSlot } from "./lkg-slot";
+import { captureSlot, type LkgSlot, resetLkgSlotsForTest } from "./lkg-slot";
 
 function fixture(): { db: Database; raw: BunDatabase } {
     const raw = new BunDatabase(":memory:");
@@ -105,6 +106,30 @@ describe("LKG durable write discipline", () => {
             expect(loadPersistedLkgSlot(db, "recent")).toBeDefined();
             expect(saveLkgSlotToDb(db, "old", slot)).toBe(true);
             expect(loadPersistedLkgSlot(db, "old")).toBeDefined();
+        } finally {
+            raw.close();
+        }
+    });
+});
+
+describe("LKG replay source label (boot-receipt honesty)", () => {
+    it("says absent when no slot exists, mem when captured, disk when only persisted", () => {
+        // The boot receipts read `reason=cache_hit` while an oversized
+        // session had NO slot at all (the 24 MiB capture cap silently
+        // refuses). The label makes the replay source observable per pass.
+        const { db, raw } = fixture();
+        try {
+            resetLkgSlotsForTest();
+            expect(lkgReplayStateLabel(db, "fresh")).toBe("absent");
+
+            expect(captureSlot("mem-session", slot)).toBe(true);
+            expect(lkgReplayStateLabel(db, "mem-session")).toBe("mem");
+
+            expect(saveLkgSlotToDb(db, "disk-session", slot)).toBe(true);
+            expect(lkgReplayStateLabel(db, "disk-session")).toBe("disk");
+
+            clearPersistedLkgSlot(db, "disk-session");
+            expect(lkgReplayStateLabel(db, "disk-session")).toBe("absent");
         } finally {
             raw.close();
         }

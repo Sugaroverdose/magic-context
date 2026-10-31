@@ -405,7 +405,15 @@ export function lkgSlotRejection(sessionId: string, slot: LkgSlot): string | nul
 }
 
 export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
-    if (lkgSlotRejection(sessionId, slot) !== null) return false;
+    const rejection = lkgSlotRejection(sessionId, slot);
+    if (rejection !== null) {
+        // Name the fired check in the session log: the cap rejection was
+        // silent for the whole boot-cache-bust arc (`if (captured)` had no
+        // else arm anywhere in the TS lane), so an oversized session simply
+        // never had a slot and no receipt said why.
+        sessionLog(sessionId, `lkg_capture_declined reason=${rejection}`);
+        return false;
+    }
     const bytes = slotBytes(slot);
     const prior = lkgHeapHolder.entries.get(sessionId);
     if (prior) totalBytes -= prior.bytes;
@@ -422,6 +430,10 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
             lkgHeapHolder.entries.set(sessionId, prior);
             totalBytes += prior.bytes;
         }
+        sessionLog(
+            sessionId,
+            `lkg_capture_declined reason=heap_budget bytes=${bytes} total=${totalBytes} cap=${LKG_TOTAL_BYTES}`,
+        );
         return false;
     }
     const entry = {
@@ -445,7 +457,10 @@ export function captureSlot(sessionId: string, slot: LkgSlot): boolean {
 /** Install a slot loaded from durable storage, applying the same size bounds. */
 function installHydratedSlot(sessionId: string, slot: LkgSlot): boolean {
     const bytes = slotBytes(slot);
-    if (bytes > LKG_SINGLE_SLOT_BYTES) return false;
+    if (bytes > LKG_SINGLE_SLOT_BYTES) {
+        sessionLog(sessionId, `lkg_hydration_declined reason=slot_bytes=${bytes}`);
+        return false;
+    }
     const prior = lkgHeapHolder.entries.get(sessionId);
     if (prior) totalBytes -= prior.bytes;
     lkgHeapHolder.entries.delete(sessionId);
@@ -461,6 +476,10 @@ function installHydratedSlot(sessionId: string, slot: LkgSlot): boolean {
             lkgHeapHolder.entries.set(sessionId, prior);
             totalBytes += prior.bytes;
         }
+        sessionLog(
+            sessionId,
+            `lkg_hydration_declined reason=heap_budget bytes=${bytes} total=${totalBytes} cap=${LKG_TOTAL_BYTES}`,
+        );
         return false;
     }
     const entry = {

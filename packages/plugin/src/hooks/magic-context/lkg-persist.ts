@@ -6,6 +6,7 @@ import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { LkgPersistenceBackend, LkgSlot } from "./lkg-slot";
+import { getInMemorySlot } from "./lkg-slot";
 
 /**
  * Durable persistence for last-known-good (LKG) transform snapshots.
@@ -297,6 +298,27 @@ export function clearPersistedLkgSlot(db: Database, sessionId: string): void {
         persistedFingerprints.get(db)?.delete(sessionId);
     } catch (error) {
         sessionLog(sessionId, "LKG snapshot durable clear failed:", error);
+    }
+}
+
+/**
+ * Where this pass could replay the LKG prefix from, for the per-pass receipt
+ * line. `absent` is the honest answer the boot receipts lacked: the 24 MiB
+ * capture cap refuses oversized sessions silently, so a rebuilt array used
+ * to ride out under `reason=cache_hit` (which only ever described the
+ * m[0]/m[1] cache). A cheap existence probe — validation still belongs to
+ * the replay fences.
+ */
+export function lkgReplayStateLabel(db: Database, sessionId: string): "mem" | "disk" | "absent" {
+    if (getInMemorySlot(sessionId)) return "mem";
+    try {
+        const row = db
+            .prepare("SELECT 1 FROM lkg_slots WHERE session_id = ?")
+            .get(sessionId) as unknown;
+        return row ? "disk" : "absent";
+    } catch {
+        // Best-effort telemetry: a failed probe must not alter the pass.
+        return "absent";
     }
 }
 
