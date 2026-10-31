@@ -124,6 +124,7 @@ import {
     prepareCachedM0M1Replay,
     renderCompartmentInjection,
 } from "./inject-compartments";
+import { lkgReplayStateLabel } from "./lkg-persist";
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
 import { hasVisibleNoteReadCall } from "./note-visibility";
 import type { PassDegradationKind, PassDegradationSite, PassOutcome } from "./pass-outcome";
@@ -2812,7 +2813,7 @@ export async function runPostTransformPhase(
                 }
                 sessionLog(
                     args.sessionId,
-                    `transform: injected m[0]/m[1] (rematerialized=${result.m0RematerializedThisPass}, reason=${result.decision.reason ?? "cache_hit"})`,
+                    `transform: injected m[0]/m[1] (rematerialized=${result.m0RematerializedThisPass}, reason=${result.decision.reason ?? "cache_hit"}, lkg=${lkgReplayStateLabel(args.db, args.sessionId)})`,
                 );
             }
         } catch (error) {
