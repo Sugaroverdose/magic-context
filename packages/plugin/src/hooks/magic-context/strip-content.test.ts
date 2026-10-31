@@ -707,13 +707,18 @@ describe("strip-content", () => {
         });
 
         describe("#given an assistant that is already sentinel (idempotent replay)", () => {
-            it("#then skips it entirely (zero count, unchanged)", () => {
+            it("#then counts no fresh strip but keeps the id flowing to the persisted set", () => {
+                // R11: the emptied message drop IS this shape. Counting it
+                // again would inflate the fresh-strip log; skipping its id
+                // made it invisible to detection, so a re-exposed row lost
+                // the only channel that re-blanks it after the tag goes
+                // `compacted` at a fold. Bytes must not change either way.
                 const assistant = message("m-a", "assistant", [{ type: "text", text: "" }]);
 
                 const result = stripDroppedPlaceholderMessages([assistant]);
 
                 expect(result.stripped).toBe(0);
-                expect(result.sentineledIds).toEqual([]);
+                expect(result.sentineledIds).toEqual(["m-a"]);
                 expect(assistant.parts).toEqual([{ type: "text", text: "" }]);
             });
         });

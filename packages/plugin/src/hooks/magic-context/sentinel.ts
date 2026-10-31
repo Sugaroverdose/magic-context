@@ -66,6 +66,23 @@ export function modelAcceptsEmptyContent(providerID?: string): boolean {
 }
 
 /**
+ * Decide whether a DROPPED message (user text, or a whole-message sentinel)
+ * may be served as the empty string on this route.
+ *
+ * Wider than `modelAcceptsEmptyContent`: that predicate is about the
+ * Anthropic AI-SDK adapter actively filtering empty text parts off the wire
+ * (its hidden-seam and part-drop machinery depends on that behavior). This
+ * one only asks whether an empty string survives the route's validator.
+ * Measured 2026-10-31: the station route returned HTTP 200 for an empty
+ * user message, an empty assistant message, and consecutive user messages;
+ * the strict validators (Kimi `must not be empty`) reject those shapes, so
+ * unknown providers stay on the bracketed fillers.
+ */
+export function routeAcceptsEmptyDroppedContent(providerID?: string): boolean {
+    return providerID === "anthropic" || providerID === "station";
+}
+
+/**
  * True when the route serializes reasoning as Anthropic signed thinking, where
  * removing the tool-result separator between two reasoning-bearing assistant
  * steps lets the adapter merge them into one signed turn (issue 423). Covers
@@ -243,9 +260,10 @@ export function makeSentinel(originalPart: unknown): {
 /**
  * Create a sentinel for replacing a WHOLE assistant message's parts list.
  *
- * Picks `""` when the live provider is the canonical Anthropic provider
- * (whose AI-SDK normalization filters empty content from the wire),
- * `[dropped]` otherwise. See `modelAcceptsEmptyContent` for the rule.
+ * Picks `""` on routes measured to accept empty dropped content
+ * (anthropic, whose AI-SDK normalization filters empty text, and station,
+ * probed HTTP 200 for empty user/assistant content on 2026-10-31),
+ * `[dropped]` otherwise. See `routeAcceptsEmptyDroppedContent`.
  *
  * The chosen placeholder text is kept in `WHOLE_MESSAGE_PLACEHOLDER_TEXT`
  * so `isSentinel` recognizes both shapes (idempotency on replay).
@@ -255,7 +273,7 @@ export function makeWholeMessageSentinel(
 ): { type: "text"; text: string } & Record<string, unknown> {
     return {
         type: "text",
-        text: modelAcceptsEmptyContent(providerID) ? "" : WHOLE_MESSAGE_PLACEHOLDER_TEXT,
+        text: routeAcceptsEmptyDroppedContent(providerID) ? "" : WHOLE_MESSAGE_PLACEHOLDER_TEXT,
     };
 }
 

@@ -843,10 +843,13 @@ function findFirstTextPart(parts: unknown[]): { type: string; text: string } | n
 }
 
 function isDroppedPlaceholder(text: string): boolean {
-    // Branch shape: the constant `[content omitted]` filler (message drops;
-    // the tool-result slot is now empty). The legacy forms stay detectable
-    // so pre-upgrade renders in long-lived sessions neutralize the same way.
-    return /^(?:\[content omitted\]|\.\.\.|\[dropped(?: §\d+§)?\])$/.test(text.trim());
+    // Branch shapes: the emptied form (R11 — message drops on routes
+    // measured to accept empty dropped content) and the constant
+    // `[content omitted]` filler. The legacy forms stay detectable so
+    // pre-upgrade renders in long-lived sessions neutralize the same way.
+    // The empty match must come first: without it the join path would
+    // prepend the block plus "\n\n" onto an emptied head.
+    return /^(?:|\[content omitted\]|\.\.\.|\[dropped(?: §\d+§)?\])$/.test(text.trim());
 }
 
 export interface M0SnapshotMarkers {

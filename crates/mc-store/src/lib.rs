@@ -7381,6 +7381,13 @@ fn seeded_drop_unit(
     }
     let (kind, frozen_payload) = if related || drop_mode == "full" {
         ("drop", "[dropped]".to_string())
+    } else if drop_mode == "message_empty" {
+        // R11 frozen message-drop shape: the route accepted empty content
+        // when the drop was applied, so the served bytes are empty forever.
+        ("drop", String::new())
+    } else if drop_mode == "message_filler" {
+        // R11 frozen message-drop shape for strict routes.
+        ("drop", "[content omitted]".to_string())
     } else if drop_mode == "truncated" || drop_mode == "skeleton" {
         // Legacy marker skeleton; the module converts it on its next HARD fold.
         ("skeleton", "[dropped]".to_string())
@@ -17540,6 +17547,18 @@ mod tests {
             super::seeded_drop_unit("m2#0", "edit_marker_stripped", Some("hint"), false).unwrap();
         assert_eq!(edit.kind, "edit_marker");
         assert_eq!(edit.frozen_payload, "hint");
+    }
+
+    #[test]
+    fn r11_message_drop_shapes_seed_their_frozen_bytes() {
+        // The frozen message shapes must seed, not skip: a "None" here would
+        // log the seed invalid and leave the module lane without the drop.
+        let emptied = super::seeded_drop_unit("m1#0", "message_empty", None, false).unwrap();
+        assert_eq!(emptied.kind, "drop");
+        assert_eq!(emptied.frozen_payload, "");
+        let filler = super::seeded_drop_unit("m2#0", "message_filler", None, false).unwrap();
+        assert_eq!(filler.kind, "drop");
+        assert_eq!(filler.frozen_payload, "[content omitted]");
     }
     use super::*;
     use cortexkit_store_types::{Isolation, StorageBackend};

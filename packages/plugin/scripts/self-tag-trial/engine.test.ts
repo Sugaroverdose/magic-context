@@ -48,7 +48,7 @@ describe("self-tag trial real tagging", () => {
             t.user("fixture"); await t.accept({ texts: [], calls: [{ id: "read", name: "read", input: {} }] });
             for (let n = 0; n < 10; n++) { t.user(`turn ${n}`); await t.accept({ texts: ["seven"], calls: [] }); }
             await t.accept({ texts: [], calls: [{ id: "reduce", name: "ctx_reduce", input: { drop: "2" } }] });
-            expect(JSON.stringify(await t.pass())).toContain('"output":"§2§ ..."');
+            expect(JSON.stringify(await t.pass())).toContain('"output":"§2§ "');
         } finally { t.close(); }
     });
 });

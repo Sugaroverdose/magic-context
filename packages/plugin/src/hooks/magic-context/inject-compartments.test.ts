@@ -420,6 +420,33 @@ describe("prepareCompartmentInjection — empty compartments fallback", () => {
         expect(firstPart.text).toContain("test directive");
         expect(firstPart.text).toContain("original");
     });
+
+    it("renderCompartmentInjection prepends instead of joining onto an emptied dropped head", () => {
+        // R11: on routes that accept empty dropped content a dropped head
+        // user message renders as "". Joining the block onto it would mint
+        // trailing blank bytes that differ from the filler head's prepend
+        // path for the same logical drop — registering the empty shape
+        // keeps both shapes on the same code path.
+        db = makeDb();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "USER_DIRECTIVES",
+            content: "test directive",
+        });
+
+        const messages: MessageLike[] = [userMessage("m1", "")];
+        const prepared = prepareCompartmentInjection(db, SESSION_ID, messages, true, PROJECT_PATH);
+        expect(prepared).not.toBeNull();
+        if (!prepared) return;
+
+        const renderResult = renderCompartmentInjection(SESSION_ID, messages, prepared);
+        expect(renderResult.prependedMessageCount).toBe(1);
+        const original = messages[1]?.parts[0] as { text: string } | undefined;
+        expect(original?.text).toBe("");
+        const head = messages[0].parts[0] as { type: string; text: string };
+        expect(head.text).toContain("<session-history>");
+        expect(head.text.trimEnd()).toBe(head.text);
+    });
 });
 
 describe("prepareCompartmentInjection — cross-database cache isolation", () => {
