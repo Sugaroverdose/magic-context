@@ -2,8 +2,8 @@
 
 import { describe, expect, it } from "bun:test";
 import { buildReplacementContent } from "./apply-operations";
-import { isMarkerOnlyText } from "./strip-content";
 import { MESSAGE_DROP_PLACEHOLDER, WHOLE_MESSAGE_PLACEHOLDER_TEXT } from "./sentinel";
+import { isMarkerOnlyText } from "./strip-content";
 
 describe("buildReplacementContent — one canonical placeholder", () => {
     // The whole point: buildReplacementContent returns the SAME constant bytes
@@ -73,6 +73,20 @@ describe("buildReplacementContent — R11 route-gated empty shape, frozen per ta
         expect(buildReplacementContent(42, undefined, undefined)).toBe(MESSAGE_DROP_PLACEHOLDER);
     });
 
+    it("does not empty a USER-role drop on the filtering adapter", () => {
+        // Anthropic's AI-SDK filters empty text parts off the wire entirely:
+        // an emptied user message vanishes and its turn anchor with it —
+        // the same hazard stripDroppedPlaceholderMessages guards against by
+        // never neutralizing user rows. Station passes bytes through
+        // (HTTP 200 probed for empty user content), so only assistant-role
+        // rows may be emptied on anthropic.
+        expect(buildReplacementContent(42, undefined, "anthropic", "user")).toBe(
+            MESSAGE_DROP_PLACEHOLDER,
+        );
+        expect(buildReplacementContent(42, undefined, "anthropic", "assistant")).toBe("");
+        expect(buildReplacementContent(42, undefined, "station", "user")).toBe("");
+    });
+
     it("replays the frozen shape regardless of the current route", () => {
         // A tag frozen empty when created serves "" even after a switch onto
         // a strict route; a tag frozen filler serves the filler even after a
@@ -92,7 +106,13 @@ describe("buildReplacementContent — R11 route-gated empty shape, frozen per ta
 });
 
 // ── R11 integration: the shape is decided once at apply and replayed frozen ──
-import { afterEach, beforeEach, describe as describe2, expect as expect2, it as it2 } from "bun:test";
+import {
+    afterEach,
+    beforeEach,
+    describe as describe2,
+    expect as expect2,
+    it as it2,
+} from "bun:test";
 import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -103,9 +123,9 @@ import {
     openDatabase,
     queuePendingOp,
 } from "../../features/magic-context/storage";
+import type { TagEntry } from "../../features/magic-context/types";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { applyFlushedStatuses, applyPendingOperations } from "./apply-operations";
-import type { TagEntry } from "../../features/magic-context/types";
 import type { TagTarget } from "./tag-messages";
 
 describe2("message drop shape freeze (R11)", () => {
@@ -192,32 +212,35 @@ describe2("message drop shape freeze (R11)", () => {
         expect2(row.dropMode).toBe("message_filler");
     });
 
-    it2("replay serves the frozen bytes on a different route than the one that decided them", () => {
-        // Frozen empty at apply on station; replayed on a strict route.
-        seedMessageTag(3);
-        applyPendingOperations(
-            session,
-            db,
-            messageTarget(3, {}),
-            new Set(),
-            undefined,
-            undefined,
-            [],
-            new Set(),
-            undefined,
-            undefined,
-            "station",
-        );
-        const replayed: { content?: string } = {};
-        const didMutate = applyFlushedStatuses(
-            session,
-            db,
-            messageTarget(3, replayed),
-            getTagsBySession(db, session),
-        );
-        expect2(didMutate).toBe(true);
-        expect2(replayed.content).toBe("");
-    });
+    it2(
+        "replay serves the frozen bytes on a different route than the one that decided them",
+        () => {
+            // Frozen empty at apply on station; replayed on a strict route.
+            seedMessageTag(3);
+            applyPendingOperations(
+                session,
+                db,
+                messageTarget(3, {}),
+                new Set(),
+                undefined,
+                undefined,
+                [],
+                new Set(),
+                undefined,
+                undefined,
+                "station",
+            );
+            const replayed: { content?: string } = {};
+            const didMutate = applyFlushedStatuses(
+                session,
+                db,
+                messageTarget(3, replayed),
+                getTagsBySession(db, session),
+            );
+            expect2(didMutate).toBe(true);
+            expect2(replayed.content).toBe("");
+        },
+    );
 
     it2("legacy rows without a frozen shape keep replaying the filler", () => {
         // Pre-R11 byte-stability: a dropped message tag whose drop_mode is the
