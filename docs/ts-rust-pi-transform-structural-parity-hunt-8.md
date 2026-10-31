@@ -55,3 +55,29 @@ No clear-cut production transform defect survived source and fixture adjudicatio
 ## Honest-empty declaration
 
 Hunt #8 is **not empty**. It closes the non-Anthropic differ blind spot with seven provider families, adds a non-vacuous issue-#135 invalid-wire bucket, proves the four-cell cold-start sequence matrix, pins both implementations to one caveman byte corpus, and records two precise operational briefs (compaction-off dormant module state and live aged-session evidence). The standing honest-empty counter remains **0/3**. No master push is part of this work.
+
+## Correction (2026-11-01, post-hunt code change — R11)
+
+The §A "Empty-content strategy" verdict above describes the tree as audited.
+It no longer describes current TypeScript: R11 (`3ac99c26a`, `c1d86a64c`)
+split the anthropic-only `modelAcceptsEmptyContent` (unchanged, still the
+AI-SDK filtering-semantics gate for its hidden-seam consumers) from a new
+route gate `routeAcceptsEmptyDroppedContent` = `anthropic` OR `station`
+(station probed HTTP 200 for empty user/assistant content, 2026-10-31), and
+`makeWholeMessageSentinel` moved to the route gate. Whole-MESSAGE drops use
+the role-aware refinement `routeAcceptsEmptyDroppedMessage`: anthropic
+empties assistant-role only (the AI-SDK part filter would erase an emptied
+user turn anchor), station every role; the chosen shape is frozen per tag
+(`message_empty`/`message_filler` in the existing `drop_mode` column) and
+replay never re-decides.
+
+**Rust-lane drift, open:** Rust still gates on exact `provider_id ==
+Some("anthropic")` (`crates/mc-module/src/transform.rs:15576,15692`), so on
+the station route Rust emits `[dropped]` where TS now emits `""` for whole
+sentinel parts. Cross-lane byte divergence is bounded by the standing
+lane-switch law (switching lanes already changes served bytes, so no extra
+bust is attributed), but the provider-matrix invariant "rejects any
+non-Anthropic empty content" is now TS-false. Porting the station arm to
+Rust and re-gating the matrix test is an open item; the Rust lane does not
+compile on the host carrying this tree, so the port must land with its own
+cargo gate rather than as an unverifiable edit.
