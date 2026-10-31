@@ -83,6 +83,24 @@ export function routeAcceptsEmptyDroppedContent(providerID?: string): boolean {
 }
 
 /**
+ * Role-aware refinement of `routeAcceptsEmptyDroppedContent` for whole
+ * MESSAGE drops. The anthropic adapter does not merely accept empty text —
+ * its AI-SDK normalization filters such parts off the wire, so an emptied
+ * USER message disappears with its turn anchor (the hazard
+ * `stripDroppedPlaceholderMessages` guards by never neutralizing user
+ * rows). Only assistant-role rows may be emptied there. The station route
+ * transmits the bytes as given (HTTP 200 probed for empty user content,
+ * 2026-10-31), so every role is safe.
+ */
+export function routeAcceptsEmptyDroppedMessage(
+    providerID: string | undefined,
+    role: string,
+): boolean {
+    if (!routeAcceptsEmptyDroppedContent(providerID)) return false;
+    return providerID !== "anthropic" || role === "assistant";
+}
+
+/**
  * True when the route serializes reasoning as Anthropic signed thinking, where
  * removing the tool-result separator between two reasoning-bearing assistant
  * steps lets the adapter merge them into one signed turn (issue 423). Covers

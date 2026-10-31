@@ -253,6 +253,7 @@ export function applyHeuristicCleanup(
                         tag.tagNumber,
                         undefined,
                         config.providerID,
+                        target.message?.info?.role,
                     );
                     const didReplace =
                         dropResult === "absent" ? target.setContent(replacement) : false;

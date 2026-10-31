@@ -11,7 +11,7 @@ import type { PendingOp, TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
-import { MESSAGE_DROP_PLACEHOLDER, routeAcceptsEmptyDroppedContent } from "./sentinel";
+import { MESSAGE_DROP_PLACEHOLDER, routeAcceptsEmptyDroppedMessage } from "./sentinel";
 import type { TagTarget } from "./tag-messages";
 import type { ToolDropResult } from "./tool-drop-target";
 import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
@@ -70,14 +70,18 @@ export function buildReplacementContent(
     _tagId: number,
     frozen?: TagEntry["dropMode"],
     providerID?: string,
+    role?: string,
 ): string {
     // R11: the shape is decided once, at apply, and frozen on the tag.
     // A defined `frozen` value is a replay — the stored mode is the whole
     // answer, the current route is never consulted (a mid-session route
     // change must not rewrite already-served bytes). Only a fresh drop
-    // (no frozen mode yet) asks the route gate.
+    // (no frozen mode yet) asks the route gate; the gate is role-aware
+    // because the filtering adapter would erase an emptied user anchor.
     if (frozen) return frozen === "message_empty" ? "" : MESSAGE_DROP_PLACEHOLDER;
-    return routeAcceptsEmptyDroppedContent(providerID) ? "" : MESSAGE_DROP_PLACEHOLDER;
+    return routeAcceptsEmptyDroppedMessage(providerID, role ?? "assistant")
+        ? ""
+        : MESSAGE_DROP_PLACEHOLDER;
 }
 export interface NewToolDropOutcome {
     result: ToolDropResult;
@@ -525,6 +529,7 @@ export function applyPendingOperations(
                         pendingOp.tagId,
                         undefined,
                         providerID,
+                        target.message?.info?.role,
                     );
                     messageDropMode = replacement === "" ? "message_empty" : "message_filler";
                     const priorContent = target.getContent?.();
