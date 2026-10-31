@@ -26,7 +26,12 @@ export interface TagEntry {
         | "skeleton_real"
         | "skeleton_stripped"
         | "edit_marker"
-        | "edit_marker_stripped";
+        | "edit_marker_stripped"
+        /** Message-drop render shape, frozen at apply (R11): "" on routes
+         * measured to accept empty dropped content, the bracketed filler
+         * elsewhere. Only message tags carry these; replay never re-decides. */
+        | "message_empty"
+        | "message_filler";
     toolName: string | null;
     inputByteSize: number;
     byteSize: number;

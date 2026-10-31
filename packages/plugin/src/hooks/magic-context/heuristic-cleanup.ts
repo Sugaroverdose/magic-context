@@ -89,6 +89,8 @@ export function applyHeuristicCleanup(
          * for forwarding this only for primary sessions where caveman is enabled.
          */
         caveman?: CavemanCleanupConfig;
+        /** Route for the R11 message-drop shape decision (injection strip). */
+        providerID?: string;
     },
     preloadedTags?: TagEntry[],
 ): {
@@ -247,12 +249,26 @@ export function applyHeuristicCleanup(
 
                 if (strippedSource.trim().length === 0) {
                     const dropResult = target.drop?.() ?? "absent";
-                    const replacement = buildReplacementContent(tag.tagNumber);
+                    const replacement = buildReplacementContent(
+                        tag.tagNumber,
+                        undefined,
+                        config.providerID,
+                    );
                     const didReplace =
                         dropResult === "absent" ? target.setContent(replacement) : false;
                     if (dropResult === "removed" || dropResult === "absent") {
                         replaceSourceContent(db, sessionId, tag.tagNumber, "");
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+                        if (didReplace) {
+                            // Freeze the shape actually served so the replay
+                            // in applyFlushedStatuses cannot re-decide it.
+                            updateTagDropMode(
+                                db,
+                                sessionId,
+                                tag.tagNumber,
+                                replacement === "" ? "message_empty" : "message_filler",
+                            );
+                        }
                         if (dropResult === "removed" || didReplace) {
                             droppedInjections++;
                             droppedTokenReductions.push(

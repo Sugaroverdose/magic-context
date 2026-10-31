@@ -11,7 +11,7 @@ import type { PendingOp, TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
-import { MESSAGE_DROP_PLACEHOLDER } from "./sentinel";
+import { MESSAGE_DROP_PLACEHOLDER, routeAcceptsEmptyDroppedContent } from "./sentinel";
 import type { TagTarget } from "./tag-messages";
 import type { ToolDropResult } from "./tool-drop-target";
 import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
@@ -66,8 +66,18 @@ export const RECENT_TOOL_SKELETON_WINDOW = 20;
 // post-neutralization sentinel, and isSentinel would pre-skip these messages
 // out of the persisted neutralization set. heuristic-cleanup.ts calls this
 // function, so the two drop paths can never disagree.
-export function buildReplacementContent(_tagId: number): string {
-    return MESSAGE_DROP_PLACEHOLDER;
+export function buildReplacementContent(
+    _tagId: number,
+    frozen?: TagEntry["dropMode"],
+    providerID?: string,
+): string {
+    // R11: the shape is decided once, at apply, and frozen on the tag.
+    // A defined `frozen` value is a replay — the stored mode is the whole
+    // answer, the current route is never consulted (a mid-session route
+    // change must not rewrite already-served bytes). Only a fresh drop
+    // (no frozen mode yet) asks the route gate.
+    if (frozen) return frozen === "message_empty" ? "" : MESSAGE_DROP_PLACEHOLDER;
+    return routeAcceptsEmptyDroppedContent(providerID) ? "" : MESSAGE_DROP_PLACEHOLDER;
 }
 export interface NewToolDropOutcome {
     result: ToolDropResult;
@@ -345,6 +355,9 @@ export function applyPendingOperations(
     onTagReduced?: (reduction: DroppedTokenReduction) => void,
     /** Reports why selected operations did or did not change the visible payload. */
     onBatchComplete?: (diagnostics: PendingOperationBatchDiagnostics) => void,
+    /** Route for the R11 message-drop shape decision; only fresh drops
+     * consult it — every later pass replays the mode frozen on the tag. */
+    providerID?: string,
 ): boolean {
     let didMutateMessage = false;
     let diagnostics: PendingOperationBatchDiagnostics | undefined;
@@ -446,6 +459,7 @@ export function applyPendingOperations(
                 }
 
                 let shouldPersistDrop = false;
+                let messageDropMode: TagEntry["dropMode"] | undefined;
                 if (isToolTag) {
                     if (editMarkerTagIds.has(pendingOp.tagId)) {
                         // Superseded edit/write: compress to a filePath-preserving
@@ -507,7 +521,12 @@ export function applyPendingOperations(
                         shouldPersistDrop = true;
                     }
                 } else if (target) {
-                    const replacement = buildReplacementContent(pendingOp.tagId);
+                    const replacement = buildReplacementContent(
+                        pendingOp.tagId,
+                        undefined,
+                        providerID,
+                    );
+                    messageDropMode = replacement === "" ? "message_empty" : "message_filler";
                     const priorContent = target.getContent?.();
                     const changed = target.setContent(replacement);
                     if (changed) {
@@ -536,6 +555,11 @@ export function applyPendingOperations(
                     continue;
                 }
                 updateTagStatus(db, sessionId, pendingOp.tagId, "dropped");
+                if (messageDropMode) {
+                    // Freeze the render shape beside the status: every later
+                    // pass replays these bytes, whoever the route is.
+                    updateTagDropMode(db, sessionId, pendingOp.tagId, messageDropMode);
+                }
                 if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
                 if (operationMutated) diagnostics.mutated += 1;
                 else diagnostics.persistedWithoutMutation += 1;
@@ -629,7 +653,11 @@ export function applyFlushedStatuses(
                     }
                 }
             } else if (target) {
-                const changed = target.setContent(buildReplacementContent(tag.tagNumber));
+                // Replay reads the frozen shape; pre-R11 rows carry the
+                // schema default and keep the filler they were served with.
+                const changed = target.setContent(
+                    buildReplacementContent(tag.tagNumber, tag.dropMode),
+                );
                 if (changed) didMutateMessage = true;
             }
         }

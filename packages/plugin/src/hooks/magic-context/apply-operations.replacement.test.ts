@@ -52,3 +52,183 @@ describe("buildReplacementContent — one canonical placeholder", () => {
         expect(buildReplacementContent(11)).not.toBe(WHOLE_MESSAGE_PLACEHOLDER_TEXT);
     });
 });
+
+describe("buildReplacementContent — R11 route-gated empty shape, frozen per tag", () => {
+    // The bracketed fillers are the R9 imitation class: the census found
+    // assistant prose copying "[content omitted]" / "[dropped]" off wire
+    // exemplars. Routes measured to accept empty content (anthropic's AI-SDK
+    // normalization filters empty text; station returned HTTP 200 for empty
+    // user AND empty assistant content, probed 2026-10-31) get the empty
+    // shape; strict routes (Kimi `must not be empty`) keep the filler. The
+    // chosen shape is FROZEN on the tag at apply time — a later route change
+    // must not rewrite bytes that were already served.
+
+    it("empties dropped message text on routes measured to accept empty content", () => {
+        expect(buildReplacementContent(42, undefined, "station")).toBe("");
+        expect(buildReplacementContent(42, undefined, "anthropic")).toBe("");
+    });
+
+    it("keeps the bracketed filler on strict and unknown routes", () => {
+        expect(buildReplacementContent(42, undefined, "kimi")).toBe(MESSAGE_DROP_PLACEHOLDER);
+        expect(buildReplacementContent(42, undefined, undefined)).toBe(MESSAGE_DROP_PLACEHOLDER);
+    });
+
+    it("replays the frozen shape regardless of the current route", () => {
+        // A tag frozen empty when created serves "" even after a switch onto
+        // a strict route; a tag frozen filler serves the filler even after a
+        // switch onto an empty-accepting route. Replay never re-decides.
+        expect(buildReplacementContent(42, "message_empty", "kimi")).toBe("");
+        expect(buildReplacementContent(42, "message_filler", "station")).toBe(
+            MESSAGE_DROP_PLACEHOLDER,
+        );
+    });
+
+    it("legacy pre-R11 rows replay the filler (byte-stable for already-served drops)", () => {
+        // Rows persisted before the freeze existed carry the schema default
+        // or any tool-side mode; the message branch keeps their bytes.
+        expect(buildReplacementContent(42, "full", "station")).toBe(MESSAGE_DROP_PLACEHOLDER);
+        expect(buildReplacementContent(42, "erased", "station")).toBe(MESSAGE_DROP_PLACEHOLDER);
+    });
+});
+
+// ── R11 integration: the shape is decided once at apply and replayed frozen ──
+import { afterEach, beforeEach, describe as describe2, expect as expect2, it as it2 } from "bun:test";
+import { rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+    closeDatabase,
+    getTagsBySession,
+    insertTag,
+    openDatabase,
+    queuePendingOp,
+} from "../../features/magic-context/storage";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { applyFlushedStatuses, applyPendingOperations } from "./apply-operations";
+import type { TagEntry } from "../../features/magic-context/types";
+import type { TagTarget } from "./tag-messages";
+
+describe2("message drop shape freeze (R11)", () => {
+    const session = "r11-freeze";
+    let db: NonNullable<ReturnType<typeof openDatabase>>;
+    let root: string;
+    let originalData: string | undefined;
+    let originalStorage: string | undefined;
+
+    beforeEach(() => {
+        originalData = process.env.XDG_DATA_HOME;
+        originalStorage = process.env.MAGIC_CONTEXT_STORAGE_DIR;
+        root = createTestTempDirFromPath(join(tmpdir(), "r11-freeze-"));
+        process.env.XDG_DATA_HOME = root;
+        process.env.MAGIC_CONTEXT_STORAGE_DIR = root;
+        db = openDatabase()!;
+    });
+    afterEach(() => {
+        closeDatabase();
+        if (originalData === undefined) delete process.env.XDG_DATA_HOME;
+        else process.env.XDG_DATA_HOME = originalData;
+        if (originalStorage === undefined) delete process.env.MAGIC_CONTEXT_STORAGE_DIR;
+        else process.env.MAGIC_CONTEXT_STORAGE_DIR = originalStorage;
+        rmSync(root, { recursive: true, force: true });
+    });
+
+    function messageTarget(tagNumber: number, captured: { content?: string }) {
+        const target: TagTarget = {
+            getContent: () => "the original user prose that was dropped",
+            setContent: (content: string) => {
+                captured.content = content;
+                return true;
+            },
+        };
+        return new Map<number, TagTarget>([[tagNumber, target]]);
+    }
+
+    function seedMessageTag(tagNumber: number) {
+        insertTag(db, session, `msg-${tagNumber}`, "message", 36, tagNumber);
+        queuePendingOp(db, session, tagNumber, "drop");
+    }
+
+    it2("a new drop on an empty-accepting route serves empty bytes and freezes the shape", () => {
+        seedMessageTag(1);
+        const captured: { content?: string } = {};
+        const mutated = applyPendingOperations(
+            session,
+            db,
+            messageTarget(1, captured),
+            new Set(),
+            undefined,
+            undefined,
+            [],
+            new Set(),
+            undefined,
+            undefined,
+            "station",
+        );
+        expect2(mutated).toBe(true);
+        expect2(captured.content).toBe("");
+        const row = getTagsBySession(db, session).find((t) => t.tagNumber === 1) as TagEntry;
+        expect2(row.status).toBe("dropped");
+        expect2(row.dropMode).toBe("message_empty");
+    });
+
+    it2("a new drop on a strict route serves the filler and freezes THAT shape", () => {
+        seedMessageTag(2);
+        const captured: { content?: string } = {};
+        applyPendingOperations(
+            session,
+            db,
+            messageTarget(2, captured),
+            new Set(),
+            undefined,
+            undefined,
+            [],
+            new Set(),
+            undefined,
+            undefined,
+            "kimi",
+        );
+        expect2(captured.content).toBe(MESSAGE_DROP_PLACEHOLDER);
+        const row = getTagsBySession(db, session).find((t) => t.tagNumber === 2) as TagEntry;
+        expect2(row.dropMode).toBe("message_filler");
+    });
+
+    it2("replay serves the frozen bytes on a different route than the one that decided them", () => {
+        // Frozen empty at apply on station; replayed on a strict route.
+        seedMessageTag(3);
+        applyPendingOperations(
+            session,
+            db,
+            messageTarget(3, {}),
+            new Set(),
+            undefined,
+            undefined,
+            [],
+            new Set(),
+            undefined,
+            undefined,
+            "station",
+        );
+        const replayed: { content?: string } = {};
+        const didMutate = applyFlushedStatuses(
+            session,
+            db,
+            messageTarget(3, replayed),
+            getTagsBySession(db, session),
+        );
+        expect2(didMutate).toBe(true);
+        expect2(replayed.content).toBe("");
+    });
+
+    it2("legacy rows without a frozen shape keep replaying the filler", () => {
+        // Pre-R11 byte-stability: a dropped message tag whose drop_mode is the
+        // schema default must render exactly what the old build rendered.
+        insertTag(db, session, "msg-4", "message", 36, 4);
+        const legacyRow = getTagsBySession(db, session).find((t) => t.tagNumber === 4);
+        expect2(legacyRow?.dropMode).toBe("full");
+        const replayed: { content?: string } = {};
+        applyFlushedStatuses(session, db, messageTarget(4, replayed), [
+            { ...(legacyRow as TagEntry), status: "dropped" },
+        ]);
+        expect2(replayed.content).toBe(MESSAGE_DROP_PLACEHOLDER);
+    });
+});

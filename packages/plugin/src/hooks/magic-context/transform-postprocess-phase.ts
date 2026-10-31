@@ -2303,6 +2303,8 @@ export async function runPostTransformPhase(
                 [],
                 new Set(),
                 (reduction) => droppedTokenReductions.push(reduction),
+                undefined,
+                args.resolvedProviderID,
             );
             if (pendingOpsDidMutate) {
                 droppedCount += pendingOps.length;
@@ -2374,6 +2376,7 @@ export async function runPostTransformPhase(
                 {
                     protectedTagNumbers: args.protectedTagNumbers,
                     protectedCutoff: args.protectedCutoff,
+                    providerID: args.resolvedProviderID,
                     // Tiered emergency drop fires only at the derived force band (both primary and
                     // subagent) AND only when the ceiling is known. Undefined
                     // ceiling (cold start) or below-threshold usage → no
@@ -2409,6 +2412,7 @@ export async function runPostTransformPhase(
                         protectedCutoff: args.protectedCutoff,
                         routine: true,
                         caveman: cavemanConfig,
+                        providerID: args.resolvedProviderID,
                     },
                     getActiveTagsBySession(args.db, args.sessionId),
                 );

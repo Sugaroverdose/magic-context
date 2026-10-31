@@ -55,7 +55,9 @@ describe("self-tag trial real tagging", () => {
             await t.accept({ texts: [], calls: [{ id: "reduce", name: "ctx_reduce", input: { drop: "2" } }] });
             // ctx_reduce v1: the skeleton serves the plain placeholder; the
             // drop is carried by the registry row, not a tag prefix.
-            expect(JSON.stringify(await t.pass())).toContain('"output":"..."');
+            // R9: the released slot is empty bytes (assembly wire is plain,
+            // no soup-render prefix).
+            expect(JSON.stringify(await t.pass())).toContain('"output":""');
             expect(getTagById(t.db, "drop-test", 2)?.status).toBe("dropped");
         } finally { t.close(); }
     });
