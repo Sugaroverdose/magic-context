@@ -264,7 +264,7 @@ describe("createMessagesTransformHandler — empty assistant wire guard (opencod
         });
         const output = makeOutput();
         output.messages.push({
-            info: { id: "healthy", role: "assistant", sessionID: ses },
+            info: { id: "healthy", role: "assistant", sessionID: ses, finish: "stop" },
             parts: [
                 { type: "step-start" },
                 { type: "reasoning", text: "thinking" },
@@ -272,8 +272,13 @@ describe("createMessagesTransformHandler — empty assistant wire guard (opencod
             ],
         });
         const served = await handler({}, output);
+        // The tail law re-anchors the user below this finished tool-less assistant
+        // (the station 400 shape); the guard must still leave every healthy byte
+        // of the assistant itself untouched.
         expect(served).toHaveLength(2);
-        expect(served[1].parts).toHaveLength(3);
+        expect(served[0].info.id).toBe("healthy");
+        expect(served[0].parts).toHaveLength(3);
+        expect(served[1].info.id).toBe("m1");
     });
 });
 
@@ -721,6 +726,83 @@ describe("createMessagesTransformHandler — issue #327 wire tail", () => {
         // Completed content appended mid-transform stays exactly where OpenCode
         // put it — never reordered below its prompt, never refused.
         expect(output.messages.at(-1)?.info.id).toBe("assistant-completed-late");
+    });
+});
+
+describe("createMessagesTransformHandler — stray assistant-terminated re-loop (station 400)", () => {
+    function assistantShellTail(
+        output: any,
+        info: Record<string, unknown>,
+        parts: Record<string, unknown>[],
+    ): void {
+        output.messages.push({
+            info: { id: "assistant-tail", role: "assistant", sessionID: "ses_test", ...info },
+            parts,
+        });
+    }
+
+    it("re-anchors when the host re-loops after a tool-less completed step (mid-turn send)", async () => {
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {},
+            },
+        });
+        const output = makeOutput();
+        // Host-built shape (Oct 30 incident): the steering user is persisted, the
+        // step that answers the pre-steering prompt is completed below it, and
+        // OpenCode issues another request whose array ends with that assistant.
+        assistantShellTail(output, { finish: "stop" }, [
+            { type: "step-start" },
+            { type: "reasoning", text: "thinking", signature: "sig" },
+            { type: "text", text: "final answer" },
+            { type: "step-finish" },
+        ]);
+
+        await handler({}, output);
+
+        // The finished assistant is history, not prefill: the input user must end
+        // the request so strict validators do not 400 "requests ending with a
+        // model turn", and the steering message actually gets served.
+        expect(output.messages.map((message: any) => message.info.role)).toEqual([
+            "assistant",
+            "user",
+        ]);
+        expect(output.messages.at(-1)?.info.id).toBe("m1");
+    });
+
+    it("re-anchors after a reasoning-only unknown-finish step (Oct 29 shape)", async () => {
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {},
+            },
+        });
+        const output = makeOutput();
+        assistantShellTail(output, { finish: "unknown" }, [
+            { type: "step-start" },
+            { type: "reasoning", text: "abandoned thought", signature: "sig" },
+            { type: "step-finish" },
+        ]);
+
+        await handler({}, output);
+
+        expect(output.messages.at(-1)?.info.id).toBe("m1");
+    });
+
+    it("leaves a length-capped tail assistant in place (genuine prefill continuation)", async () => {
+        const handler = createMessagesTransformHandler({
+            magicContext: {
+                "experimental.chat.messages.transform": async () => {},
+            },
+        });
+        const output = makeOutput();
+        assistantShellTail(output, { finish: "length" }, [
+            { type: "step-start" },
+            { type: "text", text: "truncated mid-sentence" },
+        ]);
+
+        await handler({}, output);
+
+        expect(output.messages.at(-1)?.info.id).toBe("assistant-tail");
     });
 });
 

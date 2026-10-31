@@ -117,21 +117,27 @@ function moveUserToTail(
 }
 
 function enforcePersistedUserTerminatedTail(messages: MessageWithParts[]): void {
-    if (messages.at(-1)?.info.role !== "assistant") return;
+    const tail = messages.at(-1);
+    if (tail?.info.role !== "assistant") return;
     const userIndex = findLatestUserIndex(messages);
+    if (userIndex < 0) return;
     const trailing = messages.slice(userIndex + 1);
     if (
-        userIndex < 0 ||
         trailing.some(
             (message) => message.info.role !== "assistant" || assistantHasCompletedContent(message),
         )
     ) {
         // An assistant with real content at the array tail is OpenCode's NORMAL
-        // mid-turn continuation shape: tool results ride as parts on the streaming
-        // assistant, and the provider serializer emits the user-terminated wire
-        // itself. Leave the array untouched — refusing (or reordering) here kills
-        // every tool-using turn at its first continuation pass.
-        return;
+        // mid-turn continuation shape only while the serializer can still emit a
+        // user-terminated wire from it: tool parts become a trailing tool-result
+        // turn, and a length-capped tail is a genuine prefill continuation.
+        // Anything else (natural stop, tool-less, unknown finish) is the host
+        // re-looping after the model already finished its turn — strict
+        // validators 400 that ("requests ending with a model turn") while a
+        // steering message sent mid-turn sits unanswered below. Re-anchor it.
+        const tailHasTools = tail.parts.some((part) => (part as { type?: string }).type === "tool");
+        const tailFinish = (tail.info as { finish?: string }).finish;
+        if (tailHasTools || tailFinish === "length") return;
     }
     moveUserToTail(messages, messages[userIndex], userIndex);
 }
