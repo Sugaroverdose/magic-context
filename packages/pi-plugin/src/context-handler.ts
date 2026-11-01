@@ -6513,7 +6513,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
-	const toolReclaimApplicationOpportunity = isCacheBustingPass && systemReclaimAllowed;
+	const toolReclaimApplicationOpportunity =
+		isCacheBustingPass && systemReclaimAllowed;
 	let autoReclaimTargetCount = 0;
 	let autoReclaimDidMutate = false;
 	if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {

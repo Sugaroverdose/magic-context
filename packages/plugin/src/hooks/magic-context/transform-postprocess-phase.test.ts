@@ -9570,7 +9570,11 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
                     type: "tool",
                     tool: "read",
                     callID: "call-stamp",
-                    state: { status: "completed", input: { path: "a.ts" }, output: "stamped output" },
+                    state: {
+                        status: "completed",
+                        input: { path: "a.ts" },
+                        output: "stamped output",
+                    },
                 },
                 {
                     type: "tool",
@@ -9615,14 +9619,14 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         const sessionId = "ses-system-reclaim-hold";
         const { stampTag, sweepTag } = await seededPass(sessionId, deferredOnly(sessionId));
         // The model stamp releases immediately (ctxv9 law, untouched).
-        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === stampTag)!.status).toBe(
-            "dropped",
-        );
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === stampTag)!.status,
+        ).toBe("dropped");
         // The system-origin row stays queued and its tag keeps serving bytes.
         expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([sweepTag]);
-        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
-            "active",
-        );
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status,
+        ).toBe("active");
     });
 
     it("drains auto_drop rows on a published-history boundary", async () => {
@@ -9644,9 +9648,9 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
             },
         });
         expect(getPendingOps(db, sessionId)).toEqual([]);
-        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
-            "dropped",
-        );
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status,
+        ).toBe("dropped");
     });
 
     it("drains auto_drop rows on the forced band", async () => {
@@ -9657,9 +9661,9 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
             contextUsage: { percentage: 96, inputTokens: 1_000 },
         });
         expect(getPendingOps(db, sessionId)).toEqual([]);
-        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
-            "dropped",
-        );
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status,
+        ).toBe("dropped");
     });
 
     it("drains auto_drop rows on an explicit flush", async () => {
@@ -9670,9 +9674,9 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
             pendingMaterializationSessions: new Set([sessionId]),
         });
         expect(getPendingOps(db, sessionId)).toEqual([]);
-        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
-            "dropped",
-        );
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status,
+        ).toBe("dropped");
     });
 
     it("keeps subagent passes draining auto_drop rows on the same deferred intent", async () => {
@@ -9686,9 +9690,9 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         // Same deferred-materialization consumption; the subagent pressure lane
         // (#619 law) is untouched by the primary gate.
         expect(getPendingOps(db, sessionId)).toEqual([]);
-        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
-            "dropped",
-        );
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status,
+        ).toBe("dropped");
     });
 });
 
