@@ -5677,6 +5677,19 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	};
 	const isCacheBustingPass = hasReclaimRide(rideSignals);
 	const publishedWorkDrainAllowed = isCacheBustingPass;
+	// System-origin reclaim (queued drops, the sweeper, heuristics) may only
+	// ride a pass that actually rewrites served bytes. A consumed deferred-
+	// materialization intent whose fold rewrote nothing keeps the pass warm;
+	// rewriting old bytes there is an independent prefix bust. The documented
+	// exception is the aborted-fold retry, where the provider is already cold.
+	// Subagent passes keep their execute-band pressure semantics.
+	const systemReclaimAllowed =
+		args.sessionMeta.isSubagent === true ||
+		rideSignals.hardFold ||
+		rideSignals.force ||
+		hasPendingMaterializeSignal ||
+		rideSignals.publishedHistory ||
+		(deferredMaterializeEligible && prefixPreflightContended);
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
 		args.protectedTokens !== undefined;
@@ -5693,10 +5706,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const shouldRunHeuristics =
 		args.heuristics !== undefined &&
 		isCacheBustingPass &&
+		systemReclaimAllowed &&
 		(rideSignals.publishedHistory ||
 			args.forceMaterialization === true ||
 			hasPendingMaterializeSignal ||
-			deferredMaterializeEligible ||
+			(deferredMaterializeEligible && prefixPreflightContended) ||
 			// A fold persisted earlier in this pass changed the served prefix, so
 			// reductions may ride it without causing an independent bust.
 			foldBustsServedPrefixThisPass ||
@@ -5953,6 +5967,17 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		const pendingDecisionLog = `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOpsDepth === null ? "not loaded (deferred pass)" : pendingOpsDepth} context=${args.contextUsage.percentage.toFixed(1)}%`;
 		sessionLog(args.sessionId, pendingDecisionLog);
 		pendingDecisionLogObserverForTests?.(pendingDecisionLog);
+		// Frozen-base adaptation of 347e503cd: this base's pending-op
+		// vocabulary is a single 'drop' operation, so there is no
+		// system-origin class to filter by — the whole queue rides the
+		// byte-change permission or waits.
+		const opsToApply = systemReclaimAllowed ? pendingOps : [];
+		if (opsToApply.length !== pendingOps.length) {
+			sessionLog(
+				args.sessionId,
+				`pending ops held — reason=system-reclaim-ride-required; held=${pendingOps.length} applied=0 scheduler=${args.schedulerDecision}`,
+			);
+		}
 		try {
 			const tApplyPending = performance.now();
 			pendingOpsDidMutate = applyPendingOperations(
@@ -5963,13 +5988,13 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 					? newestCtxReduceTagNumbers(getTagsBySession(args.db, args.sessionId))
 					: protectedTagNumbersForPass,
 				pendingOperationTags,
-				pendingOps,
+				opsToApply,
 				[],
 				new Set(),
 				(reduction) => droppedTokenReductions.push(reduction),
 			);
 			if (pendingOpsDidMutate) {
-				droppedCount += pendingOps.length;
+				droppedCount += opsToApply.length;
 			}
 			logTransformTiming(
 				args.sessionId,
@@ -6487,7 +6512,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		}
 	}
 
-	const toolReclaimApplicationOpportunity = isCacheBustingPass;
+	const toolReclaimApplicationOpportunity =
+		isCacheBustingPass && systemReclaimAllowed;
 	let autoReclaimTargetCount = 0;
 	let autoReclaimDidMutate = false;
 	if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
