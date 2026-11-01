@@ -514,11 +514,12 @@ describe("Pi protocol exclusions", () => {
 				false,
 				"log-system",
 			);
-			expect(
-				log.mock.calls.filter((call) =>
-					call[1].startsWith("pi system entries preserved"),
-				),
-			).toHaveLength(0);
+			// Scope by session: unawaited fold continuations from other tests in
+			// this file (and other files under bun's parallel scheduler) emit the
+			// same prefix under their own session ids and land in this window.
+			const preserved = (call: unknown[]) =>
+				call[0] === "log-system" && call[1].startsWith("pi system entries preserved");
+			expect(log.mock.calls.filter(preserved)).toHaveLength(0);
 			__test.trimPiMessagesToBoundary(
 				[initial, delta, userMessage("old")],
 				["s0", "s1", "u"],
@@ -526,11 +527,9 @@ describe("Pi protocol exclusions", () => {
 				false,
 				"log-system",
 			);
-			expect(
-				log.mock.calls
-					.filter((call) => call[1].startsWith("pi system entries preserved"))
-					.map((call) => call[1]),
-			).toEqual(["pi system entries preserved across fold: 2"]);
+			expect(log.mock.calls.filter(preserved).map((call) => call[1])).toEqual([
+				"pi system entries preserved across fold: 2",
+			]);
 		} finally {
 			log.mockRestore();
 		}
