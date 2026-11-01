@@ -9546,6 +9546,152 @@ describe("pending-ops and heuristics permission labels", () => {
     });
 });
 
+// System-origin reclaim (compartment auto_drop rows, tool-reclaim sweeper,
+// heuristics) may only ride a pass that actually rewrites served bytes — an
+// executed busting fold, a forced band, an explicit flush, or published
+// history. A consumed deferred-materialization intent whose fold rewrote
+// nothing leaves the pass warm; draining the queue there is an independent
+// prefix rewrite (the boot-law B replay promise). Model stamps ('drop' rows)
+// keep immediate release; subagent passes keep their execute-band semantics.
+describe("system-origin reclaim rides byte-change events, not deferred intent", () => {
+    async function seededPass(
+        sessionId: string,
+        overrides: Partial<Parameters<typeof runPostTransformPhase>[0]>,
+    ): Promise<{ stampTag: number; sweepTag: number }> {
+        const userMessage = {
+            info: { id: "u1", role: "user" },
+            parts: [{ type: "text", text: "go" }],
+        } as unknown as MessageLike;
+        const assistantMessage = {
+            info: { id: "a1", role: "assistant" },
+            parts: [
+                { type: "step-start" },
+                {
+                    type: "tool",
+                    tool: "read",
+                    callID: "call-stamp",
+                    state: { status: "completed", input: { path: "a.ts" }, output: "stamped output" },
+                },
+                {
+                    type: "tool",
+                    tool: "read",
+                    callID: "call-sweep",
+                    state: {
+                        status: "completed",
+                        input: { path: "b.ts" },
+                        output: "sweeper target output",
+                    },
+                },
+                { type: "step-finish" },
+            ],
+        } as unknown as MessageLike;
+        const messages = [userMessage, assistantMessage];
+        const tagger = createTagger();
+        const tagged = tagMessages(sessionId, messages, tagger, db);
+        const rows = getTagsBySession(db, sessionId);
+        const stampTag = rows.find((tag) => tag.messageId === "call-stamp")!.tagNumber;
+        const sweepTag = rows.find((tag) => tag.messageId === "call-sweep")!.tagNumber;
+        queuePendingOp(db, sessionId, stampTag, "drop");
+        queuePendingOp(db, sessionId, sweepTag, "auto_drop");
+        await runPostTransformPhase(
+            basePostTransformArgs(db, sessionId, messages, {
+                ...tagged,
+                tagger,
+                resolvedProviderID: "station",
+                ...overrides,
+            }),
+        );
+        return { stampTag, sweepTag };
+    }
+
+    const deferredOnly = (sessionId: string) => ({
+        canConsumeDeferredLate: true,
+        deferredMaterializationSessions: new Set([sessionId]),
+    });
+
+    it("holds auto_drop rows when the consumed deferred fold rewrote nothing", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-system-reclaim-hold";
+        const { stampTag, sweepTag } = await seededPass(sessionId, deferredOnly(sessionId));
+        // The model stamp releases immediately (ctxv9 law, untouched).
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === stampTag)!.status).toBe(
+            "dropped",
+        );
+        // The system-origin row stays queued and its tag keeps serving bytes.
+        expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([sweepTag]);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
+            "active",
+        );
+    });
+
+    it("drains auto_drop rows on a published-history boundary", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-system-reclaim-published";
+        const { sweepTag } = await seededPass(sessionId, {
+            schedulerDecision: "execute",
+            historyRebuiltThisPass: true,
+            pendingCompartmentInjection: {
+                block: "",
+                compartmentEndMessage: 2,
+                compartmentEndMessageId: "u1",
+                compartmentCount: 1,
+                skippedVisibleMessages: 0,
+                factCount: 0,
+                memoryCount: 0,
+                rebuiltFromDb: true,
+            },
+        });
+        expect(getPendingOps(db, sessionId)).toEqual([]);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
+            "dropped",
+        );
+    });
+
+    it("drains auto_drop rows on the forced band", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-system-reclaim-force";
+        const { sweepTag } = await seededPass(sessionId, {
+            contextUsage: { percentage: 96, inputTokens: 1_000 },
+        });
+        expect(getPendingOps(db, sessionId)).toEqual([]);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
+            "dropped",
+        );
+    });
+
+    it("drains auto_drop rows on an explicit flush", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-system-reclaim-flush";
+        const { sweepTag } = await seededPass(sessionId, {
+            pendingMaterializationSessions: new Set([sessionId]),
+        });
+        expect(getPendingOps(db, sessionId)).toEqual([]);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
+            "dropped",
+        );
+    });
+
+    it("keeps subagent passes draining auto_drop rows on the same deferred intent", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-system-reclaim-subagent";
+        const { sweepTag } = await seededPass(sessionId, {
+            ...deferredOnly(sessionId),
+            fullFeatureMode: false,
+        });
+        // Same deferred-materialization consumption; the subagent pressure lane
+        // (#619 law) is untouched by the primary gate.
+        expect(getPendingOps(db, sessionId)).toEqual([]);
+        expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status).toBe(
+            "dropped",
+        );
+    });
+});
+
 // Claude Fable 5.1, Opus 5.5 and Sonnet 5.5 bind each signed thinking block to every
 // byte served before it, so a pass that busts the cache removes every thinking
 // block still on the wire (the provider would drop it or reject the request).

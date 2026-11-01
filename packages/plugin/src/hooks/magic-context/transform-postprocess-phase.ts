@@ -2034,12 +2034,28 @@ export async function runPostTransformPhase(
                     (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
     };
     const publishedWorkDrainAllowed = !compactionOff && hasReclaimRide(rideSignals);
+    // System-origin reclaim may only ride a pass that actually rewrites served
+    // bytes. A consumed deferred-materialization intent whose fold rewrote
+    // nothing leaves the pass warm; draining auto_drop rows, the sweeper, or
+    // heuristics there is an independent prefix rewrite. The documented
+    // exception is the aborted-fold retry, where the provider is already cold
+    // (prefixPreflightFailed). Model stamps ('drop' rows) keep immediate
+    // release; subagent passes keep their execute-band pressure semantics.
+    const systemReclaimAllowed =
+        !args.fullFeatureMode ||
+        (!compactionOff &&
+            (rideSignals.hardFold ||
+                rideSignals.force ||
+                isExplicitFlush ||
+                rideSignals.publishedHistory ||
+                (deferredMaterialize && prefixPreflightFailed)));
     const shouldApplyPendingOps = publishedWorkDrainAllowed;
     const shouldRunHeuristics =
         !compactionOff &&
-        hasReclaimRide(rideSignals) &&
+        systemReclaimAllowed &&
         (rideSignals.publishedHistory ||
-            materializationRequested ||
+            isExplicitFlush ||
+            (deferredMaterialize && prefixPreflightFailed) ||
             forceMaterialization ||
             // The off-wire fold changed the served prefix, so the prefix already
             // busted. Heuristics may ride it and bypass the once-per-turn guard
@@ -2225,6 +2241,17 @@ export async function runPostTransformPhase(
                 `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${formatPendingOpsDepth()}, context=${args.contextUsage.percentage.toFixed(1)}%`,
             );
             const tApply = performance.now();
+            // System-origin rows wait for a byte-change event; model stamps
+            // release on this pass under the current permission.
+            const opsToApply = systemReclaimAllowed
+                ? pendingOps
+                : pendingOps.filter((op) => op.operation !== "auto_drop");
+            if (opsToApply.length !== pendingOps.length) {
+                sessionLog(
+                    args.sessionId,
+                    `pending ops held — reason=system-reclaim-ride-required; autoDrop=${pendingOps.length - opsToApply.length} applied=${opsToApply.length} scheduler=${args.schedulerDecision}`,
+                );
+            }
             // P0 perf: don't pass `args.tags` here. applyPendingOperations
             // genuinely needs the full tag set (including dropped/compacted
             // rows it uses to skip already-processed pending ops), but the
@@ -2244,7 +2271,7 @@ export async function runPostTransformPhase(
                     ? newestCtxReduceTagNumbers(getTagsBySession(args.db, args.sessionId))
                     : args.protectedTagIds,
                 undefined,
-                pendingOps,
+                opsToApply,
                 [],
                 new Set(),
                 (reduction) => droppedTokenReductions.push(reduction),
@@ -2252,8 +2279,8 @@ export async function runPostTransformPhase(
                 args.resolvedProviderID,
             );
             if (pendingOpsDidMutate) {
-                droppedCount += pendingOps.length;
-                for (const pendingOp of pendingOps) {
+                droppedCount += opsToApply.length;
+                for (const pendingOp of opsToApply) {
                     const message = args.targets.get(pendingOp.tagId)?.message;
                     if (message) reasoningMutatedMessages.add(message);
                     else reasoningMutationTargetUnknown = true;
@@ -2579,7 +2606,7 @@ export async function runPostTransformPhase(
         if (emergencyDropEligible && (pendingOpsDidMutate || heuristicOrReasoningDidMutate)) {
             setEmergencyDropSample(args.db, args.sessionId, args.contextUsage.inputTokens);
         }
-        const toolReclaimApplicationOpportunity = isCacheBustingPass;
+        const toolReclaimApplicationOpportunity = isCacheBustingPass && systemReclaimAllowed;
         let autoReclaimTargetCount = 0;
         let autoReclaimDidMutate = false;
         if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
