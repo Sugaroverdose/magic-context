@@ -1915,6 +1915,7 @@ export async function runPostTransformPhase(
                   historyBudgetTokens: args.m0M1.historyBudgetTokens,
                   historyBudgetPolicyIdentity: args.m0M1.historyBudgetPolicyIdentity,
                   hardSignals: args.m0M1.hardSignals,
+                  systemRegionMode: args.systemRegionEnabled === true && !compactionOff,
               })
             : { value: false, reason: null };
     // Region rotation promotion: a named boundary with a stale region manifest
