@@ -4847,7 +4847,7 @@ describe("Channel 1 reminder copy changes", () => {
 // every pass: protectionCacheBustingPass pins true on warm deferred passes
 // and the calibration bust reason flips to "fold" forever (§7.3 claim).
 describe("createTransform: region rows do not freeze protection calibration", () => {
-    async function regionPassCalibration(systemRegionEnabled: boolean) {
+    async function regionPassCalibration(systemRegionLane: boolean) {
         useTempDataHome("context-region-calibration-");
         const sessionId = "ses-region-calibration";
         const db = openDatabase();
@@ -4885,7 +4885,7 @@ describe("createTransform: region rows do not freeze protection calibration", ()
                 clearReasoningAge: 1000,
                 protectedTokens: 0,
                 historianRunnable: false,
-                systemRegionEnabled,
+                systemRegionLane,
                 memoryConfig: { enabled: true, injectionBudgetTokens: 1000 },
                 liveModelBySession: new Map([
                     [sessionId, { providerID: "anthropic", modelID: "claude-opus-5" }],

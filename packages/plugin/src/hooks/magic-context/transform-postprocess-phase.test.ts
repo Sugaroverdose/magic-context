@@ -10458,7 +10458,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
                 await runPostTransformPhase(
                     basePostTransformArgs(db, sessionId, [], {
                         resolvedProviderID: "anthropic",
-                        systemRegionEnabled: true,
+                        systemRegionLane: true,
                         m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
                     }),
                 );
@@ -10491,7 +10491,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
                     resolvedProviderID: "anthropic",
                     schedulerDecision: "execute",
                     schedulerDeferReason: null,
-                    systemRegionEnabled: true,
+                    systemRegionLane: true,
                     m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
                 }),
             );
@@ -10540,7 +10540,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
                 basePostTransformArgs(db, sessionId, [], {
                     resolvedProviderID: "anthropic",
                     contextUsage: { percentage: 88, inputTokens: 1_000 },
-                    systemRegionEnabled: true,
+                    systemRegionLane: true,
                     m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
                 }),
             );
@@ -10567,7 +10567,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, [], {
                     resolvedProviderID: "anthropic",
-                    systemRegionEnabled: true,
+                    systemRegionLane: true,
                     m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
                 }),
             );
@@ -10577,7 +10577,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
         expect(logs.filter((line) => line.includes("m[0] HARD fold decision"))).toEqual([]);
     });
 
-    it("control: gate-off head lane keeps its cached_m1_missing fold behavior intact", async () => {
+    it("control: head-lane capability keeps its cached_m1_missing fold behavior intact", async () => {
         const sessionId = "ses-region-c3-headlane";
         const db = new Database(":memory:");
         initializeDatabase(db);

@@ -388,9 +388,9 @@ export async function sendEmergencyRefusalNotice(
 
 export interface TransformDeps {
     cacheTtlConfig?: import("../../shared/model-cache-ttl").CacheTtlConfig;
-    /** Experimental frozen system-region residency (config `system_region`).
+    /** Frozen system-region residency capability (isSystemRegionLane).
      *  Off = head lane, today's bytes. */
-    systemRegionEnabled?: boolean;
+    systemRegionLane?: boolean;
     hiddenCompletionExecutor?: import("./compartment-runner-types").HiddenCompletionExecutor;
     /** Host marker lifecycle; omission preserves OpenCode 1 marker writes and replay. */
     compactionMarkerStrategy?: CompactionMarkerStrategy & {
@@ -2481,7 +2481,7 @@ export function createTransform(deps: TransformDeps) {
                 historyBudgetTokens,
                 historyBudgetPolicyIdentity: historyPolicyIdentity,
                 hardSignals: m0HardSignals,
-                systemRegionMode: deps.systemRegionEnabled === true && !compactionOff,
+                systemRegionMode: deps.systemRegionLane === true && !compactionOff,
             }).value;
         const protectionCacheBustingPass =
             !compactionOff &&
@@ -2608,7 +2608,7 @@ export function createTransform(deps: TransformDeps) {
             schedulerDecision,
             schedulerDeferReason,
             fullFeatureMode,
-            systemRegionEnabled: deps.systemRegionEnabled === true,
+            systemRegionLane: deps.systemRegionLane === true,
             compactionOff,
             canRunCompartments,
             awaitedCompartmentRun,

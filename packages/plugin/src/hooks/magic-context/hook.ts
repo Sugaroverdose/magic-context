@@ -10,6 +10,7 @@ import {
     type HistorianConfig,
     type MagicContextConfig,
 } from "../../config/schema/magic-context";
+import { isSystemRegionLane } from "../../config/system-region-lane";
 import type { ResolvedTransformMode } from "../../config/transform-mode";
 import type { createCompactionHandler } from "../../features/magic-context/compaction";
 import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-opencode-db";
@@ -198,7 +199,6 @@ export interface MagicContextDeps {
         compaction?: { enabled?: boolean };
         mural?: { enabled: boolean; model?: string };
         /** Experimental frozen system-region residency; off unless explicitly enabled. */
-        system_region?: { enabled: boolean };
     };
     /** Registration-owned prompt-surface loader shared with the tool registry. */
     promptSurfaceRuntime?: PromptSurfaceRuntime;
@@ -715,15 +715,14 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // Re-registration on a healed storage reopen replaces the stale handle.
     registerLkgPersistence(createDbLkgPersistence(db));
 
-    // The frozen system-region lane is v1-TS-only: the Rust module composes
-    // its own m[0] panel heads (no sentinel concept in crates/), so appending
-    // the stored region there would double-serve panels from two baselines.
-    const systemRegionLaneActive =
-        deps.config.system_region?.enabled === true && deps.config.transform_mode !== "rust";
+    // The frozen system-region lane is an install-time capability (owner
+    // ruling: the config switch is dead; recovery is rollback). One decider,
+    // computed once at boot from transformMode + compaction, then threaded.
+    const systemRegionLaneActive = isSystemRegionLane(deps.config);
 
     const transform = createTransform({
         cacheTtlConfig: deps.config.cache_ttl,
-        systemRegionEnabled: systemRegionLaneActive,
+        systemRegionLane: systemRegionLaneActive,
         tagger: deps.tagger,
         scheduler: deps.scheduler,
         contextUsageMap,
@@ -1146,7 +1145,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         // Mirror the primary-session caveman opt-in so the agent knows older
         // prose may be rewritten even when ctx_reduce is available.
         experimentalCavemanTextCompression: deps.config.caveman_text_compression?.enabled === true,
-        systemRegionEnabled: systemRegionLaneActive,
+        systemRegionLane: systemRegionLaneActive,
     });
     const systemPromptHashHandler = systemPromptHash.handler;
 
