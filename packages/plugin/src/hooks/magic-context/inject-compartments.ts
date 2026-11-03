@@ -3961,8 +3961,9 @@ export function prepareCachedM0M1Replay(
     const m0Bytes = toBuffer(row.cached_m0_bytes);
     const regionReplay = isSentinelRegionRow(m0Bytes);
     if (regionReplay && !regionLane) return undefined;
-    if (!regionReplay && !row.cached_m1_bytes) return undefined;
-    const m1Text = regionReplay ? "" : toBuffer(row.cached_m1_bytes!).toString("utf8");
+    const rawM1 = row.cached_m1_bytes;
+    if (!regionReplay && !rawM1) return undefined;
+    const m1Text = regionReplay || !rawM1 ? "" : toBuffer(rawM1).toString("utf8");
     const mural = row.cached_m0_mural_data_url
         ? { enabled: true, supportsVision: true, dataUrl: row.cached_m0_mural_data_url }
         : undefined;
