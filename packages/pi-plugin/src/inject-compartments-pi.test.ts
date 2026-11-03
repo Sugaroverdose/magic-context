@@ -38,10 +38,12 @@ import {
 	materializeM0PiWithRetry,
 	mustMaterializePi,
 	prepareCachedM0M1PiReplay,
+	replayCompletePiPrefix,
 	renderM0Pi,
 	renderM1Pi,
 } from "./inject-compartments-pi";
 import { createTestDb, textOf, userMessage } from "./test-utils.test";
+import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
 
 function user(text: string, timestamp = 1) {
 	return { role: "user" as const, content: text, timestamp };
@@ -3316,6 +3318,75 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 			state.sessionId,
 		);
 		expect(prepareCachedM0M1PiReplay(state, db)).toBeUndefined();
+	});
+
+	it("G1: the contention fallback never replays a region row as an empty head", () => {
+		// region row + mustMaterializePi fires + materialize loses the lock 3x:
+		// the fallback used to serve decodeCachedM0() ?? "" — an empty m[0]
+		// with the m[1] tail. The caller must discriminate before replaying.
+		const db = createTestDb();
+		const state = piState("ses-pi-contention-region", process.cwd());
+		insertMemory(db, {
+			projectPath: state.projectIdentity ?? "",
+			category: "NAMING",
+			content: "G1 fresh-head sentinel text",
+		});
+		materializeM0Pi(state, db);
+		db.prepare(
+			"UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
+		).run(Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"), state.sessionId);
+		const locking = {
+			exec: (sql: string) => {
+				if (/BEGIN\s+IMMEDIATE/i.test(String(sql))) {
+					throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+				}
+				return (db as never as { exec: (s: string) => unknown }).exec(sql);
+			},
+		};
+		const contentionDb = new Proxy(db, {
+			get(target, prop) {
+				if (prop === "exec") return locking.exec;
+				const value = Reflect.get(target, prop, target) as unknown;
+				return typeof value === "function"
+					? (value as (...a: unknown[]) => unknown).bind(target)
+					: value;
+			},
+		}) as never;
+		const messages = [userMessage("hello")];
+		injectM0M1Pi(state, contentionDb, messages);
+		const head = textOf(messages[0]);
+		expect(head).toContain("G1 fresh-head sentinel text");
+		expect(head).not.toContain("<project-memory>x</project-memory>");
+		closeQuietly(db);
+	});
+
+	// Executable control for the caller guard above: neutralizing the
+	// !isSystemRegionBytes(cached.cached_m0_bytes) conjunction at the two
+	// contention fallbacks makes the FIRST law fail with the reader's
+	// /region/ throw instead of a fresh head (verified in review round 5;
+	// kept as transcript, not a permanent source-mutating row). The predicate
+	// the guard uses is pinned directly:
+	it("G1: the guard predicate discriminates the region row shape", () => {
+		expect(isSystemRegionBytes(Buffer.from(`${SENTINEL}\nx`, "utf8"))).toBe(true);
+		expect(isSystemRegionBytes(Buffer.from("<session-history>x", "utf8"))).toBe(false);
+		expect(isSystemRegionBytes(null)).toBe(false);
+	});
+
+	it("G1: the replay reader itself refuses region bytes (exported law)", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-replay-refuse", process.cwd());
+		materializeM0Pi(state, db);
+		const row = db
+			.prepare("SELECT * FROM session_meta WHERE session_id = ?")
+			.get(state.sessionId) as never;
+		(row as { cached_m0_bytes: Buffer }).cached_m0_bytes = Buffer.from(
+			`${SENTINEL}\n<project-memory>x</project-memory>`,
+			"utf8",
+		);
+		expect(() =>
+			replayCompletePiPrefix(state, row, [], [userMessage("hello")], undefined, null),
+		).toThrow(/region/i);
+		closeQuietly(db);
 	});
 
 	it("control: the same cache with its own head bytes is not invalid", () => {
