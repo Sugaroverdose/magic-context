@@ -252,14 +252,23 @@ and never was. Consequences:
   proposal is to keep slots across rotations (no new fence). Stale panels on a fault replay
   are acceptable and cheaper than dropping the recovery ladder. This is the default in
   force; §12.6 keeps the confirmation open.
-- Boot-cache-bust honesty: `lkgReplayStateLabel` (`lkg-persist.ts:312-323`) reports
-  mem/disk/absent from row existence, and the observed wipe (22 chunks to 0 rows,
-  `captured_at` NULL, zero `lkg_capture_declined` lines) comes from a write or clear path
-  that bypasses the logged rejections (`saveLkgSlotToDb` performs no slot validation before
-  chunk-replacing the row, `lkg-persist.ts:216-290`; `dropSlot` clears durably with no log,
-  `lkg-slot.ts:554-572`; `loadPersistedLkgSlot` clears an unparseable-but-assembled row with
-  no log at `lkg-persist.ts:362-369`). The region design assumes step 2 lands first: a
-  frozen serve path with a dishonest LKG tier has no safety net.
+- Boot-cache-bust honesty (landed, prerequisite step 2, commit `a49c8611e`): the observed
+  wipe (22 chunks to 0 rows, `captured_at` reading NULL, zero `lkg_capture_declined`
+  lines) was reproduced red-first and closed at every silent path. `captureSlot` and the
+  durable writer now share `lkgSlotStructuralRejection` (`lkg-slot.ts:381-395`, reasons
+  `empty_prefix`, `missing_anchor`, `invalid_captured_at`), so a slot that
+  `parsePersistedLkgSlot` could never read back is refused before install;
+  `saveLkgSlotToDb` (`lkg-persist.ts:216`) runs the same pure check before its
+  chunk-deleting transaction and logs `lkg_persist_declined`; `dropSlot` emits
+  `lkg_slot_dropped reason=...` (`lkg-slot.ts:572`); `loadPersistedLkgSlot` names its
+  parse-failure clear (`lkg-persist.ts:376`); `captureLkgSlot` logs
+  `lkg_capture_declined reason=build_<cause>` on the prefix-build falsy path
+  (`lkg-replay.ts:393`) that precedes the slot store's reason logic, and the bust path's
+  `dropSlot(sessionId, "lkg_refresh_declined")` into the store is now visible; the Rust
+  capture site no longer short-circuits around `captureSlot`'s refusal receipt. Law
+  tests: `lkg-store-honesty.test.ts` (9 tests). `lkgReplayStateLabel`
+  (`lkg-persist.ts:321-332`) keeps reporting mem/disk/absent from row existence, which is
+  honest now that no unlogged path can empty a row.
 - Storage: `context.db` and the Rust `store.db` remain one consistency unit; if the region
   is mirrored into the module store (§9), it restores from the same backup.
 
