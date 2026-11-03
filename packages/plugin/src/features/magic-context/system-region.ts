@@ -121,6 +121,22 @@ export function writeSystemRegion(db: Database, sessionId: string, region: strin
 // Stem law + optional non-whitespace detail (render_config:budget(...)-style
 // composite receipts keep their exact operands, L7 precedent). Whitespace in
 // a reason would break the key=value shape of the receipt line.
+/**
+ * Mint-site sanitizer for store-derived receipt operands (H1). Reasons that
+ * interpolate stored text (render_config:budget(<stored>→<current>)) must
+ * arrive at the funnel already receipt-safe: the funnel grammar throws by
+ * design (programmer typos), and a throw inside the materialization
+ * transaction would re-mint and re-throw every pass — a permanent wedge that
+ * only a successful fold could clear. Flattening at the mint keeps the
+ * throw strictly a typo detector. Whitespace collapses to "_", backticks
+ * (template-delimiter hazards) to "'", each operand clamps to `maxLen` with
+ * a trailing "~" so truncation is visible in the receipt.
+ */
+export function sanitizeReceiptOperand(value: string, maxLen = 40): string {
+    const flat = value.replace(/\s+/g, "_").replace(/`/g, "'");
+    return flat.length > maxLen ? `${flat.slice(0, maxLen - 1)}~` : flat;
+}
+
 const REASON_TOKEN = /^[a-z][a-z0-9_]{2,47}(?::[^\s]{1,120})?$/;
 function requireReasonToken(fn: string, reason: string): void {
     if (!REASON_TOKEN.test(reason)) {

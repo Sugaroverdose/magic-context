@@ -183,3 +183,90 @@ describe("system-region fold: materialization boundary installs the region", () 
         ).toBe(true);
     });
 });
+
+describe("system-region receipts: store-derived operands cannot wedge the fold lane (H1)", () => {
+    const OPERAND = `evil operand\twith spaces and ${"x".repeat(200)} trailing`;
+
+    it("a corrupt stored budget identity mints a receipt-safe reason; the fold proceeds and self-heals", () => {
+        const db = makeDb();
+        seedPanels(db);
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            projectPath: PROJECT_PATH,
+            projectDirectory: "",
+            systemRegion: { enabled: true, reason: "first_render" },
+        });
+        // Corrupt only the render-budgets operand the budget arm interpolates
+        // verbatim; every other component stays as the healthy fold wrote it.
+        const stored = (
+            db
+                .prepare("SELECT cached_m0_upgrade_state AS v FROM session_meta WHERE session_id = ?")
+                .get(SESSION_ID) as { v: string | null }
+        ).v!;
+        expect(stored).toContain("|render-budgets:");
+        db.prepare("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?").run(
+            stored.replace(/(\|render-budgets:)[^|]*/, `$1${OPERAND}`),
+            SESSION_ID,
+        );
+        const state = getOrCreateSessionMeta(db, SESSION_ID);
+        const { mustMaterialize } = require("./inject-compartments") as {
+            mustMaterialize: (a: never) => { value: boolean; reason: string | null };
+        };
+        const decision = mustMaterialize({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory: "",
+            systemRegionMode: true,
+        } as never);
+        expect(decision.value).toBe(true);
+        expect(decision.reason).toStartWith("render_config:budget(");
+        // Mint-site sanitization: the reason is receipt-safe — no whitespace,
+        // clamped length, grammar-valid for the funnel.
+        expect(decision.reason).not.toMatch(/\s/);
+        expect(decision.reason.length).toBeLessThanOrEqual(48 + 1 + 120);
+        // The fold lane proceeds with this reason: no throw inside the
+        // materialization transaction, rotation installed, receipt carries the
+        // sanitized token.
+        expect(() =>
+            materializeM0({
+                db,
+                sessionId: SESSION_ID,
+                state: getOrCreateSessionMeta(db, SESSION_ID),
+                projectPath: PROJECT_PATH,
+                projectDirectory: "",
+                systemRegion: { enabled: true, reason: decision.reason! },
+            }),
+        ).not.toThrow();
+        expect(readSystemRegion(db, SESSION_ID)).not.toBeNull();
+        expect(
+            lines.some(
+                (line) =>
+                    line.startsWith("system-region rotation:") &&
+                    line.includes(`reason=${decision.reason}`) &&
+                    line.includes("executed=true"),
+            ),
+        ).toBe(true);
+        // Self-heal: the successful rewrite replaced the corrupt operand.
+        const healed = getOrCreateSessionMeta(db, SESSION_ID);
+        expect(healed.cachedM0UpgradeState ?? "").not.toContain("evil");
+        expect(healed.cachedM0UpgradeState ?? "").not.toMatch(/render-budgets:\S*\s/);
+    });
+
+    it("the shrink arm is parser-gated: a whitespace-bearing stored operand can never mint", async () => {
+        const { renderedBudgetShrinkReason } = await import("./compartment-render-epoch");
+        // Baseline: clean operands fire and mint a whitespace-free token.
+        const clean = renderedBudgetShrinkReason("m1000-h60000", "m900-h60000");
+        expect(clean).toStartWith("render_config:budget_shrink(");
+        expect(clean).not.toMatch(/\s/);
+        // The mint is reachable only for operands matching ^m\d+(\.\d+)?-h\d+$
+        // — a corrupt (whitespace/oversize/garbage) stored operand is rejected
+        // by the parser, so this arm structurally cannot emit store text.
+        expect(renderedBudgetShrinkReason("m 1000-h60000", "m900-h60000")).toBeNull();
+        expect(renderedBudgetShrinkReason(`m${"9".repeat(400)}-h1`, "m900-h60000")).toBeNull();
+        expect(renderedBudgetShrinkReason("garbage", "m900-h60000")).toBeNull();
+    });
+});
