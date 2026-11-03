@@ -101,9 +101,16 @@ describe("system-region L0: per-actor producer census", () => {
             ...walkTs(join(SRC_ROOT, "..", "..", "cli", "src"), "cli/"),
             ...walkTs(join(SRC_ROOT, "..", "..", "pi-plugin", "src"), "pi/"),
         ];
+        // G4 honest boundary — what the regexes cannot see: dynamic
+        // table-name VARIABLES (not ${...} interpolations), schema-qualified
+        // forms (`main.pending_ops`), aliasing via views, and every file
+        // outside the four walk roots (e2e-tests, dashboard TS). The
+        // dynamic-${} arms below are captured by shape; a writer that hides
+        // behind an indirect variable is a review-time defect the census
+        // cannot promise to catch, same disclosure class as the Rust zone.
         const writers = zoneFiles
             .filter(({ full }) =>
-                /(?:INSERT INTO|DELETE FROM|UPDATE)\s+pending_ops|INSERT INTO \$\{quoteIdentifier\(table\)\}/i.test(
+                /(?:INSERT INTO|DELETE FROM|UPDATE)\s+pending_ops|INSERT INTO \$\{quoteIdentifier\(table\)\}|DELETE FROM \$\{[^}]*table[^}]*\}/i.test(
                     readFileSync(full, "utf8"),
                 ),
             )
@@ -111,8 +118,25 @@ describe("system-region L0: per-actor producer census", () => {
             .sort();
         expect(writers).toEqual([
             "features/magic-context/compaction.ts",
+            // G4: harness-twin relabel deletes over a STATIC rule table list
+            // (session_projects, primer_candidates, transform_decisions —
+            // pending_ops is not among them); the generic `${table}`
+            // prepared statements are kept in the census because the shape,
+            // not the current list, is what a future rule could target.
+            "features/magic-context/opencode2-relabel.ts",
             "features/magic-context/storage-clone.ts",
+            // G4: identity-merge row relocation — DELETE FROM
+            // ${quoteIdentifier(table.name)} for the merged-away identity;
+            // removing queued rows transfers nothing (queue dies with the
+            // losing identity), no drain authority.
+            "features/magic-context/storage-identity-merge.ts",
             "features/magic-context/storage-ops.ts",
+            // G4: session teardown — DELETE FROM ${definition.table} /
+            // ${quoteIdentifier(table)} over SESSION_SCOPED_TABLES, which
+            // includes pending_ops. The schedule dies with the session;
+            // deleting queued rows there removes authority, it cannot
+            // apply it (no drain bypass) — L0 spirit holds, named member.
+            "features/magic-context/storage-session-tables.ts",
             "features/magic-context/storage-tags.ts",
             // Dev benchmark fixture seeder: creates intent for load tests
             // only; not a runtime writer.
