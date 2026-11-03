@@ -1,8 +1,16 @@
 # Frozen system-region residency for store-backed panels
 
-Status: **reviewed, owner rulings recorded (§12).** The decisions in §3 through §8 are law
-for the implementation. Two items remain open with the proposed default in force (§12.6,
-§12.7). Step 2 (durable-slot honesty) is authorized to proceed.
+Status: **reviewed, owner rulings recorded (§12); constitution added (owner mandate,
+2026-11-03) — the law set L1–L9 is the spec.** The decisions in §3 through §8 are law for
+the implementation. §12.7 remains open with its proposed default in force (§12.6 was
+ruled: slots survive rotation, §7.4). Step 2 (durable-slot honesty) has landed.
+
+Base: this lane was rebased off assembly onto the v0.45.0 tag (`cb6724d69`) on 2026-11-03
+(backup tag `archive/synthetic-head-pre-rebase-2026-11-03`). The lane is
+`v0.45.0 + 2 prereqs + frozen-region feature`: prereq 1 `8953bc4ee` (LKG telemetry
+honesty), prereq 2 `0c606a9ff` (R12 system-reclaim boundary, adapted — see §7.2). The
+extraction property `git diff v0.45.0...HEAD` minus the two prereqs = the feature only is
+the invariant to preserve.
 
 Audience: the lane owner and the implementers of the OpenCode 1, OpenCode 2, Pi and Rust
 lanes. Purpose: approve what the frozen system region is, when its bytes may rotate, how the
@@ -29,36 +37,129 @@ cause (step 2 of the lane), the mural product itself, dashboard UI changes.
 - Pressure accounting moves from the array tokenizer to the served-system estimate, which
   already exists (`final-wire-token-estimate.ts:267` folds `systemPromptTokens` in).
 
+## Constitution (L1–L9): laws as structural properties
+
+Owner mandate, 2026-11-03: the frozen region is a new window. The cache-resiliency
+imperatives this fork accumulated as band-aids (Oct 23 units bug through ctxv14) are its
+foundations, not features to re-implement on top. For each law: the guarantee, the
+structural property that makes violation impossible-by-construction, the guard it
+obsoletes, and the law test that attacks the mechanism. If a law ever needs a bolt-on
+guard instead of a structure, that is a design smell to raise in §12, not to patch
+silently.
+
+- **L1 — Boot is replay, never re-derivation.** Stored region bytes are served verbatim;
+  the serve path performs zero store reads beyond the session meta the pass already
+  loaded. Structure: serve is `decodeSystemRegionRow(sessionMetaEarly.cachedM0Bytes)` —
+  a sentinel strip and return; assembly exists only behind the rotation transaction, and
+  the sentinel admits no row the serve writer did not produce. Obsoletes: the restore-vs-
+  live head divergence class. Tests: `system-region.test.ts` R11 reader-contract rows
+  (legacy raw row → null → first-render); `system-region-serve.test.ts` steady-replay and
+  gate-off rows; planned §10 attack row: instrument the db handle and assert zero
+  additional `prepare` calls during a serve pass.
+- **L2 — Content events move bytes; restarts never do.** Structure: rotation eligibility
+  is `decideSystemRegionRotation`, a pure compare of live store markers against the
+  markers captured at the last rotation; a fresh process reading the same row and markers
+  computes `rotate=false`. No boot-time path calls the assembler. Obsoletes: boot
+  cache-bust. Tests: rotation-decision rows (identical markers → false across a re-opened
+  handle); planned §10 row 1 (panel mutation + restart → byte-identical serve, zero
+  rotation/hash lines).
+- **L3 — Movement happens only inside a named rotation transaction.** Structure: every
+  region byte change flows through `executeSystemRegionRotation`, whose reason is a
+  required parameter drawn from the enumerated set (re-anchor, hardFold, force band,
+  explicit flush, published history, pending-growth cap) — an anonymous bust is not
+  type-expressible. Obsoletes: scattered bust guards. Tests: rotation rows assert the
+  receipt names its reason; inert-gate negative controls prove each decision arm
+  discriminates.
+- **L4 — When the region does not rotate, nothing trims, adds, or re-renders into it.**
+  Structure: the serve path is read-only by construction (no mutation API exists for
+  region bytes outside the rotation transaction); every system-origin change is a marker
+  move or a queue row, and the single R12-derived permission (`transform-postprocess-
+  phase.ts:2042-2050`) holds the whole queue until a boundary — on this base there is no
+  per-origin immediate-apply carve-out (§7.2 frozen-base note), so "queues and rides" is
+  the only shape. Obsoletes: per-site bust checks and R12's gate as a bolt-on — it
+  becomes the region's own admission control. Tests: the carried R12 rows (`transform-
+  postprocess-phase.test.ts`, `system-reclaim-boundary-pi.test.ts`), `system-region-
+  serve.test.ts` steady-pass rows (refresh sets stay empty), and the §10 row 5 single-
+  bust-permission pair.
+- **L5 — Served bytes are immutable once served.** Structure: shape is decided at apply
+  (rotation time); replay reads frozen state. The region decode is pure extraction — it
+  cannot re-tier, re-render, or re-budget; decay tiers live inside stored bytes and move
+  only at rotation (the m[0] re-tier law, strengthened: tiers are literally stored
+  text). Watermark-gated strips keep the frozen-id replay pattern on the array side.
+  Obsoletes: the drop_mode class, generalized from tool tags to the region. Tests:
+  encode/decode identity rows over hostile whitespace/unicode payloads; serve rows
+  proving byte-equality across passes.
+- **L6 — Capture == served.** Structure: the durable capture (region blob + marker
+  manifest) is written inside the fold's single persist callback
+  (`materializeM0` → `executeSystemRegionRotation(db, …, persist)`), so a snapshot stale
+  relative to last-served bytes cannot exist; there is no second capture step to
+  re-derive from. Obsoletes: the §4b(b) capture-cadence defect class. Tests:
+  `system-region-fold.test.ts` — region equals the exact concatenation the fold
+  rendered, markers equal the fold's snapshot, and refused rotations capture nothing.
+- **L7 — Every refusal, clear, drop, and rotation emits a named-reason receipt.**
+  Structure: one funnel per event class — `executeSystemRegionRotation` logs
+  unconditionally with the reason (executed=true/false), and the LKG slot store refuses
+  through `lkgSlotStructuralRejection` at both gates with logging refusal paths
+  (`lkg-slot.ts:381-396`, `lkg-persist.ts:221`, `:372-378`, `lkg-slot.ts:576`,
+  `lkg-replay.ts:393`). Obsoletes: per-incident receipt patches (the five-path hunt of
+  `17006a72b` became a law, not a fix). Tests: receipt rows count lines per event
+  (red-first, silent paths fail CI); negative controls removed one receipt and the row
+  went red.
+- **L8 — One invalidation per event.** Structure: the cause sets are disjoint by
+  construction — the live watcher hashes H only (`hostContent`), the region is never
+  hashed live, and panel causes appear only in the rotation decision list. A panel edit
+  therefore produces exactly one possible bust, at the next boundary; a host edit
+  produces exactly one, the re-anchor fold. Obsoletes: the `reason=unknown executed=
+  false` class and any coexistence guard between panel churn and the watcher. Tests:
+  `system-region-serve.test.ts` — panel-content change moves neither the watched hash
+  nor the refresh sets; H change moves exactly the re-anchor arm set.
+- **L9 — Log labels distinguish replay from rebuild from queue-ride.** Structure: the
+  receipt vocabulary is closed — a served pass is silent (replay), a rotation prints
+  `system-region rotation: reason=… executed=…` (rebuild), a held drain prints
+  `pending ops held — reason=system-reclaim-ride-required` (queue-ride), a refused
+  capture prints `lkg_capture_declined reason=…`. No path reuses another's line, so a
+  receipt always names the producing path. Obsoletes: the `lkg=` ambiguity lesson.
+  Tests: each law row asserts its exact label; a queue-ride receipt can never satisfy a
+  rebuild row.
+
+Deletion duty (deletion is as load-bearing as addition): the head-side guards the
+structure obsoletes land with §11 — the `mustMaterialize` m[1]-delta non-trigger list
+becomes the region's marker non-trigger list, the head empty-placeholder floors collapse
+into the never-empty floor enforced at the store writer (`writeSystemRegion`), and the
+per-lane m[1] refresh bust checks collapse into L4's single permission. The
+provider-eviction re-anchor arms (model/system-hash/TTL) stay — they anchor H, and L8's
+disjointness is what keeps them from ever firing for P.
+
 ## 1. Problem
 
-The heads are built in `inject-compartments.ts:3303` (`prependM0M1Messages`) as
+The heads are built in `inject-compartments.ts:3346` (`prependM0M1Messages`) as
 `role: "user"` with `info.syntheticHead: true` and part-level `synthetic: true`. The
 user-role wrapper exists only because the April 2026 host pipeline forces it: OpenCode's
 `toModelMessagesEffect` filters on `ignored` (not `synthetic`), and the title-generation
 gate counts any non-all-synthetic user message as a real turn, which is the #129
-phantom-turn fix documented at `inject-compartments.ts:3310-3321`.
+phantom-turn fix documented at `inject-compartments.ts:3348-3366`.
 
 The measured costs (work item, live install):
 
 1. A panel-store edit (profile, memory, docs, compartment publish) rotates the array-head
    bytes. The provider cache busts from array token 0 with no fold and no log line: the
    pass reports `reason=unknown executed=false` at the fold-decision receipt
-   (`transform-postprocess-phase.ts:2018`). There is no fold, so nothing prices or records
+   (`transform-postprocess-phase.ts:2019`). There is no fold, so nothing prices or records
    the bust.
 2. Authority confabulation: the model attributes panel content to the user (Nov 2
    delete-confabulation quoted the `<user-profile>` block). A user-role wrapper is an
    authority lie the panel should never have carried.
 3. Role-keyed breakage. Every role-or-position-keyed guard in the pipeline must know about
    the fake heads: `isSyntheticHeadMessage` head walks
-   (`transform-postprocess-phase.ts:222,253,1293`), the Rust-served head parse
+   (`transform-postprocess-phase.ts:222,253,1296`), the Rust-served head parse
    (`rust-served-m0.ts:37`), the ID-less-head carve-out in the `IncompleteUserMessageError`
    guard (`plugin/messages-transform.ts:605-618`), and the empty-fake-user-turn provider
    rejections.
 
 The system channel is the proven alternative, but only for byte-constant content: the
-handler appends the MC guidance block to `system[0]` at `system-prompt-hash.ts:396`, and any
+handler appends the MC guidance block to `system[0]` at `system-prompt-hash.ts:406`, and any
 mutable byte in `output.system` trips the whole-content hash watcher
-(`system-prompt-hash.ts:491-519`), which schedules a flush and fold on every change. That
+(`system-prompt-hash.ts:521-545`), which schedules a flush and fold on every change. That
 watcher behavior is exactly what must change: constant bytes re-anchor immediately,
 store-backed bytes rotate only at boundaries.
 
@@ -70,7 +171,7 @@ store-backed bytes rotate only at boundaries.
   `<new-compartments>`, `<new-memories>`, `<new-user-profile>`). Assembled from
   `context.db` at rotation time and stored per session.
 - Host-guidance segment (H): the host prompt + the MC guidance block appended at
-  `system-prompt-hash.ts:376-401` + the sticky date line. Mutable only by re-anchor events
+  `system-prompt-hash.ts:390-406` + the sticky date line (`:456-471`). Mutable only by re-anchor events
   (build upgrade, guidance/AGENTS source edit, prompt-surface or ctx_reduce verdict settle).
 - Rotation: replacing the stored region bytes with a fresh assembly. A rotation is a cache
   bust at the region start: everything after H is re-cached.
@@ -85,7 +186,7 @@ The never-re-decide-at-serve rule (the `drop_mode` lesson) applies: the region's
 decided at the rotation that captured it.
 
 The append stays inside `system[0]` rather than a second array entry, for the reason pinned
-at `system-prompt-hash.ts:389-395`: OpenAI-compatible serializers emit one wire message per
+at `system-prompt-hash.ts:397-403`: OpenAI-compatible serializers emit one wire message per
 entry and strict chat templates reject a second system message.
 
 Boot after a panel-store mutation must serve the stored bytes even though the markers have
@@ -98,10 +199,10 @@ last rotation), the rotation rides the TTL arm, not the restart.
 
 Rotation is ride-only. It never originates a bust (invariant 4 of ARCHITECTURE's load-bearing
 list). A pass may rotate only if it is already busting for one of these reasons, which are
-today's `mustMaterialize` HARD trigger set (`inject-compartments.ts:1754-1954`) with the
+today's `mustMaterialize` HARD trigger set (`inject-compartments.ts:1757-1957`) with the
 m[1]-specific members removed. The mechanism is not invented here: rotation eligibility
 cherry-picks the merged R12 system-reclaim boundary law, the `rideSignals` enumeration and
-`systemReclaimAllowed` predicate (`transform-postprocess-phase.ts:2060-2107`: hardFold,
+`systemReclaimAllowed` predicate (`transform-postprocess-phase.ts:2042-2081`: hardFold,
 force, explicitFlush, publishedHistory, plus the aborted-fold arm
 `deferredMaterialize && prefixPreflightFailed`). The FPE lane's boundary enumeration and
 bust-permission pattern is the reference implementation; the provider-eviction arms below
@@ -141,7 +242,7 @@ bytes this pass.
 
 No new user-facing rotation trigger is designed. The operator's rotation trigger is
 `/ctx-wrapup` (owner ruling): wrapup publishes history, and the published-history signal
-is a R12 `rideSignals.publishedHistory` arm (`transform-postprocess-phase.ts:2076-2082`),
+is a R12 `rideSignals.publishedHistory` arm (`transform-postprocess-phase.ts:2026-2033`),
 so a wrapup pass is a rotation boundary (`publishedM1RefreshedThisPass`). Wrapup's shipped
 semantics (imports sessions MC does not manage yet, or wraps up when the context window
 became smaller) already reach this arm on installs that leave MC's own `compaction` config
@@ -151,7 +252,7 @@ this lane.
 ## 5. Rotation markers (the generalized profileVersion pattern)
 
 Today the per-panel store-version watermark pattern is `renderM1`'s profile gate
-(`inject-compartments.ts:2983-3002`): `getGlobalUserProfileVersion(db)` versus the captured
+(`inject-compartments.ts:3026-3033`): `getGlobalUserProfileVersion(db)` versus the captured
 `markers.projectUserProfileVersion` decides whether the `<new-user-profile>` delta renders.
 The generalization: every panel in the region carries a store-version marker captured with
 the region bytes at rotation, and rotation eligibility is "any marker differs from the
@@ -166,7 +267,7 @@ stored set":
 | budgets/config | `renderBudgetIdentity`, `compartmentRenderEpoch`, `upgradeState` |
 
 All of these already exist as `session_meta` columns written by the m[0]/m[1] machinery
-(`readCurrentM0SnapshotMarkers`, `inject-compartments.ts:1576`; `CachedM0M1Row`,
+(`readCurrentM0SnapshotMarkers`, `inject-compartments.ts:1561`; `CachedM0M1Row`,
 `:3038-3049`). The marker set is also the "pending delta" estimator input for the backstop:
 the bytes between the captured markers and the current store state are the pending delta.
 
@@ -212,8 +313,13 @@ in the stored bytes and can only change at rotation.
 ### 7.2 One bust permission
 
 The single per-pass bust permission (invariant 4) now also gates rotation, as one more
-consumer of the R12 `systemReclaimAllowed` predicate (`transform-postprocess-phase.ts:2100-2107`),
-not a parallel gate. Every mutation
+consumer of the R12 `systemReclaimAllowed` predicate (`transform-postprocess-phase.ts:2042-2050`),
+not a parallel gate. Frozen-base note: on v0.45.0 the pending-op vocabulary is a single
+`drop` operation (no FPE-era `auto_drop` origin class), so the carried R12 gate is
+all-or-nothing — the whole queue rides the byte-change permission or waits, with a
+`pending ops held — reason=system-reclaim-ride-required` receipt. The constitution's L4
+is stated against this shape; when the FPE lane rebases, its origin-class filter may
+re-narrow, never widen, the same permission. Every mutation
 lane (queued `ctx_reduce` drops, age sweeps, heuristics, synthetic todo, sentinel
 first-application, and now rotation) consults the same permission; a veto that applies to
 one lane and not another remains a defect (the ALF split-bust precedent). The
@@ -225,7 +331,7 @@ rotation into the known bust (drain-into-the-known-bust invariant, unchanged).
 
 The array tokenizer no longer sees panel bytes; the served-system estimate already does.
 The hash handler estimates the full served system content and persists it as
-`sessionMeta.systemPromptTokens` (`system-prompt-hash.ts:537-547`), and
+`sessionMeta.systemPromptTokens` (`system-prompt-hash.ts:573-586`), and
 `estimateFinalWireInputTokens` folds that in beside the array and tool estimates with the
 calibrated `systemRatio` (`final-wire-token-estimate.ts:267-298`). Requirements:
 
@@ -253,16 +359,17 @@ and never was. Consequences:
   itself a bust pass, so the capture refreshes on the same pass and no boot-rebuild
   window opens between rotation and first capture). Stale panels on a fault replay are
   acceptable and cheaper than dropping the recovery ladder.
-- Boot-cache-bust honesty (landed, prerequisite step 2, commit `a49c8611e`): the observed
+- Boot-cache-bust honesty (landed, step 2, commits `8953bc4ee` prereq + `17006a72b` on the
+  rebased base; was `1210bf8c3`/`a49c8611e` pre-rebase): the observed
   wipe (22 chunks to 0 rows, `captured_at` reading NULL, zero `lkg_capture_declined`
   lines) was reproduced red-first and closed at every silent path. `captureSlot` and the
   durable writer now share `lkgSlotStructuralRejection` (`lkg-slot.ts:381-395`, reasons
   `empty_prefix`, `missing_anchor`, `invalid_captured_at`), so a slot that
   `parsePersistedLkgSlot` could never read back is refused before install;
-  `saveLkgSlotToDb` (`lkg-persist.ts:216`) runs the same pure check before its
+  `saveLkgSlotToDb` (`lkg-persist.ts:221`) runs the same pure check before its
   chunk-deleting transaction and logs `lkg_persist_declined`; `dropSlot` emits
-  `lkg_slot_dropped reason=...` (`lkg-slot.ts:572`); `loadPersistedLkgSlot` names its
-  parse-failure clear (`lkg-persist.ts:376`); `captureLkgSlot` logs
+  `lkg_slot_dropped reason=...` (`lkg-slot.ts:576`); `loadPersistedLkgSlot` names its
+  parse-failure clear (`lkg-persist.ts:372-378`); `captureLkgSlot` logs
   `lkg_capture_declined reason=build_<cause>` on the prefix-build falsy path
   (`lkg-replay.ts:393`) that precedes the slot store's reason logic, and the bust path's
   `dropSlot(sessionId, "lkg_refresh_declined")` into the store is now visible; the Rust
@@ -276,7 +383,7 @@ and never was. Consequences:
 ## 8. Observability
 
 Rotations must be as loud as folds. New receipt beside the fold decision line
-(`transform-postprocess-phase.ts:2018`):
+(`transform-postprocess-phase.ts:2019`):
 `system-region rotation: reason=<boundary> markers=<moved set> bytes=<n> executed=<bool>`.
 The `reason=unknown executed=false` class the work item measured becomes detectable: any
 panel-visible change reaching the model either rides a rotation line or did not reach the
@@ -339,14 +446,25 @@ discriminates: disable the gate, the law test must fail):
 6. Pressure accounting: region bytes are included in the combined estimate feeding the
    force band and the 95% refusal.
 
+Implementation status (2026-11-03): landed as `system-region.test.ts` (store + R11
+reader), `system-region-rotation.test.ts` (decision arms + receipts + inert-gate
+controls; law 3 named-reason rows), `system-region-serve.test.ts` (laws 1, 2, 8: steady
+replay, watcher split, pressure estimate, gate-off, date-freeze containment),
+`system-region-fold.test.ts` (law 6 capture==served, gate-off control, legacy-row
+replacement, marker atomicity) — 41 rows, each with a verified negative control.
+Remaining: rows 1 and 4 need the boot-restart harness (fresh-process replay), row 2's
+rotation-rides-the-bust half needs the postprocess wiring, row 6's force-band leg needs
+the estimator assertion through the pass entry. L1's zero-store-read attack row and L6's
+persist-throw rollback row are the two mechanism-attacks still to write.
+
 ## 11. What gets deleted
 
-- `prependM0M1Messages` both lanes (`inject-compartments.ts:3303`, `inject-compartments-pi.ts:2553`)
+- `prependM0M1Messages` both lanes (`inject-compartments.ts:3346`, `inject-compartments-pi.ts:2553`)
   and the m[0]/m[1] injection call sites.
 - `info.syntheticHead` (`tag-messages.ts:243`), `isSyntheticHeadMessage` and its head walks
   (`transform-postprocess-phase.ts:222,253,1293`), the Rust-served head parse
   (`rust-served-m0.ts:37`).
-- Part-level `synthetic: true` flags on head parts, `M0_EMPTY_BODY` (TS `:1149`, Rust
+- Part-level `synthetic: true` flags on head parts, `M0_EMPTY_BODY` (TS `:1152`, Rust
   `memory_render.rs:27`) and `M1_EMPTY_PLACEHOLDER` with their empty-head classes.
 - The #129 phantom-turn special cases and the ID-less-head carve-out comment arms in
   `plugin/messages-transform.ts:605-618` (the guard itself stays for real persisted rows).
@@ -380,7 +498,7 @@ Ruled by the owner (2026-11-03 review of this document):
    config. RPC command surfaces stay untouched.
 5. Freshness contract: accepted as specified. No new boundary mechanism: rotation reuses
    the merged R12 `systemReclaimAllowed` / `rideSignals` enumeration
-   (`transform-postprocess-phase.ts:2060-2107`) as its boundary and bust-permission
+   (`transform-postprocess-phase.ts:2042-2081`) as its boundary and bust-permission
    pattern, with the FPE lane as the reference.
 
 6. (Ruled, 2026-11-03) LKG slots survive rotations without a fence (§7.4). A rotation
