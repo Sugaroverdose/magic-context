@@ -1,9 +1,8 @@
 # Frozen system-region residency for store-backed panels
 
-Status: **draft for review.** The decisions in §3 through §8 are proposed as law for the
-implementation; §11 lists the open questions the reviewer must settle before step 2 of the
-lane starts. The prerequisite durable-slot honesty fix is owned by this lane and specified
-separately (see §7.4 and the work item).
+Status: **reviewed, owner rulings recorded (§12).** The decisions in §3 through §8 are law
+for the implementation. Two items remain open with the proposed default in force (§12.6,
+§12.7). Step 2 (durable-slot honesty) is authorized to proceed.
 
 Audience: the lane owner and the implementers of the OpenCode 1, OpenCode 2, Pi and Rust
 lanes. Purpose: approve what the frozen system region is, when its bytes may rotate, how the
@@ -100,7 +99,13 @@ last rotation), the rotation rides the TTL arm, not the restart.
 Rotation is ride-only. It never originates a bust (invariant 4 of ARCHITECTURE's load-bearing
 list). A pass may rotate only if it is already busting for one of these reasons, which are
 today's `mustMaterialize` HARD trigger set (`inject-compartments.ts:1754-1954`) with the
-m[1]-specific members removed:
+m[1]-specific members removed. The mechanism is not invented here: rotation eligibility
+cherry-picks the merged R12 system-reclaim boundary law, the `rideSignals` enumeration and
+`systemReclaimAllowed` predicate (`transform-postprocess-phase.ts:2060-2107`: hardFold,
+force, explicitFlush, publishedHistory, plus the aborted-fold arm
+`deferredMaterialize && prefixPreflightFailed`). The FPE lane's boundary enumeration and
+bust-permission pattern is the reference implementation; the provider-eviction arms below
+are its event sources.
 
 Provider-side eviction, the cache is already dead, rotation is free:
 
@@ -134,9 +139,18 @@ compartment sequence, `project_user_profile_version`, `maxMemoryId`, project-doc
 tool-set hash (`:1853-1856,1925-1946`). They mark the region rotation-pending and change no
 bytes this pass.
 
-`/ctx-flush` becomes a rotation-forcing user command (it may rotate on demand; user
-explicits are boundaries). This is a semantics change from today's SOFT flush and is listed
-in §11 for confirmation.
+`/ctx-flush` is a rotation-forcing user command (R12 `explicitFlush` arm; owner ruling).
+Two facts about today's flush are part of this work:
+(a) it is SOFT (m[1] refresh, no m[0] fold), and (b) it is DEAD on compaction-off installs:
+the RPC refuses before doing any work (`plugin/rpc-handlers.ts:1733` returns
+`compactionOffRefusal("ctx-flush")` when `compactionEnabled` is false, the shipped default
+in this deployment). The flush command's boundary semantics must be decoupled from the
+compaction gate: on a compaction-off install, `/ctx-flush` forces a region rotation on
+demand (the panels exist there too; compaction-off keeps memories, docs and notes). The
+postprocess `!compactionOff` conjuncts on the reclaim gates
+(`transform-postprocess-phase.ts:2092,2102`) must not suppress the rotation ride for the
+explicit-flush signal; array-side reclaim stays gated as it is today. Law test 7 (§10)
+pins this.
 
 ## 5. Rotation markers (the generalized profileVersion pattern)
 
@@ -201,7 +215,9 @@ in the stored bytes and can only change at rotation.
 
 ### 7.2 One bust permission
 
-The single per-pass bust permission (invariant 4) now also gates rotation. Every mutation
+The single per-pass bust permission (invariant 4) now also gates rotation, as one more
+consumer of the R12 `systemReclaimAllowed` predicate (`transform-postprocess-phase.ts:2100-2107`),
+not a parallel gate. Every mutation
 lane (queued `ctx_reduce` drops, age sweeps, heuristics, synthetic todo, sentinel
 first-application, and now rotation) consults the same permission; a veto that applies to
 one lane and not another remains a defect (the ALF split-bust precedent). The
@@ -238,8 +254,8 @@ and never was. Consequences:
   replayed array is stale-by-one-generation only in the sense that it was built against an
   older region; since a rotation is a priced bust, and replay only fires on fault, the
   proposal is to keep slots across rotations (no new fence). Stale panels on a fault replay
-  are acceptable and cheaper than dropping the recovery ladder. Confirmation requested
-  (§11).
+  are acceptable and cheaper than dropping the recovery ladder. This is the default in
+  force; §12.6 keeps the confirmation open.
 - Boot-cache-bust honesty: `lkgReplayStateLabel` (`lkg-persist.ts:312-323`) reports
   mem/disk/absent from row existence, and the observed wipe (22 chunks to 0 rows,
   `captured_at` NULL, zero `lkg_capture_declined` lines) comes from a write or clear path
@@ -316,6 +332,9 @@ discriminates: disable the gate, the law test must fail):
    and drops nothing; the next boundary pass does both in one bust.
 6. Pressure accounting: region bytes are included in the combined estimate feeding the
    force band and the 95% refusal.
+7. Flush works with compaction off: on a `compaction.enabled: false` install, `/ctx-flush`
+   is not refused by the RPC gate (`plugin/rpc-handlers.ts:1733`) and forces a region
+   rotation, while array-side reclaim lanes stay gated off as today.
 
 ## 11. What gets deleted
 
@@ -331,32 +350,37 @@ discriminates: disable the gate, the law test must fail):
 - The head-adjacency special cases in `openai-compat-adjacency.ts` for the leading
   user-user pair, the `cached_m1_bytes` render lane, and the deprecated key-files
   remnants its comments still describe (`system-prompt-hash.ts:403-408`).
+- The mural head carriage (`cached_m0_mural_data_url` on the m[0] parts). Owner ruling:
+  this deployment never uses the mural, so no tail-part special case is built. If the
+  surface is kept at all it is a base64 PNG embedded in the region text blob like any
+  other model-readable chunk; stub-or-delete is the preferred minimal-effort candidate,
+  decided at implementation.
 
-## 12. Open questions for review
+## 12. Rulings and open items
 
-1. Mural image. Image bytes cannot live in a system string. Today the mural PNG rides
-   m[0]'s parts (`cached_m0_mural_data_url`). Proposal: attach it as a synthetic file part
-   on the array tail at rotation-capture passes only, replayed by the frozen-id pattern;
-   this keeps a minimal synthetic-part surface instead of a head. Alternative: keep the
-   mural as a one-part synthetic user message and defer full head deletion for vision
-   sessions. Ruling requested.
-2. Notes. The work item lists notes among the head panels, but notes are not head-resident
-   today: they reach the model through the ctx_note tool output and the nudge lane
-   (`note-nudger.ts`, `note-visibility.ts`), which is mid-array. Proposal: they stay where
-   they are and are out of scope for the region; confirm.
-3. Column reuse versus new columns. Proposal reuses `session_meta.cached_m0_bytes` as the
-   region BLOB and keeps the existing `cached_m0_*` marker columns; `cached_m1_bytes` is
-   NULLed by the migration and eventually dropped. A new named column
-   (`system_region_bytes`) is cleaner at the cost of a schema bump. Ruling requested; no
-   new persistent data ships without this ruling.
-4. `/ctx-flush` becomes rotation-forcing (user explicit). Confirm the semantics change.
-5. Freshness contract. Between rotations, new memories, compartments and profile edits are
-   invisible to the model. Today they surface at the next bust (m[1] refresh). The force
-   band and the pending-growth cap bound the delay, and historian publish paths land on
-   bust passes, but a quiet session with a small delta now waits longer. Confirm this is
-   the accepted cost of the residency model.
-6. LKG slots survive rotations without a fence (§7.4). Confirm stale-panel replay on fault
-   is acceptable.
+Ruled by the owner (2026-11-03 review of this document):
+
+1. Mural: no tail-part special case; base64 into the region blob if kept, stub-or-delete
+   preferred (§11).
+2. Notes: out of scope, confirmed. They ride the nudge lane (`note-nudger.ts`,
+   `note-visibility.ts`), not the heads; the work item's panel list was loose.
+3. Storage: reuse `session_meta.cached_m0_bytes` as the region BLOB, no new column. Same
+   payload, different placement; the persistence layer stays untouched. The coordinator's
+   column-hygiene objection was overruled; the reader contract (stored bytes are region
+   bytes, never legacy m[0] text) is covered by re-pinned tests instead of schema
+   separation: the boot path must prove a row written by the old lane is treated as
+   first-render (rotated fresh), not served as region bytes.
+4. Flush: rotation-forcing via the R12 `explicitFlush` arm, and decoupled from the
+   compaction gate so compaction-off installs can force a rotation (§4, law test 7).
+5. Freshness contract: accepted as specified. No new boundary mechanism: rotation reuses
+   the merged R12 `systemReclaimAllowed` / `rideSignals` enumeration
+   (`transform-postprocess-phase.ts:2060-2107`) as its boundary and bust-permission
+   pattern, with the FPE lane as the reference.
+
+Open, proposed default in force:
+
+6. LKG slots survive rotations without a fence (§7.4). Default: keep; stale-panel replay
+   on fault is accepted. A ruling is still requested.
 7. ARCHITECTURE.md's `mc:protected` region documents m[0]/m[1] as the head architecture and
    is human-edit-only. After implementation it needs a deliberate human rewrite; the lane
    will flag it rather than touch it.
