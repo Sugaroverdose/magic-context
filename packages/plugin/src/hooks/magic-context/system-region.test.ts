@@ -104,6 +104,21 @@ describe("system-region store: R11 reader contract", () => {
         }
     });
 
+    it("refuses an empty region — the placeholder-floor law", () => {
+        const { db } = fixture();
+        try {
+            expect(writeSystemRegion(db, "empty", "")).toBe(false);
+            expect(
+                lines.some((line) =>
+                    line.includes("system-region write declined session=empty reason=empty_region"),
+                ),
+            ).toBe(true);
+            expect(readSystemRegion(db, "empty")).toBeNull();
+        } finally {
+            db.close?.();
+        }
+    });
+
     it("returns null for absent rows, NULL columns, and undecodable blobs, each with a receipt on corrupt", () => {
         const { db, raw } = fixture();
         try {

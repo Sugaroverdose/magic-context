@@ -74,6 +74,7 @@ import { isHostRenderedSystemMessage } from "./host-served-rows";
 import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
+import { executeSystemRegionRotation, type RegionMarkers } from "./system-region";
 import type { MessageLike } from "./tag-messages";
 import { formatDate } from "./temporal-awareness";
 import { renderUserProfileContent } from "./user-profile-render";
@@ -1011,6 +1012,14 @@ export interface M0M1RenderOptions {
         db: Database,
         rendered: { m0Bytes: Buffer; m1Bytes: Buffer; muralDataUrl: string | null },
     ) => void;
+    /**
+     * Frozen system-region residency (§3, frozen-system-region-residency design):
+     * when enabled, this materialization boundary assembles the five panels ONCE
+     * into the region (`m0Text` + separator + `m1Text`) and installs it as the
+     * sentinel-encoded region row instead of the head-lane m[0]/m[1] bytes. The
+     * fold reason becomes the rotation receipt reason. Off = head bytes, today.
+     */
+    systemRegion?: { enabled: boolean; reason: string };
 }
 
 export interface MaterializeDecision {
@@ -2693,34 +2702,74 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             ...new Set([...renderedMemoryIds, ...m1Render.renderedMemoryIds]),
         ];
 
-        persistCachedM0(options.db, options.sessionId, {
-            m0Bytes,
-            muralDataUrl: frozenMuralDataUrl,
-            muralHash: frozenMuralHash,
+        const foldMarkers: RegionMarkers = {
             projectMemoryEpoch: snapshotMarkers.projectMemoryEpoch,
-            workspaceFingerprint: snapshotMarkers.workspaceFingerprint,
-            projectUserProfileVersion: snapshotMarkers.projectUserProfileVersion,
             maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
             maxMemoryId: snapshotMarkers.maxMemoryId,
             maxMutationId: snapshotMarkers.maxMutationId,
             maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
-            m1Bytes,
             projectDocsHash: snapshotMarkers.projectDocsHash,
-            materializedAt: snapshotMarkers.materializedAt,
-            sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
-            upgradeState: encodeCachedM0UpgradeIdentity(
-                snapshotMarkers.upgradeState,
-                snapshotMarkers.compartmentRenderEpoch,
-                snapshotMarkers.muralEnabled,
-                snapshotMarkers.renderBudgetIdentity,
-                snapshotMarkers.memoryRenderEpoch,
-                snapshotMarkers.renderedBudgets ?? null,
-            ),
-            systemHash: snapshotMarkers.systemHash,
-            toolSetHash: snapshotMarkers.toolSetHash,
-            modelKey: snapshotMarkers.modelKey,
-            projectIdentity: snapshotMarkers.projectIdentity,
-        });
+            upgradeState: String(snapshotMarkers.upgradeState),
+            compartmentRenderEpoch: snapshotMarkers.compartmentRenderEpoch,
+            muralEnabled: snapshotMarkers.muralEnabled,
+            renderBudgetIdentity: snapshotMarkers.renderBudgetIdentity,
+            memoryRenderEpoch: snapshotMarkers.memoryRenderEpoch,
+            renderedBudgets: snapshotMarkers.renderedBudgets ?? null,
+            profileVersion: snapshotMarkers.projectUserProfileVersion,
+        };
+        const persistFoldRow = (m0Payload: Buffer, m1Payload: Buffer | null) => {
+            persistCachedM0(options.db, options.sessionId, {
+                m0Bytes: m0Payload,
+                muralDataUrl: frozenMuralDataUrl,
+                muralHash: frozenMuralHash,
+                projectMemoryEpoch: snapshotMarkers.projectMemoryEpoch,
+                workspaceFingerprint: snapshotMarkers.workspaceFingerprint,
+                projectUserProfileVersion: snapshotMarkers.projectUserProfileVersion,
+                maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
+                maxMemoryId: snapshotMarkers.maxMemoryId,
+                maxMutationId: snapshotMarkers.maxMutationId,
+                maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
+                m1Bytes: m1Payload,
+                projectDocsHash: snapshotMarkers.projectDocsHash,
+                materializedAt: snapshotMarkers.materializedAt,
+                sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
+                upgradeState: encodeCachedM0UpgradeIdentity(
+                    snapshotMarkers.upgradeState,
+                    snapshotMarkers.compartmentRenderEpoch,
+                    snapshotMarkers.muralEnabled,
+                    snapshotMarkers.renderBudgetIdentity,
+                    snapshotMarkers.memoryRenderEpoch,
+                    snapshotMarkers.renderedBudgets ?? null,
+                ),
+                systemHash: snapshotMarkers.systemHash,
+                toolSetHash: snapshotMarkers.toolSetHash,
+                modelKey: snapshotMarkers.modelKey,
+                projectIdentity: snapshotMarkers.projectIdentity,
+            });
+        };
+        if (options.systemRegion?.enabled === true) {
+            // Region mode: the boundary assembles the panels once and installs
+            // the sentinel region row in place of the head bytes, atomically
+            // with the marker capture the head fold performs. The empty/m1
+            // placeholder text still flows through, so a content-less session
+            // keeps the never-empty region floor via the placeholder blocks.
+            const regionText = `${m0Text}\n\n${m1Text}`;
+            const rotated = executeSystemRegionRotation(
+                options.db,
+                options.sessionId,
+                options.systemRegion.reason,
+                regionText,
+                foldMarkers,
+                (regionBlob) => persistFoldRow(regionBlob, null),
+            );
+            if (!rotated) {
+                throw new MaterializeContentionError({
+                    reason: "system-region rotation refused (empty or forged payload)",
+                });
+            }
+        } else {
+            persistFoldRow(m0Bytes, m1Bytes);
+        }
 
         // v2 path persists the rendered-memory identity itself. `memory_block_ids`
         // / `memory_block_count` are otherwise written ONLY by the dead legacy v1

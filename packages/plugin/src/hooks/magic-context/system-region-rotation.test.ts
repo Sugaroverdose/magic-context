@@ -18,9 +18,12 @@ mock.module("../../shared/logger", () => ({
     }),
 }));
 
-const { decideSystemRegionRotation, executeSystemRegionRotation, readSystemRegion } = await import(
-    "./system-region"
-);
+const {
+    decideSystemRegionRotation,
+    decodeSystemRegionRow,
+    executeSystemRegionRotation,
+    readSystemRegion,
+} = await import("./system-region");
 
 import type { Database } from "../../shared/sqlite";
 import type { RegionMarkers } from "./system-region";
@@ -42,10 +45,10 @@ const BASE: RegionMarkers = {
     maxMemoryMutationId: 0,
     projectDocsHash: "hash-a",
     upgradeState: "up",
-    compartmentRenderEpoch: 2,
+    compartmentRenderEpoch: "2",
     muralEnabled: false,
     renderBudgetIdentity: "rb",
-    memoryRenderEpoch: 1,
+    memoryRenderEpoch: "1",
     renderedBudgets: null,
     profileVersion: 4,
 };
@@ -198,13 +201,24 @@ describe("system-region rotation execution", () => {
         const db = fixture();
         lines.length = 0;
         let persisted: RegionMarkers | undefined;
+        let persistedBlob: Buffer | undefined;
         expect(
-            executeSystemRegionRotation(db, "ses", "pending_growth", "region-bytes", BASE, (m) => {
-                persisted = m;
-            }),
+            executeSystemRegionRotation(
+                db,
+                "ses",
+                "pending_growth",
+                "region-bytes",
+                BASE,
+                (blob, markers) => {
+                    persistedBlob = blob;
+                    persisted = markers;
+                },
+            ),
         ).toBe(true);
-        expect(readSystemRegion(db, "ses")).toBe("region-bytes");
+        // The fold's single writer receives the sentinel-encoded payload and
+        // the markers to capture, in one call (one transaction).
         expect(persisted).toEqual(BASE);
+        expect(decodeSystemRegionRow(persistedBlob ?? null)).toBe("region-bytes");
         expect(
             lines.some((line) =>
                 line.includes(
