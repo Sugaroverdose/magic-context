@@ -846,6 +846,16 @@ export function trimPiMessagesToCachedBoundary(
 				| undefined);
 	if (!stored?.m0 || !stored.m1 || typeof stored.boundary !== "string")
 		return 0;
+	// H3 reader property (defense in depth below the write-site closure):
+	// region bytes never describe head text, so no boundary decision may be
+	// derived from a row whose m0 is a frozen system-region.
+	const rawM0 = stored.m0;
+	if (
+		isSystemRegionBytes(
+			typeof rawM0 === "string" ? Buffer.from(rawM0, "utf8") : (rawM0 as Uint8Array),
+		)
+	)
+		return 0;
 	const boundary = stored.boundary;
 	if (boundary.length === 0) return 0;
 	const compartments =

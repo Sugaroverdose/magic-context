@@ -105,9 +105,13 @@ export function writeSystemRegion(db: Database, sessionId: string, region: strin
         );
         return false;
     }
+    // H3 write-site property: installing a region retires the head-era
+    // baseline boundary — no Pi path may derive trim decisions from a
+    // boundary that no longer describes the served bytes.
     db.prepare(
         "INSERT INTO session_meta (session_id, cached_m0_bytes) VALUES (?, ?) " +
-            "ON CONFLICT(session_id) DO UPDATE SET cached_m0_bytes = excluded.cached_m0_bytes",
+            "ON CONFLICT(session_id) DO UPDATE SET cached_m0_bytes = excluded.cached_m0_bytes, " +
+            "cached_m0_last_baseline_end_message_id = NULL",
     ).run(sessionId, encodeSystemRegionRow(region));
     return true;
 }
