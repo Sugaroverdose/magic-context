@@ -715,9 +715,15 @@ export function createMagicContextHook(deps: MagicContextDeps) {
     // Re-registration on a healed storage reopen replaces the stale handle.
     registerLkgPersistence(createDbLkgPersistence(db));
 
+    // The frozen system-region lane is v1-TS-only: the Rust module composes
+    // its own m[0] panel heads (no sentinel concept in crates/), so appending
+    // the stored region there would double-serve panels from two baselines.
+    const systemRegionLaneActive =
+        deps.config.system_region?.enabled === true && deps.config.transform_mode !== "rust";
+
     const transform = createTransform({
         cacheTtlConfig: deps.config.cache_ttl,
-        systemRegionEnabled: deps.config.system_region?.enabled === true,
+        systemRegionEnabled: systemRegionLaneActive,
         tagger: deps.tagger,
         scheduler: deps.scheduler,
         contextUsageMap,
@@ -1140,7 +1146,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         // Mirror the primary-session caveman opt-in so the agent knows older
         // prose may be rewritten even when ctx_reduce is available.
         experimentalCavemanTextCompression: deps.config.caveman_text_compression?.enabled === true,
-        systemRegionEnabled: deps.config.system_region?.enabled === true,
+        systemRegionEnabled: systemRegionLaneActive,
     });
     const systemPromptHashHandler = systemPromptHash.handler;
 

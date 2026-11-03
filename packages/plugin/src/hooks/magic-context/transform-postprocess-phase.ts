@@ -1970,15 +1970,16 @@ export async function runPostTransformPhase(
         m0M1EnabledForFold &&
         !emergencyDropEligible &&
         !freezeM0M1;
+    const regionLaneActive = args.systemRegionEnabled === true && !compactionOff;
     const cachedPrefixBeforePreflight = shouldCaptureCachedPrefix
-        ? prepareCachedM0M1Replay(args.db, args.sessionId)
+        ? prepareCachedM0M1Replay(args.db, args.sessionId, regionLaneActive)
         : undefined;
     const completeCachedPrefixAvailable =
         (args.sessionMeta.cachedM0Bytes != null && args.sessionMeta.cachedM1Bytes != null) ||
         cachedPrefixBeforePreflight !== undefined ||
         (m0M1EnabledForFold &&
             !shouldCaptureCachedPrefix &&
-            hasCompleteCachedM0M1(args.db, args.sessionId));
+            hasCompleteCachedM0M1(args.db, args.sessionId, regionLaneActive));
     const firstRenderBust = m0M1EnabledForFold && !completeCachedPrefixAvailable;
     let foldExecutedThisPass = false;
     // The one bust permission an executed fold grants: true only when the fold
@@ -2936,7 +2937,7 @@ export async function runPostTransformPhase(
         // the replay contention-exhausted keeps this pass from counting as
         // consumed history, so deferred refreshes stay pending.
         if (freezeM0M1 && !preparedPrefix) {
-            preparedPrefix = prepareCachedM0M1Replay(args.db, args.sessionId);
+            preparedPrefix = prepareCachedM0M1Replay(args.db, args.sessionId, regionLaneActive);
         }
         const tInjectM0M1 = performance.now();
         try {

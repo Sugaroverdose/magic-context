@@ -18,6 +18,16 @@ export const SYSTEM_REGION_SENTINEL = "<!-- mc:system-region v1 -->";
 
 const SENTINEL_BYTES = Buffer.from(SYSTEM_REGION_SENTINEL, "utf8");
 
+/** True when stored bytes begin with the region sentinel: the row belongs to
+ *  this store, not to a head-lane reader. Every lane that reads the shared
+ *  column as head content must refuse such rows (cross-lane discrimination). */
+export function isSystemRegionBytes(bytes: Uint8Array | null | undefined): boolean {
+    if (!bytes || bytes.byteLength < SENTINEL_BYTES.length) return false;
+    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+        .subarray(0, SENTINEL_BYTES.length)
+        .equals(SENTINEL_BYTES);
+}
+
 function isCorruptUtf8(bytes: Buffer): boolean {
     const decoded = bytes.toString("utf8");
     if (!decoded.includes("\uFFFD")) return false;
