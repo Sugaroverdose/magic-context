@@ -50,6 +50,7 @@ const BASE: RegionMarkers = {
     renderBudgetIdentity: "rb",
     memoryRenderEpoch: "1",
     renderedBudgets: null,
+    profileRenderEpoch: "upe1",
     profileVersion: 4,
 };
 
@@ -99,6 +100,7 @@ describe("system-region rotation decision: content triggers", () => {
         ["render_budget_identity", "renderBudgetIdentity", "rb2"],
         ["memory_render_epoch", "memoryRenderEpoch", 2],
         ["rendered_budgets", "renderedBudgets", "b"],
+        ["profile_render_epoch", "profileRenderEpoch", "upe2"],
     ] as const)("rotation reason=%s", (reason, field, value) => {
         // Content arms share the delta arms' gating: rotate only on a pass
         // that already holds the bust permission.

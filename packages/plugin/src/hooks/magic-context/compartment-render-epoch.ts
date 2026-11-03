@@ -1,8 +1,13 @@
 export const COMPARTMENT_RENDER_EPOCH = "cre2";
 export const MEMORY_RENDER_FORMAT_EPOCH = "mre3";
+/** User-profile render template (self-description line, row shape). Bump once
+ *  per template change: each renderer-format change folds cached m[0] exactly
+ *  once (head lane) and rotates stored regions exactly once (region lane). */
+export const PROFILE_RENDER_EPOCH = "upe1";
 
 const EPOCH_COMPONENT_PREFIX = "|compartment-render:";
 const MEMORY_EPOCH_COMPONENT_PREFIX = "|memory-render:";
+const PROFILE_EPOCH_COMPONENT_PREFIX = "|profile-render:";
 const MURAL_COMPONENT_PREFIX = "|mural-enabled:";
 const BUDGET_COMPONENT_PREFIX = "|render-budgets:";
 const RENDERED_BUDGETS_COMPONENT_PREFIX = "|rendered-budgets:";
@@ -11,6 +16,7 @@ export interface CachedM0UpgradeIdentity {
     upgradeState: string | null;
     compartmentRenderEpoch: string | null;
     memoryRenderEpoch: string | null;
+    profileRenderEpoch: string | null;
     muralEnabled: boolean | null;
     renderBudgetIdentity: string | null;
     renderedBudgets: string | null;
@@ -27,6 +33,9 @@ export function encodeCachedM0UpgradeIdentity(
     renderBudgetIdentity: string | null = null,
     memoryRenderEpoch: string | null = MEMORY_RENDER_FORMAT_EPOCH,
     renderedBudgets: string | null = null,
+    // Appended LAST so older decoders that slice every known component to its
+    // next "|" never see their last component bleed into this one.
+    profileRenderEpoch: string | null = PROFILE_RENDER_EPOCH,
 ): string | null {
     let encoded = upgradeState ?? "";
     if (compartmentRenderEpoch !== null) {
@@ -43,6 +52,9 @@ export function encodeCachedM0UpgradeIdentity(
     }
     if (renderedBudgets !== null) {
         encoded += `${RENDERED_BUDGETS_COMPONENT_PREFIX}${renderedBudgets}`;
+    }
+    if (profileRenderEpoch !== null) {
+        encoded += `${PROFILE_EPOCH_COMPONENT_PREFIX}${profileRenderEpoch}`;
     }
     return encoded.length > 0 ? encoded : null;
 }
@@ -62,6 +74,7 @@ export function decodeCachedM0UpgradeIdentity(value: string | null): CachedM0Upg
             upgradeState: null,
             compartmentRenderEpoch: null,
             memoryRenderEpoch: null,
+            profileRenderEpoch: null,
             muralEnabled: null,
             renderBudgetIdentity: null,
             renderedBudgets: null,
@@ -73,6 +86,7 @@ export function decodeCachedM0UpgradeIdentity(value: string | null): CachedM0Upg
         value.indexOf(MURAL_COMPONENT_PREFIX),
         value.indexOf(BUDGET_COMPONENT_PREFIX),
         value.indexOf(RENDERED_BUDGETS_COMPONENT_PREFIX),
+        value.indexOf(PROFILE_EPOCH_COMPONENT_PREFIX),
     ].filter((index) => index >= 0);
     const identityEnd = componentIndexes.length > 0 ? Math.min(...componentIndexes) : value.length;
     const upgradeState = value.slice(0, identityEnd);
@@ -81,6 +95,7 @@ export function decodeCachedM0UpgradeIdentity(value: string | null): CachedM0Upg
         upgradeState: upgradeState.length > 0 ? upgradeState : null,
         compartmentRenderEpoch: component(value, EPOCH_COMPONENT_PREFIX),
         memoryRenderEpoch: component(value, MEMORY_EPOCH_COMPONENT_PREFIX),
+        profileRenderEpoch: component(value, PROFILE_EPOCH_COMPONENT_PREFIX),
         muralEnabled: muralComponent === "1" ? true : muralComponent === "0" ? false : null,
         renderBudgetIdentity: component(value, BUDGET_COMPONENT_PREFIX),
         renderedBudgets: component(value, RENDERED_BUDGETS_COMPONENT_PREFIX),
