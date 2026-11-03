@@ -31,6 +31,7 @@ import {
     selectRelocatableMemoryIds,
 } from "@magic-context/core/features/magic-context/memory/relocate-memory";
 import { bumpProjectMemoryEpoch } from "@magic-context/core/features/magic-context/storage-project-state";
+import { clearSystemRegion } from "@magic-context/core/features/magic-context/system-region";
 import {
     getDefaultSubcConnectionFile,
     SubcModuleTransport,
@@ -385,11 +386,12 @@ export function applyMigrateSession(
             .run(plan.toMcIdentity, plan.sessionId) as { changes?: number };
         chunkEmbeddingsRestamped = chunkResult.changes ?? 0;
 
-        // Force m[0]/m[1] re-materialization under the new project on next load.
+        // Force m[0]/m[1] re-materialization under the new project on next
+        // load — through the receipted region funnel (the region column's
+        // sole-writer rule); m[1] is head-lane storage and clears with it.
+        clearSystemRegion(deps.contextDb as never, plan.sessionId, "migrate_session");
         deps.contextDb
-            .prepare(
-                "UPDATE session_meta SET cached_m0_bytes = NULL, cached_m1_bytes = NULL WHERE session_id = ?",
-            )
+            .prepare("UPDATE session_meta SET cached_m1_bytes = NULL WHERE session_id = ?")
             .run(plan.sessionId);
 
         // Memory action.

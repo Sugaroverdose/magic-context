@@ -18,6 +18,7 @@ import {
     readReplayDocument,
     writeReplayDocument,
 } from "./storage-replay-document";
+import { clearSystemRegion } from "./system-region";
 
 export interface CloneCompartmentRow {
     sequence: number;
@@ -710,7 +711,6 @@ export function copySessionStateForClone(
                 todo_synthetic_call_id = excluded.todo_synthetic_call_id,
                 todo_synthetic_anchor_message_id = excluded.todo_synthetic_anchor_message_id,
                 todo_synthetic_state_json = excluded.todo_synthetic_state_json,
-                cached_m0_bytes = NULL,
                 cached_m1_bytes = NULL`,
         ).run(
             destinationSessionId,
@@ -732,6 +732,9 @@ export function copySessionStateForClone(
             migrateTodo ? (mapMessageId(filter, todoAnchor) ?? "") : "",
             migrateTodo ? (meta?.todo_synthetic_state_json ?? "") : "",
         );
+        // The region column is the frozen system-region store's; erasing it
+        // goes through the receipted funnel (L7), not this statement.
+        clearSystemRegion(db, destinationSessionId, "storage_clone");
         // Clone owns the whole replay document so its filtered native state
         // cannot be overwritten by the CLI's later generic metadata copy.
         const metaColumnRows = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{

@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDir } from "../../shared/test-temp-dir";
 import { createHostOrdinalMint } from "./message-ordinal-mint";
 
 const SESSION = "ses_mint";
 
 function seedHost(): string {
-    const dir = mkdtempSync(join(tmpdir(), "mint-host-"));
+    const { dir } = createTestTempDir("mint-host-");
     const path = join(dir, "opencode.db");
     const db = new Database(path);
     db.exec(`

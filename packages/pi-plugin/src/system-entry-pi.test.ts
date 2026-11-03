@@ -518,7 +518,8 @@ describe("Pi protocol exclusions", () => {
 			// this file (and other files under bun's parallel scheduler) emit the
 			// same prefix under their own session ids and land in this window.
 			const preserved = (call: unknown[]) =>
-				call[0] === "log-system" && call[1].startsWith("pi system entries preserved");
+				call[0] === "log-system" &&
+				call[1].startsWith("pi system entries preserved");
 			expect(log.mock.calls.filter(preserved)).toHaveLength(0);
 			__test.trimPiMessagesToBoundary(
 				[initial, delta, userMessage("old")],

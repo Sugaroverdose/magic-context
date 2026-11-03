@@ -1,8 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import { mkdtempSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Database } from "../../shared/sqlite";
+import { createTestTempDir } from "../../shared/test-temp-dir";
 import {
     deriveKey,
     fpeDecrypt,
@@ -120,7 +119,7 @@ describe("FPE", () => {
 
 describe("FPE released-input lookup (registry spine)", () => {
     function makeWorld() {
-        const dir = mkdtempSync(join(tmpdir(), "fpe-lookup-"));
+        const { dir } = createTestTempDir("fpe-lookup-");
         const hostPath = join(dir, "opencode.db");
         const host = new Database(hostPath);
         host.exec(`

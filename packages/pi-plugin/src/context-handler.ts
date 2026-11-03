@@ -5683,13 +5683,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	};
 	const isCacheBustingPass = hasReclaimRide(rideSignals);
 	const publishedWorkDrainAllowed = isCacheBustingPass;
-	// System-origin reclaim (auto_drop rows, the sweeper, heuristics) may only
+	// System-origin reclaim (queued drops, the sweeper, heuristics) may only
 	// ride a pass that actually rewrites served bytes. A consumed deferred-
 	// materialization intent whose fold rewrote nothing keeps the pass warm;
 	// rewriting old bytes there is an independent prefix bust. The documented
 	// exception is the aborted-fold retry, where the provider is already cold.
-	// Subagent passes keep their execute-band pressure semantics, and model
-	// stamps ('drop' rows) keep immediate release.
+	// Subagent passes keep their execute-band pressure semantics.
 	const systemReclaimAllowed =
 		args.sessionMeta.isSubagent === true ||
 		rideSignals.hardFold ||
@@ -5975,15 +5974,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		const pendingDecisionLog = `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOpsDepth === null ? "not loaded (deferred pass)" : pendingOpsDepth} context=${args.contextUsage.percentage.toFixed(1)}%`;
 		sessionLog(args.sessionId, pendingDecisionLog);
 		pendingDecisionLogObserverForTests?.(pendingDecisionLog);
-		// System-origin rows wait for a byte-change event; model stamps
-		// release on this pass under the current permission.
-		const opsToApply = systemReclaimAllowed
-			? pendingOps
-			: pendingOps.filter((op) => op.operation !== "auto_drop");
+		// Frozen-base adaptation of 347e503cd: this base's pending-op
+		// vocabulary is a single 'drop' operation, so there is no
+		// system-origin class to filter by — the whole queue rides the
+		// byte-change permission or waits.
+		const opsToApply = systemReclaimAllowed ? pendingOps : [];
 		if (opsToApply.length !== pendingOps.length) {
 			sessionLog(
 				args.sessionId,
-				`pending ops held — reason=system-reclaim-ride-required; autoDrop=${pendingOps.length - opsToApply.length} applied=${opsToApply.length} scheduler=${args.schedulerDecision}`,
+				`pending ops held — reason=system-reclaim-ride-required; held=${pendingOps.length} applied=0 scheduler=${args.schedulerDecision}`,
 			);
 		}
 		try {

@@ -6,6 +6,7 @@ import {
     getOrCreateSessionMeta,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { decodeSystemRegionRow } from "../../features/magic-context/system-region";
 import type { PluginContext } from "../../plugin/types";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { log, sessionLog } from "../../shared/logger";
@@ -205,6 +206,9 @@ export function createSystemPromptHashHandler(deps: {
     /** When true, inject a "BEWARE: history compression is on" warning so the
      *  agent doesn't mimic its own caveman-compressed past output. */
     experimentalCavemanTextCompression?: boolean;
+    /** When true, serve the frozen system region (stored panel bytes) inside
+     *  system[0] and keep it out of the watched hash. Off = today's bytes. */
+    systemRegionLane?: boolean;
 }): {
     handler: (
         input: {
@@ -227,6 +231,12 @@ export function createSystemPromptHashHandler(deps: {
     // and only update it on cache-busting passes. This prevents a midnight date
     // flip from causing an unnecessary flush + cache rebuild.
     const stickyDateBySession = new Map<string, string>();
+
+    // Last region payload served per session. A region only changes when this
+    // process rotates it (the stored row is frozen between rotations), so the
+    // in-memory watermark is sufficient to decide when the token estimate must
+    // re-run for region bytes — no extra column, no extra read.
+    const servedRegionBySession = new Map<string, string | null>();
 
     const handler = async (
         input: {
@@ -477,6 +487,23 @@ export function createSystemPromptHashHandler(deps: {
             }
         }
 
+        // ── Step 2.5: Frozen system-region residency (serve only) ──
+        // The stored region is appended after every H mutation (guidance, date
+        // freeze) so date rewriting can never reach region bytes, and it is
+        // never hashed: the watcher below compares hostContent. Panel edits
+        // therefore produce no hash line and no bust — they rotate the region
+        // at the next materialization boundary (decideSystemRegionRotation).
+        // The stored bytes are served verbatim: this site performs zero store
+        // reads beyond the session meta the handler already loaded.
+        const hostContent = output.system.join("\n");
+        let regionServed: string | null = null;
+        if (deps.systemRegionLane === true && sessionMetaEarly) {
+            regionServed = decodeSystemRegionRow(sessionMetaEarly.cachedM0Bytes);
+            if (regionServed !== null) {
+                output.system[0] = `${output.system[0]}${SYSTEM_PROMPT_GUIDANCE_SEPARATOR}${regionServed}`;
+            }
+        }
+
         // ── Step 3: Persist only after all routing identities are frozen ──
         const systemContent = output.system.join("\n");
         // The first stable ctx_reduce verdict and resolved model jointly own the
@@ -488,8 +515,11 @@ export function createSystemPromptHashHandler(deps: {
         // causing precision loss on read-back and infinite hash-change flushes.
         // node:crypto MD5 produces identical digests to Bun.CryptoHasher("md5"),
         // so persisted hashes remain stable across the Bun→Node runtime swap.
+        // The watched hash covers H only (host + guidance + sticky date): the
+        // frozen region rides the same wire message but is panel content, and
+        // panel changes must rotate the region at a boundary, not bust here.
         const currentHash = createHash("md5")
-            .update(promptSurfaceHashMaterial(systemContent, promptSurface.preset))
+            .update(promptSurfaceHashMaterial(hostContent, promptSurface.preset))
             .digest("hex");
 
         // Reuse sessionMetaEarly from Step 1 — no code path between that read
@@ -534,7 +564,10 @@ export function createSystemPromptHashHandler(deps: {
         // would fail the LLM call instead of just losing a telemetry write). Persist
         // the hash even if token estimation fails, so the next pass doesn't re-detect
         // a phantom hash change and re-flush.
-        if (currentHash !== previousHash) {
+        const regionChanged =
+            deps.systemRegionLane === true && servedRegionBySession.get(sessionId) !== regionServed;
+        if (currentHash !== previousHash || regionChanged) {
+            if (deps.systemRegionLane === true) servedRegionBySession.set(sessionId, regionServed);
             let systemPromptTokens = sessionMeta.systemPromptTokens;
             try {
                 systemPromptTokens = estimateTokens(systemContent);
@@ -599,6 +632,7 @@ export function createSystemPromptHashHandler(deps: {
         handler,
         clearSession: (sessionId: string) => {
             guidanceEpochs.clear(sessionId);
+            servedRegionBySession.delete(sessionId);
             clearSystemPromptHashSession(sessionId, {
                 stickyDateBySession,
                 cachedDocsBySession: new Map(),

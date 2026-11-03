@@ -372,11 +372,29 @@ function touch(sessionId: string, entry: { slot: LkgSlot; bytes: number }): void
 }
 
 /**
+ * Structural checks shared by the capture gate and the durable writer: fields
+ * `parsePersistedLkgSlot` can never read back must be refused before anything is
+ * installed or stored. The live store lost a session's slices to a save of a slot
+ * with an empty prefix and a non-finite `capturedAt`; no gate examined these
+ * fields on the write path, and no refusal line was printed.
+ */
+export function lkgSlotStructuralRejection(slot: LkgSlot): string | null {
+    if (typeof slot.jsonPrefix !== "string" || slot.jsonPrefix.length === 0) return "empty_prefix";
+    if (typeof slot.lastInputMessageId !== "string" || slot.lastInputMessageId.length === 0)
+        return "missing_anchor";
+    if (typeof slot.capturedAt !== "number" || !Number.isFinite(slot.capturedAt))
+        return "invalid_captured_at";
+    return null;
+}
+
+/**
  * Why {@link captureSlot} would refuse `slot` for `sessionId`, or null when it would
  * take it (subject only to the total heap budget). Kept next to the checks it names so
  * a refusal can say which one fired.
  */
 export function lkgSlotRejection(sessionId: string, slot: LkgSlot): string | null {
+    const structural = lkgSlotStructuralRejection(slot);
+    if (structural !== null) return structural;
     if (slot.inputContentDigests.length !== slot.inputIdSeq.length)
         return `digest_count=${slot.inputContentDigests.length} inputs=${slot.inputIdSeq.length}`;
     const emptyDigest = slot.inputContentDigests.findIndex((digest) => digest.length === 0);
@@ -551,7 +569,11 @@ export function getSlot(sessionId: string): LkgSlot | undefined {
     return copySlotForRead(entry.slot);
 }
 
-export function dropSlot(sessionId: string, _reason?: string): void {
+export function dropSlot(sessionId: string, reason?: string): void {
+    // The destructive arm of the refresh cycle must leave a receipt: the bust
+    // path calls this with "lkg_refresh_declined" after a capture was refused,
+    // and the durable clear was invisible while the store lost its slices.
+    sessionLog(sessionId, `lkg_slot_dropped reason=${reason ?? "unspecified"}`);
     const entry = lkgHeapHolder.entries.get(sessionId);
     if (entry) {
         lkgHeapHolder.entries.delete(sessionId);

@@ -53,6 +53,7 @@ import {
 	persistCachedM0,
 	readProjectDocsCanonical,
 } from "@magic-context/core/features/magic-context/storage";
+import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
 import {
 	getActiveUserMemories,
 	type UserMemory,
@@ -770,6 +771,9 @@ export interface PiM0M1InjectionResult extends PiInjectionResult {
 
 function decodeCachedM0(value: Buffer | Uint8Array | null): string | null {
 	if (!value) return null;
+	// Cross-lane discrimination: a frozen-system-region row belongs to the
+	// OpenCode-1-TS region store; Pi never serves those bytes as head text.
+	if (isSystemRegionBytes(value)) return null;
 	return Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString(
 		"utf8",
 	);
@@ -841,6 +845,18 @@ export function trimPiMessagesToCachedBoundary(
 				| { m0?: unknown; m1?: unknown; boundary?: unknown }
 				| undefined);
 	if (!stored?.m0 || !stored.m1 || typeof stored.boundary !== "string")
+		return 0;
+	// H3 reader property (defense in depth below the write-site closure):
+	// region bytes never describe head text, so no boundary decision may be
+	// derived from a row whose m0 is a frozen system-region.
+	const rawM0 = stored.m0;
+	if (
+		isSystemRegionBytes(
+			typeof rawM0 === "string"
+				? Buffer.from(rawM0, "utf8")
+				: (rawM0 as Uint8Array),
+		)
+	)
 		return 0;
 	const boundary = stored.boundary;
 	if (boundary.length === 0) return 0;
@@ -2202,6 +2218,19 @@ function readCachedPiM0M1Row(
 	db: ContextDatabase,
 	sessionId: string,
 ): CachedPiM0M1Row | null {
+	const row = readCachedPiM0M1RowRaw(db, sessionId);
+	// Stage P property closure: a frozen-system-region row presents as ABSENT
+	// to every Pi consumer at the single row reader. All serve/decision lanes
+	// (pass snapshot -> firstRenderBust; replay pair; soft-refresh CAS) derive
+	// from this row, so discriminating here — not per-caller — makes each
+	// truthiness decision structurally correct.
+	return row && isSystemRegionBytes(row.cached_m0_bytes) ? null : row;
+}
+
+function readCachedPiM0M1RowRaw(
+	db: ContextDatabase,
+	sessionId: string,
+): CachedPiM0M1Row | null {
 	return db
 		.prepare(
 			`SELECT cached_m0_bytes, cached_m0_mural_data_url,
@@ -2266,6 +2295,10 @@ function markersFromCachedPiRow(
 	compartmentsForNormalization: readonly PiCompartment[],
 ): PiM0SnapshotMarkers | null {
 	if (!row.cached_m0_bytes) return null;
+	// Same cross-lane discipline as decodeCachedM0: a frozen-system-region row
+	// is not a head snapshot, so its marker columns must not satisfy CAS or
+	// marker reads (F6).
+	if (isSystemRegionBytes(row.cached_m0_bytes)) return null;
 	const cachedUpgradeIdentity = decodeCachedM0UpgradeIdentity(
 		row.cached_m0_upgrade_state,
 	);
@@ -2591,7 +2624,7 @@ function prependM0M1Messages(
 
 // Cached bytes and their boundary come from one row. Replaying them must not
 // depend on live marker validation or fresh rendering succeeding.
-function replayCompletePiPrefix(
+export function replayCompletePiPrefix(
 	state: PiM0M1State,
 	row: CachedPiM0M1Row,
 	compartments: PiCompartment[],
@@ -2599,7 +2632,22 @@ function replayCompletePiPrefix(
 	entryIds: readonly (string | undefined)[] | undefined,
 	reason: string | null,
 ): PiM0M1InjectionResult {
-	let m0 = decodeCachedM0(row.cached_m0_bytes) ?? "";
+	// Refusal at the reader, not only at callers (G1): serving `"" + m1` for a
+	// foreign row is the exact defect this closes — a region row (or any row
+	// whose bytes the head decoder refuses) must never produce a head-less
+	// prefix. Callers discriminate first; this throw is the structural floor.
+	if (isSystemRegionBytes(row.cached_m0_bytes)) {
+		throw new Error(
+			`pi replay refused: cached_m0_bytes is a frozen system-region row for session ${state.sessionId}`,
+		);
+	}
+	const decodedM0 = decodeCachedM0(row.cached_m0_bytes);
+	if (decodedM0 === null) {
+		throw new Error(
+			`pi replay refused: cached_m0_bytes are not decodable head bytes for session ${state.sessionId}`,
+		);
+	}
+	let m0 = decodedM0;
 	const m1 = decodeCachedM1(row, state.sessionId);
 	rememberPiMuralPayload(
 		state.sessionId,
@@ -2660,6 +2708,10 @@ export function prepareCachedM0M1PiReplay(
 			? readCachedPiM0M1Row(db, state.sessionId)
 			: rowOverride;
 	if (!cached?.cached_m0_bytes || !cached.cached_m1_bytes) return undefined;
+	// A frozen-system-region row is not a head snapshot: replaying it would
+	// serve "" + m1 (decodeCachedM0 refuses the bytes). Decline the replay;
+	// the fold path regenerates a real head cache (F6).
+	if (isSystemRegionBytes(cached.cached_m0_bytes)) return undefined;
 	const snapshot: PiM0M1State = {
 		...state,
 		freezePrefixForPass: true,
@@ -2757,7 +2809,11 @@ export function injectM0M1Pi(
 			const cached = state.allowFreshContentionFallback
 				? null
 				: snapshot.cachedRow;
-			if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
+			if (
+				cached?.cached_m0_bytes &&
+				cached.cached_m1_bytes &&
+				!isSystemRegionBytes(cached.cached_m0_bytes)
+			) {
 				return replayCompletePiPrefix(
 					state,
 					cached,
@@ -2802,7 +2858,11 @@ export function injectM0M1Pi(
 				const cached = state.allowFreshContentionFallback
 					? null
 					: snapshot.cachedRow;
-				if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
+				if (
+					cached?.cached_m0_bytes &&
+					cached.cached_m1_bytes &&
+					!isSystemRegionBytes(cached.cached_m0_bytes)
+				) {
 					return replayCompletePiPrefix(
 						state,
 						cached,
@@ -3080,7 +3140,7 @@ export function clearM0M1PiCache(
 	sessionId: string,
 	reason: string,
 ): void {
-	clearCachedM0M1(db, sessionId);
+	clearCachedM0M1(db, sessionId, reason);
 	setCachedBoundary(db, sessionId, null);
 	cachedMuralBySession.delete(sessionId);
 	logSession(sessionId, `cleared cached m[0] (${reason})`);

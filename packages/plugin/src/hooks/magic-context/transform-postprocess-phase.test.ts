@@ -9838,13 +9838,15 @@ describe("pending-ops and heuristics permission labels", () => {
     });
 });
 
-// System-origin reclaim (compartment auto_drop rows, tool-reclaim sweeper,
+// System-origin reclaim (queued compartment drops, tool-reclaim sweeper,
 // heuristics) may only ride a pass that actually rewrites served bytes — an
 // executed busting fold, a forced band, an explicit flush, or published
 // history. A consumed deferred-materialization intent whose fold rewrote
 // nothing leaves the pass warm; draining the queue there is an independent
-// prefix rewrite (the boot-law B replay promise). Model stamps ('drop' rows)
-// keep immediate release; subagent passes keep their execute-band semantics.
+// prefix rewrite (the boot-law B replay promise). Frozen-base adaptation of
+// 347e503cd: this base has a single 'drop' pending-op vocabulary (no FPE-era
+// auto_drop origin class), so every queued row waits for the boundary;
+// subagent passes keep their execute-band semantics.
 describe("system-origin reclaim rides byte-change events, not deferred intent", () => {
     async function seededPass(
         sessionId: string,
@@ -9888,7 +9890,7 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         const stampTag = rows.find((tag) => tag.messageId === "call-stamp")!.tagNumber;
         const sweepTag = rows.find((tag) => tag.messageId === "call-sweep")!.tagNumber;
         queuePendingOp(db, sessionId, stampTag, "drop");
-        queuePendingOp(db, sessionId, sweepTag, "auto_drop");
+        queuePendingOp(db, sessionId, sweepTag, "drop");
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, messages, {
                 ...tagged,
@@ -9905,23 +9907,20 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         deferredMaterializationSessions: new Set([sessionId]),
     });
 
-    it("holds auto_drop rows when the consumed deferred fold rewrote nothing", async () => {
+    it("holds queued rows when the consumed deferred fold rewrote nothing", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-system-reclaim-hold";
         const { stampTag, sweepTag } = await seededPass(sessionId, deferredOnly(sessionId));
-        // The model stamp releases immediately (ctxv9 law, untouched).
-        expect(
-            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === stampTag)!.status,
-        ).toBe("dropped");
-        // The system-origin row stays queued and its tag keeps serving bytes.
-        expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([sweepTag]);
-        expect(
-            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status,
-        ).toBe("active");
+        // No byte-change event on this pass: the whole queue waits and every
+        // queued tag keeps serving its bytes.
+        expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([stampTag, sweepTag]);
+        const rows = getTagsBySession(db, sessionId);
+        expect(rows.find((tag) => tag.tagNumber === stampTag)!.status).toBe("active");
+        expect(rows.find((tag) => tag.tagNumber === sweepTag)!.status).toBe("active");
     });
 
-    it("drains auto_drop rows on a published-history boundary", async () => {
+    it("drains queued rows on a published-history boundary", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-system-reclaim-published";
@@ -9945,10 +9944,18 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         ).toBe("dropped");
     });
 
-    it("drains auto_drop rows on the forced band", async () => {
+    it("drains queued rows on the forced band", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-system-reclaim-force";
+        // A non-zero emergency sample disarms the `=== 0` force arm, so this
+        // row exercises the provider-proven `>= 95` arm alone — its name's
+        // claim. (F3: a sed had dropped this row to 88%, where it silently
+        // rode the sample arm.)
+        const { setEmergencyDropSample } = await import(
+            "../../features/magic-context/storage-meta-persisted"
+        );
+        setEmergencyDropSample(db, sessionId, 1234);
         const { sweepTag } = await seededPass(sessionId, {
             contextUsage: { percentage: 96, inputTokens: 1_000 },
         });
@@ -9958,7 +9965,42 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         ).toBe("dropped");
     });
 
-    it("drains auto_drop rows on an explicit flush", async () => {
+    // G6: the two arms of the force drain (>= 95 || emergencyInputSample === 0)
+    // pinned PERMANENTLY, each arm alone — the F3 controls promoted from
+    // transcript to rows.
+    it("the sample arm alone drains: 88% with an untouched (zero) emergency sample", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-system-reclaim-sample-arm";
+        const { sweepTag } = await seededPass(sessionId, {
+            contextUsage: { percentage: 88, inputTokens: 1_000 },
+        });
+        expect(getPendingOps(db, sessionId)).toEqual([]);
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status,
+        ).toBe("dropped");
+    });
+
+    it("neither arm: 88% with a non-zero emergency sample keeps rows queued (defer pass)", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-system-reclaim-no-arm";
+        const { setEmergencyDropSample } = await import(
+            "../../features/magic-context/storage-meta-persisted"
+        );
+        setEmergencyDropSample(db, sessionId, 1234);
+        const { stampTag, sweepTag } = await seededPass(sessionId, {
+            contextUsage: { percentage: 88, inputTokens: 1_000 },
+        });
+        expect(getPendingOps(db, sessionId).length).toBe(2);
+        for (const tag of [stampTag, sweepTag]) {
+            expect(
+                getTagsBySession(db, sessionId).find((t) => t.tagNumber === tag)!.status,
+            ).not.toBe("dropped");
+        }
+    });
+
+    it("drains queued rows on an explicit flush", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-system-reclaim-flush";
@@ -9971,7 +10013,7 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         ).toBe("dropped");
     });
 
-    it("keeps subagent passes draining auto_drop rows on the same deferred intent", async () => {
+    it("keeps subagent passes draining queued rows on the same deferred intent", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-system-reclaim-subagent";
@@ -10699,81 +10741,193 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
     });
 });
 
-// Upstream issue 619 (fixed in 0.46.0, backported TS-only): subagents have no
-// historian or history fold, so their execute pass is the shared ride for
-// queued ctx_reduce drops. Ported with the boot-law conjunct the upstream
-// version lacks: on a restore-only pass (usage unknown at entry) the ride is
-// suppressed, so a restarted child never folds its stale queue at boot.
-describe("issue 619 subagent execute ride", () => {
-    for (const [name, fullFeatureMode, schedulerDecision, queued, applies] of [
-        ["subagent execute drains queued drops", false, "execute", true, true],
-        ["primary execute holds queued drops", true, "execute", true, false],
-        ["subagent defer holds queued drops", false, "defer", true, false],
-        ["subagent empty execute is byte-identical", false, "execute", false, false],
-    ] as const) {
-        it(`issue 619 ${name}`, async () => {
-            db = new Database(":memory:");
-            initializeDatabase(db);
-            const sessionId = `issue-619-${schedulerDecision}-${queued}-${fullFeatureMode}`;
-            getOrCreateSessionMeta(db, sessionId);
-            const message = makeToolMessage("issue-619-tool");
-            insertTag(
-                db,
-                sessionId,
-                "issue-619-call",
-                "tool",
-                1000,
-                1,
-                0,
-                "bash",
-                0,
-                message.info.id,
-            );
-            if (queued) padRecentToolSkeletonWindow(sessionId, 1);
-            const args = basePostTransformArgs(db, sessionId, [message], {
-                fullFeatureMode,
-                schedulerDecision: "defer",
-                schedulerDeferReason: undefined,
-                contextUsage: { percentage: 40, inputTokens: 40000 },
-                targets: new Map([[1, makeDropTarget(message)]]),
-                protectedTagIds: new Set(queued ? [] : [1]),
-            });
-            await runPostTransformPhase(args);
-            if (applies) {
-                const aged = makeToolMessage("issue-619-aged-tool");
-                insertTag(
-                    db,
-                    sessionId,
-                    "issue-619-aged-call",
-                    "tool",
-                    1000,
-                    22,
-                    0,
-                    "bash",
-                    0,
-                    aged.info.id,
-                );
-                args.messages.push(aged);
-                args.targets.set(22, makeDropTarget(aged));
-                // The queued drop and a distinct eligible age candidate must
-                // consume the same permission, not bust on successive passes.
-                args.sessionMeta.toolReclaimWatermark = 22;
-            }
-            const baseline = JSON.stringify(args.messages);
-            if (queued) queuePendingOp(db, sessionId, 1, "drop");
-            await runPostTransformPhase({ ...args, schedulerDecision });
-            expect(getPendingOps(db, sessionId)).toHaveLength(queued && !applies ? 1 : 0);
-            if (applies) {
-                expect(JSON.stringify(args.messages)).not.toBe(baseline);
-                expect(
-                    getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 22)?.status,
-                ).toBe("dropped");
-            } else expect(JSON.stringify(args.messages)).toBe(baseline);
-            const appliedBytes = JSON.stringify(args.messages);
-            for (let pass = 0; pass < 3; pass++) {
-                await runPostTransformPhase({ ...args, schedulerDecision });
-                expect(JSON.stringify(args.messages)).toBe(appliedBytes);
-            }
+// Frozen system-region residency: the pass-level promotion laws. These run
+// the REAL decision sites (foldDueDecision -> mustMaterialize, and the
+// promotion block), not the predicate in isolation: a site that omits the
+// region-mode flag returns cached_m1_missing every pass and the predicate
+// unit tests cannot see it (L7/L9 receipt-honesty class).
+describe("system-region pass-level: warm passes stay silent, boundaries rotate", () => {
+    const PROJECT_PATH = "/tmp/test-phase-region";
+
+    async function installedRegionDb(sessionId: string): Promise<Database> {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "C3-MEM-ONE",
         });
+        const state = getOrCreateSessionMeta(db, sessionId) as never;
+        compartmentInjection.injectM0M1({
+            db,
+            sessionId,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory: "",
+            isCacheBustingPass: true,
+            systemRegion: { enabled: true, reason: "first_render" },
+        } as never);
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
+        expect(readSystemRegion(db, sessionId)).toContain("C3-MEM-ONE");
+        return db;
     }
+
+    it("warm deferred region passes emit no cached_m1_missing receipt and rotate nothing", async () => {
+        const sessionId = "ses-region-c3-census";
+        const db = await installedRegionDb(sessionId);
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
+        const before = readSystemRegion(db, sessionId);
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            for (let pass = 0; pass < 2; pass++) {
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, [], {
+                        resolvedProviderID: "anthropic",
+                        systemRegionLane: true,
+                        m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                    }),
+                );
+            }
+        } finally {
+            spy.mockRestore();
+        }
+        expect(logs.filter((line) => line.includes("cached_m1_missing"))).toEqual([]);
+        expect(logs.filter((line) => line.includes("system-region rotation"))).toEqual([]);
+        expect(readSystemRegion(db, sessionId)).toBe(before);
+        expect(getOrCreateSessionMeta(db, sessionId).cachedM1Bytes).toBeNull();
+    });
+
+    it("an execute boundary with a new memory rotates the region once, with receipts", async () => {
+        const sessionId = "ses-region-c3-promotion";
+        const db = await installedRegionDb(sessionId);
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "C3-MEM-TWO-NEW",
+        });
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    schedulerDecision: "execute",
+                    schedulerDeferReason: null,
+                    systemRegionLane: true,
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        expect(
+            logs.some((line) =>
+                line.includes("system-region rotation promoted: reason=max_memory_id"),
+            ),
+        ).toBe(true);
+        expect(
+            logs.some((line) =>
+                line.includes("system-region rotation: reason=max_memory_id executed=true"),
+            ),
+        ).toBe(true);
+        expect(logs.filter((line) => line.includes("cached_m1_missing"))).toEqual([]);
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
+        expect(readSystemRegion(db, sessionId)).toContain("C3-MEM-TWO-NEW");
+    });
+
+    it("A4: a promoted pass prices its fold honestly — one reason, one executed state, earned bust", async () => {
+        // The promotion path rewrites served bytes (the rotation line says
+        // executed=true); the fold receipt must not contradict it with
+        // reason=unknown executed=false, and the earned bust must propagate so
+        // queue lanes ride the pass that already paid (deliberate
+        // amortization). L8's contradictory-executed shape re-entered via the
+        // promotion path; this row pins it shut.
+        const sessionId = "ses-region-a4-receipt";
+        const db = await installedRegionDb(sessionId);
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "A4-MEM-NEW",
+        });
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            // Force band, not execute: on an execute pass the pre-existing
+            // softRefreshOpportunity already prices the fold; the earned-bust
+            // loss showed up on boundary passes the scheduler deferred.
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    contextUsage: { percentage: 88, inputTokens: 1_000 },
+                    systemRegionLane: true,
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        const foldLines = logs.filter((line) => line.includes("m[0] HARD fold decision"));
+        expect(foldLines).toHaveLength(1);
+        // No contradictory pair on one pass: same cause, opposite verdicts.
+        expect(foldLines[0]).not.toContain("reason=unknown executed=false");
+        expect(foldLines[0]).toContain("reason=max_memory_id");
+        expect(foldLines[0]).toContain("executed=true");
+        expect(foldLines[0]).toContain("bustsServedPrefix=true");
+    });
+
+    it("A4: a warm non-boundary region pass prints no fold-decision line at all", async () => {
+        const sessionId = "ses-region-a4-warm-silent";
+        const db = await installedRegionDb(sessionId);
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    systemRegionLane: true,
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        expect(logs.filter((line) => line.includes("m[0] HARD fold decision"))).toEqual([]);
+    });
+
+    it("control: head-lane capability keeps its cached_m1_missing fold behavior intact", async () => {
+        const sessionId = "ses-region-c3-headlane";
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        getOrCreateSessionMeta(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?",
+        ).run(Buffer.from("<session-history>head</session-history>", "utf8"), sessionId);
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        expect(logs.some((line) => line.includes("cached_m1_missing"))).toBe(true);
+    });
 });

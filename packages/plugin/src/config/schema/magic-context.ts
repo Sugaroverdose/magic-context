@@ -924,6 +924,11 @@ export interface MagicContextConfig {
     mural: MuralConfig;
     /** Selects the runtime implementation for this project. Rust mode is experimental and requires user-level subc configuration. */
     transform_mode: "ts" | "rust";
+    /** Experimental frozen system-region residency: the store-backed panels serve as
+     *  one frozen string inside system[0] instead of synthetic user-role heads.
+     *  v1-TS-lane only: Rust transform mode, the OpenCode 2 adapter and Pi/OMP
+     *  ignore it (they keep serving heads; a boot line says so).
+     *  Default: false (head lane, today's bytes). */
     /** Auto-update the cached OpenCode plugin wrapper when a newer npm version is available.
      *  USER config only; project configs cannot disable it. Default: true. */
     auto_update?: boolean;

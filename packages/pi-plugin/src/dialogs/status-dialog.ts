@@ -48,6 +48,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getNotes } from "@magic-context/core/features/magic-context/storage-notes";
 import { getTagsBySession } from "@magic-context/core/features/magic-context/storage-tags";
+import { SYSTEM_REGION_SENTINEL } from "@magic-context/core/features/magic-context/system-region";
 import { getEmbedDrainUiStatus } from "@magic-context/core/hooks/magic-context/embed-session-state";
 import { resolveExecuteThresholdDetail } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/legacy-compartments";
@@ -734,12 +735,17 @@ export function buildPiStatusDetail(
 	// Facts retired → 0). Falls back to Σp1 / on-demand v2 memory render cold.
 	const decodeCachedBytes = (
 		bytes: Buffer | Uint8Array | string | null | undefined,
-	): string =>
-		bytes instanceof Uint8Array
-			? Buffer.from(bytes).toString("utf8")
-			: typeof bytes === "string"
-				? bytes
-				: "";
+	): string => {
+		const text =
+			bytes instanceof Uint8Array
+				? Buffer.from(bytes).toString("utf8")
+				: typeof bytes === "string"
+					? bytes
+					: "";
+		// Frozen system-region rows reuse cached_m0_bytes for system-resident
+		// panel bytes: not head text, so the breakdown reports none of it.
+		return text.startsWith(SYSTEM_REGION_SENTINEL) ? "" : text;
+	};
 	const m0Blocks = computeM0BlockTokens(deps.db, sessionId, {
 		m0Text: decodeCachedBytes(metaRow?.cached_m0_bytes),
 		m1Text: decodeCachedBytes(metaRow?.cached_m1_bytes),

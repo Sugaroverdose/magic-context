@@ -962,7 +962,7 @@ function* rebaseSteps(
         // render. Clear the previous host's system-prompt hash at the same time so
         // the new host can establish its baseline without scheduling another HARD
         // fold after this initial rebuild.
-        clearCachedM0M1(db, sessionId);
+        clearCachedM0M1(db, sessionId, "store_generation_rebase");
         db.prepare("UPDATE session_meta SET system_prompt_hash = '' WHERE session_id = ?").run(
             sessionId,
         );

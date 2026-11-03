@@ -2,6 +2,7 @@ import { Buffer } from "node:buffer";
 import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import type { Database } from "../../shared/sqlite";
+import { clearSystemRegion } from "./system-region";
 import type { SessionMeta } from "./types";
 
 export interface SessionMetaRow {
@@ -561,15 +562,17 @@ export function persistCachedM0(
     );
 }
 
-export function clearCachedM0M1(db: Database, sessionId: string): void {
+export function clearCachedM0M1(db: Database, sessionId: string, reason: string): void {
     ensureSessionMetaRow(db, sessionId);
+    // The region column belongs to the frozen system-region store; its erase
+    // goes through the receipted funnel (L7), never this list.
+    clearSystemRegion(db, sessionId, reason);
     const existingColumns = new Set(
         (db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>).map(
             (column) => column.name,
         ),
     );
     const clears: Array<[string, string | number | null]> = [
-        ["cached_m0_bytes", null],
         ["cached_m0_mural_data_url", null],
         ["cached_m0_mural_hash", null],
         ["cached_m1_bytes", null],
@@ -605,8 +608,4 @@ export function clearCachedM0M1(db: Database, sessionId: string): void {
         ...values,
         sessionId,
     );
-}
-
-export function clearCachedM0(db: Database, sessionId: string): void {
-    clearCachedM0M1(db, sessionId);
 }

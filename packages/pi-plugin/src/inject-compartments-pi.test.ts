@@ -16,6 +16,7 @@ import {
 	queueMemoryMutation,
 	setProjectState,
 } from "@magic-context/core/features/magic-context/storage";
+import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
 import {
 	getActiveUserMemories,
 	insertUserMemory,
@@ -37,8 +38,11 @@ import {
 	materializeM0Pi,
 	materializeM0PiWithRetry,
 	mustMaterializePi,
+	prepareCachedM0M1PiReplay,
 	renderM0Pi,
 	renderM1Pi,
+	replayCompletePiPrefix,
+	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import { createTestDb, textOf, userMessage } from "./test-utils.test";
 
@@ -3274,4 +3278,277 @@ it("Pi shrinking budget refolds an oversized baseline once with empty m1", () =>
 	} finally {
 		closeQuietly(db);
 	}
+});
+
+// Round-2 review C2c: a session row written by the OpenCode-1 frozen-region
+// store must never surface as Pi head text. The Pi reader treats sentinel
+// rows as absent (fold/first-render path), never as content.
+describe("frozen-region cross-lane discrimination (Pi reader)", () => {
+	const SENTINEL = "<!-- mc:system-region v1 -->";
+
+	it("a sentinel row folds instead of serving region bytes as head text", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-sentinel", process.cwd());
+		// Real materialized cache first: markers are complete, only the
+		// bytes are foreign (a region row written by the v1-TS lane).
+		materializeM0Pi(state, db);
+		db.prepare(
+			"UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
+		).run(
+			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
+			state.sessionId,
+		);
+		expect(mustMaterializePi(state, db)).toEqual({
+			value: true,
+			reason: "cache_invalid",
+		});
+	});
+
+	it("F6: the marker reader refuses a sentinel row on the replay path too", () => {
+		// markersFromCachedPiRow previously accepted the row on truthiness
+		// plus marker columns — a region row could satisfy CAS/marker reads
+		// even though decodeCachedM0 refuses its bytes. The replay entry
+		// point must produce no prefix for a foreign row.
+		const db = createTestDb();
+		const state = piState("ses-pi-sentinel-replay", process.cwd());
+		materializeM0Pi(state, db);
+		db.prepare(
+			"UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
+		).run(
+			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
+			state.sessionId,
+		);
+		expect(prepareCachedM0M1PiReplay(state, db)).toBeUndefined();
+	});
+
+	it("G1: the contention fallback never replays a region row as an empty head", () => {
+		// region row + mustMaterializePi fires + materialize loses the lock 3x:
+		// the fallback used to serve decodeCachedM0() ?? "" — an empty m[0]
+		// with the m[1] tail. The caller must discriminate before replaying.
+		const db = createTestDb();
+		const state = piState("ses-pi-contention-region", process.cwd());
+		insertMemory(db, {
+			projectPath: state.projectIdentity ?? "",
+			category: "NAMING",
+			content: "G1 fresh-head sentinel text",
+		});
+		materializeM0Pi(state, db);
+		db.prepare(
+			"UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
+		).run(
+			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
+			state.sessionId,
+		);
+		const locking = {
+			exec: (sql: string) => {
+				if (/BEGIN\s+IMMEDIATE/i.test(String(sql))) {
+					throw Object.assign(new Error("database is locked"), {
+						code: "SQLITE_BUSY",
+					});
+				}
+				return (db as never as { exec: (s: string) => unknown }).exec(sql);
+			},
+		};
+		const contentionDb = new Proxy(db, {
+			get(target, prop) {
+				if (prop === "exec") return locking.exec;
+				const value = Reflect.get(target, prop, target) as unknown;
+				return typeof value === "function"
+					? (value as (...a: unknown[]) => unknown).bind(target)
+					: value;
+			},
+		}) as never;
+		const messages = [userMessage("hello")];
+		injectM0M1Pi(state, contentionDb, messages);
+		const head = textOf(messages[0]);
+		expect(head).toContain("G1 fresh-head sentinel text");
+		expect(head).not.toContain("<project-memory>x</project-memory>");
+		closeQuietly(db);
+	});
+
+	// Executable control for the caller guard above: neutralizing the
+	// !isSystemRegionBytes(cached.cached_m0_bytes) conjunction at the two
+	// contention fallbacks makes the FIRST law fail with the reader's
+	// /region/ throw instead of a fresh head (verified in review round 5;
+	// kept as transcript, not a permanent source-mutating row). The predicate
+	// the guard uses is pinned directly:
+	it("G1: the guard predicate discriminates the region row shape", () => {
+		expect(isSystemRegionBytes(Buffer.from(`${SENTINEL}\nx`, "utf8"))).toBe(
+			true,
+		);
+		expect(isSystemRegionBytes(Buffer.from("<session-history>x", "utf8"))).toBe(
+			false,
+		);
+		expect(isSystemRegionBytes(null)).toBe(false);
+	});
+
+	it("G1: the replay reader itself refuses region bytes (exported law)", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-replay-refuse", process.cwd());
+		materializeM0Pi(state, db);
+		const row = db
+			.prepare("SELECT * FROM session_meta WHERE session_id = ?")
+			.get(state.sessionId) as never;
+		(row as { cached_m0_bytes: Buffer }).cached_m0_bytes = Buffer.from(
+			`${SENTINEL}\n<project-memory>x</project-memory>`,
+			"utf8",
+		);
+		expect(() =>
+			replayCompletePiPrefix(
+				state,
+				row,
+				[],
+				[userMessage("hello")],
+				undefined,
+				null,
+			),
+		).toThrow(/region/i);
+		closeQuietly(db);
+	});
+
+	it("control: the same cache with its own head bytes is not invalid", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-headlane", process.cwd());
+		materializeM0Pi(state, db);
+		expect(mustMaterializePi(state, db).reason).not.toBe("cache_invalid");
+	});
+});
+
+// Round-6 review H3: property closure — no Pi path may derive
+// wire-affecting decisions from region rows unguarded. The trim-to-cached-
+// boundary reader previously truth-tested m0/m1, so a region row keeping
+// a head-era boundary could drive tail trims. Closed at BOTH ends: the
+// region write site nulls the head-era boundary column, and the reader
+// refuses sentinel bytes defensively.
+it("H3: a region installed over a head-era boundary must not drive trimming", () => {
+	const db = createTestDb();
+	const state = piState("ses-pi-trim-region", process.cwd());
+	const sessionId = state.sessionId;
+	const {
+		appendCompartments,
+	} = require("@magic-context/core/features/magic-context/compartment-storage");
+	appendCompartments(db, sessionId, [
+		{
+			sequence: 1,
+			startMessage: 1,
+			endMessage: 1,
+			startMessageId: "m1-id",
+			endMessageId: "m2-id",
+			title: "Covered",
+			content: "U: covered\ncompartment body",
+		},
+	]);
+	// Head-era row: real head bytes, m1 payload, live boundary "m2-id".
+	db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run(sessionId);
+	db.prepare(
+		`UPDATE session_meta
+			    SET cached_m0_bytes = ?, cached_m1_bytes = ?,
+			        cached_m0_last_baseline_end_message_id = ?
+			  WHERE session_id = ?`,
+	).run(
+		Buffer.from("<session-history>baseline</session-history>", "utf8"),
+		Buffer.from("<session-history-since>delta</session-history-since>", "utf8"),
+		"m2-id",
+		sessionId,
+	);
+	const messages = [
+		userMessage("covered"),
+		userMessage("covered2"),
+		userMessage("live tail"),
+	];
+	const ids = ["m1-id", "m2-id", "m3-id"];
+	// Instrument sanity: the boundary is live and the head row trims.
+	expect(
+		trimPiMessagesToCachedBoundary(db, sessionId, [...messages], [...ids]),
+	).toBeGreaterThan(0);
+	// Convert to a region row through the store's writer (the shape the
+	// reviewer named: install without touching head-era columns).
+	const {
+		writeSystemRegion,
+	} = require("@magic-context/core/features/magic-context/system-region");
+	writeSystemRegion(db, sessionId, "<project-memory>frozen</project-memory>");
+	// Write-site property: the head-era boundary column is gone.
+	expect(
+		(
+			db
+				.prepare(
+					"SELECT cached_m0_last_baseline_end_message_id AS b FROM session_meta WHERE session_id = ?",
+				)
+				.get(sessionId) as { b: string | null }
+		).b,
+	).toBeNull();
+	// Reader property: no trim on a region row, even with a boundary
+	// re-seeded behind the writer (defense in depth).
+	db.prepare(
+		"UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+	).run("m2-id", sessionId);
+	expect(
+		trimPiMessagesToCachedBoundary(db, sessionId, [...messages], [...ids]),
+	).toBe(0);
+});
+
+// Stage P (round 10): property closure at the Pi row READER. All cached_m0
+// consumers derive their decisions from the pass-snapshot row (context-handler
+// firstRenderBust) or the replay pair (applyCachedPiRow) — a region-shaped m0
+// must present as ABSENT at the reader, making every truthiness decision
+// structurally correct (L1 boot-is-replay for region rows: the head lane
+// behaves exactly as a first render).
+describe("pi region-discrimination: row reader property closure (stage P)", () => {
+	const REGION_SENTINEL = "<!-- mc:system-region v1 -->";
+
+	function regionRow(db: ReturnType<typeof createTestDb>, sessionId: string) {
+		db.prepare(
+			"UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?",
+		).run(
+			Buffer.from(
+				`${REGION_SENTINEL}\n<project-memory>frozen</project-memory>`,
+				"utf8",
+			),
+			sessionId,
+		);
+	}
+
+	it("the pass snapshot presents a region row as absent (reader-level closure)", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-snapshot-region", process.cwd());
+		materializeM0Pi(state, db);
+		expect(
+			createPiM0M1PassSnapshot({ db, sessionId: state.sessionId }).cachedRow,
+		).not.toBeNull();
+		regionRow(db, state.sessionId);
+		expect(
+			createPiM0M1PassSnapshot({ db, sessionId: state.sessionId }).cachedRow,
+		).toBeNull();
+		closeQuietly(db);
+	});
+
+	it("control: a head-shaped row still presents its cachedRow to the snapshot", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-snapshot-head", process.cwd());
+		materializeM0Pi(state, db);
+		const snapshot = createPiM0M1PassSnapshot({
+			db,
+			sessionId: state.sessionId,
+		});
+		expect(snapshot.cachedRow?.cached_m0_bytes).not.toBeNull();
+		expect(
+			isSystemRegionBytes(snapshot.cachedRow?.cached_m0_bytes ?? null),
+		).toBe(false);
+		closeQuietly(db);
+	});
+
+	it("L1: a region row leaves the head lane in the first-render decision shape", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-l1-region", process.cwd());
+		materializeM0Pi(state, db);
+		regionRow(db, state.sessionId);
+		// First-render shape: the cache is treated as absent, never as head.
+		expect(mustMaterializePi(state, db).value).toBe(true);
+		const messages = [userMessage("after boot")];
+		injectM0M1Pi(state, db, messages);
+		const head = textOf(messages[0]);
+		expect(head).not.toContain("<project-memory>frozen</project-memory>");
+		expect(head).toContain("session-history");
+		closeQuietly(db);
+	});
 });

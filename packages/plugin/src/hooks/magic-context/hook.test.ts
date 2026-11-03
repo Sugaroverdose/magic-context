@@ -1217,3 +1217,59 @@ it("the event hook flushes notices on session.idle, never on a terminal assistan
     await hook.event!({ event: { type: "session.idle", properties: { sessionID } } } as never);
     expect(promptMocks.prompt).toHaveBeenCalledTimes(1);
 });
+
+// Round-2 review C2b: the region flag must never reach a lane that composes
+// its own heads — the Rust transform mode composes m[0] panel heads inside
+// the module, so appending the stored region there double-serves panels from
+// two baselines. The gate is v1-TS-only.
+describe("system-region capability lane (boot-resolved, no config key)", () => {
+    it("transform_mode rust keeps the region off on both the system handler and the transform", async () => {
+        const { spyOn } = await import("bun:test");
+        const spm = await import("./system-prompt-hash");
+        const tf = await import("./transform");
+        const handlerOpts: Array<Record<string, unknown>> = [];
+        const transformOpts: Array<Record<string, unknown>> = [];
+        const spyHandler = spyOn(spm, "createSystemPromptHashHandler").mockImplementation(((
+            opts: Record<string, unknown>,
+        ) => {
+            handlerOpts.push(opts);
+            return { handler: async () => {}, clearSession: () => {} };
+        }) as never);
+        const spyTransform = spyOn(tf, "createTransform").mockImplementation(((
+            opts: Record<string, unknown>,
+        ) => {
+            transformOpts.push(opts);
+            return Object.assign(async () => {}, {});
+        }) as never);
+        try {
+            const deps = createMockDeps();
+            deps.config = {
+                ...deps.config,
+                transform_mode: "rust",
+            };
+            createMagicContextHook(deps);
+            expect(handlerOpts.length).toBeGreaterThan(0);
+            expect(transformOpts.length).toBeGreaterThan(0);
+            expect(handlerOpts[0].systemRegionLane).toBe(false);
+            expect(transformOpts[0].systemRegionLane).toBe(false);
+
+            // Capability-by-default: an ordinary TS install boots the lane
+            // with no config involvement (owner ruling: switch dead).
+            const depsTs = createMockDeps();
+            createMagicContextHook(depsTs);
+            expect(handlerOpts.at(-1)?.systemRegionLane).toBe(true);
+            expect(transformOpts.at(-1)?.systemRegionLane).toBe(true);
+
+            // Inert-CAPABILITY boot control: a compaction-off install boots
+            // the head lane (the region arm must be fully dead).
+            const depsOff = createMockDeps();
+            depsOff.config = { ...depsOff.config, compaction: { enabled: false } };
+            createMagicContextHook(depsOff);
+            expect(handlerOpts.at(-1)?.systemRegionLane).toBe(false);
+            expect(transformOpts.at(-1)?.systemRegionLane).toBe(false);
+        } finally {
+            spyHandler.mockRestore();
+            spyTransform.mockRestore();
+        }
+    });
+});

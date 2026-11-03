@@ -365,6 +365,26 @@ describe("applyMigrateSession — OpenCode + context re-stamp", () => {
         expect(res.epochsBumped).toEqual([]);
     });
 
+    it("F1: a frozen-region row is erased through the receipted funnel on migrate", async () => {
+        // The migrate clear must go through clearSystemRegion (reason
+        // migrate_session), never a raw SET cached_m0_bytes = NULL — the
+        // sole-writer rule applies to every production surface, CLI included.
+        const oc = makeOpencodeDb();
+        const ctx = makeContextDb();
+        seedSession(oc, ctx);
+        const { encodeSystemRegionRow, readSystemRegion } = await import(
+            "@magic-context/core/features/magic-context/system-region"
+        );
+        ctx.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(
+            encodeSystemRegionRow("<project-memory>x</project-memory>"),
+            SID,
+        );
+        expect(readSystemRegion(ctx as never, SID)).toBe("<project-memory>x</project-memory>");
+        const plan = planMigrateSession(SID, "/home/u/benchmarks", makeDeps(oc, ctx, true));
+        applyMigrateSession(plan, "leave", makeDeps(oc, ctx, true));
+        expect(readSystemRegion(ctx as never, SID)).toBeNull();
+    });
+
     it("only updates session columns that exist (schema-resilient)", () => {
         const oc = new Database(":memory:");
         databases.push(oc);

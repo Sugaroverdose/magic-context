@@ -7,6 +7,7 @@ import { getDataDir, getMagicContextStorageDir } from "../src/shared/data-path";
 import { Database } from "../src/shared/sqlite";
 import { closeQuietly } from "../src/shared/sqlite-helpers";
 import { clearSession } from "../src/features/magic-context/storage-meta-session";
+import { clearSystemRegion } from "../src/features/magic-context/system-region";
 import { SESSION_SCOPED_TABLES } from "../src/features/magic-context/storage-session-tables";
 import {
     copySessionStateForClone,
@@ -1060,6 +1061,9 @@ function copyContextMeta(
         (column) =>
             column.name !== "session_id" &&
             column.name !== "trailing_blank_decisions" &&
+            // The region column is the receipted funnel's alone: never
+            // assigned in a dynamic SET, cleared via clearSystemRegion below.
+            column.name !== "cached_m0_bytes" &&
             !RETIRED_META_COLUMNS.has(column.name),
     );
     const selectedColumns = ["session_id", ...metaColumns.map((column) => column.name)]
@@ -1086,6 +1090,9 @@ function copyContextMeta(
         ...values,
         destinationSessionId,
     );
+    // The destination folds a fresh region on its next boundary; the copy
+    // never carries the source's system-resident bytes.
+    clearSystemRegion(db, destinationSessionId, "scripts_clone");
 }
 
 function copyContextAdditionalTables(

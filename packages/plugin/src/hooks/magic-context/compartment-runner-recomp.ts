@@ -134,7 +134,7 @@ export function promoteRecompStagingWithM0Mutation(
         });
         db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
-        clearCachedM0M1(db, sessionId);
+        clearCachedM0M1(db, sessionId, "recomp_rebuild");
 
         db.exec("COMMIT");
         finished = true;

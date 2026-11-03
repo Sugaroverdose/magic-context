@@ -59,6 +59,7 @@ import {
     getCompactionMarkerHealth,
     getObservedEpochFloor,
 } from "../features/magic-context/storage-meta-persisted";
+import { SYSTEM_REGION_SENTINEL } from "../features/magic-context/system-region";
 import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-definition-tokens";
 import {
     computeOpenCodeWorkMetricsIncremental,
@@ -477,12 +478,19 @@ export function buildSidebarSnapshot(
         // session-history) is computed by the SHARED helper so the OpenCode
         // sidebar and the Pi /ctx-status dialog can never diverge on what the
         // categories are or how they're measured.
-        const decodeCachedBytes = (bytes: unknown): string =>
-            bytes instanceof Uint8Array
-                ? Buffer.from(bytes).toString("utf8")
-                : typeof bytes === "string"
-                  ? bytes
-                  : "";
+        const decodeCachedBytes = (bytes: unknown): string => {
+            const text =
+                bytes instanceof Uint8Array
+                    ? Buffer.from(bytes).toString("utf8")
+                    : typeof bytes === "string"
+                      ? bytes
+                      : "";
+            // Frozen system-region rows reuse cached_m0_bytes for
+            // system-resident panel bytes: not head text, so the m[0]-block
+            // breakdown reports none of it (its bytes are counted by the
+            // served-system estimate instead).
+            return text.startsWith(SYSTEM_REGION_SENTINEL) ? "" : text;
+        };
         const m0Blocks = computeM0BlockTokens(db, sessionId, {
             m0Text: decodeCachedBytes(meta?.cached_m0_bytes),
             m1Text: decodeCachedBytes(meta?.cached_m1_bytes),

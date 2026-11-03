@@ -62,6 +62,11 @@ import {
     markTagsCompactedByMessageIds,
     updateTagStatus,
 } from "../../features/magic-context/storage-tags";
+import {
+    decideSystemRegionRotation,
+    type RegionMarkers,
+    readSystemRegion,
+} from "../../features/magic-context/system-region";
 import type { Tagger } from "../../features/magic-context/tagger";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
@@ -115,13 +120,17 @@ import {
     injectM0M1,
     type M0HardSignals,
     type M0M1State,
+    type M0SnapshotMarkerReadArgs,
     type MaterializeDecision,
     mustMaterialize,
     type PrefixTrimSourceOrder,
     type PrefixTrimStatus,
     type PreparedCompartmentInjection,
     prepareCachedM0M1Replay,
+    readCurrentM0SnapshotMarkers,
+    regionMarkersFromSnapshot,
     renderCompartmentInjection,
+    snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
 import { lkgReplayStateLabel } from "./lkg-persist";
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
@@ -1426,6 +1435,11 @@ interface RunPostTransformPhaseArgs {
     /** Use the defer reason resolved with the scheduler decision at the boundary; do not recompute it from this phase's inputs, which may no longer reflect that decision. */
     schedulerDeferReason?: "scheduler_defer" | null;
     fullFeatureMode: boolean;
+    /** Frozen system-region residency CAPABILITY (boot-resolved via
+     *  isSystemRegionLane — no config key): materialization boundaries
+     *  install the sentinel region row and the array carries no heads.
+     *  False = head lane, today's bytes (rust/v2/Pi/compaction-off). */
+    systemRegionLane?: boolean;
     /**
      * Compaction-off mode (issue #266), boot-resolved. Every mutating gate in
      * this phase becomes `existingGate && !compactionOff`; the m[0]/m[1]
@@ -1729,6 +1743,52 @@ export function finalizeMessageRepresentation(
     return { clearedParts, mergedReasoningParts };
 }
 
+/**
+ * Frozen system-region rotation promotion (L3/L4): on a pass that is already
+ * busting for a named reason (execute, force band, explicit flush, deferred
+ * materialization, published history), a region whose captured manifest
+ * differs from the live store — or whose bytes have aged past the growth cap
+ * — promotes the ordinary fold into a rotation of the same transaction. The
+ * promotion never originates a bust: outside a boundary it always declines,
+ * and a missing region is installed by mustMaterialize, not here.
+ */
+export function regionRotationPromotion(input: {
+    systemRegionLane: boolean;
+    freezeM0M1: boolean;
+    foldDue: boolean;
+    boundaryPermission: boolean;
+    forceBand: boolean;
+    storedRegion: string | null;
+    capturedMarkers: RegionMarkers | null;
+    currentMarkers: RegionMarkers;
+    historyBudgetTokens?: number;
+}): { promote: boolean; reason: string | null } {
+    const decline = { promote: false, reason: null } as const;
+    if (
+        !input.systemRegionLane ||
+        input.freezeM0M1 ||
+        input.foldDue ||
+        !input.boundaryPermission ||
+        input.storedRegion === null ||
+        input.storedRegion.length === 0
+    ) {
+        return decline;
+    }
+    const decision = decideSystemRegionRotation({
+        storedRegion: input.storedRegion,
+        capturedMarkers: input.capturedMarkers,
+        currentMarkers: input.currentMarkers,
+        bustPermission: true,
+        forceBand: input.forceBand,
+        // Length proxy, not estimateTokens: this runs on every boundary pass
+        // and the cap is a coarse pressure gate (~4 chars/token, the same
+        // ratio the estimator applies).
+        pendingBytes: input.storedRegion.length,
+        pendingBytesCap: (input.historyBudgetTokens ?? 40000) * 0.2 * 4,
+    });
+    return decision.rotate ? { promote: true, reason: decision.reason } : decline;
+}
+
 export async function runPostTransformPhase(
     args: RunPostTransformPhaseArgs,
 ): Promise<PostTransformPhaseResult> {
@@ -1842,16 +1902,20 @@ export async function runPostTransformPhase(
         (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory) &&
         (args.fullFeatureMode || compactionOff);
     const freezeM0M1 = args.freezeM0M1 === true;
-    // The restore-only pass serves the persisted bytes — m[0] included — so
-    // a re-anchor request raised by the host's post-restart replay is moot
-    // on it: discharge it instead of parking it. A parked request would
-    // ride a later bust, rewrite bytes the restore already made identical,
-    // and drag the stale backlog with it. (Local flags above are snapshotted
-    // from the set at pass start, so clearing it changes nothing this pass.)
-    if (restoreOnlyBootPass && pendingMaterializationAtPassStart && !freezeM0M1) {
-        args.pendingMaterializationSessions.delete(args.sessionId);
-    }
-
+    const foldDueArgs: M0SnapshotMarkerReadArgs & { state: M0M1State } = {
+        db: args.db,
+        sessionId: args.sessionId,
+        state: args.sessionMeta as M0M1State,
+        projectPath: args.m0M1?.projectPath,
+        projectDirectory: args.m0M1?.projectDirectory,
+        injectDocs: args.m0M1?.injectDocs,
+        memoryEnabled: args.m0M1?.memoryEnabled,
+        muralEnabled: args.m0M1?.muralEnabled,
+        memoryInjectionBudgetTokens: args.m0M1?.memoryInjectionBudgetTokens,
+        historyBudgetTokens: args.m0M1?.historyBudgetTokens,
+        historyBudgetPolicyIdentity: args.m0M1?.historyBudgetPolicyIdentity,
+        hardSignals: args.m0M1?.hardSignals,
+    };
     const foldDueDecision =
         m0M1EnabledForFold && args.m0M1 && !freezeM0M1
             ? mustMaterialize({
@@ -1867,23 +1931,65 @@ export async function runPostTransformPhase(
                   historyBudgetTokens: args.m0M1.historyBudgetTokens,
                   historyBudgetPolicyIdentity: args.m0M1.historyBudgetPolicyIdentity,
                   hardSignals: args.m0M1.hardSignals,
+                  systemRegionMode: args.systemRegionLane === true && !compactionOff,
               })
             : { value: false, reason: null };
+    // Region rotation promotion: a named boundary with a stale region manifest
+    // turns this pass's ordinary fold into the rotation transaction (same
+    // transaction, one bust). Never originates a bust of its own.
+    let regionRotationReason: string | null = null;
+    if (args.systemRegionLane === true && m0M1EnabledForFold && !foldDueDecision.value) {
+        const storedRegion = readSystemRegion(args.db, args.sessionId);
+        if (storedRegion !== null) {
+            const boundaryPermission =
+                args.schedulerDecision === "execute" ||
+                emergencyDropEligible ||
+                isExplicitFlush ||
+                deferredMaterialize ||
+                args.historyRebuiltThisPass === true ||
+                (args.canConsumeDeferredLate === true &&
+                    args.deferredHistoryWasPendingAtPassStart === true);
+            const captured =
+                (args.sessionMeta as M0M1State).snapshotMarkers ??
+                snapshotMarkersFromCachedM0(args.sessionMeta as M0M1State);
+            const promotion = regionRotationPromotion({
+                systemRegionLane: args.systemRegionLane === true,
+                freezeM0M1,
+                foldDue: false,
+                boundaryPermission,
+                forceBand: emergencyDropEligible && boundaryPermission,
+                storedRegion,
+                capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+                currentMarkers: regionMarkersFromSnapshot(
+                    readCurrentM0SnapshotMarkers(foldDueArgs),
+                ),
+                historyBudgetTokens: args.m0M1?.historyBudgetTokens,
+            });
+            if (promotion.promote && promotion.reason) {
+                regionRotationReason = promotion.reason;
+                sessionLog(
+                    args.sessionId,
+                    `system-region rotation promoted: reason=${promotion.reason} scheduler=${args.schedulerDecision}`,
+                );
+            }
+        }
+    }
     let preparedPrefix: InjectM0M1Result | undefined;
     const shouldCaptureCachedPrefix =
         (foldDueDecision.value || args.schedulerDecision === "execute") &&
         m0M1EnabledForFold &&
         !emergencyDropEligible &&
         !freezeM0M1;
+    const regionLaneActive = args.systemRegionLane === true;
     const cachedPrefixBeforePreflight = shouldCaptureCachedPrefix
-        ? prepareCachedM0M1Replay(args.db, args.sessionId)
+        ? prepareCachedM0M1Replay(args.db, args.sessionId, regionLaneActive)
         : undefined;
     const completeCachedPrefixAvailable =
         (args.sessionMeta.cachedM0Bytes != null && args.sessionMeta.cachedM1Bytes != null) ||
         cachedPrefixBeforePreflight !== undefined ||
         (m0M1EnabledForFold &&
             !shouldCaptureCachedPrefix &&
-            hasCompleteCachedM0M1(args.db, args.sessionId));
+            hasCompleteCachedM0M1(args.db, args.sessionId, regionLaneActive));
     const firstRenderBust = m0M1EnabledForFold && !completeCachedPrefixAvailable;
     let foldExecutedThisPass = false;
     // The one bust permission an executed fold grants: true only when the fold
@@ -1920,7 +2026,11 @@ export async function runPostTransformPhase(
         m1Bytes: args.sessionMeta.cachedM1Bytes ?? null,
         muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
     };
-    if ((foldDueDecision.value || softRefreshOpportunity) && m0M1EnabledForFold && args.m0M1) {
+    if (
+        (foldDueDecision.value || softRefreshOpportunity || regionRotationReason !== null) &&
+        m0M1EnabledForFold &&
+        args.m0M1
+    ) {
         let committedFoldBustsServedPrefix: boolean | undefined;
         try {
             const previousM1 = args.sessionMeta.cachedM1Bytes?.toString("utf8");
@@ -1944,9 +2054,17 @@ export async function runPostTransformPhase(
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
                 compactionOff,
+                systemRegion:
+                    args.systemRegionLane === true
+                        ? {
+                              enabled: true,
+                              reason: regionRotationReason ?? foldDueDecision.reason ?? "hard_fold",
+                          }
+                        : undefined,
+                forceMaterializeReason: regionRotationReason ?? undefined,
                 onFoldCommit: (db, rendered) => {
                     committedFoldBustsServedPrefix = foldBustsServedPrefix(
-                        foldDueDecision.reason,
+                        regionRotationReason ?? foldDueDecision.reason,
                         servedPrefixBeforeFold,
                         rendered,
                     );
@@ -1963,7 +2081,12 @@ export async function runPostTransformPhase(
             preparedPrefix = foldResult;
             prefixPreflightFailed = foldResult.materializationContentionRetryExhausted === true;
             foldExecutedThisPass = foldExecutesThisPass(
-                foldDueDecision.value || softRefreshOpportunity,
+                // A promoted region rotation IS this pass's fold: it rewrote
+                // served bytes, so it must be priced as an executed fold and
+                // its bust permission earned (A4). Head-lane behavior is
+                // unchanged — regionRotationReason is only ever set on the
+                // region lane.
+                foldDueDecision.value || softRefreshOpportunity || regionRotationReason !== null,
                 foldResult.m0RematerializedThisPass,
             );
             // Every executed fold commits through the hook above. Should one ever
@@ -2015,7 +2138,7 @@ export async function runPostTransformPhase(
         }
         sessionLog(
             args.sessionId,
-            `m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
+            `m[0] HARD fold decision: reason=${foldDueDecision.reason ?? regionRotationReason ?? "unknown"} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
         );
     }
 
@@ -2092,11 +2215,11 @@ export async function runPostTransformPhase(
     const publishedWorkDrainAllowed = !compactionOff && hasReclaimRide(rideSignals);
     // System-origin reclaim may only ride a pass that actually rewrites served
     // bytes. A consumed deferred-materialization intent whose fold rewrote
-    // nothing leaves the pass warm; draining auto_drop rows, the sweeper, or
+    // nothing leaves the pass warm; draining the queue, the sweeper, or
     // heuristics there is an independent prefix rewrite. The documented
     // exception is the aborted-fold retry, where the provider is already cold
-    // (prefixPreflightFailed). Model stamps ('drop' rows) keep immediate
-    // release; subagent passes keep their execute-band pressure semantics.
+    // (prefixPreflightFailed). Subagent passes keep their execute-band pressure
+    // semantics via the fullFeatureMode bypass.
     const systemReclaimAllowed =
         !args.fullFeatureMode ||
         (!compactionOff &&
@@ -2299,13 +2422,15 @@ export async function runPostTransformPhase(
             const tApply = performance.now();
             // System-origin rows wait for a byte-change event; model stamps
             // release on this pass under the current permission.
-            const opsToApply = systemReclaimAllowed
-                ? pendingOps
-                : pendingOps.filter((op) => op.operation !== "auto_drop");
+            // Frozen-base adaptation of 347e503cd: this base's pending-op
+            // vocabulary is a single 'drop' operation (readPendingOps ignores
+            // anything else), so there is no system-origin class to filter by —
+            // the whole queue rides the byte-change permission or waits.
+            const opsToApply = systemReclaimAllowed ? pendingOps : [];
             if (opsToApply.length !== pendingOps.length) {
                 sessionLog(
                     args.sessionId,
-                    `pending ops held — reason=system-reclaim-ride-required; autoDrop=${pendingOps.length - opsToApply.length} applied=${opsToApply.length} scheduler=${args.schedulerDecision}`,
+                    `pending ops held — reason=system-reclaim-ride-required; held=${pendingOps.length} applied=0 scheduler=${args.schedulerDecision}`,
                 );
             }
             // P0 perf: don't pass `args.tags` here. applyPendingOperations
@@ -2877,7 +3002,7 @@ export async function runPostTransformPhase(
         // the replay contention-exhausted keeps this pass from counting as
         // consumed history, so deferred refreshes stay pending.
         if (freezeM0M1 && !preparedPrefix) {
-            preparedPrefix = prepareCachedM0M1Replay(args.db, args.sessionId);
+            preparedPrefix = prepareCachedM0M1Replay(args.db, args.sessionId, regionLaneActive);
         }
         const tInjectM0M1 = performance.now();
         try {
@@ -2904,6 +3029,14 @@ export async function runPostTransformPhase(
                 // path: memory/docs/user-profile render, but historical
                 // compartment rows never reach <session-history>.
                 compactionOff,
+                systemRegion:
+                    args.systemRegionLane === true
+                        ? {
+                              enabled: true,
+                              reason:
+                                  (foldDueDecision.value && foldDueDecision.reason) || "hard_fold",
+                          }
+                        : undefined,
             });
             deliveredPrefix = result;
             if (result.injected) {

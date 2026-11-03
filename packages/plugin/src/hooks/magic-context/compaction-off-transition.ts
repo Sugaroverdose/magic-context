@@ -62,6 +62,7 @@ import {
     setCompactionModeRecord,
     setPersistedCompactionMarkerState,
 } from "../../features/magic-context/storage-meta-persisted";
+import { clearSystemRegion } from "../../features/magic-context/system-region";
 import { sessionLog } from "../../shared/logger";
 import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 
@@ -146,9 +147,12 @@ function clearCachedM0Baseline(
     db: import("../../shared/sqlite").Database,
     sessionId: string,
 ): boolean {
+    // The region column belongs to the frozen system-region store; its erase
+    // goes through the receipted funnel (L7). The head columns stay here.
+    clearSystemRegion(db, sessionId, "compaction_off_transition");
     const result = db
         .prepare(
-            "UPDATE session_meta SET cached_m0_bytes = NULL, cached_m1_bytes = NULL, cached_m0_mural_data_url = NULL WHERE session_id = ?",
+            "UPDATE session_meta SET cached_m1_bytes = NULL, cached_m0_mural_data_url = NULL WHERE session_id = ?",
         )
         .run(sessionId);
     return (result.changes ?? 0) > 0;

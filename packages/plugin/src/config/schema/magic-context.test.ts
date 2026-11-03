@@ -3,6 +3,7 @@ import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_HISTORY_BUDGET_PERCENTAGE,
     DEFAULT_LOCAL_EMBEDDING_MODEL,
+    LIVE_RELOAD_CONFIG_PATHS,
     type MagicContextConfig,
     MagicContextConfigSchema,
     PER_HARNESS_MIGRATION_INVENTORY,
@@ -802,5 +803,29 @@ describe("MagicContextConfigSchema", () => {
                 }),
             ).toThrow();
         });
+    });
+});
+
+// N2 (round 10, reworded round 11): defense-in-depth pin, not a live
+// hazard. The capability is boot-frozen today — the sole predicate call
+// site (hook.ts boot) reads the boot-time snapshot, and live-reload
+// sample adoption reaches only the historian/dreamer samplers, so a
+// whitelist entry could NOT currently flip the lane mid-session. The pin
+// keeps the lane inputs (transform_mode, compaction, compaction.enabled)
+// out of any HYPOTHETICAL future adoption surface: if the config
+// architecture ever widens live adoption, this law is what keeps the
+// boot-freeze property true. Pinned by exact-string membership.
+describe("system-region capability inputs are never live-reloadable", () => {
+    const LANE_INPUT_PATHS = ["transform_mode", "compaction", "compaction.enabled"] as const;
+    function laneSafetyViolations(paths: readonly string[]): string[] {
+        return LANE_INPUT_PATHS.filter((p) => paths.includes(p));
+    }
+    it("LIVE_RELOAD_CONFIG_PATHS excludes every capability input", () => {
+        expect(laneSafetyViolations(LIVE_RELOAD_CONFIG_PATHS)).toEqual([]);
+    });
+    it("control: the checker reddens on each prospective whitelist addition", () => {
+        for (const p of LANE_INPUT_PATHS) {
+            expect(laneSafetyViolations([...LIVE_RELOAD_CONFIG_PATHS, p])).toEqual([p]);
+        }
     });
 });

@@ -48,10 +48,10 @@ export async function setup(context: V2Context) {
     setHarness("opencode2");
     bindStaleBuildNotice({}, import.meta.url, "opencode2");
     const duties = await registerContext(context);
-    const checks =
-        loadPluginConfigDetailed(context.location.directory).config.auto_update === false
-            ? undefined
-            : startUpdateChecks(context);
+    const pluginConfig = loadPluginConfigDetailed(context.location.directory).config;
+    // The frozen system-region lane is an OpenCode-1-TS capability (no
+    // config key); this lane keeps serving synthetic heads (design doc §9).
+    const checks = pluginConfig.auto_update === false ? undefined : startUpdateChecks(context);
     // The plugin log, not the console: the host passes plugin output straight
     // through to the operator's terminal. Flushed now so a host that dies
     // during boot still leaves a record that setup completed.

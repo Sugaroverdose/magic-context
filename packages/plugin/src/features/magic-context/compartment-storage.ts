@@ -393,7 +393,7 @@ export function replaceSessionFacts(
     db.transaction(() => {
         db.prepare("DELETE FROM session_facts WHERE session_id = ?").run(sessionId);
         insertFactRows(db, sessionId, facts, now);
-        clearCachedM0M1(db, sessionId);
+        clearCachedM0M1(db, sessionId, "session_facts_replace");
     }).immediate();
 }
 
@@ -428,7 +428,7 @@ export function replaceAllCompartmentState(
         insertCompartmentRows(db, sessionId, compartments, now);
         insertFactRows(db, sessionId, facts, now);
 
-        clearCachedM0M1(db, sessionId);
+        clearCachedM0M1(db, sessionId, "compartment_state_replace");
     }).immediate();
 }
 
@@ -467,7 +467,7 @@ export function replaceAllCompartmentStateAndBumpDepth(
         insertCompartmentRows(db, sessionId, compartments, now);
         insertFactRows(db, sessionId, facts, now);
 
-        clearCachedM0M1(db, sessionId);
+        clearCachedM0M1(db, sessionId, "compartment_state_replace");
 
         if (depthEndOrdinal >= depthStartOrdinal) {
             const stmt = getIncrementDepthStatement(db);
@@ -673,7 +673,7 @@ export function promoteRecompStaging(
                 insertFactRows(db, sessionId, staging.facts, now);
                 db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
                 db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
-                clearCachedM0M1(db, sessionId);
+                clearCachedM0M1(db, sessionId, "recomp_promote");
                 return { compartments: staging.compartments, facts: staging.facts };
             })
             .immediate();
@@ -715,7 +715,7 @@ export function promoteRecompStaging(
         db.prepare("DELETE FROM recomp_compartments WHERE session_id = ?").run(sessionId);
         db.prepare("DELETE FROM recomp_facts WHERE session_id = ?").run(sessionId);
 
-        clearCachedM0M1(db, sessionId);
+        clearCachedM0M1(db, sessionId, "recomp_promote");
 
         db.exec("COMMIT");
         finished = true;

@@ -1,4 +1,5 @@
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
+import { sessionLog } from "../../shared/logger";
 import {
     captureSlot,
     dropSlot,
@@ -324,54 +325,75 @@ function outputMessageIsPostAnchor(
  * the exact artifact stored in the last-known-good replay entry; callers must
  * use it as-is rather than serialize the prefix again.
  */
-export function buildLkgPrefix(
-    input: LkgEntryProjection[] | MessageLike[],
-    output: MessageLike[],
-): {
+interface BuiltLkgPrefix {
     anchorIndex: number;
     anchorMessageId: string;
     inputIdSeq: string[];
     inputContentDigests: string[];
     jsonPrefix: string;
-} | null {
+}
+
+function tryBuildLkgPrefix(
+    input: LkgEntryProjection[] | MessageLike[],
+    output: MessageLike[],
+): { ok: true; built: BuiltLkgPrefix } | { ok: false; reason: string } {
     const projected = asEntryProjection(input);
     const anchorIndex = findLkgAnchor(projected);
-    if (anchorIndex === null) return null;
+    if (anchorIndex === null) return { ok: false, reason: "no_anchor" };
     const ids = projected.map((message) => message.id);
-    if (ids.some((id) => id === null)) return null;
+    if (ids.some((id) => id === null)) return { ok: false, reason: "missing_ids" };
     const validIds = ids as string[];
-    if (new Set(validIds).size !== validIds.length) return null;
+    if (new Set(validIds).size !== validIds.length) return { ok: false, reason: "duplicate_ids" };
     const anchorMessageId = validIds[anchorIndex];
     const inputContentDigests = projected
         .slice(0, anchorIndex + 1)
         .map((message) => message.contentDigest?.() ?? null);
-    if (inputContentDigests.some((digest) => digest === null)) return null;
+    if (inputContentDigests.some((digest) => digest === null))
+        return { ok: false, reason: "missing_digests" };
     const inputIndexById = new Map(validIds.map((id, index) => [id, index]));
     const prefix: MessageLike[] = [];
     for (const message of output) {
         const postAnchor = outputMessageIsPostAnchor(message, inputIndexById, anchorIndex);
-        if (postAnchor === null) return null;
+        if (postAnchor === null) return { ok: false, reason: "unknown_output" };
         if (!postAnchor) prefix.push(message);
     }
     let jsonPrefix: string;
     try {
         jsonPrefix = JSON.stringify(prefix);
-        if (typeof jsonPrefix !== "string") return null;
+        if (typeof jsonPrefix !== "string") return { ok: false, reason: "serialize_failed" };
     } catch {
-        return null;
+        return { ok: false, reason: "serialize_failed" };
     }
     return {
-        anchorIndex,
-        anchorMessageId,
-        inputIdSeq: validIds.slice(0, anchorIndex + 1),
-        inputContentDigests: inputContentDigests as string[],
-        jsonPrefix,
+        ok: true,
+        built: {
+            anchorIndex,
+            anchorMessageId,
+            inputIdSeq: validIds.slice(0, anchorIndex + 1),
+            inputContentDigests: inputContentDigests as string[],
+            jsonPrefix,
+        },
     };
 }
 
+export function buildLkgPrefix(
+    input: LkgEntryProjection[] | MessageLike[],
+    output: MessageLike[],
+): BuiltLkgPrefix | null {
+    const result = tryBuildLkgPrefix(input, output);
+    return result.ok ? result.built : null;
+}
+
 export function captureLkgSlot(args: LkgCaptureInput): boolean {
-    const built = buildLkgPrefix(args.input, args.output);
-    if (!built) return false;
+    const result = tryBuildLkgPrefix(args.input, args.output);
+    if (!result.ok) {
+        // The bust path treats `!captured` as grounds to drop the durable slot;
+        // a build refusal that never reached the slot store must still say why,
+        // or the refresh cycle destroys the row in silence.
+        sessionLog(args.sessionId, `lkg_capture_declined reason=build_${result.reason}`);
+        return false;
+    }
+    const built = result.built;
     const modelKeys = canonicalLkgModelKeys(args.modelKey, args.providerKey);
     return captureSlot(args.sessionId, {
         jsonPrefix: built.jsonPrefix,

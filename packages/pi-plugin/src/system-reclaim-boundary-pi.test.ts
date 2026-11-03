@@ -25,15 +25,15 @@ import {
 	createFakePi,
 	createTestDb,
 	fakeContext,
-	toolResultMessage,
 	type PiMessage,
+	toolResultMessage,
 	userMessage,
 } from "./test-utils.test";
 
-// Mirror of the OpenCode lane law: system-origin reclaim (auto_drop rows,
-// the tool-reclaim sweeper, heuristics) rides only byte-change events. A
-// consumed deferred-materialization intent whose fold rewrote nothing must
-// keep queued auto_drop rows in the queue; model stamps release immediately.
+// Mirror of the OpenCode lane law: system-origin reclaim (queued drops, the
+// tool-reclaim sweeper, heuristics) rides only byte-change events. A consumed
+// deferred-materialization intent whose fold rewrote nothing must keep the
+// whole queue waiting. Frozen-base adaptation: single 'drop' vocabulary.
 const MODEL = { provider: "test-provider", id: "test-model" };
 
 function providerUsage(inputTokens: number) {
@@ -71,7 +71,12 @@ function setup(sessionId: string) {
 		ctx: never,
 	) => Promise<unknown>;
 	const messageEnd = async (message: PiMessage) => {
-		persistPiMessageEndModelMeta({ db, sessionId, message, cacheTtlConfig: "30m" });
+		persistPiMessageEndModelMeta({
+			db,
+			sessionId,
+			message,
+			cacheTtlConfig: "30m",
+		});
 		await persistPiPressureFromMessageEnd({
 			db,
 			sessionId,
@@ -115,28 +120,52 @@ async function seededToolRound(sessionId: string) {
 		...providerUsage(20_000),
 	});
 	await ctx.messageEnd(answer);
-	const callStamp = assistantToolCall("call-stamp", "Read", { path: "a.ts" }, 3);
+	const callStamp = assistantToolCall(
+		"call-stamp",
+		"Read",
+		{ path: "a.ts" },
+		3,
+	);
 	const resultStamp = toolResultMessage("call-stamp", "stamped output", 4);
-	const callSweep = assistantToolCall("call-sweep", "Read", { path: "b.ts" }, 5);
-	const resultSweep = toolResultMessage("call-sweep", "sweeper target output", 6);
-	const messages = [user1, answer, callStamp, resultStamp, callSweep, resultSweep];
+	const callSweep = assistantToolCall(
+		"call-sweep",
+		"Read",
+		{ path: "b.ts" },
+		5,
+	);
+	const resultSweep = toolResultMessage(
+		"call-sweep",
+		"sweeper target output",
+		6,
+	);
+	const messages = [
+		user1,
+		answer,
+		callStamp,
+		resultStamp,
+		callSweep,
+		resultSweep,
+	];
 	await ctx.runPass(messages, 30);
 	const rows = getTagsBySession(ctx.db, sessionId).filter(
 		(tag) => tag.status === "active",
 	);
-	const stampTag = rows.find((tag) => tag.messageId === "call-stamp") ?? rows[0];
-	const sweepTag = rows.find((tag) => tag.messageId === "call-sweep") ?? rows[1];
+	const stampTag =
+		rows.find((tag) => tag.messageId === "call-stamp") ?? rows[0];
+	const sweepTag =
+		rows.find((tag) => tag.messageId === "call-sweep") ?? rows[1];
 	queuePendingOp(ctx.db, sessionId, stampTag.id, "drop");
-	queuePendingOp(ctx.db, sessionId, sweepTag.id, "auto_drop");
+	queuePendingOp(ctx.db, sessionId, sweepTag.id, "drop");
 	return { ctx, messages, stampTag, sweepTag };
 }
 
 describe("Pi system-origin reclaim rides byte-change events", () => {
 	afterEach(() => {});
 
-	it("holds auto_drop rows when the consumed deferred fold rewrote nothing", async () => {
+	it("holds queued rows when the consumed deferred fold rewrote nothing", async () => {
 		const sessionId = "ses-pi-system-reclaim-hold";
-		const { ctx, messages, stampTag, sweepTag } = await seededToolRound(sessionId);
+		const { ctx, messages, stampTag, sweepTag } =
+			await seededToolRound(sessionId);
 		try {
 			signalPiDeferredMaterialization(sessionId);
 			await ctx.runPass(
@@ -150,22 +179,29 @@ describe("Pi system-origin reclaim rides byte-change events", () => {
 				],
 				70,
 			);
-			expect(getTagsBySession(ctx.db, sessionId).find((t) => t.id === stampTag.id)!.status).toBe(
-				"dropped",
-			);
-			expect(getPendingOps(ctx.db, sessionId).map((op) => op.tagId)).toEqual([sweepTag.id]);
-			expect(getTagsBySession(ctx.db, sessionId).find((t) => t.id === sweepTag.id)!.status).toBe(
-				"active",
-			);
 			expect(
-				ctx.logs.some((line) => line.includes("reason=system-reclaim-ride-required")),
+				getTagsBySession(ctx.db, sessionId).find((t) => t.id === stampTag.id)!
+					.status,
+			).toBe("active");
+			expect(getPendingOps(ctx.db, sessionId).map((op) => op.tagId)).toEqual([
+				stampTag.id,
+				sweepTag.id,
+			]);
+			expect(
+				getTagsBySession(ctx.db, sessionId).find((t) => t.id === sweepTag.id)!
+					.status,
+			).toBe("active");
+			expect(
+				ctx.logs.some((line) =>
+					line.includes("reason=system-reclaim-ride-required"),
+				),
 			).toBe(true);
 		} finally {
 			ctx.cleanup();
 		}
 	});
 
-	it("drains auto_drop rows on the forced band", async () => {
+	it("drains queued rows on the forced band", async () => {
 		const sessionId = "ses-pi-system-reclaim-force";
 		const { ctx, messages, sweepTag } = await seededToolRound(sessionId);
 		try {
@@ -181,9 +217,10 @@ describe("Pi system-origin reclaim rides byte-change events", () => {
 				96,
 			);
 			expect(getPendingOps(ctx.db, sessionId)).toEqual([]);
-			expect(getTagsBySession(ctx.db, sessionId).find((t) => t.id === sweepTag.id)!.status).toBe(
-				"dropped",
-			);
+			expect(
+				getTagsBySession(ctx.db, sessionId).find((t) => t.id === sweepTag.id)!
+					.status,
+			).toBe("dropped");
 		} finally {
 			ctx.cleanup();
 		}

@@ -4945,3 +4945,111 @@ describe("Channel 1 reminder copy changes", () => {
         expect(fresh.output).not.toContain("natural stopping point");
     });
 });
+
+// Frozen system-region residency, site-2 law: the protectionFoldWillBust
+// mustMaterialize call (transform.ts) must know the row is a region row.
+// Omitting the flag makes a valid sentinel row read as cached_m1_missing
+// every pass: protectionCacheBustingPass pins true on warm deferred passes
+// and the calibration bust reason flips to "fold" forever (§7.3 claim).
+describe("createTransform: region rows do not freeze protection calibration", () => {
+    async function regionPassCalibration(systemRegionLane: boolean) {
+        useTempDataHome("context-region-calibration-");
+        const sessionId = "ses-region-calibration";
+        const db = openDatabase();
+        getOrCreateSessionMeta(db, sessionId);
+        // Install through the production funnel so blob and markers land
+        // together (L6); a hand-seeded blob without markers is not a state
+        // the fold can leave behind.
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        insertMemory(db, {
+            projectPath: process.cwd(),
+            category: "ARCHITECTURE",
+            content: "calibration region memory",
+        });
+        const { injectM0M1 } = await import("./inject-compartments");
+        injectM0M1({
+            db,
+            sessionId,
+            state: getOrCreateSessionMeta(db, sessionId),
+            projectPath: process.cwd(),
+            projectDirectory: "",
+            isCacheBustingPass: true,
+            memoryEnabled: true,
+            systemRegion: { enabled: true, reason: "first_render" },
+        } as never);
+        const makeTransform = () =>
+            createTransform({
+                tagger: createTagger(),
+                scheduler: { shouldExecute: () => false },
+                contextUsageMap: new Map(),
+                db,
+                historyRefreshSessions: new Set<string>(),
+                deferredHistoryRefreshSessions: new Set<string>(),
+                pendingMaterializationSessions: new Set(),
+                lastHeuristicsTurnId: new Map(),
+                clearReasoningAge: 1000,
+                protectedTokens: 0,
+                historianRunnable: false,
+                systemRegionLane,
+                memoryConfig: { enabled: true, injectionBudgetTokens: 1000 },
+                liveModelBySession: new Map([
+                    [sessionId, { providerID: "anthropic", modelID: "claude-opus-5" }],
+                ]),
+            });
+        const transform = makeTransform();
+        const source: TestMessage[] = [
+            {
+                info: { id: "cal-user", role: "user", sessionID: sessionId },
+                parts: [{ type: "text", text: "hello" }],
+            },
+        ];
+        const calibrationModule = await import(
+            "../../features/magic-context/session-decision-calibration"
+        );
+        const calls: Array<{ pass: number; bustPermitted?: boolean; bustReason?: string }> = [];
+        let passIndex = 0;
+        const spy = spyOn(calibrationModule, "sessionDecisionCalibration").mockImplementation(
+            (_db, _sid, pass) => {
+                calls.push({
+                    pass: passIndex,
+                    bustPermitted: pass?.bustPermitted,
+                    bustReason: pass?.bustReason,
+                });
+                return {
+                    protectedFloorTokens: 0,
+                    protectedCeilingTokens: 0,
+                    hygieneUnitsVersion: 1,
+                    frozen: false,
+                } as never;
+            },
+        );
+        try {
+            for (let pass = 0; pass < 4; pass++) {
+                await transform({}, { messages: structuredClone(source) });
+                passIndex++;
+            }
+        } finally {
+            spy.mockRestore();
+        }
+        // Pass 0 legitimately adopts the live hard signals into the markers
+        // (region) or folds once for cached_m1_missing (head); the region law
+        // measures the WARM tail (pass >= 1) only.
+        return calls;
+    }
+
+    it("warm deferred region passes never report a fold bust to calibration", async () => {
+        const calls = await regionPassCalibration(true);
+        const warm = calls.filter((call) => call.pass >= 1 && call.bustPermitted !== undefined);
+        expect(warm.length).toBeGreaterThanOrEqual(2);
+        expect(warm.every((call) => call.bustPermitted === false)).toBe(true);
+        expect(warm.every((call) => call.bustReason !== "fold")).toBe(true);
+    });
+
+    it("control: without the region flag the sentinel row is a due fold (not vacuous)", async () => {
+        const calls = await regionPassCalibration(false);
+        // Proves the law measures the flag threading, not a folded-off pass:
+        // unflagged, the sentinel row reads as cached_m1_missing and
+        // protectionFoldWillBust fires (head lane folds it once, on pass 0).
+        expect(calls.some((call) => call.bustReason === "fold")).toBe(true);
+    });
+});
