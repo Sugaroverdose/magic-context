@@ -158,11 +158,7 @@ const REASON_TOKEN = /^[a-z][a-z0-9_]{2,47}(?::[^\s]{1,120})?$/;
  * receipt-violation line. Programmer typos stay caught by the test-time
  * grammar laws and the mint census; production never wedges on spelling.
  */
-export function sanitizeReasonToken(
-    fn: string,
-    sessionId: string | null,
-    reason: string,
-): string {
+export function sanitizeReasonToken(fn: string, sessionId: string | null, reason: string): string {
     if (REASON_TOKEN.test(reason)) return reason;
     const flat = reason.replace(/\s+/g, "_").replace(/`/g, "'");
     const stemMatch = /^[a-z][a-z0-9_]{2,47}/.exec(flat);
