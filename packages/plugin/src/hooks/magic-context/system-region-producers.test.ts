@@ -6,6 +6,23 @@ import { join, relative } from "node:path";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
 
+function walkTs(dir: string, prefix: string): Array<{ rel: string; full: string }> {
+    const out: Array<{ rel: string; full: string }> = [];
+    const walk = (d: string) => {
+        for (const entry of readdirSync(d)) {
+            const full = join(d, entry);
+            if (statSync(full).isDirectory()) {
+                if (!entry.startsWith(".")) walk(full);
+                continue;
+            }
+            if (entry.endsWith(".ts") && !entry.endsWith(".test.ts"))
+                out.push({ rel: prefix + relative(dir, full), full });
+        }
+    };
+    if (statSync(dir).isDirectory()) walk(dir);
+    return out;
+}
+
 function productionTsFiles(): string[] {
     const out: string[] = [];
     const walk = (dir: string) => {
@@ -34,10 +51,17 @@ describe("system-region L0: per-actor producer census", () => {
     const files = productionTsFiles();
     const rel = (f: string) => relative(SRC_ROOT, f);
     const STORE = "features/magic-context/system-region.ts";
+    const ALL_ZONE_FILES: Array<{ rel: string; full: string }> = [
+        ...walkTs(SRC_ROOT, ""),
+        ...walkTs(join(SRC_ROOT, "..", "scripts"), "scripts/"),
+        ...walkTs(join(SRC_ROOT, "..", "..", "cli", "src"), "cli/"),
+        ...walkTs(join(SRC_ROOT, "..", "..", "pi-plugin", "src"), "pi/"),
+    ];
     const filesUsing = (pattern: RegExp) =>
-        files
-            .filter((f) => rel(f) !== STORE && pattern.test(readFileSync(f, "utf8")))
-            .map(rel)
+        ALL_ZONE_FILES.filter(
+            ({ rel, full }) => rel !== STORE && pattern.test(readFileSync(full, "utf8")),
+        )
+            .map(({ rel }) => rel)
             .sort();
 
     it("the rotation executor has exactly one production caller (the fold lane)", () => {
@@ -51,9 +75,11 @@ describe("system-region L0: per-actor producer census", () => {
         // violation class. writeSystemRegion itself stays funnel-internal.
         expect(filesUsing(/writeSystemRegion\(/)).toEqual([]);
         expect(filesUsing(/clearSystemRegion\(/).sort()).toEqual([
+            "cli/commands/migrate-session.ts",
             "features/magic-context/storage-clone.ts",
             "features/magic-context/storage-meta-shared.ts",
             "hooks/magic-context/compaction-off-transition.ts",
+            "scripts/clone-session.ts",
         ]);
         expect(filesUsing(/clearAllSystemRegions\(/)).toEqual([
             "features/magic-context/migrations.ts",
@@ -63,15 +89,39 @@ describe("system-region L0: per-actor producer census", () => {
         ]);
     });
 
-    it("pending_ops is written only by the queue API, the boundary drain, the mode transition, and clone", () => {
-        // Intent may be enqueued (queue/clone/drain); the schedule itself is
-        // read and applied only inside the boundary permission. A new writer
-        // outside these four is an actor with unauthorized schedule authority.
-        expect(filesUsing(/(?:INSERT INTO|DELETE FROM|UPDATE)\s+pending_ops/i).sort()).toEqual([
+    it("pending_ops is written only by the queue API, the boundary drain, the mode transition, clone, and named tools", () => {
+        // F1/F5: the walk covers every zone that can open context.db.
+        // Row-copies of already-queued intent (clone) are queue authority
+        // carriers, not new intent; the schedule itself is read and applied
+        // only inside the boundary permission. A new writer outside this set
+        // is an actor with unauthorized schedule authority.
+        const zoneFiles: Array<{ rel: string; full: string }> = [
+            ...walkTs(SRC_ROOT, ""),
+            ...walkTs(join(SRC_ROOT, "..", "scripts"), "scripts/"),
+            ...walkTs(join(SRC_ROOT, "..", "..", "cli", "src"), "cli/"),
+            ...walkTs(join(SRC_ROOT, "..", "..", "pi-plugin", "src"), "pi/"),
+        ];
+        const writers = zoneFiles
+            .filter(({ full }) =>
+                /(?:INSERT INTO|DELETE FROM|UPDATE)\s+pending_ops|INSERT INTO \$\{quoteIdentifier\(table\)\}/i.test(
+                    readFileSync(full, "utf8"),
+                ),
+            )
+            .map(({ rel }) => rel)
+            .sort();
+        expect(writers).toEqual([
             "features/magic-context/compaction.ts",
             "features/magic-context/storage-clone.ts",
             "features/magic-context/storage-ops.ts",
             "features/magic-context/storage-tags.ts",
+            // Dev benchmark fixture seeder: creates intent for load tests
+            // only; not a runtime writer.
+            "scripts/bench-store-generation-rebase.ts",
+            // F5 — clone semantics are row-copy of already-queued intent, not
+            // new intent: the destination inherits the source's queue and the
+            // boundary drain still decides when drops land (generic
+            // INSERT INTO ${table} copy).
+            "scripts/clone-session.ts",
         ]);
     });
 
@@ -97,55 +147,62 @@ describe("system-region L0: per-actor producer census", () => {
         expect(definers.map(rel)).toEqual(["hooks/magic-context/transform-postprocess-phase.ts"]);
     });
 
-    it("every rotation reason string in production is a name from the §4 enumeration", () => {
-        // A trigger in code but not in the named-boundary list is an L0
-        // violation: it moves bytes outside the schedule's vocabulary.
-        // The names are drawn from the decision function's own tables plus
-        // the fold-lane arms, so a new arm must be added to BOTH lists —
-        // drift reddens this row.
-        const named = new Set([
-            // fold lane (mustMaterialize → region reason):
-            "hard_fold",
-            // decision tables (system-region.ts):
-            "first_render",
-            "missing_markers",
-            "project_memory_epoch",
-            "max_mutation_id",
-            "max_memory_mutation_id",
-            "upgrade_state",
-            "compartment_render_epoch",
-            "mural_enabled",
-            "render_budget_identity",
-            "memory_render_epoch",
-            "rendered_budgets",
-            "max_memory_id",
-            "max_compartment_seq",
-            "profile_version",
-            "project_docs_hash",
-            "force_band",
-            "pending_growth",
-            // provider-eviction / host arms reaching the region reason:
-            "model_change",
-            "system_hash",
-            "ttl_idle",
-            "host_compaction",
-            "reanchor",
-            "published_history",
-            "explicit_flush",
-            "none",
-        ]);
-        const offenders: string[] = [];
-        for (const f of files) {
-            const text = readFileSync(f, "utf8");
-            // Only literals inside a systemRegion block count: the same files
-            // also build head-lane mustMaterialize decision objects whose
-            // reason strings belong to a different vocabulary.
+    it("the §4 rotation-reason list and the code's reason literals are the same set", () => {
+        // F4: the doc list is the single source of truth, parsed at test
+        // time. Drift is red in BOTH directions: a doc entry without a code
+        // arm, or a code literal absent from the doc. No hardcoded mirror of
+        // the vocabulary may live in this test.
+        const docPath = join(
+            SRC_ROOT,
+            "..",
+            "..",
+            "..",
+            "docs",
+            "designs",
+            "frozen-system-region-residency.md",
+        );
+        const doc = readFileSync(docPath, "utf8");
+        const fence = doc.match(/```rotation-reasons\n([^`]+)```/);
+        expect(fence).not.toBeNull();
+        const docReasons = new Set(
+            fence![1]
+                .split("\n")
+                .map((l) => l.trim())
+                .filter(Boolean),
+        );
+
+        // Code side: the decision tables + arms in the store module, the
+        // region-reachable fold arms in mustMaterialize, and the fold-lane
+        // default at the call sites. Scanned from the function bodies, not a
+        // fixed-width window around an identifier.
+        const codeReasons = new Set<string>();
+        const storeText = readFileSync(join(SRC_ROOT, STORE), "utf8");
+        for (const m of storeText.matchAll(/\[\s*"[a-zA-Z]+",\s*"([a-z_]+)"\s*\]/g))
+            codeReasons.add(m[1]);
+        for (const m of storeText.matchAll(/reason:\s*"([a-z_]+)"/g))
+            if (m[1] !== "none") codeReasons.add(m[1]);
+        const injectText = readFileSync(
+            join(SRC_ROOT, "hooks/magic-context/inject-compartments.ts"),
+            "utf8",
+        );
+        const mmStart = injectText.indexOf("export function mustMaterialize(");
+        expect(mmStart).toBeGreaterThan(-1);
+        const mmEndRel = injectText.slice(mmStart + 1).search(/^export (async )?function/m);
+        const mmBody = injectText.slice(mmStart, mmStart + 1 + mmEndRel);
+        for (const m of mmBody.matchAll(/reason:\s*"([a-z_]+)"/g))
+            codeReasons.add(m[1]);
+        // Head-lane-only fold reason: region mode guards around it (`&& !regionMode`).
+        codeReasons.delete("cached_m1_missing");
+        // Call-site fold-lane defaults: reason literals inside the
+        // systemRegion option object passed to the fold.
+        for (const { full } of ALL_ZONE_FILES) {
+            const text = readFileSync(full, "utf8");
+            if (!/systemRegion/.test(text)) continue;
             for (const m of text.matchAll(
-                /systemRegion:\s*\{[\s\S]{0,220}?reason:\s*"([a-z0-9_]+)"/g,
-            )) {
-                if (!named.has(m[1])) offenders.push(`${rel(f)}: ${m[1]}`);
-            }
+                /systemRegion:[\s\S]{0,400}?reason[\s:\S]{0,120}?"([a-z_]+)"/g,
+            ))
+                codeReasons.add(m[1]);
         }
-        expect(offenders).toEqual([]);
+        expect([...docReasons].sort()).toEqual([...codeReasons].sort());
     });
 });

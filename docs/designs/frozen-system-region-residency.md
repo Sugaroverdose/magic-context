@@ -200,7 +200,11 @@ store-backed bytes rotate only at boundaries.
 - Rotation: replacing the stored region bytes with a fresh assembly. A rotation is a cache
   bust at the region start: everything after H is re-cached.
 - Materialization boundary: a pass that is already busting the served prefix for a
-  legitimate reason (§4). Only these passes may rotate.
+  legitimate reason (§4). Only these passes may rotate. The canonical enumeration is the
+  R12 `systemReclaimAllowed` predicate plus scheduler-execute — the promotion caller's
+  `boundaryPermission` in `transform-postprocess-phase.ts` is that enumeration; every
+  `decideSystemRegionRotation` arm additionally requires its own `bustPermission`
+  argument, so the effective permission is the intersection.
 
 ## 3. Frozen region contract
 
@@ -280,6 +284,38 @@ semantics (imports sessions MC does not manage yet, or wraps up when the context
 became smaller) already reach this arm on installs that leave MC's own `compaction` config
 key unset, which is the shipped default here. The RPC command surfaces are untouched by
 this lane.
+
+The canonical rotation-reason vocabulary (F4: this list is the single source of truth;
+`system-region-producers.test.ts` parses it and asserts set-equality with the code's
+reason literals in both directions — a doc entry without a code arm reddens, a code
+literal absent from this doc reddens):
+
+```rotation-reasons
+hard_fold
+first_render
+missing_markers
+region_first_install
+model_change
+system_hash
+ttl_idle
+host_compaction
+project_memory_epoch
+max_mutation_id
+max_memory_mutation_id
+upgrade_state
+project_change
+compartment_render_epoch
+mural_enabled
+render_budget_identity
+memory_render_epoch
+rendered_budgets
+max_memory_id
+max_compartment_seq
+profile_version
+project_docs_hash
+force_band
+pending_growth
+```
 
 ## 5. Rotation markers (the generalized profileVersion pattern)
 
@@ -646,3 +682,47 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   of `pending_ops` writers, `ctx_reduce` enqueue-only through the queue API, one
   bust-permission definition, and every `systemRegion` reason literal drawn from
   §4's enumeration (planted-rogue verified).
+
+## 15. Review round 4 (class-closure, adjudicated F1–F6)
+
+- **F1 (walk-root honesty)** — both censuses walked only `packages/plugin/src`;
+  the CLI migrate command raw-nulled the region column outside the walk. The
+  migrate clear now routes through `clearSystemRegion` (reason
+  `migrate_session`), and both censuses walk the whole production surface:
+  plugin src + scripts, `packages/cli/src`, `packages/pi-plugin/src`
+  (zone-tagged rels), Rust roots unchanged. Honest scope statements: the Rust
+  deny-shapes catch column literals, `ResetValue::Null` reset lists, and
+  staged/format! column names — fully opaque runtime-computed names are beyond
+  regex and the census comment says so.
+- **F2 (evasion shapes)** — planted-rogue-verified: concatenation-assembled
+  `"UPDATE session_meta SET " + cols.join(...)` (offends as dynamic SET),
+  `INSERT INTO session_meta (…, cached_m0_bytes, …) VALUES (…, NULL, …)`
+  (offends outside the funnel's own upsert), Rust reset-list and format!
+  shapes (offend outside the two named reasoned exemptions). The clone
+  script's dynamic meta SET now excludes the region column and clears it via
+  the funnel (sub-law pins both).
+- **F3** — the force-band drain row was silently riding the
+  `emergencyInputSample === 0` arm at 88%; restored to 96% AND given a
+  non-zero sample so the `>= 95` arm is the only thing that can carry it
+  (neutralizing either arm individually: red / green respectively).
+- **F4 (vocabulary single source of truth)** — §4 now carries a
+  ```` ```rotation-reasons ```` fenced list; `system-region-producers.test.ts`
+  parses it at test time and asserts set-equality with the code's reason
+  literals in BOTH directions (scanned from the decision tables, the
+  `decideSystemRegionRotation` arms, the `mustMaterialize` body — head-lane-only
+  `cached_m1_missing` excluded with reason — and the `systemRegion:` call-site
+  blocks). First run caught real drift: `project_change` existed in code but
+  not in the doc. Both drift directions verified red with planted rogues. The
+  reviewer's A3 minor (promotion `boundaryPermission` broader than the prose
+  list) is aligned by pinning §2's boundary definition to the predicate that
+  is the code's authority.
+- **F5 (queue-copy member)** — clone semantics ruled: row-copy of
+  already-queued intent, not new intent — `scripts/clone-session.ts` joins the
+  closed `pending_ops` writer set as a named member (generic table copy);
+  `scripts/bench-store-generation-rebase.ts` joins as the dev-fixture seeder.
+  Boundary drain remains the only applier.
+- **F6** — both status dialogs import `isSystemRegionBytes` instead of
+  hardcoding the sentinel; `markersFromCachedPiRow` and
+  `prepareCachedM0M1PiReplay` refuse region rows (the replay path had been
+  serving `"" + m1` behind `decodeCachedM0`'s refusal). Law with
+  guard-neutralized control.

@@ -9,6 +9,18 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { clearSystemRegion, readSystemRegion } from "../../features/magic-context/system-region";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
+// F1: the walk roots are the whole production surface that can open
+// context.db — the plugin core AND its scripts, the CLI package, and the Pi
+// package (which imports the core). A "production tree" claim must match the
+// walk roots, so the census walks every zone, not just packages/plugin/src.
+const PKG_ROOT = join(SRC_ROOT, "..");
+const REPO_PACKAGES = join(PKG_ROOT, "..");
+const TS_ROOTS: ReadonlyArray<{ dir: string; prefix: string }> = [
+    { dir: SRC_ROOT, prefix: "" },
+    { dir: join(PKG_ROOT, "scripts"), prefix: "scripts/" },
+    { dir: join(REPO_PACKAGES, "cli", "src"), prefix: "cli/" },
+    { dir: join(REPO_PACKAGES, "pi-plugin", "src"), prefix: "pi/" },
+];
 
 const lines: string[] = [];
 mock.module("../../shared/logger", () => ({
@@ -94,6 +106,10 @@ const ALLOWED_DYNAMIC_SET: ReadonlyMap<string, string> = new Map([
         "features/magic-context/storage-schema-helpers.ts",
         "fallback defaults list for non-region columns only (sub-law: may not name cached_m0 columns)",
     ],
+    [
+        "scripts/clone-session.ts",
+        "clone row-copy dispatcher: the region column is excluded from the dynamic SET and reset through the receipted funnel (sub-law)",
+    ],
 ]);
 
 const ALLOWED_RUST: ReadonlyMap<string, string> = new Map([
@@ -158,6 +174,15 @@ function subLawViolation(rel: string, text: string): string | null {
                 : null;
         case "features/magic-context/storage-schema-helpers.ts":
             return /cached_m0/.test(text) ? "names cached_m0 columns" : null;
+        case "scripts/clone-session.ts": {
+            if (!/column\.name !== "cached_m0_bytes"/.test(text))
+                return "region column not excluded from the dynamic clone SET";
+            if (!/clearSystemRegion\(db, destinationSessionId, "scripts_clone"\)/.test(text))
+                return "clone does not reset the destination region through the funnel";
+            if (/UPDATE\s+session_meta\s+SET[\s\S]{0,400}?cached_m0_bytes\s*=/.test(text))
+                return "dynamic SET could assign the region column";
+            return null;
+        }
         default:
             return `dynamic-SET file ${rel} has no sub-law`;
     }
@@ -177,10 +202,14 @@ function collectTsFiles(dir: string, out: string[]): void {
 describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
     it("the production tree has no raw cached_m0_bytes eraser outside the sanctioned funnel", () => {
         const offenders: string[] = [];
-        const tsFiles: string[] = [];
-        collectTsFiles(SRC_ROOT, tsFiles);
-        for (const full of tsFiles) {
-            const rel = relative(SRC_ROOT, full);
+        const tsFiles: Array<{ rel: string; full: string }> = [];
+        for (const { dir, prefix } of TS_ROOTS) {
+            if (!statSync(dir).isDirectory()) continue;
+            const out: string[] = [];
+            collectTsFiles(dir, out);
+            for (const full of out) tsFiles.push({ rel: prefix + relative(dir, full), full });
+        }
+        for (const { rel, full } of tsFiles) {
             const text = readFileSync(full, "utf8");
             if (!ALLOWED_WRITERS.has(rel)) {
                 if (/cached_m0_bytes\s*=\s*(NULL|\?|[:@$]\w|excluded\.)/i.test(text)) {
@@ -189,8 +218,25 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
                 if (/REPLACE\s+INTO\s+session_meta/i.test(text)) {
                     offenders.push(`${rel} (REPLACE nulls the row)`);
                 }
+                // F2(b): an INSERT (or upsert) whose session_meta column list
+                // mentions the region column writes it implicitly — the same
+                // erase with no `=` anywhere. Only the funnel's own upsert may.
+                if (
+                    /INSERT\s+(?:OR\s+REPLACE\s+)?INTO\s+session_meta[\s\S]{0,500}?cached_m0_bytes/i.test(
+                        text,
+                    )
+                ) {
+                    offenders.push(`${rel} (INSERT column list names the region)`);
+                }
             }
-            if (/session_meta/i.test(text) && /SET\s+\$\{/.test(text)) {
+            // F2(a): a SET clause assembled by concatenation or join is a
+            // dynamic SET wearing a static prefix; treat every form as such.
+            const dynamicSet =
+                /UPDATE\s+session_meta\s+SET\s*\$\{/.test(text) ||
+                /UPDATE\s+session_meta\s+SET\s*["'`]\s*\+/.test(text) ||
+                /UPDATE\s+session_meta\s+SET["'`]?\s*\.join\(/.test(text) ||
+                /["'`]UPDATE session_meta SET ["'`]?\s*\+\s*\w+/.test(text);
+            if (dynamicSet) {
                 if (!ALLOWED_DYNAMIC_SET.has(rel)) offenders.push(`${rel} (dynamic SET, unnamed)`);
                 else {
                     const violation = subLawViolation(rel, text);
@@ -223,12 +269,28 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
                     if (!entry.endsWith(".rs") || entry.endsWith("_tests.rs")) continue;
                     const rel = relative(root, full);
                     if (allowed.has(rel)) continue;
-                    if (
-                        /"cached_m0_bytes"|cached_m0_bytes\s*=\s*NULL/i.test(
-                            readFileSync(full, "utf8"),
+                    const rust = readFileSync(full, "utf8");
+                    // F2(c): the literal is only one form. A reset-list pair
+                    // (col, ResetValue::Null) or a format!/concatenated column
+                    // name against session_meta is the same erase with the
+                    // name moved off the SQL string; both offend. Fully
+                    // opaque runtime-computed column names are beyond any
+                    // regex census — this zone's claim is deliberately
+                    // narrowed to shapes that name or stage the column.
+                    if (/"cached_m0_bytes"|cached_m0_bytes\s*=\s*NULL/i.test(rust)) {
+                        offenders.push(`${rel} (rust column writer, root=${root})`);
+                    } else if (
+                        /ResetValue::Null/.test(rust) &&
+                        /session_meta|cached_m0/i.test(rust)
+                    ) {
+                        offenders.push(`${rel} (rust reset list, root=${root})`);
+                    } else if (
+                        /session_meta/i.test(rust) &&
+                        /format!\s*\([^)]*cached_m0|\+\s*=\s*[^;]*cached_m0|push_str\(\s*"cached_m0/i.test(
+                            rust,
                         )
                     ) {
-                        offenders.push(`${rel} (rust column writer, root=${root})`);
+                        offenders.push(`${rel} (rust dynamic column name, root=${root})`);
                     }
                 }
             };
