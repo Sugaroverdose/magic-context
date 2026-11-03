@@ -1,7 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
@@ -214,6 +214,58 @@ describe("system-region L0: per-actor producer census", () => {
             if (!/cached_m0_last_baseline_end_message_id/.test(readFileSync(full, "utf8")))
                 continue;
             if (!ALLOWED.has(rel)) offenders.push(rel);
+        }
+        // K2: repo-standard roots, matching the F1-adjudicated eraser census
+        // (crates/ + dashboard src-tauri walk + repo-root scripts/). Rust
+        // resets land on the same column; the dashboard reader names it too.
+        const REPO = join(SRC_ROOT, "..", "..", "..");
+        const EXTRA: Array<{ root: string; prefix: string; allowed: ReadonlySet<string> }> = [
+            {
+                root: join(REPO, "crates"),
+                prefix: "crates/",
+                allowed: new Set([
+                    // reset-list writer; adjudicated never-active on the Rust
+                    // lane — exemption imported from the eraser census.
+                    "crates/mc-module/src/single_store_repair.rs",
+                ]),
+            },
+            {
+                root: join(REPO, "packages", "dashboard", "src-tauri", "src"),
+                prefix: "tauri/",
+                // dashboard reader, guarded (eraser-census member).
+                allowed: new Set(["tauri/db.rs"]),
+            },
+            {
+                root: join(REPO, "scripts"),
+                prefix: "scripts/",
+                allowed: new Set([
+                    // read-only host probe (readonly DB handle).
+                    "scripts/b2-drill/repair-history-host-probe.ts",
+                ]),
+            },
+        ];
+        for (const { root, prefix, allowed } of EXTRA) {
+            if (!existsSync(root)) continue;
+            const stack = [root];
+            while (stack.length) {
+                const dir = stack.pop()!;
+                for (const entry of readdirSync(dir)) {
+                    const full = join(dir, entry);
+                    if (statSync(full).isDirectory()) {
+                        stack.push(full);
+                        continue;
+                    }
+                    if (!/\.(ts|rs)$/.test(entry) || entry.endsWith("_tests.rs")) continue;
+                    const rel = prefix + full.slice(root.length + 1);
+                    if (
+                        !readFileSync(full, "utf8").includes(
+                            "cached_m0_last_baseline_end_message_id",
+                        )
+                    )
+                        continue;
+                    if (!allowed.has(rel)) offenders.push(rel);
+                }
+            }
         }
         expect(offenders).toEqual([]);
     });
