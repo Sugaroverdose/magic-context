@@ -171,6 +171,53 @@ describe("system-region L0: per-actor producer census", () => {
         expect(definers.map(rel)).toEqual(["hooks/magic-context/transform-postprocess-phase.ts"]);
     });
 
+    it("the head-era baseline-boundary column has only named readers and writers (J2c)", () => {
+        // Property enforcement surface for "no path derives wire-affecting
+        // decisions from region rows unguarded": every production file that
+        // touches cached_m0_last_baseline_end_message_id must be a named
+        // member with its discrimination stated. A new reader that skips
+        // region discrimination fails here, not in production.
+        const ALLOWED: ReadonlyMap<string, string> = new Map([
+            [
+                "features/magic-context/system-region.ts",
+                "write-site null (direct installs; column-safe probe)",
+            ],
+            ["features/magic-context/storage-meta-shared.ts", "central invalidation clears list"],
+            [
+                "hooks/magic-context/inject-compartments.ts",
+                "head-lane writer (fold UPDATE) + replay/trim readers",
+            ],
+            [
+                "hooks/magic-context/history-boundary-repair.ts",
+                "reader with isSystemRegionBytes discrimination (A2)",
+            ],
+            [
+                "v2/hooks/context.ts",
+                "v2 restore-range hint; named consumer, never serves region bytes",
+            ],
+            ["features/magic-context/migrations.ts", "schema"],
+            ["features/magic-context/storage-db.ts", "schema/ensureColumn"],
+            [
+                "pi/inject-compartments-pi.ts",
+                "Pi trim reader with sentinel refusal (H3) + passSnapshot mapper",
+            ],
+        ]);
+        const offenders: string[] = [];
+        const files = [
+            ...walkTs(SRC_ROOT, ""),
+            ...walkTs(join(SRC_ROOT, "..", "scripts"), "scripts/"),
+            ...walkTs(join(SRC_ROOT, "..", "..", "cli", "src"), "cli/"),
+            ...walkTs(join(SRC_ROOT, "..", "..", "pi-plugin", "src"), "pi/"),
+        ];
+        for (const { rel, full } of files) {
+            if (rel.endsWith(".test.ts")) continue;
+            if (!/cached_m0_last_baseline_end_message_id/.test(readFileSync(full, "utf8")))
+                continue;
+            if (!ALLOWED.has(rel)) offenders.push(rel);
+        }
+        expect(offenders).toEqual([]);
+    });
+
     it("no region rotation reason mints from a raw store-read string (J1)", () => {
         // Property: every \${...} interpolation inside a reason template on
         // the rotation mint surface is either sanitizeReceiptOperand(...) or
@@ -253,8 +300,7 @@ describe("system-region L0: per-actor producer census", () => {
         // G5 blind classes:
         // (1) template-literal composite reasons match on the STEM before
         //     `:` or `(` (render_config:budget(...));
-        for (const m of mmBody.matchAll(/reason:\s*`([a-z_]+)(?::|[(:])/g))
-            codeReasons.add(m[1]);
+        for (const m of mmBody.matchAll(/reason:\s*`([a-z_]+)(?::|[(:])/g)) codeReasons.add(m[1]);
         // (2) variable-passed reasons: captured by name and resolved through
         //     this explicit map — the producer's own return literals are not
         //     regex-guaranteed reachable, so an unmapped variable name fails
