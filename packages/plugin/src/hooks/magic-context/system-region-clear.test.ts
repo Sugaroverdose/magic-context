@@ -26,6 +26,9 @@ const TS_ROOTS: ReadonlyArray<{ dir: string; prefix: string }> = [
     { dir: join(PKG_ROOT, "scripts"), prefix: "scripts/" },
     { dir: join(REPO_PACKAGES, "cli", "src"), prefix: "cli/" },
     { dir: join(REPO_PACKAGES, "pi-plugin", "src"), prefix: "pi/" },
+    // P1 (round 11): #2665 names the runtime scripts tree too — it carries
+    // real TS (benchmarks, probes, generators) that can open context.db.
+    { dir: join(REPO_PACKAGES, "pi-plugin", "scripts"), prefix: "pi-scripts/" },
 ];
 
 const lines: string[] = [];
@@ -265,7 +268,9 @@ function collectTsFiles(dir: string, out: string[]): void {
             if (!entry.startsWith(".")) collectTsFiles(full, out);
             continue;
         }
-        if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) out.push(full);
+        // Round 11 (P1b): the widened pi-scripts root carries a real .cjs
+        // probe — runtime-writable code is in scope regardless of extension.
+        if (/\.(ts|mjs|cjs)$/.test(entry) && !entry.endsWith(".test.ts")) out.push(full);
     }
 }
 

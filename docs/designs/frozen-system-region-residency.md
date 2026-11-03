@@ -1018,9 +1018,13 @@ not ceremony). Rust/v2/Pi/compaction-off keep heads as the **sole
 implementation** on those lanes (capability branch, not a fallback).
 Census law (N1-hardened, round 10): no production file matches
 `.system_region` (property access) or `["system_region"]` / `['system_region']`
-(bracket access) across plugin/src, pi-plugin/src, cli/src, plugin/scripts,
-dashboard/src, dashboard/src-tauri/src and crates/ (`_tests.rs` skipped) —
-same roots as the F1/#2665 eraser census; named-reader exemption list empty
-by design; planted-rogue control covers both shapes. Neither shape matches
+(bracket access, any quote shape incl. backticks) across plugin/src,
+pi-plugin/src, cli/src, plugin/scripts, pi-plugin/scripts, dashboard/src,
+dashboard/src-tauri/src and crates/ (`_tests.rs` skipped) — the F1/#2665
+eraser roots, augmented: the flag census is a superset (adds dashboard/src,
+dashboard/src-tauri/src, crates/); the eraser census gained pi-plugin/scripts
+in the same pass. Named-reader exemption list empty by design; planted-rogue
+control covers every denied shape, with one plant inside the pi-scripts root
+proving the added root is walked. Neither shape matches
 the predicate module's rationale comment (deliberate: it documents the dead
 key).

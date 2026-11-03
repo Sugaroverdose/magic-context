@@ -433,7 +433,7 @@ describe("system-region capability lane (flag deletion)", () => {
     // language touching the shared store. No wholesale directory exemptions;
     // a sanctioned reader needs a named member (list is empty by design —
     // the key is deleted).
-    const FLAG_READ = /\.system_region\b|\[['"]system_region['"]\]/;
+    const FLAG_READ = /\.system_region\b|\[['"]system_region['"]\]|\[`system_region`\]/;
     const PKG = join(SRC_PLUGIN, "..", "..");
     const CENSUS_TS_ROOTS: Array<[string, string]> = [
         [SRC_PLUGIN, "plugin/"],
@@ -441,6 +441,7 @@ describe("system-region capability lane (flag deletion)", () => {
         [join(PKG, "cli", "src"), "cli/"],
         [join(SRC_PLUGIN, "..", "scripts"), "plugin-scripts/"],
         [join(PKG, "dashboard", "src"), "dashboard/"],
+        [join(PKG, "pi-plugin", "scripts"), "pi-scripts/"],
     ];
     const CENSUS_RS_ROOTS = [join(PKG, "..", "crates"), join(PKG, "dashboard", "src-tauri", "src")];
     // Named exemptions for sanctioned readers: none. Add a member only with
@@ -467,7 +468,7 @@ describe("system-region capability lane (flag deletion)", () => {
         const offenders: string[] = [];
         const files = [
             ...CENSUS_TS_ROOTS.flatMap(([root, prefix]) =>
-                walkProdAll(root, prefix, [".ts", ".tsx", ".mjs"]),
+                walkProdAll(root, prefix, [".ts", ".tsx", ".mjs", ".cjs"]),
             ),
             ...CENSUS_RS_ROOTS.flatMap((root) =>
                 statSync(root).isDirectory()
@@ -487,7 +488,7 @@ describe("system-region capability lane (flag deletion)", () => {
     });
 
     it("planted-rogue control: each denied shape inside a covered root reddens the census", () => {
-        const plants: Array<{ name: string; body: string }> = [
+        const plants: Array<{ name: string; body: string; dir?: string }> = [
             {
                 name: "dot-access rogue (plugin/src)",
                 body: "export const v = (c: { system_region?: unknown }) => c.system_region;\n",
@@ -496,12 +497,23 @@ describe("system-region capability lane (flag deletion)", () => {
                 name: "bracket-access rogue (plugin/src)",
                 body: 'export const v = (c: Record<string, unknown>) => c["system_region"];\n',
             },
+            {
+                name: "backtick-bracket rogue (plugin/src)",
+                body: "export const v = (c: Record<string, unknown>) => c[`system_region`];\n",
+            },
+            {
+                name: "bracket-access rogue (pi-plugin/scripts)",
+                body: 'export const v = (c: Record<string, unknown>) => c["system_region"];\n',
+                dir: join(PKG, "pi-plugin", "scripts"),
+            },
         ];
         for (const plant of plants) {
-            const target = join(
-                SRC_PLUGIN,
-                `__census-rogue-${plant.name.startsWith("dot") ? "dot" : "bracket"}.ts`,
-            );
+            const kind = plant.name.startsWith("dot")
+                ? "dot"
+                : plant.name.startsWith("backtick")
+                  ? "backtick"
+                  : "bracket";
+            const target = join(plant.dir ?? SRC_PLUGIN, `__census-rogue-${kind}.ts`);
             writeFileSync(target, plant.body);
             try {
                 const found = censusOffenders();
