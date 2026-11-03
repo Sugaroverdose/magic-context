@@ -207,9 +207,18 @@ describe("system-region wiring: rotation promotion (L3/L4)", () => {
         expect(
             regionRotationPromotion({ ...base, currentMarkers: live({ projectMemoryEpoch: 2 }) }),
         ).toEqual({ promote: true, reason: "project_memory_epoch" });
-        // Deliberate non-triggers (m[1]-lane fields) stay non-triggers.
+        // m[1]-delta fields promote on the boundary: region mode has no m[1],
+        // so these are the fields whose change re-rendered m[1] on bust passes.
         expect(
             regionRotationPromotion({ ...base, currentMarkers: live({ maxMemoryId: 13 }) }),
+        ).toEqual({ promote: true, reason: "max_memory_id" });
+        // Without the boundary they never promote (ride-only, L4).
+        expect(
+            regionRotationPromotion({
+                ...base,
+                boundaryPermission: false,
+                currentMarkers: live({ maxMemoryId: 13 }),
+            }),
         ).toEqual({ promote: false, reason: null });
     });
 
