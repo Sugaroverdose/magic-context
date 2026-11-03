@@ -62,7 +62,6 @@ import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import { TOOL_RELEASED_SENTINEL } from "../hooks/magic-context/sentinel";
 import {
     byteSize,
-    prependTag,
     stripTagPrefix,
     stripWellFormedLeadingTagPrefix,
 } from "../hooks/magic-context/tag-content-primitives";

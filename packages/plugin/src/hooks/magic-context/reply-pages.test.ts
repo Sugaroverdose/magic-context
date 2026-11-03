@@ -56,7 +56,7 @@ describe("module reply paging", () => {
     it("verifies the digest even when a same-length corruption preserves page metadata", async () => {
         const pages = pagesFor(JSON.stringify({ text: "x".repeat(150_000) }));
         const corrupt = structuredClone(pages);
-        corrupt[1]!.reply_page.data = "y" + corrupt[1]!.reply_page.data.slice(1);
+        corrupt[1]!.reply_page.data = `y${corrupt[1]!.reply_page.data.slice(1)}`;
         await expect(
             assembleReplyPages(corrupt[0], async (_id, index) => corrupt[index]),
         ).rejects.toThrow("Incomplete or invalid");

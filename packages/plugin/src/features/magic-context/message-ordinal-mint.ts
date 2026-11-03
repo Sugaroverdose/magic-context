@@ -38,11 +38,11 @@ export function createHostOrdinalMint(mcDb: Database, sessionId: string): Ordina
             ordinalByMessageId.set(row.id, row.ordinal);
         }
         // Wire callID -> owner message ordinal, from the registry: tool rows
-// key on the wire call id and carry `tool_owner_message_id`, covered by
-// idx_tags_tool_composite — an index range read. The host part scan
-// (json_extract over every session part, ~1.6 s at 64K parts) is not
-// needed: the resolver only ever asks for call ids it resolved through
-// the registry, and every registered call is here.
+        // key on the wire call id and carry `tool_owner_message_id`, covered by
+        // idx_tags_tool_composite — an index range read. The host part scan
+        // (json_extract over every session part, ~1.6 s at 64K parts) is not
+        // needed: the resolver only ever asks for call ids it resolved through
+        // the registry, and every registered call is here.
         const ordinalByCallId = new Map<string, number>();
         const toolRows = mcDb
             .prepare(
@@ -63,7 +63,10 @@ export function createHostOrdinalMint(mcDb: Database, sessionId: string): Ordina
             .all(sessionId) as unknown as { id: string }[];
         for (const row of userRows) {
             const ordinal = ordinalByMessageId.get(row.id);
-            if (typeof ordinal === "number" && (latestUserOrdinal === undefined || ordinal > latestUserOrdinal)) {
+            if (
+                typeof ordinal === "number" &&
+                (latestUserOrdinal === undefined || ordinal > latestUserOrdinal)
+            ) {
                 latestUserOrdinal = ordinal;
             }
         }

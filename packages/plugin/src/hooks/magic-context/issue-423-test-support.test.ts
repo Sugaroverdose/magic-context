@@ -140,9 +140,8 @@ export function registerIssue423Tests(
                         ),
                 ).toBe(true);
                 expect(
-                    tools.filter(
-                        (tag) => tag.status === "dropped" && tag.toolName === "bash",
-                    ).length,
+                    tools.filter((tag) => tag.status === "dropped" && tag.toolName === "bash")
+                        .length,
                 ).toBeGreaterThan(0);
             } finally {
                 closeQuietly(db);

@@ -195,7 +195,12 @@ export function createToolExecuteBeforeHook(options: FpeResolveDepsOption = {}) 
                     // SAME args object it handed us in a fresh { args } wrapper, so
                     // the replacement must mutate that object in place. Replacing
                     // output.args is read by nobody.
-                    if (args && typeof args === "object" && original && typeof original === "object") {
+                    if (
+                        args &&
+                        typeof args === "object" &&
+                        original &&
+                        typeof original === "object"
+                    ) {
                         const target = args as Record<string, unknown>;
                         for (const key of Object.keys(target)) delete target[key];
                         Object.assign(target, original as Record<string, unknown>);

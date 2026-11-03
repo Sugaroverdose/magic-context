@@ -124,7 +124,7 @@ export function addFillers(token: string, key: bigint): string {
 }
 
 export function addChannelMarks(filled: string, key: bigint): string {
-    const seed = fnv1a(filled + "sp" + key.toString(16));
+    const seed = fnv1a(`${filled}sp${key.toString(16)}`);
     let state = seed;
     const positions: number[] = [];
     for (let d = 0; d < 2; d++) {

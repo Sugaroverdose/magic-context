@@ -22,8 +22,10 @@ describe("ctx-reduce constants", () => {
 
         it("teaches the copy-handle grammar, never numeric stamps", () => {
             expect(CTX_REDUCE_DESCRIPTION).toContain("ctx_handles");
-            expect(CTX_REDUCE_DESCRIPTION).toContain("joined by \`..\`");
-            expect(CTX_REDUCE_DESCRIPTION).toContain("has not served its purpose until the user responds");
+            expect(CTX_REDUCE_DESCRIPTION).toContain("joined by `..`");
+            expect(CTX_REDUCE_DESCRIPTION).toContain(
+                "has not served its purpose until the user responds",
+            );
             expect(CTX_REDUCE_DESCRIPTION).toContain("ctx_expand(message=N)");
             expect(CTX_REDUCE_DESCRIPTION).toContain("copied");
             expect(CTX_REDUCE_DESCRIPTION).toContain("slot for slot");

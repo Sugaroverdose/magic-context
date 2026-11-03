@@ -300,9 +300,7 @@ describe("FPE v4 segmentation channel", () => {
 
     it("v1-era gap-space renders decode under v4: strip is the boundary, not a permission list", () => {
         // test-local v1 law: pool-5 glyphs + space as competing filler slots
-        const V1 = [0xb7, 0x2219, 0x2e31, 0x2023, 0x2022, 0x20].map((c) =>
-            String.fromCodePoint(c),
-        );
+        const V1 = [0xb7, 0x2219, 0x2e31, 0x2023, 0x2022, 0x20].map((c) => String.fromCodePoint(c));
         const fnv = (s: string): bigint => {
             let h = 2166136261n;
             for (let i = 0; i < s.length; i++) {

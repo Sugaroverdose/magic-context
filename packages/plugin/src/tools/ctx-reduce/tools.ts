@@ -8,7 +8,6 @@ import {
 import { parseRangeString } from "../../features/magic-context/range-parser";
 import {
     type OrdinalMint,
-    ordinalForRegistryKey,
     type ReduceInputOutcome,
     resolveBulkDefault,
     resolveHandles,

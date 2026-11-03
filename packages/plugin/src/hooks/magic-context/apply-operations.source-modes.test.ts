@@ -17,12 +17,7 @@ import { createTagger } from "../../features/magic-context/tagger";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { deriveKey, renderDropToken } from "./fpe";
 import { isReleasedCarrier } from "./fpe-resolve";
-import {
-    applyFlushedStatuses,
-    applyPendingOperations,
-    type MessageLike,
-    tagMessages,
-} from "./transform-operations";
+import { applyPendingOperations, type MessageLike, tagMessages } from "./transform-operations";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
