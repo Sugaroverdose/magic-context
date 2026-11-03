@@ -1197,7 +1197,9 @@ export default async function (pi: ExtensionAPI): Promise<void> {
 	if (bootConfig.config.system_region?.enabled === true) {
 		// Honest surface: the frozen-region store is OpenCode-1-TS-only; this
 		// lane keeps serving synthetic heads until the port lands.
-		warn("config: system_region.enabled is ignored on the Pi/OMP lane (heads kept)");
+		warn(
+			"config: system_region.enabled is ignored on the Pi/OMP lane (heads kept)",
+		);
 	}
 	if (!bootConfig.config.enabled) {
 		info("plugin DISABLED via config (enabled: false) — skipping registration");
