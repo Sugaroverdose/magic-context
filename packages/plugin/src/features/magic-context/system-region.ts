@@ -107,11 +107,15 @@ export function writeSystemRegion(db: Database, sessionId: string, region: strin
     }
     // H3 write-site property: installing a region retires the head-era
     // baseline boundary — no Pi path may derive trim decisions from a
-    // boundary that no longer describes the served bytes.
+    // boundary that no longer describes the served bytes. Column-safe: the
+    // store writer must work on minimal pre-boundary schemas (R11 fixtures).
+    const hasBoundary = (
+        db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>
+    ).some((c) => c.name === "cached_m0_last_baseline_end_message_id");
     db.prepare(
         "INSERT INTO session_meta (session_id, cached_m0_bytes) VALUES (?, ?) " +
-            "ON CONFLICT(session_id) DO UPDATE SET cached_m0_bytes = excluded.cached_m0_bytes, " +
-            "cached_m0_last_baseline_end_message_id = NULL",
+            "ON CONFLICT(session_id) DO UPDATE SET cached_m0_bytes = excluded.cached_m0_bytes" +
+            (hasBoundary ? ", cached_m0_last_baseline_end_message_id = NULL" : ""),
     ).run(sessionId, encodeSystemRegionRow(region));
     return true;
 }
