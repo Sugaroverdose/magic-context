@@ -2270,6 +2270,10 @@ function markersFromCachedPiRow(
 	compartmentsForNormalization: readonly PiCompartment[],
 ): PiM0SnapshotMarkers | null {
 	if (!row.cached_m0_bytes) return null;
+	// Same cross-lane discipline as decodeCachedM0: a frozen-system-region row
+	// is not a head snapshot, so its marker columns must not satisfy CAS or
+	// marker reads (F6).
+	if (isSystemRegionBytes(row.cached_m0_bytes)) return null;
 	const cachedUpgradeIdentity = decodeCachedM0UpgradeIdentity(
 		row.cached_m0_upgrade_state,
 	);
@@ -2664,6 +2668,10 @@ export function prepareCachedM0M1PiReplay(
 			? readCachedPiM0M1Row(db, state.sessionId)
 			: rowOverride;
 	if (!cached?.cached_m0_bytes || !cached.cached_m1_bytes) return undefined;
+	// A frozen-system-region row is not a head snapshot: replaying it would
+	// serve "" + m1 (decodeCachedM0 refuses the bytes). Decline the replay;
+	// the fold path regenerates a real head cache (F6).
+	if (isSystemRegionBytes(cached.cached_m0_bytes)) return undefined;
 	const snapshot: PiM0M1State = {
 		...state,
 		freezePrefixForPass: true,
