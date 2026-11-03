@@ -112,7 +112,23 @@ export function writeSystemRegion(db: Database, sessionId: string, region: strin
     return true;
 }
 
+/**
+ * Funnel-entry reason guard (G2b / L7): receipts are the only trace of a
+ * byte move, and the per-call census compares reason tokens at test time.
+ * Reasons are internal literals — a malformed token is a programmer error,
+ * so it fails loud at the entry instead of logging an uncensusable string.
+ */
+const REASON_TOKEN = /^[a-z][a-z0-9_]{2,47}$/;
+function requireReasonToken(fn: string, reason: string): void {
+    if (!REASON_TOKEN.test(reason)) {
+        throw new Error(
+            `system-region ${fn}: malformed receipt reason ${JSON.stringify(reason)} (expected [a-z][a-z0-9_]{2,47})`,
+        );
+    }
+}
+
 export function clearSystemRegion(db: Database, sessionId: string, reason: string): void {
+    requireReasonToken("clearSystemRegion", reason);
     // Destructive arms leave receipts, same law as the LKG store — and only
     // for actual events: clearing an absent region is not an event.
     const result = db
@@ -132,6 +148,7 @@ export function clearSystemRegion(db: Database, sessionId: string, reason: strin
  * the receipt); one receipt with the true affected count.
  */
 export function clearAllSystemRegions(db: Database, reason: string): number {
+    requireReasonToken("clearAllSystemRegions", reason);
     // Column-safe: pre-region schemas have nothing to clear and no column to
     // name (migration fixtures legitimately start below its introduction).
     const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>;
@@ -149,6 +166,7 @@ export function clearSystemRegionsByProjectIdentity(
     identities: string[],
     reason: string,
 ): number {
+    requireReasonToken("clearSystemRegionsByProjectIdentity", reason);
     if (identities.length === 0) return 0;
     const placeholders = identities.map(() => "?").join(", ");
     const result = db
@@ -281,6 +299,7 @@ export function executeSystemRegionRotation(
     capturedMarkers: RegionMarkers,
     persist?: (regionBlob: Buffer, markers: RegionMarkers) => void,
 ): boolean {
+    requireReasonToken("executeSystemRegionRotation", reason);
     // Same admission as the store's own writer: empty and sentinel-forging
     // payloads are refused on every path, persist-callback included.
     const valid =
