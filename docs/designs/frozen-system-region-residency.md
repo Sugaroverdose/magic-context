@@ -48,6 +48,21 @@ obsoletes, and the law test that attacks the mechanism. If a law ever needs a bo
 guard instead of a structure, that is a design smell to raise in §12, not to patch
 silently.
 
+- **L0 — Single writer, schedule-only (owner law, 2026-11-03).** Exactly one mechanism —
+  the boundary transaction — may change bytes MC contributes to the served wire. Every
+  other subsystem holds no write authority and may only enqueue intent (queue/marker row →
+  named boundary → transaction). The sole synchronous exception is model-issued stamp
+  intent (`ctx_reduce` → `pending_ops` row; the drop still lands only through the
+  boundary's queue drain). Foreign byte-zones — the host-composed system region — are
+  OUTSIDE the contract by design: their rotation is a content event or a foreign defect,
+  and MC's duty is detect, name in a receipt, re-anchor (the watcher's H arm). Structure:
+  the per-actor producer census (`system-region-producers.test.ts`) enumerates every
+  subsystem able to influence served bytes and pins each row's legal path; a direct write
+  outside a named actor fails CI (same form as the region-column sole-writer census). A
+  rotation trigger present in code but absent from §4's named-boundary list is an L0
+  violation. Obsoletes: the whole "which lane may mutate" argument class. Tests: the
+  producer-census rows + the carried column census + the single-bust-permission pair
+  (§10 row 5).
 - **L1 — Boot is replay, never re-derivation.** Stored region bytes are served verbatim;
   the serve path performs zero store reads beyond the session meta the pass already
   loaded. Structure: serve is `decodeSystemRegionRow(sessionMetaEarly.cachedM0Bytes)` —
@@ -66,10 +81,18 @@ silently.
   rotation/hash lines).
 - **L3 — Movement happens only inside a named rotation transaction.** Structure: every
   region byte change flows through `executeSystemRegionRotation`, whose reason is a
-  required parameter drawn from the enumerated set (re-anchor, hardFold, force band,
-  explicit flush, published history, pending-growth cap) — an anonymous bust is not
-  type-expressible. Obsoletes: scattered bust guards. Tests: rotation rows assert the
-  receipt names its reason; inert-gate negative controls prove each decision arm
+  required parameter drawn from the enumerated set — provider-eviction re-anchor
+  (model/system-hash/TTL/host-compaction), the content arms (`project_memory_epoch`,
+  `max_mutation_id`, `max_memory_mutation_id`, `upgrade_state`, `compartment_render_epoch`,
+  `mural_enabled`, `render_budget_identity`, `memory_render_epoch`, `rendered_budgets`),
+  the bust-gated delta-trigger class (`max_memory_id`, `max_compartment_seq`,
+  `profile_version`, `project_docs_hash` — rotation triggers here, m[1] refreshers on
+  the head lane), and the pressure arms (`force_band`, `pending_growth`); the install
+  arms (`first_render`, `missing_markers`) belong to the fold lane. Every arm of the
+  decision requires the single per-pass bust permission (A3) — an anonymous bust, or a
+  rotation claimed on a non-busting pass, is not type-expressible. Obsoletes: scattered
+  bust guards. Tests: rotation rows assert the receipt names its reason and that no arm
+  rotates without the permission; inert-gate negative controls prove each decision arm
   discriminates.
 - **L4 — When the region does not rotate, nothing trims, adds, or re-renders into it.**
   Structure: the serve path is read-only by construction (no mutation API exists for
@@ -217,14 +240,16 @@ Provider-side eviction, the cache is already dead, rotation is free:
 - idle past TTL, self-consuming as today (`:1866-1879`),
 - host compaction (`:1886-1892`).
 
-Genuine content or config change, the region bytes must change anyway:
-
-- first render (no stored region yet; covers the upgrade boot: heads vanishing from the
-  array is itself a bust, so the first rotation is free),
-- structural compartment mutations (`max_mutation_id`, `:1947-1949`),
-- `project_memory_epoch` (dashboard or external mutation, `:1909-1924`),
-- render-config changes: `compartment_render_epoch`, `render_config:*` budget/mural arms
-  (`:1790-1826`).
+Genuine content or config change, the region bytes must change anyway — the content arms
+of `decideSystemRegionRotation` (`CONTENT_TRIGGER_FIELDS`, system-region.ts):
+`projectMemoryEpoch`, `maxMutationId` (structural compartment mutations),
+`maxMemoryMutationId` (non-additive memory mutations), `upgradeState`,
+`compartmentRenderEpoch`, `muralEnabled`, `renderBudgetIdentity`, `memoryRenderEpoch`,
+`renderedBudgets`. The install arms (`first_render`, `missing_markers`) are decided by
+the fold lane (`mustMaterialize` `region_first_install`), never by the promotion
+decision: every arm of `decideSystemRegionRotation` is bust-permission-gated (A3) — a
+rotate=true verdict on a non-busting pass is not expressible, so a widened caller cannot
+license a byte move that the pass has not already paid for.
 
 Pressure backstop:
 
@@ -236,10 +261,16 @@ Pressure backstop:
   or the large memory-mutation count, rotation is due; it lands on the next pass that is
   busting anyway, and the force band is the guarantee it eventually lands.
 
-Explicit non-triggers, preserved deliberately (they are marker moves, not boundaries): a new
-compartment sequence, `project_user_profile_version`, `maxMemoryId`, project-docs hash drift,
-tool-set hash (`:1853-1856,1925-1946`). They mark the region rotation-pending and change no
-bytes this pass.
+The four head-lane m[1]-delta fields — a new compartment sequence,
+`project_user_profile_version`, `maxMemoryId`, project-docs hash drift — are deliberate
+non-triggers of the m[0] HARD fold on the HEAD lane (they re-rendered m[1] there). In
+region mode there is no m[1] to ride, so they keep their exact role by changing shape:
+they are the bust-permission-gated DELTA triggers (`DELTA_TRIGGER_FIELDS`) — they rotate
+the region on a pass that is already busting, never originate a bust themselves, and
+without them new memories, compartments, profile additions, and docs edits would never
+surface at all (the round-2 discovery). Their freshness ceiling is the pending-growth
+backstop and the force band. What stays a true non-trigger everywhere: the tool-set hash
+(process-global, false positives; `:1853-1856`).
 
 No new user-facing rotation trigger is designed. The operator's rotation trigger is
 `/ctx-wrapup` (owner ruling): wrapup publishes history, and the published-history signal
@@ -256,8 +287,12 @@ Today the per-panel store-version watermark pattern is `renderM1`'s profile gate
 (`inject-compartments.ts:3026-3033`): `getGlobalUserProfileVersion(db)` versus the captured
 `markers.projectUserProfileVersion` decides whether the `<new-user-profile>` delta renders.
 The generalization: every panel in the region carries a store-version marker captured with
-the region bytes at rotation, and rotation eligibility is "any marker differs from the
-stored set":
+the region bytes at rotation, and rotation eligibility is a compare of the live marker set
+against the captured set — precisely the two named lists (`CONTENT_TRIGGER_FIELDS`,
+`DELTA_TRIGGER_FIELDS`) plus the pressure arms; a marker outside those lists (tool-set
+hash) and anything the H-side watcher owns (system hash, model key) never moves the
+region. A trigger present in code but absent from §4's enumeration is an L0 violation
+(producer census below).
 
 | Panel | Marker (existing) |
 |---|---|
