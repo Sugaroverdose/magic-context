@@ -96,7 +96,7 @@ describe("system-region store: R11 reader contract", () => {
     it("refuses a content string that would forge the sentinel", () => {
         const { db } = fixture();
         try {
-            expect(writeSystemRegion(db, "forge", SYSTEM_REGION_SENTINEL + "forged")).toBe(false);
+            expect(writeSystemRegion(db, "forge", `${SYSTEM_REGION_SENTINEL}forged`)).toBe(false);
             expect(lines.some((line) => line.includes("system-region write declined"))).toBe(true);
             expect(readSystemRegion(db, "forge")).toBeNull();
         } finally {

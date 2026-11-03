@@ -27,7 +27,6 @@
 
 import { MEMORY_MURAL_BLOCK } from "@magic-context/core/agents/magic-context-prompt";
 import { isPartialCompartmentEnd } from "@magic-context/core/features/magic-context/compartment-storage";
-import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
 import {
 	getMaxMemoryIdForProjects,
 	getMemoriesByProject,
@@ -54,6 +53,7 @@ import {
 	persistCachedM0,
 	readProjectDocsCanonical,
 } from "@magic-context/core/features/magic-context/storage";
+import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
 import {
 	getActiveUserMemories,
 	type UserMemory,

@@ -50,7 +50,6 @@ import {
     openDatabase,
     setSessionWorkMetrics,
 } from "../features/magic-context/storage";
-import { SYSTEM_REGION_SENTINEL } from "../features/magic-context/system-region";
 import {
     getPersistedSchemaVersion,
     getUnconfirmedMigrationHolders,
@@ -60,6 +59,7 @@ import {
     getCompactionMarkerHealth,
     getObservedEpochFloor,
 } from "../features/magic-context/storage-meta-persisted";
+import { SYSTEM_REGION_SENTINEL } from "../features/magic-context/system-region";
 import { getMeasuredToolDefinitionTokens } from "../features/magic-context/tool-definition-tokens";
 import {
     computeOpenCodeWorkMetricsIncremental,

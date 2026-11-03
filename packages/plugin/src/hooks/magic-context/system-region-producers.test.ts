@@ -189,8 +189,7 @@ describe("system-region L0: per-actor producer census", () => {
         expect(mmStart).toBeGreaterThan(-1);
         const mmEndRel = injectText.slice(mmStart + 1).search(/^export (async )?function/m);
         const mmBody = injectText.slice(mmStart, mmStart + 1 + mmEndRel);
-        for (const m of mmBody.matchAll(/reason:\s*"([a-z_]+)"/g))
-            codeReasons.add(m[1]);
+        for (const m of mmBody.matchAll(/reason:\s*"([a-z_]+)"/g)) codeReasons.add(m[1]);
         // Head-lane-only fold reason: region mode guards around it (`&& !regionMode`).
         codeReasons.delete("cached_m1_missing");
         // Call-site fold-lane defaults: reason literals inside the

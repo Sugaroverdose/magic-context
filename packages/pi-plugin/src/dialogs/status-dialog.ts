@@ -48,11 +48,11 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getNotes } from "@magic-context/core/features/magic-context/storage-notes";
 import { getTagsBySession } from "@magic-context/core/features/magic-context/storage-tags";
+import { SYSTEM_REGION_SENTINEL } from "@magic-context/core/features/magic-context/system-region";
 import { getEmbedDrainUiStatus } from "@magic-context/core/hooks/magic-context/embed-session-state";
 import { resolveExecuteThresholdDetail } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/legacy-compartments";
 import { computeM0BlockTokens } from "@magic-context/core/hooks/magic-context/m0-token-breakdown";
-import { SYSTEM_REGION_SENTINEL } from "@magic-context/core/features/magic-context/system-region";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import {
 	formatCacheTtlDisplay,
