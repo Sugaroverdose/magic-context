@@ -433,7 +433,11 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
                 "<project-memory>x</project-memory>",
             );
         }
-        // Well-formed tokens pass (the census vocabulary shape):
+        // Well-formed tokens pass (the census vocabulary shape), including
+        // composite receipts: stem law + non-whitespace detail (L7 exact
+        // operands; the rotation lane passes render_config:budget(...)).
+        clearSystemRegion(db as never, "ses-reason-guard", "render_config:budget(m8000→m1000)");
+        seedRegion(db, "ses-reason-guard");
         clearSystemRegion(db as never, "ses-reason-guard", "migrate_session");
         expect(readSystemRegion(db, "ses-reason-guard")).toBeNull();
     });
