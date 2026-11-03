@@ -9929,9 +9929,12 @@ describe("pending-ops and heuristics permission labels", () => {
 // history. A consumed deferred-materialization intent whose fold rewrote
 // nothing leaves the pass warm; draining the queue there is an independent
 // prefix rewrite (the boot-law B replay promise). Frozen-base adaptation of
-// 347e503cd: this base has a single 'drop' pending-op vocabulary (no FPE-era
-// auto_drop origin class), so every queued row waits for the boundary;
-// subagent passes keep their execute-band semantics.
+// 347e503cd keeps the queue all-or-nothing (#2641): both vocabulary classes
+// — 'drop' model stamps and 'auto_drop' system-origin rows from the
+// compartment runner (types.ts PendingOp, storage-ops toPendingOp) — ride
+// the byte-change permission or wait; the classes differ at apply (sweeper
+// render shape, apply-operations source gate), not at the gate. Subagent
+// passes keep their execute-band semantics.
 describe("system-origin reclaim rides byte-change events, not deferred intent", () => {
     async function seededPass(
         sessionId: string,

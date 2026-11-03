@@ -233,21 +233,20 @@ describe("Pi system-origin reclaim rides byte-change events", () => {
 		}
 	});
 
-	it("stamp-over-sweeper duplicate: the older auto_drop row wins at apply — model stamp shape lost (documented current behavior)", async () => {
+	it("duplicate auto_drop+stamp rows both apply; last (stamp) release realizes, shape converges to full", async () => {
 		const sessionId = "ses-pi-system-reclaim-dup";
 		const { ctx, messages, sweepTag } = await seededToolRound(sessionId);
 		try {
 			// Same tag, both vocabularies: the system lane queues auto_drop
 			// first, the model stamps drop on top before either drains.
 			// pending_ops has no unique constraint on (session, tag) — both
-			// rows persist; getPendingOps reads queued_at ASC, id ASC, so the
-			// older auto_drop row is applied first (sweeper render shape), the
-			// tag flips to dropped, and the model's drop row then hits the
-			// already_reduced rejection while removePendingOp(tag_id) clears
-			// both rows. The model's release SHAPE is lost.
-			// DOCUMENTED CURRENT BEHAVIOR — finding escalated to the
-			// coordinator; the contrast row below pins what the model would
-			// have gotten alone. Do not "fix" this row silently either way.
+			// rows persist, and BOTH apply: tagStatusById is snapshotted
+			// before the apply loop, so the second row never sees the first
+			// row's flip (removePendingOp(tag_id) clears both). The terminal
+			// persisted shape is the last-applied (stamp) row's — the
+			// model's release realizes. DOCUMENTED CURRENT BEHAVIOR: the
+			// stale-snapshot double-apply is escalated to the coordinator;
+			// do not "fix" this row silently either way.
 			for (const op of getPendingOps(ctx.db, sessionId)) {
 				removePendingOp(ctx.db, sessionId, op.tagId);
 			}

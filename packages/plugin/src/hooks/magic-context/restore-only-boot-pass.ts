@@ -15,8 +15,8 @@
  * the served wire. Idle expiry is true by construction at boot and the
  * host's post-restart replay raises a materialization flush — both are boot
  * artifacts, not reclaim permission. The boot pass serves the byte-identical
- * LKG restore; the queued backlog stays queued; the flush request parks (its
- * drain lives behind materialization success, so parking never loses it).
+ * LKG restore; the queued backlog stays queued; the flush request is
+ * discharged at pass start (see Discharge below).
  *
  * Admission, not a freeze: the pass sizes itself from the persisted provider
  * record first, and when THAT reading prices a byte crisis
@@ -27,7 +27,14 @@
  * and boot execute is exactly the reading this law distrusts. Published
  * history is a separate signal and stays ungated; a boot-raised
  * materialization flush admits no reclaim or heuristic lane and is
- * discharged at pass start (see Discharge below).
+ * discharged at pass start (see Discharge below). A genuine content-change
+ * fold still executes on a boot pass: `mustMaterialize` firing on baseline
+ * bytes that drifted while the process was down (e.g. `max_mutation_id`,
+ * structural compartment mutation) admits the lanes via
+ * `foldBustsServedPrefixThisPass` with usage unknown — content-change folds
+ * are legitimate boundaries, not leaks (a content event re-anchors m[0] by
+ * design, boot-law B); the gate's scope is the flush/idle boot artifacts
+ * only.
  *
  * Discharge, not parking: the restore serves the persisted bytes — m[0]
  * included — so a re-anchor request raised by the host's post-restart replay
