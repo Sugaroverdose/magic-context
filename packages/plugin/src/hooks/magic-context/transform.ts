@@ -2481,6 +2481,7 @@ export function createTransform(deps: TransformDeps) {
                 historyBudgetTokens,
                 historyBudgetPolicyIdentity: historyPolicyIdentity,
                 hardSignals: m0HardSignals,
+                systemRegionMode: deps.systemRegionEnabled === true && !compactionOff,
             }).value;
         const protectionCacheBustingPass =
             !compactionOff &&

@@ -10368,3 +10368,130 @@ describe("prefix-bound oldest-prefix reasoning trim", () => {
         for (const m of stripped.slice(1)) expect(reasoningCount(m)).toBe(0);
     });
 });
+
+// Frozen system-region residency: the pass-level promotion laws. These run
+// the REAL decision sites (foldDueDecision -> mustMaterialize, and the
+// promotion block), not the predicate in isolation: a site that omits the
+// region-mode flag returns cached_m1_missing every pass and the predicate
+// unit tests cannot see it (L7/L9 receipt-honesty class).
+describe("system-region pass-level: warm passes stay silent, boundaries rotate", () => {
+    const PROJECT_PATH = "/tmp/test-phase-region";
+
+    async function installedRegionDb(sessionId: string): Promise<Database> {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "ARCHITECTURE",
+            content: "C3-MEM-ONE",
+        });
+        const state = getOrCreateSessionMeta(db, sessionId) as never;
+        compartmentInjection.injectM0M1({
+            db,
+            sessionId,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory: "",
+            isCacheBustingPass: true,
+            systemRegion: { enabled: true, reason: "first_render" },
+        } as never);
+        const { readSystemRegion } = await import("./system-region");
+        expect(readSystemRegion(db, sessionId)).toContain("C3-MEM-ONE");
+        return db;
+    }
+
+    it("warm deferred region passes emit no cached_m1_missing receipt and rotate nothing", async () => {
+        const sessionId = "ses-region-c3-census";
+        const db = await installedRegionDb(sessionId);
+        const { readSystemRegion } = await import("./system-region");
+        const before = readSystemRegion(db, sessionId);
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            for (let pass = 0; pass < 2; pass++) {
+                await runPostTransformPhase(
+                    basePostTransformArgs(db, sessionId, [], {
+                        resolvedProviderID: "anthropic",
+                        systemRegionEnabled: true,
+                        m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                    }),
+                );
+            }
+        } finally {
+            spy.mockRestore();
+        }
+        expect(logs.filter((line) => line.includes("cached_m1_missing"))).toEqual([]);
+        expect(logs.filter((line) => line.includes("system-region rotation"))).toEqual([]);
+        expect(readSystemRegion(db, sessionId)).toBe(before);
+        expect(getOrCreateSessionMeta(db, sessionId).cachedM1Bytes).toBeNull();
+    });
+
+    it("an execute boundary with a new memory rotates the region once, with receipts", async () => {
+        const sessionId = "ses-region-c3-promotion";
+        const db = await installedRegionDb(sessionId);
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "C3-MEM-TWO-NEW",
+        });
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    schedulerDecision: "execute",
+                    schedulerDeferReason: null,
+                    systemRegionEnabled: true,
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        expect(
+            logs.some((line) =>
+                line.includes("system-region rotation promoted: reason=max_memory_id"),
+            ),
+        ).toBe(true);
+        expect(
+            logs.some((line) =>
+                line.includes("system-region rotation: reason=max_memory_id executed=true"),
+            ),
+        ).toBe(true);
+        expect(logs.filter((line) => line.includes("cached_m1_missing"))).toEqual([]);
+        const { readSystemRegion } = await import("./system-region");
+        expect(readSystemRegion(db, sessionId)).toContain("C3-MEM-TWO-NEW");
+    });
+
+    it("control: gate-off head lane keeps its cached_m1_missing fold behavior intact", async () => {
+        const sessionId = "ses-region-c3-headlane";
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        getOrCreateSessionMeta(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?",
+        ).run(Buffer.from("<session-history>head</session-history>", "utf8"), sessionId);
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        expect(logs.some((line) => line.includes("cached_m1_missing"))).toBe(true);
+    });
+});
