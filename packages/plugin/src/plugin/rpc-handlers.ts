@@ -50,7 +50,7 @@ import {
     openDatabase,
     setSessionWorkMetrics,
 } from "../features/magic-context/storage";
-import { isSystemRegionBytes } from "../features/magic-context/system-region";
+import { SYSTEM_REGION_SENTINEL } from "../features/magic-context/system-region";
 import {
     getPersistedSchemaVersion,
     getUnconfirmedMigrationHolders,
@@ -489,7 +489,7 @@ export function buildSidebarSnapshot(
             // system-resident panel bytes: not head text, so the m[0]-block
             // breakdown reports none of it (its bytes are counted by the
             // served-system estimate instead).
-            return isSystemRegionBytes(text) ? "" : text;
+            return text.startsWith(SYSTEM_REGION_SENTINEL) ? "" : text;
         };
         const m0Blocks = computeM0BlockTokens(db, sessionId, {
             m0Text: decodeCachedBytes(meta?.cached_m0_bytes),
