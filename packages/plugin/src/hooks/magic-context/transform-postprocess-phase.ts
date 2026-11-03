@@ -172,7 +172,7 @@ import {
     buildSupersessionReclaimOps,
     recentSupersessionOwnerMessageIds,
 } from "./supersession-reclaim";
-import { decideSystemRegionRotation, type RegionMarkers, readSystemRegion } from "./system-region";
+import { decideSystemRegionRotation, type RegionMarkers, readSystemRegion } from "../../features/magic-context/system-region";
 import { byteSize, prependTag } from "./tag-content-primitives";
 import {
     assertTailHygieneContentUnchanged,

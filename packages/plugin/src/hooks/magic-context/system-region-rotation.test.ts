@@ -23,10 +23,10 @@ const {
     decodeSystemRegionRow,
     executeSystemRegionRotation,
     readSystemRegion,
-} = await import("./system-region");
+} = await import("../../features/magic-context/system-region");
 
 import type { Database } from "../../shared/sqlite";
-import type { RegionMarkers } from "./system-region";
+import type { RegionMarkers } from "../../features/magic-context/system-region";
 
 function fixture(): Database {
     const raw = new BunDatabase(":memory:");

@@ -79,7 +79,7 @@ import {
     type RegionMarkers,
     readSystemRegion,
     SYSTEM_REGION_SENTINEL,
-} from "./system-region";
+} from "../../features/magic-context/system-region";
 import type { MessageLike } from "./tag-messages";
 import { formatDate } from "./temporal-awareness";
 import { renderUserProfileContent } from "./user-profile-render";
