@@ -121,15 +121,6 @@ export function writeSystemRegion(db: Database, sessionId: string, region: strin
 }
 
 /**
- * Funnel-entry reason guard (G2b / L7): receipts are the only trace of a
- * byte move, and the per-call census compares reason tokens at test time.
- * Reasons are internal literals — a malformed token is a programmer error,
- * so it fails loud at the entry instead of logging an uncensusable string.
- */
-// Stem law + optional non-whitespace detail (render_config:budget(...)-style
-// composite receipts keep their exact operands, L7 precedent). Whitespace in
-// a reason would break the key=value shape of the receipt line.
-/**
  * Mint-site sanitizer for store-derived receipt operands (H1). Reasons that
  * interpolate stored text (render_config:budget(<stored>→<current>)) must
  * arrive at the funnel already receipt-safe: the funnel no longer fatals on
@@ -144,6 +135,9 @@ export function sanitizeReceiptOperand(value: string, maxLen = 40): string {
     return flat.length > maxLen ? `${flat.slice(0, maxLen - 1)}~` : flat;
 }
 
+// Stem law + optional non-whitespace detail (render_config:budget(...)-style
+// composite receipts keep their exact operands, L7 precedent). Whitespace in
+// a reason would break the key=value shape of the receipt line.
 const REASON_TOKEN = /^[a-z][a-z0-9_]{2,47}(?::[^\s]{1,120})?$/;
 
 /**

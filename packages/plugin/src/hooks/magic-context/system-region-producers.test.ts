@@ -215,9 +215,12 @@ describe("system-region L0: per-actor producer census", () => {
                 continue;
             if (!ALLOWED.has(rel)) offenders.push(rel);
         }
-        // K2: repo-standard roots, matching the F1-adjudicated eraser census
-        // (crates/ + dashboard src-tauri walk + repo-root scripts/). Rust
-        // resets land on the same column; the dashboard reader names it too.
+        // K2 (M2-corrected): repo-standard roots, matching the F1-adjudicated
+        // eraser census where the boundary column actually exists: crates/
+        // (reset-list writers) and repo-root scripts/. The dashboard is
+        // covered by the ERASER census for cached_m0_bytes; src-tauri holds
+        // no boundary-column literal, so no tauri root here (inert allow-set
+        // member dropped by round-9 adjudication).
         const REPO = join(SRC_ROOT, "..", "..", "..");
         const EXTRA: Array<{ root: string; prefix: string; allowed: ReadonlySet<string> }> = [
             {
@@ -228,12 +231,6 @@ describe("system-region L0: per-actor producer census", () => {
                     // lane — exemption imported from the eraser census.
                     "crates/mc-module/src/single_store_repair.rs",
                 ]),
-            },
-            {
-                root: join(REPO, "packages", "dashboard", "src-tauri", "src"),
-                prefix: "tauri/",
-                // dashboard reader, guarded (eraser-census member).
-                allowed: new Set(["tauri/db.rs"]),
             },
             {
                 root: join(REPO, "scripts"),
