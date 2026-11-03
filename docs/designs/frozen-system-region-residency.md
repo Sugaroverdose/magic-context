@@ -777,3 +777,43 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   superseded by G2's runtime throw; the round-4 style commit additionally touched
   five pre-existing test files with formatting-only (semantics-null) changes,
   verified at review.
+
+## 17. Review round 6 (adjudicated H1–H4)
+
+- **Execution disclosure** — the round-6 reviewer's session host denied test
+  execution: all round-6 verdicts (K3/K4/K5 verified-clean, K7, H1–H3 sustained)
+  are STATIC analyses. The implementer's re-runs are the only executed evidence
+  this round; "verified-clean" for K3/K4/K5 means source-verified, not
+  test-executed by the reviewer.
+- **H1 (fold-lane wedge, introduced by round 5's G2b adjudication)** — the
+  `requireReasonToken` throw was reachable with STORE-derived content: the budget
+  arm minted `render_config:budget(<stored>→<current>)` from
+  `cached_m0_upgrade_state` (arbitrary text between `|` delimiters); a
+  whitespace operand re-minted and threw every pass, and only a successful fold
+  rewrites the row — permanent wedge. Fixed at the MINT: `sanitizeReceiptOperand`
+  (whitespace→`_`, backtick→`'`, 40-char clamp with visible `~`) keeps the funnel
+  throw a pure typo detector. Laws: corrupt stored operand → fold proceeds,
+  receipt carries the sanitized token, row self-heals; shrink arm pinned
+  parser-gated (its operands must match `^m\d+(\.\d+)?-h\d+$` to mint at all).
+  Controls: neutralizing the sanitizer reddens the wedge law (transcripted).
+- **H2** — SET-less fragment rule (`"UPDATE session_meta"` closing its quote
+  before SET, co-occurring with `+`/`.join(`/`.concat(`) + widened
+  identifier-led verbs (`run|all|get|iterate`) and `.concat(`. Three
+  planted-rogues with split column names (assignment text never appears as
+  literal): two-way fragment split → identifier-led; concat → SET-less rule +
+  identifier-led; `db.run(variable)` → closed-set fragment rule. The "cannot
+  hide" claim corrected to deterrence wording; disclosed-uncoverable class now
+  names character-wise AND multi-hop computed assembly, matching the census
+  comment (§16's G3 line updated in place).
+- **H3 (property closure)** — `trimPiMessagesToCachedBoundary` truth-tested
+  m0/m1 and trusted the head-era boundary column; region installs never touched
+  it. Closed at the write site (install nulls the head-era boundary) and
+  defensively at the reader (sentinel refusal at the `stored` aggregate covering
+  both read paths). Enforced property, to be checked by future closures: **no Pi
+  path derives wire-affecting decisions from region rows unguarded** — a
+  property, not a caller list. Controls transcripted: write-site removal reddens
+  the boundary assertion; reader-guard removal reddens the trim-zero assertion.
+- **Brief corrections** — the round-5 commit range is 7 commits including
+  `a9d6fffe9` (the brief's count was wrong); the postprocess test base pins
+  `forceMaterializationPercentage: 85`, not 70 (the reviewer's own correction,
+  accepted).
