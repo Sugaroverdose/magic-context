@@ -10,6 +10,7 @@ import {
     openDatabase,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
+import { encodeSystemRegionRow } from "../../features/magic-context/system-region";
 import type { PromptSurfaceConfig } from "../../shared/prompt-surface";
 import type { PromptSurfaceRuntime } from "../../shared/prompt-surface-runtime";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
@@ -18,7 +19,6 @@ import {
     resolveCtxReduceAvailabilityFromMessages,
 } from "./ctx-reduce-availability";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
-import { encodeSystemRegionRow } from "../../features/magic-context/system-region";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;

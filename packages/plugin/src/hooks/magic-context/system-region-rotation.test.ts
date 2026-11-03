@@ -25,8 +25,8 @@ const {
     readSystemRegion,
 } = await import("../../features/magic-context/system-region");
 
-import type { Database } from "../../shared/sqlite";
 import type { RegionMarkers } from "../../features/magic-context/system-region";
+import type { Database } from "../../shared/sqlite";
 
 function fixture(): Database {
     const raw = new BunDatabase(":memory:");

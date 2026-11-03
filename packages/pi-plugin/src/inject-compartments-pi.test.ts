@@ -35,9 +35,9 @@ import {
 	createPiM0M1PassSnapshot,
 	injectM0M1Pi,
 	materializeM0Pi,
-	prepareCachedM0M1PiReplay,
 	materializeM0PiWithRetry,
 	mustMaterializePi,
+	prepareCachedM0M1PiReplay,
 	renderM0Pi,
 	renderM1Pi,
 } from "./inject-compartments-pi";
@@ -3289,11 +3289,16 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 		// Real materialized cache first: markers are complete, only the
 		// bytes are foreign (a region row written by the v1-TS lane).
 		materializeM0Pi(state, db);
-		db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(
+		db.prepare(
+			"UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
+		).run(
 			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
 			state.sessionId,
 		);
-		expect(mustMaterializePi(state, db)).toEqual({ value: true, reason: "cache_invalid" });
+		expect(mustMaterializePi(state, db)).toEqual({
+			value: true,
+			reason: "cache_invalid",
+		});
 	});
 
 	it("F6: the marker reader refuses a sentinel row on the replay path too", () => {
@@ -3304,7 +3309,9 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 		const db = createTestDb();
 		const state = piState("ses-pi-sentinel-replay", process.cwd());
 		materializeM0Pi(state, db);
-		db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(
+		db.prepare(
+			"UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
+		).run(
 			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
 			state.sessionId,
 		);

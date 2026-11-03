@@ -23,10 +23,14 @@ mock.module("../../shared/logger", () => ({
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import {
+    decodeSystemRegionRow,
+    readSystemRegion,
+    SYSTEM_REGION_SENTINEL,
+} from "../../features/magic-context/system-region";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { materializeM0 } from "./inject-compartments";
-import { decodeSystemRegionRow, readSystemRegion, SYSTEM_REGION_SENTINEL } from "../../features/magic-context/system-region";
 
 const SESSION_ID = "ses_region_fold";
 const PROJECT_PATH = "/tmp/test-region-fold";
