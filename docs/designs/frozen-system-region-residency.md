@@ -794,7 +794,10 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   (whitespace→`_`, backtick→`'`, 40-char clamp with visible `~`) keeps the funnel
   throw a pure typo detector. Laws: corrupt stored operand → fold proceeds,
   receipt carries the sanitized token, row self-heals; shrink arm pinned
-  parser-gated (its operands must match `^m\d+(\.\d+)?-h\d+$` to mint at all).
+  parser-gated - a claim round 7 falsified for LENGTH (§18 J1): the real gate
+  regex is `^m(\d+(?:\.\d+)?)-h(\d+(?:\.\d+)?)$` (decimal on BOTH sides),
+  it bounds charset and finiteness but not length, and the mint now uses
+  parsed numbers, not raw strings.
   Controls: neutralizing the sanitizer reddens the wedge law (transcripted).
 - **H2** — SET-less fragment rule (`"UPDATE session_meta"` closing its quote
   before SET, co-occurring with `+`/`.join(`/`.concat(`) + widened
@@ -813,7 +816,62 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   path derives wire-affecting decisions from region rows unguarded** — a
   property, not a caller list. Controls transcripted: write-site removal reddens
   the boundary assertion; reader-guard removal reddens the trim-zero assertion.
+  **Round-7 correction (J2a):** the attribution above overstates the write-site
+  half. In the PRODUCTION fold flow `executeSystemRegionRotation` takes the
+  persist-callback branch and never calls `writeSystemRegion`, and the fold's
+  own unconditional UPDATE repopulates the boundary column in the same
+  transaction - production safety rests entirely on the **Pi reader refusal**
+  (+ the replay throw); the write-site null is defense-in-depth for direct
+  installs (tests, clones). The production fold law pins the coherent shape
+  (boundary == newest compartment end rendered into the region), and a
+  named-member census (§18) closes the plugin half of the property.
+- **Pi boundary-read disclosure (J3, round 7)** - both Pi boundary reads
+  (`inject-compartments-pi.ts` trim reader's direct SQL and the passSnapshot
+  mapper's SELECT) name the column in mandatory SQL; absent-column safety
+  rests on `storage-db.ts` `ensureColumn`, not on the readers. A future
+  minimal-schema Pi fixture must expect a crash if that ensure is bypassed.
 - **Brief corrections** — the round-5 commit range is 7 commits including
   `a9d6fffe9` (the brief's count was wrong); the postprocess test base pins
   `forceMaterializationPercentage: 85`, not 70 (the reviewer's own correction,
   accepted).
+
+## 18. Review round 7 (adjudicated J1–J5)
+
+- **Execution note** — the coordinator EXECUTED round-7 gates personally (tsc
+  0 plugin+Pi confirmed, law files 25/0 green); the biome falsification (J5)
+  is the fourth instance of the grep-narrowed-evidence class.
+- **J1 (shrink-arm wedge, reviewer-verified)** — `renderedBudgetShrinkReason`
+  interpolated the RAW stored/current strings; the parser gate bounds charset
+  and finiteness but NOT length (a 200-digit `m`-value parses finite, mints a
+  248-char detail, throws at the rotation funnel every pass — the fold that
+  would rewrite the row is what throws). Fixed by construction: mint from the
+  PARSED numbers. Law: corrupt oversize stored `|rendered-budgets:` operand →
+  fold proceeds, bounded token, self-heal asserted on re-read. Control:
+  reverting the mint to raw strings reddens the law (transcripted). Census: no
+  `reason:` template on the mint surface (`inject-compartments.ts`,
+  `compartment-render-epoch.ts`) may interpolate a raw store-read string —
+  every `${...}` is either `sanitizeReceiptOperand(...)` or a parsed-canonical
+  allowlist member; planted raw-interpolation rogue reddens. §17's
+  "parser-gated" claim and its mis-transcribed regex corrected in place.
+- **J2** — see the §17 H3 correction (J2a): load-bearing guards are the Pi
+  reader refusal + replay throw; the write-site null is defense-in-depth for
+  direct installs. Production-fold coherence law pinned (boundary == newest
+  compartment end the region rendered). Plugin-side boundary readers closed by
+  named-member census with per-file discrimination (write-site null, clears
+  list, head-lane writers/readers, A2-discriminated repair reader, v2
+  restore-range named consumer, Pi H3-guarded trim reader, schema sites);
+  planted rogue reader in cli/src reddens the census.
+- **J3** — disclosure added to §17 (Pi mandatory-SQL reads; absent-column
+  safety = `ensureColumn`, not the readers).
+- **J4** — "cannot hide" phrasing was already replaced by round-6 deterrence
+  wording (verified absent from lane files); the replay truth-table row now
+  asserts `m1Text === ""` directly on the region pass.
+- **J5 (gate honesty, standing-rule upgrade)** — the repo gate is each
+  package's own unfiltered `biome check .` (pinned 2.5.1); grep-narrowed
+  filters are banned as evidence. At tip: plugin `Found 0 errors`
+  (1 warning, 2 infos); Pi `Found 4 errors` — all in files byte-identical to
+  v0.45.0 (tag-era `scripts/analyze-pi-cache-busts.*` unused-import,
+  `src/inject-compartments-pi-mural.test.ts` non-null) plus the disclosed
+  R12-prereq `system-reclaim-boundary-pi.test.ts` non-null rows; zero lane
+  files in the residual. Four lane test files + two Pi lane files were
+  formatter-dirty (heredoc/python-written) and are now `--write`n clean.
