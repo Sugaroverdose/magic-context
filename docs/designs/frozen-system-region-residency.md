@@ -139,13 +139,14 @@ compartment sequence, `project_user_profile_version`, `maxMemoryId`, project-doc
 tool-set hash (`:1853-1856,1925-1946`). They mark the region rotation-pending and change no
 bytes this pass.
 
-The user-facing rotation trigger is the existing pass-side `explicitFlush` arm (R12
-`rideSignals.explicitFlush`, `transform-postprocess-phase.ts:2073-2075`): a flush pass is
-a boundary and rotates. The RPC command surface is untouched by this lane. The separate
-observation that the `/ctx-flush` RPC refuses on compaction-off installs
-(`plugin/rpc-handlers.ts:1733`) is parked as its own backlog item (owner scope correction,
-2026-11-03; the proper fix is not registering dead commands) and is not a frozen-region
-concern.
+No new user-facing rotation trigger is designed. The operator's trigger is `/ctx-wrapup`,
+which already works through an enumerated boundary: wrapup publishes history, and the
+published-history signal is a R12 `rideSignals.publishedHistory` arm
+(`transform-postprocess-phase.ts:2076-2082`), so a wrapup pass is a rotation boundary
+(`publishedM1RefreshedThisPass`). The RPC command surfaces are untouched by this lane;
+the observation that the `/ctx-flush` RPC refuses on compaction-off installs
+(`plugin/rpc-handlers.ts:1733`) belongs to the parked command-registration backlog item
+(same class as `/ctx-wrapup`'s behavior there), not to frozen-region work.
 
 ## 5. Rotation markers (the generalized profileVersion pattern)
 
@@ -362,9 +363,10 @@ Ruled by the owner (2026-11-03 review of this document):
    bytes, never legacy m[0] text) is covered by re-pinned tests instead of schema
    separation: the boot path must prove a row written by the old lane is treated as
    first-render (rotated fresh), not served as region bytes.
-4. Flush: the pass-side R12 `explicitFlush` arm is the user-facing rotation boundary (§4);
-   the RPC command surface stays untouched. The compaction-off flush RPC refusal is parked
-   as a separate backlog item (owner scope correction), not part of this lane.
+4. Triggers: no new rotation trigger. The operator's trigger is `/ctx-wrapup` (publishes
+   history, an existing `publishedHistory` boundary arm, §4). RPC command surfaces stay
+   untouched; the compaction-off refusals of flush/wrapup are the parked
+   command-registration backlog item, not part of this lane.
 5. Freshness contract: accepted as specified. No new boundary mechanism: rotation reuses
    the merged R12 `systemReclaimAllowed` / `rideSignals` enumeration
    (`transform-postprocess-phase.ts:2060-2107`) as its boundary and bust-permission
