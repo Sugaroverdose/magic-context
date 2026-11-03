@@ -448,22 +448,18 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         expect(clearedLines()).toEqual(["system-region cleared reason=boundary_repair"]);
     });
 
-    it("G2b: every funnel entry throws on a malformed reason token (programmer error, fail loud)", () => {
-        // Receipts are the only trace of a byte move (L7): a free-form or
-        // empty reason makes the census unenforceable and the log unreadable.
-        // Reasons are internal literals — a bad token is a code defect, so
-        // it throws at the entry rather than logging sloppily forever.
-        const db = freshDb();
-        seedRegion(db, "ses-reason-guard");
+    it("K1: malformed reasons never fatal — the funnel sanitizes, logs a named violation, proceeds", () => {
+        // Reason is receipt text, not policy: a throw inside the
+        // materialization transaction is itself the wedge (throw, re-mint,
+        // wedge) no matter how good the mint census is. The floor must not
+        // be fatal. Grammar violations are sanitized to the legal shape and
+        // the RAW token is preserved verbatim in a loud violation receipt;
+        // programmer typos stay caught by the test-time grammar laws.
         const malformed = ["", "With Space", "UPPER", "dash-x", "ab", "x".repeat(60), "tab\tx"];
         for (const reason of malformed) {
-            expect(() => clearSystemRegion(db as never, "ses-reason-guard", reason)).toThrow(
-                /reason/,
-            );
-            expect(() => clearAllSystemRegions(db as never, reason)).toThrow(/reason/);
-            expect(() =>
-                clearSystemRegionsByProjectIdentity(db as never, ["git:x"], reason),
-            ).toThrow(/reason/);
+            const db = freshDb();
+            seedRegion(db, "ses-reason-guard");
+            lines.length = 0;
             expect(() =>
                 executeSystemRegionRotation(
                     db as never,
@@ -473,19 +469,71 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
                     {} as never,
                     () => {},
                 ),
-            ).toThrow(/reason/);
-            // The refusal must not have erased anything.
+            ).not.toThrow();
+            expect(
+                lines.some(
+                    (line) =>
+                        line.startsWith("system-region receipt-violation:") &&
+                        line.includes("fn=executeSystemRegionRotation") &&
+                        line.includes(`raw=${JSON.stringify(reason)}`),
+                ),
+            ).toBe(true);
+            const rot = lines.find((line) => line.startsWith("system-region rotation:"));
+            expect(rot).toBeDefined();
+            expect(rot).toContain("executed=true");
+            const used = /reason=(\S+) executed=true/.exec(rot!)![1];
+            expect(used).toMatch(/^[a-z][a-z0-9_]{2,47}(?::[^\s]{1,120})?$/);
+            expect(used.length).toBeLessThanOrEqual(48 + 1 + 120);
+            expect(() => clearSystemRegion(db as never, "ses-reason-guard", reason)).not.toThrow();
+            expect(readSystemRegion(db, "ses-reason-guard")).toBeNull();
+            expect(
+                lines.some(
+                    (line) =>
+                        line.startsWith("system-region receipt-violation:") &&
+                        line.includes("fn=clearSystemRegion"),
+                ),
+            ).toBe(true);
+            expect(() => clearAllSystemRegions(db as never, reason)).not.toThrow();
+            expect(() =>
+                clearSystemRegionsByProjectIdentity(db as never, ["git:x"], reason),
+            ).not.toThrow();
+        }
+        // Refusal semantics survive the non-fatal floor: a forged payload
+        // with a malformed reason is still refused and erases nothing.
+        {
+            const db = freshDb();
+            seedRegion(db, "ses-reason-guard");
+            lines.length = 0;
+            expect(() =>
+                executeSystemRegionRotation(
+                    db as never,
+                    "ses-reason-guard",
+                    "Bad Reason",
+                    // Genuinely refused: the never-empty floor rejects this
+                    // payload (a mid-string sentinel is not a forgery — the
+                    // forger must LEAD with it, which encodeSystemRegionRow
+                    // owns; empty is the honest refusal shape here).
+                    "",
+                    {} as never,
+                    () => {},
+                ),
+            ).not.toThrow();
+            const rot = lines.find((line) => line.startsWith("system-region rotation:"));
+            expect(rot).toContain("executed=false");
             expect(readSystemRegion(db, "ses-reason-guard")).toBe(
                 "<project-memory>x</project-memory>",
             );
         }
-        // Well-formed tokens pass (the census vocabulary shape), including
-        // composite receipts: stem law + non-whitespace detail (L7 exact
-        // operands; the rotation lane passes render_config:budget(...)).
-        clearSystemRegion(db as never, "ses-reason-guard", "render_config:budget(m8000→m1000)");
-        seedRegion(db, "ses-reason-guard");
-        clearSystemRegion(db as never, "ses-reason-guard", "migrate_session");
-        expect(readSystemRegion(db, "ses-reason-guard")).toBeNull();
+        // Well-formed tokens never produce a violation line, including the
+        // composite receipt shape the rotation lane passes.
+        {
+            const db = freshDb();
+            seedRegion(db, "ses-reason-guard");
+            lines.length = 0;
+            clearSystemRegion(db as never, "ses-reason-guard", "render_config:budget(m8000→m1000)");
+            expect(lines.some((line) => line.includes("receipt-violation"))).toBe(false);
+            expect(readSystemRegion(db, "ses-reason-guard")).toBeNull();
+        }
     });
 
     it("clearSystemRegion receipts the event and leaves the row unreadable as a region", () => {

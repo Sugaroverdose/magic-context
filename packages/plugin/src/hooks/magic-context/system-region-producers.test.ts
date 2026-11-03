@@ -234,20 +234,39 @@ describe("system-region L0: per-actor producer census", () => {
             ["after.memory", "Number() parsed by readRenderedBudgets"],
             ["after.history", "Number() parsed by readRenderedBudgets"],
         ]);
+        // K1(c) widened scope. The census DETERS (the funnel sanitizer is the
+        // bound; nothing fatals): it scans (1) every reason:-prefixed
+        // template, (2) every template ANYWHERE in the mint files that looks
+        // reason-shaped (contains the arrow or a fence stem — return-position
+        // and local-variable mints evade (1)), and (3) concat-assembled
+        // reasons referencing stored properties. Evasion that remains —
+        // multi-hop computed fragments — is the disclosed class.
         const MINT_FILES = [
             "hooks/magic-context/inject-compartments.ts",
             "hooks/magic-context/compartment-render-epoch.ts",
         ];
         const offenders: string[] = [];
+        const checkTemplate = (rel: string, body: string, label: string) => {
+            for (const interp of body.matchAll(/\$\{([^}]*)\}/g)) {
+                const expr = interp[1].trim();
+                if (expr.startsWith("sanitizeReceiptOperand(")) continue;
+                if (!PARSED_CANONICAL.has(expr)) {
+                    offenders.push(`${rel}: ${label} interpolates ${expr}`);
+                }
+            }
+        };
         for (const rel of MINT_FILES) {
             const text = readFileSync(join(SRC_ROOT, rel), "utf8");
             for (const m of text.matchAll(/reason:\s*`([^`]*)`/g)) {
-                for (const interp of m[1].matchAll(/\$\{([^}]*)\}/g)) {
-                    const expr = interp[1].trim();
-                    if (expr.startsWith("sanitizeReceiptOperand(")) continue;
-                    if (!PARSED_CANONICAL.has(expr)) {
-                        offenders.push(`${rel}: reason interpolates ${expr}`);
-                    }
+                checkTemplate(rel, m[1], "reason template");
+            }
+            for (const m of text.matchAll(/`([^`]*[→]|[^`]*render_config:[^`]*)`/g)) {
+                checkTemplate(rel, m[1], "reason-shaped template");
+            }
+            for (const m of text.matchAll(/reason:\s*([^\n,}]+)/g)) {
+                const rhs = m[1];
+                if (/(\+|\.concat\()/.test(rhs) && /cached|upgradeState|_state/.test(rhs)) {
+                    offenders.push(`${rel}: concat-assembled reason references stored state`);
                 }
             }
         }

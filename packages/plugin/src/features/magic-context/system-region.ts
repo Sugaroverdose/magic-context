@@ -1,4 +1,4 @@
-import { sessionLog } from "../../shared/logger";
+import { log, sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 
 /**
@@ -132,11 +132,10 @@ export function writeSystemRegion(db: Database, sessionId: string, region: strin
 /**
  * Mint-site sanitizer for store-derived receipt operands (H1). Reasons that
  * interpolate stored text (render_config:budget(<stored>→<current>)) must
- * arrive at the funnel already receipt-safe: the funnel grammar throws by
- * design (programmer typos), and a throw inside the materialization
- * transaction would re-mint and re-throw every pass — a permanent wedge that
- * only a successful fold could clear. Flattening at the mint keeps the
- * throw strictly a typo detector. Whitespace collapses to "_", backticks
+ * arrive at the funnel already receipt-safe: the funnel no longer fatals on
+ * spelling (K1 — see sanitizeReasonToken), but a violation receipt per pass
+ * would flood the log, so composites sanitize at the mint. Whitespace
+ * collapses to "_", backticks
  * (template-delimiter hazards) to "'", each operand clamps to `maxLen` with
  * a trailing "~" so truncation is visible in the receipt.
  */
@@ -146,16 +145,40 @@ export function sanitizeReceiptOperand(value: string, maxLen = 40): string {
 }
 
 const REASON_TOKEN = /^[a-z][a-z0-9_]{2,47}(?::[^\s]{1,120})?$/;
-function requireReasonToken(fn: string, reason: string): void {
-    if (!REASON_TOKEN.test(reason)) {
-        throw new Error(
-            `system-region ${fn}: malformed receipt reason ${JSON.stringify(reason)} (expected [a-z][a-z0-9_]{2,47})`,
-        );
-    }
+
+/**
+ * K1 ruling (round 8): the floor is non-fatal. A reason is receipt text,
+ * not policy — wedging the fold lane to enforce a spelling is
+ * mechanism-broken, because a throw inside the materialization transaction
+ * re-mints and re-throws every pass: the fold that would rewrite the row is
+ * what throws. No mint census can be exhaustive (return-position templates,
+ * concat assembly, third-file helpers all evade), so the class must be
+ * unreachable at the funnel: violations collapse to the legal grammar shape
+ * and the RAW token is preserved verbatim (JSON-quoted) in a loud
+ * receipt-violation line. Programmer typos stay caught by the test-time
+ * grammar laws and the mint census; production never wedges on spelling.
+ */
+export function sanitizeReasonToken(
+    fn: string,
+    sessionId: string | null,
+    reason: string,
+): string {
+    if (REASON_TOKEN.test(reason)) return reason;
+    const flat = reason.replace(/\s+/g, "_").replace(/`/g, "'");
+    const stemMatch = /^[a-z][a-z0-9_]{2,47}/.exec(flat);
+    const stem = stemMatch ? stemMatch[0] : "malformed";
+    const rest = (stemMatch ? flat.slice(stemMatch[0].length) : flat)
+        .replace(/^:/, "")
+        .slice(0, 120);
+    const sanitized = rest ? `${stem}:${rest}` : stem;
+    const line = `system-region receipt-violation: fn=${fn} raw=${JSON.stringify(reason)} sanitized=${sanitized}`;
+    if (sessionId) sessionLog(sessionId, line);
+    else log(line);
+    return sanitized;
 }
 
 export function clearSystemRegion(db: Database, sessionId: string, reason: string): void {
-    requireReasonToken("clearSystemRegion", reason);
+    reason = sanitizeReasonToken("clearSystemRegion", sessionId, reason);
     // Destructive arms leave receipts, same law as the LKG store — and only
     // for actual events: clearing an absent region is not an event.
     const result = db
@@ -175,7 +198,7 @@ export function clearSystemRegion(db: Database, sessionId: string, reason: strin
  * the receipt); one receipt with the true affected count.
  */
 export function clearAllSystemRegions(db: Database, reason: string): number {
-    requireReasonToken("clearAllSystemRegions", reason);
+    reason = sanitizeReasonToken("clearAllSystemRegions", null, reason);
     // Column-safe: pre-region schemas have nothing to clear and no column to
     // name (migration fixtures legitimately start below its introduction).
     const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>;
@@ -193,7 +216,7 @@ export function clearSystemRegionsByProjectIdentity(
     identities: string[],
     reason: string,
 ): number {
-    requireReasonToken("clearSystemRegionsByProjectIdentity", reason);
+    reason = sanitizeReasonToken("clearSystemRegionsByProjectIdentity", null, reason);
     if (identities.length === 0) return 0;
     const placeholders = identities.map(() => "?").join(", ");
     const result = db
@@ -326,7 +349,7 @@ export function executeSystemRegionRotation(
     capturedMarkers: RegionMarkers,
     persist?: (regionBlob: Buffer, markers: RegionMarkers) => void,
 ): boolean {
-    requireReasonToken("executeSystemRegionRotation", reason);
+    reason = sanitizeReasonToken("executeSystemRegionRotation", sessionId, reason);
     // Same admission as the store's own writer: empty and sentinel-forging
     // payloads are refused on every path, persist-callback included.
     const valid =
