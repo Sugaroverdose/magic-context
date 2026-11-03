@@ -197,6 +197,8 @@ export interface MagicContextDeps {
          *  resolved boolean is threaded to the transform phases. */
         compaction?: { enabled?: boolean };
         mural?: { enabled: boolean; model?: string };
+        /** Experimental frozen system-region residency; off unless explicitly enabled. */
+        system_region?: { enabled: boolean };
     };
     /** Registration-owned prompt-surface loader shared with the tool registry. */
     promptSurfaceRuntime?: PromptSurfaceRuntime;
@@ -715,6 +717,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
 
     const transform = createTransform({
         cacheTtlConfig: deps.config.cache_ttl,
+        systemRegionEnabled: deps.config.system_region?.enabled === true,
         tagger: deps.tagger,
         scheduler: deps.scheduler,
         contextUsageMap,
@@ -1137,6 +1140,7 @@ export function createMagicContextHook(deps: MagicContextDeps) {
         // Mirror the primary-session caveman opt-in so the agent knows older
         // prose may be rewritten even when ctx_reduce is available.
         experimentalCavemanTextCompression: deps.config.caveman_text_compression?.enabled === true,
+        systemRegionEnabled: deps.config.system_region?.enabled === true,
     });
     const systemPromptHashHandler = systemPromptHash.handler;
 

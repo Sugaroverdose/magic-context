@@ -94,6 +94,7 @@ describe("MagicContextConfigSchema", () => {
                 fail_closed_blocking: true,
                 mural: { enabled: false },
                 transform_mode: "ts",
+                system_region: { enabled: false },
                 auto_update: false,
                 toast_duration_ms: 5000,
                 cache_ttl: "10m",

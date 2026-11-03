@@ -388,6 +388,9 @@ export async function sendEmergencyRefusalNotice(
 
 export interface TransformDeps {
     cacheTtlConfig?: import("../../shared/model-cache-ttl").CacheTtlConfig;
+    /** Experimental frozen system-region residency (config `system_region`).
+     *  Off = head lane, today's bytes. */
+    systemRegionEnabled?: boolean;
     hiddenCompletionExecutor?: import("./compartment-runner-types").HiddenCompletionExecutor;
     /** Host marker lifecycle; omission preserves OpenCode 1 marker writes and replay. */
     compactionMarkerStrategy?: CompactionMarkerStrategy & {
@@ -2604,6 +2607,7 @@ export function createTransform(deps: TransformDeps) {
             schedulerDecision,
             schedulerDeferReason,
             fullFeatureMode,
+            systemRegionEnabled: deps.systemRegionEnabled === true,
             compactionOff,
             canRunCompartments,
             awaitedCompartmentRun,
