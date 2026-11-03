@@ -139,18 +139,13 @@ compartment sequence, `project_user_profile_version`, `maxMemoryId`, project-doc
 tool-set hash (`:1853-1856,1925-1946`). They mark the region rotation-pending and change no
 bytes this pass.
 
-`/ctx-flush` is a rotation-forcing user command (R12 `explicitFlush` arm; owner ruling).
-Two facts about today's flush are part of this work:
-(a) it is SOFT (m[1] refresh, no m[0] fold), and (b) it is DEAD on compaction-off installs:
-the RPC refuses before doing any work (`plugin/rpc-handlers.ts:1733` returns
-`compactionOffRefusal("ctx-flush")` when `compactionEnabled` is false, the shipped default
-in this deployment). The flush command's boundary semantics must be decoupled from the
-compaction gate: on a compaction-off install, `/ctx-flush` forces a region rotation on
-demand (the panels exist there too; compaction-off keeps memories, docs and notes). The
-postprocess `!compactionOff` conjuncts on the reclaim gates
-(`transform-postprocess-phase.ts:2092,2102`) must not suppress the rotation ride for the
-explicit-flush signal; array-side reclaim stays gated as it is today. Law test 7 (§10)
-pins this.
+The user-facing rotation trigger is the existing pass-side `explicitFlush` arm (R12
+`rideSignals.explicitFlush`, `transform-postprocess-phase.ts:2073-2075`): a flush pass is
+a boundary and rotates. The RPC command surface is untouched by this lane. The separate
+observation that the `/ctx-flush` RPC refuses on compaction-off installs
+(`plugin/rpc-handlers.ts:1733`) is parked as its own backlog item (owner scope correction,
+2026-11-03; the proper fix is not registering dead commands) and is not a frozen-region
+concern.
 
 ## 5. Rotation markers (the generalized profileVersion pattern)
 
@@ -332,9 +327,6 @@ discriminates: disable the gate, the law test must fail):
    and drops nothing; the next boundary pass does both in one bust.
 6. Pressure accounting: region bytes are included in the combined estimate feeding the
    force band and the 95% refusal.
-7. Flush works with compaction off: on a `compaction.enabled: false` install, `/ctx-flush`
-   is not refused by the RPC gate (`plugin/rpc-handlers.ts:1733`) and forces a region
-   rotation, while array-side reclaim lanes stay gated off as today.
 
 ## 11. What gets deleted
 
@@ -370,8 +362,9 @@ Ruled by the owner (2026-11-03 review of this document):
    bytes, never legacy m[0] text) is covered by re-pinned tests instead of schema
    separation: the boot path must prove a row written by the old lane is treated as
    first-render (rotated fresh), not served as region bytes.
-4. Flush: rotation-forcing via the R12 `explicitFlush` arm, and decoupled from the
-   compaction gate so compaction-off installs can force a rotation (§4, law test 7).
+4. Flush: the pass-side R12 `explicitFlush` arm is the user-facing rotation boundary (§4);
+   the RPC command surface stays untouched. The compaction-off flush RPC refusal is parked
+   as a separate backlog item (owner scope correction), not part of this lane.
 5. Freshness contract: accepted as specified. No new boundary mechanism: rotation reuses
    the merged R12 `systemReclaimAllowed` / `rideSignals` enumeration
    (`transform-postprocess-phase.ts:2060-2107`) as its boundary and bust-permission
