@@ -182,6 +182,53 @@ describe("system-region fold: materialization boundary installs the region", () 
             Buffer.from(meta.cached_m0_bytes).toString("utf8").startsWith(SYSTEM_REGION_SENTINEL),
         ).toBe(true);
     });
+
+    // J2(b): the PRODUCTION fold flow bypasses writeSystemRegion (persist
+    // callback short-circuit), so the boundary column is NOT nulled there —
+    // the fold's own unconditional UPDATE repopulates it. Pin the coherent
+    // production shape: a region-mode fold leaves the boundary equal to the
+    // newest compartment end it rendered into the region.
+    it("a region-mode fold repopulates the baseline boundary with its own coverage", async () => {
+        const { appendCompartments } = await import(
+            "../../features/magic-context/compartment-storage"
+        );
+        const db = makeDb();
+        seedPanels(db);
+        appendCompartments(db, SESSION_ID, [
+            {
+                sequence: 1,
+                startMessage: 1,
+                endMessage: 2,
+                startMessageId: "m1-id",
+                endMessageId: "m2-id",
+                title: "Covered",
+                content: "U: covered\ncompartment body",
+            },
+        ]);
+        // Stale head-era boundary, as if left from a pre-region fold.
+        getOrCreateSessionMeta(db, SESSION_ID);
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+        ).run("stale-id", SESSION_ID);
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            projectPath: PROJECT_PATH,
+            projectDirectory: "",
+            systemRegion: { enabled: true, reason: "hard_fold" },
+        });
+        const b = (
+            db
+                .prepare(
+                    "SELECT cached_m0_last_baseline_end_message_id AS b FROM session_meta WHERE session_id = ?",
+                )
+                .get(SESSION_ID) as { b: string | null }
+        ).b;
+        // Coherent with the region's own coverage, not the stale value.
+        expect(b).toBe("m2-id");
+        expect(readSystemRegion(db, SESSION_ID)).toContain("Covered");
+    });
 });
 
 describe("system-region receipts: store-derived operands cannot wedge the fold lane (H1)", () => {
@@ -202,7 +249,9 @@ describe("system-region receipts: store-derived operands cannot wedge the fold l
         // verbatim; every other component stays as the healthy fold wrote it.
         const stored = (
             db
-                .prepare("SELECT cached_m0_upgrade_state AS v FROM session_meta WHERE session_id = ?")
+                .prepare(
+                    "SELECT cached_m0_upgrade_state AS v FROM session_meta WHERE session_id = ?",
+                )
                 .get(SESSION_ID) as { v: string | null }
         ).v!;
         expect(stored).toContain("|render-budgets:");
