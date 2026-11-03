@@ -517,3 +517,49 @@ Open:
 7. ARCHITECTURE.md's `mc:protected` region documents m[0]/m[1] as the head architecture and
    is human-edit-only. After implementation it needs a deliberate human rewrite; the lane
    will flag it rather than touch it.
+
+## 13. Review round 2 (independent design review, baseline e48a34e69)
+
+Three sustained findings, each fixed red-first with an inert-control on its law.
+
+**C3 — region-mode flag omitted at the two top-of-pass decision sites.**
+`foldDueDecision` (postprocess) and `protectionFoldWillBust` (transform) called
+`mustMaterialize` without `systemRegionMode`, so a valid region row (whose
+`cached_m1_bytes` is legitimately NULL) read `cached_m1_missing` on *every*
+pass: a standing false `m[0] HARD fold decision: reason=cached_m1_missing
+executed=false` receipt (an L7/L9 violation), the fold block executing every
+warm pass, and `protectionCacheBustingPass` pinned true — freezing the §7.3
+semantics claim on the tunnel side. Both sites now pass the same lane
+predicate the serve/fold paths use. Laws run the real sites: a warm-pass
+census emits zero `cached_m1_missing` receipts; an execute boundary with a
+new memory rotates exactly once with receipts; warm region passes never
+report a fold bust to `sessionDecisionCalibration`. Controls: gate-off head
+lane keeps its receipts; unthreading either site reddens its law.
+(Fix commit: site threading + three laws.)
+
+**C1 — the contracted column had four un-receipted raw erasers.**
+Identity merge, session clone, migrations v26/v30 and the compaction-off
+transition all raw-nulled `cached_m0_bytes`, and `clearSystemRegion` had zero
+callers — making L3's sole-writer and L7's receipted-clear claims false by
+not touching the API. The store module moved to `features/magic-context/`
+(services layer; features files must not import `hooks/`), gained bulk
+variants with count receipts, and now every eraser routes through it with a
+named reason (`identity_merge`, `storage_clone`, `migration_v26`,
+`migration_v30`, `compaction_off_transition`); clearing an absent row is no
+longer an event and leaves no line. The class stays dead via a census
+architecture test: any raw `cached_m0_bytes` assignment in the production
+tree outside the funnel + fold-row transaction path fails the build
+(planted-rogue discrimination verified). Laws also pin post-merge next-pass
+repair through the fold.
+
+**C2 — the gate was v1-TS-scoped in fact but not in surface.**
+Rust mode: the hook derives `systemRegionLaneActive` (enabled AND
+`transform_mode !== "rust"`); the Rust module composes its own m[0] panel
+heads and would have double-served panels from two baselines. Cross-lane
+readers: the store exports `isSystemRegionBytes`; head-lane
+`mustMaterialize`/`prepareCachedM0M1Replay`/`hasCompleteCachedM0M1` treat a
+sentinel row as absent (fold rebuilds head bytes — the region is derived
+state), and Pi's `decodeCachedM0` refuses it (seeded-sentinel and
+materialized-head laws on both sides, inert-guard controls). The schema
+describes the v1-TS-only scope; v2 setup and Pi boot log an ignored-flag
+warning on the plugin log (log lines, not laws).
