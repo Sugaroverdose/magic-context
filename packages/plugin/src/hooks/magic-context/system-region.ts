@@ -129,10 +129,10 @@ export interface RegionMarkers {
     maxMemoryMutationId: number;
     projectDocsHash: string;
     upgradeState: string;
-    compartmentRenderEpoch: number;
-    muralEnabled: boolean;
-    renderBudgetIdentity: string;
-    memoryRenderEpoch: number;
+    compartmentRenderEpoch: string | null;
+    muralEnabled: boolean | null;
+    renderBudgetIdentity: string | null;
+    memoryRenderEpoch: string | null;
     renderedBudgets: string | null;
     profileVersion: number;
 }
@@ -204,13 +204,22 @@ export function executeSystemRegionRotation(
     reason: string,
     region: string,
     capturedMarkers: RegionMarkers,
-    persistMarkers?: (markers: RegionMarkers) => void,
+    persist?: (regionBlob: Buffer, markers: RegionMarkers) => void,
 ): boolean {
-    const ok = typeof region === "string" && writeSystemRegion(db, sessionId, region);
-    if (ok) persistMarkers?.(capturedMarkers);
+    // Same admission as the store's own writer: empty and sentinel-forging
+    // payloads are refused on every path, persist-callback included.
+    const valid =
+        typeof region === "string" &&
+        region.length > 0 &&
+        !region.startsWith(SYSTEM_REGION_SENTINEL);
+    const ok = valid
+        ? persist
+            ? (persist(encodeSystemRegionRow(region), capturedMarkers), true)
+            : writeSystemRegion(db, sessionId, region)
+        : false;
     sessionLog(
         sessionId,
-        `system-region rotation: reason=${reason} executed=${ok ? "true" : "false"} bytes=${typeof region === "string" ? Buffer.byteLength(region) : -1}`,
+        `system-region rotation: reason=${reason} executed=${ok ? "true" : "false"} bytes=${valid ? Buffer.byteLength(region) : -1}`,
     );
     return ok;
 }
