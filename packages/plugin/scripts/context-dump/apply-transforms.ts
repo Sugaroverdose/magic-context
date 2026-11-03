@@ -7,6 +7,7 @@ import {
 	type ToolCallIndex,
 	type ToolDropResult,
 } from "../../src/hooks/magic-context/tool-drop-target"
+import { deriveKey } from "../../src/hooks/magic-context/fpe"
 import { stripStructuralNoise } from "../../src/hooks/magic-context/strip-structural-noise"
 import { stripClearedReasoning } from "../../src/hooks/magic-context/strip-content"
 import type { MessageLike } from "../../src/hooks/magic-context/tag-messages"
@@ -215,6 +216,7 @@ export function applyTransforms(
 				toolCallIndex,
 				batch,
 				tagNumber,
+				deriveKey(sessionId),
 			),
 		)
 	}
