@@ -2,8 +2,6 @@
 
 import { afterEach, describe, expect, it, mock } from "bun:test";
 import { rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 const lines: string[] = [];
 mock.module("../../shared/logger", () => ({
@@ -29,7 +27,6 @@ import {
     SYSTEM_REGION_SENTINEL,
 } from "../../features/magic-context/system-region";
 import { Database } from "../../shared/sqlite";
-import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { materializeM0 } from "./inject-compartments";
 
 const SESSION_ID = "ses_region_fold";

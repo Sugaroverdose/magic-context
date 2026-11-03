@@ -4932,7 +4932,6 @@ describe("createTransform: region rows do not freeze protection calibration", ()
         // (region) or folds once for cached_m1_missing (head); the region law
         // measures the WARM tail (pass >= 1) only.
         return calls;
-        return calls;
     }
 
     it("warm deferred region passes never report a fold bust to calibration", async () => {
