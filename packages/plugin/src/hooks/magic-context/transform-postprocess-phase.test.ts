@@ -9619,8 +9619,16 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-system-reclaim-force";
+        // A non-zero emergency sample disarms the `=== 0` force arm, so this
+        // row exercises the provider-proven `>= 95` arm alone — its name's
+        // claim. (F3: a sed had dropped this row to 88%, where it silently
+        // rode the sample arm.)
+        const { setEmergencyDropSample } = await import(
+            "../../features/magic-context/storage-meta-persisted"
+        );
+        setEmergencyDropSample(db, sessionId, 1234);
         const { sweepTag } = await seededPass(sessionId, {
-            contextUsage: { percentage: 88, inputTokens: 1_000 },
+            contextUsage: { percentage: 96, inputTokens: 1_000 },
         });
         expect(getPendingOps(db, sessionId)).toEqual([]);
         expect(
