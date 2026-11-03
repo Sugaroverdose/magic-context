@@ -852,7 +852,9 @@ export function trimPiMessagesToCachedBoundary(
 	const rawM0 = stored.m0;
 	if (
 		isSystemRegionBytes(
-			typeof rawM0 === "string" ? Buffer.from(rawM0, "utf8") : (rawM0 as Uint8Array),
+			typeof rawM0 === "string"
+				? Buffer.from(rawM0, "utf8")
+				: (rawM0 as Uint8Array),
 		)
 	)
 		return 0;

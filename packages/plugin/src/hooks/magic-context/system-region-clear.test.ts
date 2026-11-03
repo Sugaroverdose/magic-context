@@ -126,23 +126,53 @@ const ALLOWED_DYNAMIC_SET: ReadonlyMap<string, string> = new Map([
 // scope, not just its adjacency to an assembly operator. Files already
 // sanctioned as writers or dynamic-SET exemptions are merged in below.
 const STATIC_SET_WRITERS: ReadonlyMap<string, string> = new Map([
-    ["cli/commands/migrate-session.ts", "project re-home: static cached_m1_bytes clear; region goes through the funnel"],
-    ["features/magic-context/compartment-storage.ts", "compartment marker/watermark meta columns (static)"],
-    ["features/magic-context/migration-v94-write-split.ts", "migration backfill of split columns (static)"],
-    ["features/magic-context/migrations.ts", "schema backfill statements (dynamic list pinned by sub-law)"],
+    [
+        "cli/commands/migrate-session.ts",
+        "project re-home: static cached_m1_bytes clear; region goes through the funnel",
+    ],
+    [
+        "features/magic-context/compartment-storage.ts",
+        "compartment marker/watermark meta columns (static)",
+    ],
+    [
+        "features/magic-context/migration-v94-write-split.ts",
+        "migration backfill of split columns (static)",
+    ],
+    [
+        "features/magic-context/migrations.ts",
+        "schema backfill statements (dynamic list pinned by sub-law)",
+    ],
     ["features/magic-context/pi-content-decisions.ts", "Pi decision columns (static)"],
     ["features/magic-context/session-decision-calibration.ts", "calibration columns (static)"],
     ["features/magic-context/storage-db.ts", "fence/init meta column (static)"],
-    ["features/magic-context/storage-identity-merge.ts", "identity rewrite (dynamic form pinned by sub-law; never targets session_meta)"],
-    ["features/magic-context/storage-meta-persisted.ts", "persisted meta CAS writers (dynamic form pinned by sub-law)"],
-    ["features/magic-context/storage-meta-session.ts", "generic meta dispatcher (dynamic form pinned by sub-law)"],
+    [
+        "features/magic-context/storage-identity-merge.ts",
+        "identity rewrite (dynamic form pinned by sub-law; never targets session_meta)",
+    ],
+    [
+        "features/magic-context/storage-meta-persisted.ts",
+        "persisted meta CAS writers (dynamic form pinned by sub-law)",
+    ],
+    [
+        "features/magic-context/storage-meta-session.ts",
+        "generic meta dispatcher (dynamic form pinned by sub-law)",
+    ],
     ["features/magic-context/storage-replay-document.ts", "replay-document column (static)"],
-    ["features/magic-context/storage-schema-helpers.ts", "bulk column-safe resets (dynamic form pinned by sub-law)"],
-    ["features/magic-context/store-generation-rebase.ts", "generation rebase markers (dynamic form pinned by sub-law)"],
+    [
+        "features/magic-context/storage-schema-helpers.ts",
+        "bulk column-safe resets (dynamic form pinned by sub-law)",
+    ],
+    [
+        "features/magic-context/store-generation-rebase.ts",
+        "generation rebase markers (dynamic form pinned by sub-law)",
+    ],
     ["hooks/magic-context/compaction-off-transition.ts", "transition resets (static)"],
     ["hooks/magic-context/inject-compartments.ts", "m[0] marker/CAS columns (static)"],
     ["hooks/magic-context/note-nudger.ts", "note columns (static)"],
-    ["pi/inject-compartments-pi.ts", "Pi head-cache writers (static; region rows are refused by the lane readers)"],
+    [
+        "pi/inject-compartments-pi.ts",
+        "Pi head-cache writers (static; region rows are refused by the lane readers)",
+    ],
     ["scripts/bench-store-generation-rebase.ts", "bench fixture meta seeding (static)"],
     ["scripts/clone-session.ts", "clone meta copy (dynamic form pinned by sub-law)"],
 ]);

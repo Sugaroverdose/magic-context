@@ -4855,9 +4855,7 @@ describe("createTransform: region rows do not freeze protection calibration", ()
         // Install through the production funnel so blob and markers land
         // together (L6); a hand-seeded blob without markers is not a state
         // the fold can leave behind.
-        const { insertMemory } = await import(
-            "../../features/magic-context/memory/storage-memory"
-        );
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
         insertMemory(db, {
             projectPath: process.cwd(),
             category: "ARCHITECTURE",
