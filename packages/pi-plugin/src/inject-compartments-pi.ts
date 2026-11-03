@@ -2218,6 +2218,19 @@ function readCachedPiM0M1Row(
 	db: ContextDatabase,
 	sessionId: string,
 ): CachedPiM0M1Row | null {
+	const row = readCachedPiM0M1RowRaw(db, sessionId);
+	// Stage P property closure: a frozen-system-region row presents as ABSENT
+	// to every Pi consumer at the single row reader. All serve/decision lanes
+	// (pass snapshot -> firstRenderBust; replay pair; soft-refresh CAS) derive
+	// from this row, so discriminating here — not per-caller — makes each
+	// truthiness decision structurally correct.
+	return row && isSystemRegionBytes(row.cached_m0_bytes) ? null : row;
+}
+
+function readCachedPiM0M1RowRaw(
+	db: ContextDatabase,
+	sessionId: string,
+): CachedPiM0M1Row | null {
 	return db
 		.prepare(
 			`SELECT cached_m0_bytes, cached_m0_mural_data_url,

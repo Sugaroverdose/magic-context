@@ -3486,3 +3486,69 @@ it("H3: a region installed over a head-era boundary must not drive trimming", ()
 		trimPiMessagesToCachedBoundary(db, sessionId, [...messages], [...ids]),
 	).toBe(0);
 });
+
+// Stage P (round 10): property closure at the Pi row READER. All cached_m0
+// consumers derive their decisions from the pass-snapshot row (context-handler
+// firstRenderBust) or the replay pair (applyCachedPiRow) — a region-shaped m0
+// must present as ABSENT at the reader, making every truthiness decision
+// structurally correct (L1 boot-is-replay for region rows: the head lane
+// behaves exactly as a first render).
+describe("pi region-discrimination: row reader property closure (stage P)", () => {
+	const REGION_SENTINEL = "<!-- mc:system-region v1 -->";
+
+	function regionRow(db: ReturnType<typeof createTestDb>, sessionId: string) {
+		db.prepare(
+			"UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?",
+		).run(
+			Buffer.from(
+				`${REGION_SENTINEL}\n<project-memory>frozen</project-memory>`,
+				"utf8",
+			),
+			sessionId,
+		);
+	}
+
+	it("the pass snapshot presents a region row as absent (reader-level closure)", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-snapshot-region", process.cwd());
+		materializeM0Pi(state, db);
+		expect(
+			createPiM0M1PassSnapshot({ db, sessionId: state.sessionId }).cachedRow,
+		).not.toBeNull();
+		regionRow(db, state.sessionId);
+		expect(
+			createPiM0M1PassSnapshot({ db, sessionId: state.sessionId }).cachedRow,
+		).toBeNull();
+		closeQuietly(db);
+	});
+
+	it("control: a head-shaped row still presents its cachedRow to the snapshot", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-snapshot-head", process.cwd());
+		materializeM0Pi(state, db);
+		const snapshot = createPiM0M1PassSnapshot({
+			db,
+			sessionId: state.sessionId,
+		});
+		expect(snapshot.cachedRow?.cached_m0_bytes).not.toBeNull();
+		expect(
+			isSystemRegionBytes(snapshot.cachedRow?.cached_m0_bytes ?? null),
+		).toBe(false);
+		closeQuietly(db);
+	});
+
+	it("L1: a region row leaves the head lane in the first-render decision shape", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-l1-region", process.cwd());
+		materializeM0Pi(state, db);
+		regionRow(db, state.sessionId);
+		// First-render shape: the cache is treated as absent, never as head.
+		expect(mustMaterializePi(state, db).value).toBe(true);
+		const messages = [userMessage("after boot")];
+		injectM0M1Pi(state, db, messages);
+		const head = textOf(messages[0]);
+		expect(head).not.toContain("<project-memory>frozen</project-memory>");
+		expect(head).toContain("session-history");
+		closeQuietly(db);
+	});
+});
