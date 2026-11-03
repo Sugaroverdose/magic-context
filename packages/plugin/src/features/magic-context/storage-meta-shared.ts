@@ -2,8 +2,8 @@ import { Buffer } from "node:buffer";
 import { getHarness } from "../../shared/harness";
 import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import type { Database } from "../../shared/sqlite";
-import type { SessionMeta } from "./types";
 import { clearSystemRegion } from "./system-region";
+import type { SessionMeta } from "./types";
 
 export interface SessionMetaRow {
     session_id: string;
@@ -609,5 +609,3 @@ export function clearCachedM0M1(db: Database, sessionId: string, reason: string)
         sessionId,
     );
 }
-
-

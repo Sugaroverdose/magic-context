@@ -264,7 +264,9 @@ describe("repairMissingHistoryBoundary: frozen-region rows are not head baseline
     function seedRegion(options: { boundary?: string | null } = {}): Database {
         const database = seed({ baseline: options.boundary ?? "m-5" });
         database
-            .prepare("UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?")
+            .prepare(
+                "UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?",
+            )
             .run(Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"), SESSION);
         return database;
     }

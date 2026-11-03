@@ -10,12 +10,12 @@ import {
 } from "../../features/magic-context/compartment-storage";
 import { queueM0Mutation } from "../../features/magic-context/storage-m0-mutation-log";
 import { clearCachedM0M1 } from "../../features/magic-context/storage-meta-shared";
+import { isSystemRegionBytes } from "../../features/magic-context/system-region";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { getActiveCompartmentRun } from "./compartment-runner";
 import { invalidateAutoEmbedSession } from "./embed-session-state";
 import { clearInjectionCache, resetPrefixTrimFallbackState } from "./inject-compartments";
-import { isSystemRegionBytes } from "../../features/magic-context/system-region";
 
 // ── Repair for a history boundary the host store no longer has ──────────
 //

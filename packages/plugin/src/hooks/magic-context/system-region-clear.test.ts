@@ -4,9 +4,8 @@ import { Database as BunDatabase } from "bun:sqlite";
 import { describe, expect, it, mock } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-
-import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
+import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { clearSystemRegion, readSystemRegion } from "../../features/magic-context/system-region";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
@@ -115,7 +114,10 @@ function subLawViolation(rel: string, text: string): string | null {
         case "features/magic-context/storage-meta-session.ts": {
             if (!namesRegion) return null;
             for (const m of text.matchAll(/cached_m0_bytes/g)) {
-                const line = text.slice(text.lastIndexOf("\n", m.index) + 1, text.indexOf("\n", m.index));
+                const line = text.slice(
+                    text.lastIndexOf("\n", m.index) + 1,
+                    text.indexOf("\n", m.index),
+                );
                 if (
                     !/NULL AS cached_m0_bytes|cached_m0_bytes:\s*"cached_m0_bytes"|cached_m0_bytes:\s*"NULL AS/i.test(
                         line,
@@ -192,7 +194,8 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
                 if (!ALLOWED_DYNAMIC_SET.has(rel)) offenders.push(`${rel} (dynamic SET, unnamed)`);
                 else {
                     const violation = subLawViolation(rel, text);
-                    if (violation) offenders.push(`${rel} (dynamic-SET exemption broken: ${violation})`);
+                    if (violation)
+                        offenders.push(`${rel} (dynamic-SET exemption broken: ${violation})`);
                 }
             }
         }
@@ -220,7 +223,11 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
                     if (!entry.endsWith(".rs") || entry.endsWith("_tests.rs")) continue;
                     const rel = relative(root, full);
                     if (allowed.has(rel)) continue;
-                    if (/"cached_m0_bytes"|cached_m0_bytes\s*=\s*NULL/i.test(readFileSync(full, "utf8"))) {
+                    if (
+                        /"cached_m0_bytes"|cached_m0_bytes\s*=\s*NULL/i.test(
+                            readFileSync(full, "utf8"),
+                        )
+                    ) {
                         offenders.push(`${rel} (rust column writer, root=${root})`);
                     }
                 }
@@ -307,9 +314,7 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         // Give the merge a changed row to process (it early-returns on a
         // zero-change audit — and the raw eraser historically lived behind
         // that early return).
-        const { insertMemory } = await import(
-            "../../features/magic-context/memory/storage-memory"
-        );
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
         insertMemory(db as never, {
             projectPath: "/identity/from",
             category: "ARCHITECTURE",
@@ -372,11 +377,12 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
             compactionOff: true,
             historianRunnable: false,
             compartmentInProgress: false,
-            cleanupMarkers: () => ({
-                cleaned: true,
-                clearedMarkerCount: 0,
-                markerStates: [],
-            }) as never,
+            cleanupMarkers: () =>
+                ({
+                    cleaned: true,
+                    clearedMarkerCount: 0,
+                    markerStates: [],
+                }) as never,
         });
         expect(readSystemRegion(db, "ses-off-transition")).toBeNull();
         expect(
@@ -386,7 +392,9 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
 });
 
 describe("system-region migration erasers route through the funnel", () => {
-    it.each([26, 30, 34])("migration v%i clears installed regions with a named receipt", async (v) => {
+    it.each([
+        26, 30, 34,
+    ])("migration v%i clears installed regions with a named receipt", async (v) => {
         const { MIGRATIONS } = await import("../../features/magic-context/migrations");
         const db = freshDb();
         seedRegion(db, `ses-mig-${v}`);
@@ -395,9 +403,7 @@ describe("system-region migration erasers route through the funnel", () => {
         expect(entry).toBeDefined();
         entry!.up(db as never);
         expect(readSystemRegion(db, `ses-mig-${v}`)).toBeNull();
-        expect(
-            clearedLines().some((line) => line.includes(`reason=migration_v${v}`)),
-        ).toBe(true);
+        expect(clearedLines().some((line) => line.includes(`reason=migration_v${v}`))).toBe(true);
     });
 });
 
