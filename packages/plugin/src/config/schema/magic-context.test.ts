@@ -806,12 +806,15 @@ describe("MagicContextConfigSchema", () => {
     });
 });
 
-// N2 (round 10): the system-region capability is boot-frozen —
-// isSystemRegionLane is computed once per handler boot from transform_mode
-// + compaction, and the whole stale-lane safety rests on those paths never
-// entering the live-reload whitelist. A future whitelist addition would
-// silently flip the lane mid-session (served bytes change without a
-// rotation boundary). Pinned by exact-string membership, permanently.
+// N2 (round 10, reworded round 11): defense-in-depth pin, not a live
+// hazard. The capability is boot-frozen today — the sole predicate call
+// site (hook.ts boot) reads the boot-time snapshot, and live-reload
+// sample adoption reaches only the historian/dreamer samplers, so a
+// whitelist entry could NOT currently flip the lane mid-session. The pin
+// keeps the lane inputs (transform_mode, compaction, compaction.enabled)
+// out of any HYPOTHETICAL future adoption surface: if the config
+// architecture ever widens live adoption, this law is what keeps the
+// boot-freeze property true. Pinned by exact-string membership.
 describe("system-region capability inputs are never live-reloadable", () => {
     const LANE_INPUT_PATHS = ["transform_mode", "compaction", "compaction.enabled"] as const;
     function laneSafetyViolations(paths: readonly string[]): string[] {
