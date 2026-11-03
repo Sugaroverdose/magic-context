@@ -6,7 +6,13 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
-import { clearSystemRegion, readSystemRegion } from "../../features/magic-context/system-region";
+import {
+    clearAllSystemRegions,
+    clearSystemRegion,
+    clearSystemRegionsByProjectIdentity,
+    executeSystemRegionRotation,
+    readSystemRegion,
+} from "../../features/magic-context/system-region";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
 // F1: the walk roots are the whole production surface that can open
@@ -346,6 +352,42 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         expect(clearedLines()).toEqual(["system-region cleared reason=boundary_repair"]);
     });
 
+    it("G2b: every funnel entry throws on a malformed reason token (programmer error, fail loud)", () => {
+        // Receipts are the only trace of a byte move (L7): a free-form or
+        // empty reason makes the census unenforceable and the log unreadable.
+        // Reasons are internal literals — a bad token is a code defect, so
+        // it throws at the entry rather than logging sloppily forever.
+        const db = freshDb();
+        seedRegion(db, "ses-reason-guard");
+        const malformed = ["", "With Space", "UPPER", "dash-x", "ab", "x".repeat(60), "tab\tx"];
+        for (const reason of malformed) {
+            expect(() => clearSystemRegion(db as never, "ses-reason-guard", reason)).toThrow(
+                /reason/,
+            );
+            expect(() => clearAllSystemRegions(db as never, reason)).toThrow(/reason/);
+            expect(() =>
+                clearSystemRegionsByProjectIdentity(db as never, ["git:x"], reason),
+            ).toThrow(/reason/);
+            expect(() =>
+                executeSystemRegionRotation(
+                    db as never,
+                    "ses-reason-guard",
+                    reason,
+                    "<project-memory>y</project-memory>",
+                    {} as never,
+                    () => {},
+                ),
+            ).toThrow(/reason/);
+            // The refusal must not have erased anything.
+            expect(readSystemRegion(db, "ses-reason-guard")).toBe(
+                "<project-memory>x</project-memory>",
+            );
+        }
+        // Well-formed tokens pass (the census vocabulary shape):
+        clearSystemRegion(db as never, "ses-reason-guard", "migrate_session");
+        expect(readSystemRegion(db, "ses-reason-guard")).toBeNull();
+    });
+
     it("clearSystemRegion receipts the event and leaves the row unreadable as a region", () => {
         const db = freshDb();
         seedRegion(db, "ses-clear-funnel");
@@ -477,11 +519,18 @@ describe("system-region baseline-invalidation per-call receipts (A1)", () => {
         // anonymously. The signature makes the parameter required (compile
         // time); this law pins the value: non-empty literal or `reason`
         // forwarded from the enclosing signature.
-        const tsFiles: string[] = [];
-        collectTsFiles(SRC_ROOT, tsFiles);
+        // G2a: same four-zone walk as the eraser census — a caller added in
+        // the CLI, the Pi package, or the scripts zone must not be able to
+        // erase regions anonymously.
+        const zoneFiles: Array<{ rel: string; full: string }> = [];
+        for (const { dir, prefix } of TS_ROOTS) {
+            if (!statSync(dir).isDirectory()) continue;
+            const out: string[] = [];
+            collectTsFiles(dir, out);
+            for (const full of out) zoneFiles.push({ rel: prefix + relative(dir, full), full });
+        }
         const violations: string[] = [];
-        for (const full of tsFiles) {
-            const rel = relative(SRC_ROOT, full);
+        for (const { rel, full } of zoneFiles) {
             if (rel === "features/magic-context/storage-meta-shared.ts") continue;
             const text = readFileSync(full, "utf8");
             for (const m of text.matchAll(/clearCachedM0M1\(([^)]*)\)/g)) {
