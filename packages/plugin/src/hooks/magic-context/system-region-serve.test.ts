@@ -183,6 +183,25 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
         clearCtxReduceAvailability(sessionId);
     });
 
+    // N3 (round 10): the head lane must be inert by CONSTRUCTION against a
+    // region row, not merely by absence of one. Distinct from the row-less
+    // boot law: here the stored region EXISTS and the lane is off (a
+    // compaction-off or rust-capability boot over a row installed while the
+    // lane was on, or after rollback). Nothing region-shaped may leak.
+    it("inert capability lane: a seeded region row stays invisible to the head handler", async () => {
+        useTempDataHome("srg-lane-off-");
+        const sessionId = "ses-srg-lane-off";
+        freezeReduce(sessionId);
+        const region = "<project-docs>ROGUE-LEAK-CHECK</project-docs>";
+        seedRegion(sessionId, region);
+        const { handler } = buildHandler({ systemRegionLane: false });
+        const served = await pass(handler, sessionId, "Base host prompt");
+        expect(served).toContain("Base host prompt");
+        expect(served).not.toContain("ROGUE-LEAK-CHECK");
+        expect(served).not.toContain("mc:system-region");
+        clearCtxReduceAvailability(sessionId);
+    });
+
     it("no region row yet: serve is byte-stable host-prompt only (boot before first install)", async () => {
         useTempDataHome("srg-preinstall-");
         const sessionId = "ses-srg-preinstall";
