@@ -924,6 +924,10 @@ export interface MagicContextConfig {
     mural: MuralConfig;
     /** Selects the runtime implementation for this project. Rust mode is experimental and requires user-level subc configuration. */
     transform_mode: "ts" | "rust";
+    /** Experimental frozen system-region residency: the store-backed panels serve as
+     *  one frozen string inside system[0] instead of synthetic user-role heads.
+     *  Default: false (head lane, today's bytes). */
+    system_region?: { enabled: boolean };
     /** Auto-update the cached OpenCode plugin wrapper when a newer npm version is available.
      *  USER config only; project configs cannot disable it. Default: true. */
     auto_update?: boolean;
@@ -1128,6 +1132,12 @@ export const MagicContextConfigSchema = z
             .default("ts")
             .describe(
                 'Experimental: routes the entire Magic Context runtime for the project through the ck-mc Rust module over subc (requires user-level `subc` config); "ts" is the current TypeScript pipeline.',
+            ),
+        system_region: z
+            .object({ enabled: z.boolean().default(false) })
+            .default({ enabled: false })
+            .describe(
+                "Experimental: serve the store-backed panels (project docs, user profile, memories, session history) as one frozen byte string appended inside system[0], rotating only at materialization boundaries, instead of synthetic user-role head messages. Off by default; see docs/designs/frozen-system-region-residency.md.",
             ),
         auto_update: z
             .boolean()

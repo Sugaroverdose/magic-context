@@ -74,7 +74,12 @@ import { isHostRenderedSystemMessage } from "./host-served-rows";
 import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
-import { executeSystemRegionRotation, type RegionMarkers } from "./system-region";
+import {
+    executeSystemRegionRotation,
+    type RegionMarkers,
+    readSystemRegion,
+    SYSTEM_REGION_SENTINEL,
+} from "./system-region";
 import type { MessageLike } from "./tag-messages";
 import { formatDate } from "./temporal-awareness";
 import { renderUserProfileContent } from "./user-profile-render";
@@ -1769,9 +1774,22 @@ export function mustMaterialize(args: {
     memoryInjectionBudgetTokens?: number;
     historyBudgetTokens?: number;
     historyBudgetPolicyIdentity?: string;
+    /** Frozen system-region residency: the head-lane m[1] arms do not apply —
+     *  a region row legitimately carries no m[1], and a row that is not a
+     *  valid sentinel region must fold once to install one. */
+    systemRegionMode?: boolean;
 }): MaterializeDecision {
     if (!args.state.cachedM0Bytes) return { value: true, reason: "first_render" };
-    if (!args.state.cachedM1Bytes) return { value: true, reason: "cached_m1_missing" };
+    const regionMode = args.systemRegionMode === true;
+    if (!args.state.cachedM1Bytes && !regionMode) {
+        return { value: true, reason: "cached_m1_missing" };
+    }
+    if (regionMode && readSystemRegion(args.db, args.sessionId) === null) {
+        // A row the region reader cannot serve (legacy head bytes or absent)
+        // is replaced by the next boundary fold; the reader contract (R11)
+        // guarantees those bytes were never served as a region.
+        return { value: true, reason: "region_first_install" };
+    }
     const hard = args.hardSignals ?? EMPTY_HARD_SIGNALS;
     // `current.workspaceFingerprint` is resolved inside readCurrentM0SnapshotMarkers
     // (it resolves its own workspace context); the later workspace-identity HARD
@@ -2600,7 +2618,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     }
 
     if (m0Text.length === 0) m0Text = M0_EMPTY_BODY;
-    const m0Bytes = Buffer.from(m0Text, "utf8");
+    let m0Bytes = Buffer.from(m0Text, "utf8");
     const frozenMuralDataUrl =
         mural?.enabled && mural.supportsVision ? (mural.dataUrl ?? null) : null;
     const frozenMuralHash =
@@ -2754,19 +2772,27 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             // placeholder text still flows through, so a content-less session
             // keeps the never-empty region floor via the placeholder blocks.
             const regionText = `${m0Text}\n\n${m1Text}`;
+            let installedBlob: Buffer | null = null;
             const rotated = executeSystemRegionRotation(
                 options.db,
                 options.sessionId,
                 options.systemRegion.reason,
                 regionText,
                 foldMarkers,
-                (regionBlob) => persistFoldRow(regionBlob, null),
+                (regionBlob) => {
+                    installedBlob = regionBlob;
+                    persistFoldRow(regionBlob, null);
+                },
             );
-            if (!rotated) {
+            if (!rotated || !installedBlob) {
                 throw new MaterializeContentionError({
                     reason: "system-region rotation refused (empty or forged payload)",
                 });
             }
+            // The served bytes ARE the region now: replay plumbing and the
+            // fold-bust predicate must see what left this transaction, not the
+            // head rendering it replaced.
+            m0Bytes = installedBlob;
         } else {
             persistFoldRow(m0Bytes, m1Bytes);
         }
@@ -3913,9 +3939,11 @@ export function prepareCachedM0M1Replay(
     sessionId: string,
 ): InjectM0M1Result | undefined {
     const row = readCachedM0M1Row(db, sessionId);
-    if (!row?.cached_m0_bytes || !row.cached_m1_bytes) return undefined;
+    if (!row?.cached_m0_bytes) return undefined;
     const m0Bytes = toBuffer(row.cached_m0_bytes);
-    const m1Text = toBuffer(row.cached_m1_bytes).toString("utf8");
+    const regionReplay = isSentinelRegionRow(m0Bytes);
+    if (!regionReplay && !row.cached_m1_bytes) return undefined;
+    const m1Text = regionReplay ? "" : toBuffer(row.cached_m1_bytes!).toString("utf8");
     const mural = row.cached_m0_mural_data_url
         ? { enabled: true, supportsVision: true, dataUrl: row.cached_m0_mural_data_url }
         : undefined;
@@ -3923,7 +3951,7 @@ export function prepareCachedM0M1Replay(
         ? m0Bytes.toString("utf8")
         : stripMemoryMuralBlock(m0Bytes.toString("utf8"));
     const preparedMessages: MessageLike[] = [];
-    prependM0M1Messages(sessionId, preparedMessages, m0Text, m1Text, mural);
+    if (!regionReplay) prependM0M1Messages(sessionId, preparedMessages, m0Text, m1Text, mural);
     return {
         injected: true,
         prependedMessageCount: 0,
@@ -3937,13 +3965,26 @@ export function prepareCachedM0M1Replay(
     };
 }
 
+function isSentinelRegionRow(bytes: Buffer | Uint8Array): boolean {
+    return (
+        Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+            .subarray(0, SYSTEM_REGION_SENTINEL.length)
+            .toString("utf8") === SYSTEM_REGION_SENTINEL
+    );
+}
+
 export function hasCompleteCachedM0M1(db: Database, sessionId: string): boolean {
     const row = db
-        .prepare(
-            "SELECT length(cached_m0_bytes) > 0 AND length(cached_m1_bytes) > 0 AS complete FROM session_meta WHERE session_id = ?",
-        )
-        .get(sessionId) as { complete: number | null } | null;
-    return row?.complete === 1;
+        .prepare("SELECT cached_m0_bytes, cached_m1_bytes FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as {
+        cached_m0_bytes: Uint8Array | null;
+        cached_m1_bytes: Uint8Array | null;
+    } | null;
+    if (!row?.cached_m0_bytes || row.cached_m0_bytes.byteLength === 0) return false;
+    // A region row legitimately has no m[1]: the region is the complete served
+    // prefix; completeness is decided by the reader contract, not by columns.
+    if (isSentinelRegionRow(row.cached_m0_bytes)) return true;
+    return row.cached_m1_bytes !== null && row.cached_m1_bytes.byteLength > 0;
 }
 
 export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
@@ -3997,7 +4038,9 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         memoryInjectionBudgetTokens: options.memoryInjectionBudgetTokens,
         historyBudgetTokens: options.historyBudgetTokens,
         historyBudgetPolicyIdentity: options.historyBudgetPolicyIdentity,
+        systemRegionMode: options.systemRegion?.enabled === true,
     });
+    const regionMode = options.systemRegion?.enabled === true;
     let rematerialized = false;
     let contentionExhausted = false;
     let freshFallbackRenderedMemoryIds: number[] | null = null;
@@ -4010,13 +4053,19 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
                 options.state,
                 materialized.m0Bytes,
                 materialized.snapshotMarkers,
-                materialized.m1Bytes,
+                regionMode ? undefined : materialized.m1Bytes,
             );
-            m1Render = {
-                text: materialized.m1Text,
-                memoryUpdateCount: 0,
-                renderedMemoryIds: [],
-            };
+            if (regionMode) {
+                // Region rows carry no m[1]: the delta lives inside the region
+                // and reconciles at the next rotation.
+                options.state.cachedM1Bytes = null;
+            } else {
+                m1Render = {
+                    text: materialized.m1Text,
+                    memoryUpdateCount: 0,
+                    renderedMemoryIds: [],
+                };
+            }
             rematerialized = true;
         } catch (error) {
             if (!(error instanceof MaterializeContentionError)) throw error;
@@ -4089,7 +4138,11 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     let memoryUpdateCount = 0;
     let m1Recomputed = m1Render !== null;
 
-    if (m1Render) {
+    if (regionMode) {
+        // No array-side m[1]: panel deltas rotate through the region at the
+        // next boundary. Nothing here may write or re-render cached m[1].
+        m1Text = "";
+    } else if (m1Render) {
         m1Text = m1Render.text;
         memoryUpdateCount = m1Render.memoryUpdateCount;
     } else if (contentionExhausted && freshFallbackRenderedMemoryIds) {
@@ -4223,13 +4276,12 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
               contentHash: options.state.cachedM0MuralHash ?? undefined,
           }
         : undefined;
-    let prependedMessageCount = prependM0M1Messages(
-        options.sessionId,
-        preparedMessages,
-        m0Text,
-        m1Text,
-        muralForWire,
-    );
+    // Region mode serves the panels inside system[0]; the array carries no
+    // heads. The covered-prefix trim still applies — summarized messages stay
+    // out of the wire either way.
+    let prependedMessageCount = regionMode
+        ? 0
+        : prependM0M1Messages(options.sessionId, preparedMessages, m0Text, m1Text, muralForWire);
     let prefixTrimStatus: PrefixTrimStatus = "not-attempted";
     if (options.messages) {
         prefixTrimStatus = trimToPreparedPrefix(options, {
@@ -4237,7 +4289,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             materializationContentionRetryExhausted: contentionExhausted,
             preparedTrimBoundaryId,
         });
-        options.messages.unshift(...structuredClone(preparedMessages));
+        if (!regionMode) options.messages.unshift(...structuredClone(preparedMessages));
     } else prependedMessageCount = 0;
 
     return {

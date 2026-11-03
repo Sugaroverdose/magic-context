@@ -1424,6 +1424,10 @@ interface RunPostTransformPhaseArgs {
     /** Use the defer reason resolved with the scheduler decision at the boundary; do not recompute it from this phase's inputs, which may no longer reflect that decision. */
     schedulerDeferReason?: "scheduler_defer" | null;
     fullFeatureMode: boolean;
+    /** Experimental frozen system-region residency (config `system_region`):
+     *  materialization boundaries install the sentinel region row and the
+     *  array carries no heads. Off = head lane, today's bytes. */
+    systemRegionEnabled?: boolean;
     /**
      * Compaction-off mode (issue #266), boot-resolved. Every mutating gate in
      * this phase becomes `existingGate && !compactionOff`; the m[0]/m[1]
@@ -1921,6 +1925,14 @@ export async function runPostTransformPhase(
                 hardSignals: args.m0M1.hardSignals,
                 muralEnabled: args.m0M1.muralEnabled,
                 compactionOff,
+                systemRegion:
+                    args.systemRegionEnabled === true && !compactionOff
+                        ? {
+                              enabled: true,
+                              reason:
+                                  (foldDueDecision.value && foldDueDecision.reason) || "hard_fold",
+                          }
+                        : undefined,
                 onFoldCommit: (db, rendered) => {
                     committedFoldBustsServedPrefix = foldBustsServedPrefix(
                         foldDueDecision.reason,
@@ -2830,6 +2842,14 @@ export async function runPostTransformPhase(
                 // path: memory/docs/user-profile render, but historical
                 // compartment rows never reach <session-history>.
                 compactionOff,
+                systemRegion:
+                    args.systemRegionEnabled === true && !compactionOff
+                        ? {
+                              enabled: true,
+                              reason:
+                                  (foldDueDecision.value && foldDueDecision.reason) || "hard_fold",
+                          }
+                        : undefined,
             });
             deliveredPrefix = result;
             if (result.injected) {
