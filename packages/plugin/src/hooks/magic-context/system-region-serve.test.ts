@@ -223,4 +223,76 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
         expect(second).toContain("Today's date: Wed Jan 01 2025");
         clearCtxReduceAvailability(sessionId);
     });
+
+    it("law L2: restart is replay — a fresh handler on the reopened store serves identical bytes and performs no rotation", async () => {
+        useTempDataHome("srg-restart-");
+        const sessionId = "ses-srg-restart";
+        freezeReduce(sessionId);
+        seedRegion(sessionId, "<project-docs>DOC-R</project-docs>\n<memory>R</memory>");
+        const { handler } = buildHandler({ systemRegionEnabled: true });
+        const before = await pass(handler, sessionId, "Host prompt");
+        const metaBefore = getOrCreateSessionMeta(openDatabase(), sessionId);
+        const hashBefore = metaBefore.systemPromptHash;
+        const regionBefore = Buffer.from(metaBefore.cachedM0Bytes as Uint8Array);
+
+        // Restart: close the shared handle, reopen the same file, brand-new
+        // handler and sets. Boot must be pure replay of stored bytes.
+        closeDatabase();
+        const historyRefreshSessions = new Set<string>();
+        const systemPromptRefreshSessions = new Set<string>();
+        const pendingMaterializationSessions = new Set<string>();
+        const revived = buildHandler({
+            historyRefreshSessions,
+            systemPromptRefreshSessions,
+            pendingMaterializationSessions,
+            systemRegionEnabled: true,
+        });
+        const after = await pass(revived.handler, sessionId, "Host prompt");
+        expect(after).toBe(before);
+        const metaAfter = getOrCreateSessionMeta(openDatabase(), sessionId);
+        expect(metaAfter.systemPromptHash).toBe(hashBefore);
+        expect(Buffer.from(metaAfter.cachedM0Bytes as Uint8Array)).toEqual(regionBefore);
+        expect(historyRefreshSessions.size).toBe(0);
+        expect(systemPromptRefreshSessions.size).toBe(0);
+        expect(pendingMaterializationSessions.size).toBe(0);
+        clearCtxReduceAvailability(sessionId);
+    });
+
+    it("law L1: the serve path reads no region or panel state — only the session meta the pass already loads", async () => {
+        useTempDataHome("srg-zeroread-");
+        const sessionId = "ses-srg-zeroread";
+        freezeReduce(sessionId);
+        seedRegion(sessionId, "<project-docs>DOC-Z</project-docs>\n<memory>Z</memory>");
+        const db = openDatabase();
+        const originalPrepare = db.prepare.bind(db);
+        const statements: string[] = [];
+        db.prepare = ((sql: string) => {
+            statements.push(sql);
+            return originalPrepare(sql);
+        }) as typeof db.prepare;
+        try {
+            const { handler } = buildHandler({ systemRegionEnabled: true });
+            const served = await pass(handler, sessionId, "Host prompt");
+            expect(served).toContain("<project-docs>DOC-Z</project-docs>");
+            // Zero store reads on the serve path beyond what the pass already
+            // performs: no region SELECT, no panel-table (compartments,
+            // memories, user memories, notes) touch during a serve pass.
+            const leaks = statements.filter(
+                (sql) =>
+                    !/^\s*SELECT \* FROM session_meta/i.test(sql) &&
+                    !/FROM session_meta WHERE/i.test(sql) &&
+                    /cached_m0_bytes|FROM compartments|FROM memories|FROM user_memories|FROM notes/i.test(
+                        sql,
+                    ),
+            );
+            expect(leaks).toEqual([]);
+            // Exactly the one meta read the pass already performs; a second
+            // meta SELECT is a live re-derivation dressed as replay.
+            const metaReads = statements.filter((sql) => /FROM session_meta WHERE/i.test(sql));
+            expect(metaReads.length).toBe(1);
+        } finally {
+            db.prepare = originalPrepare as typeof db.prepare;
+        }
+        clearCtxReduceAvailability(sessionId);
+    });
 });
