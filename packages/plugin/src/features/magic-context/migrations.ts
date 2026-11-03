@@ -1554,7 +1554,6 @@ export const MIGRATIONS: Migration[] = [
                 ).map((column) => column.name),
             );
             const clears: Array<[string, string | number | null]> = [
-                ["cached_m0_bytes", null],
                 ["cached_m1_bytes", null],
                 ["cached_m0_project_memory_epoch", null],
                 ["cached_m0_workspace_fingerprint", null],
@@ -1575,6 +1574,7 @@ export const MIGRATIONS: Migration[] = [
                 ["memory_block_ids", ""],
                 ["memory_block_count", 0],
             ];
+            clearAllSystemRegions(db, "migration_v34");
             const setClauses: string[] = [];
             const values: Array<string | number | null> = [];
             for (const [column, value] of clears) {

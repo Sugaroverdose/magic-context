@@ -4,8 +4,10 @@ import { Database as BunDatabase } from "bun:sqlite";
 import { describe, expect, it, mock } from "bun:test";
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
-import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
+
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
+import { clearSystemRegion, readSystemRegion } from "../../features/magic-context/system-region";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
 
@@ -23,10 +25,6 @@ mock.module("../../shared/logger", () => ({
         lastErrorTime: null,
     }),
 }));
-
-const { clearAllSystemRegions, clearSystemRegion, readSystemRegion } = await import(
-    "../../features/magic-context/system-region"
-);
 
 import { encodeSystemRegionRow } from "../../features/magic-context/system-region";
 
@@ -49,63 +47,250 @@ function clearedLines(): string[] {
     return lines.filter((line) => line.includes("system-region cleared"));
 }
 
+/**
+ * Sole-writer census (L3/L7). Assignment and REPLACE checks apply to every
+ * production file except the named writers; files whose UPDATE ... SET is
+ * assembled dynamically need a named exemption AND must pass their sub-law
+ * (the region column may not be reachable through the dynamic path). The
+ * class this pins: a raw `cached_m0_bytes` eraser outside the receipted
+ * funnel — any form: literal NULL, positional or named bind, upsert-carried
+ * value, REPLACE-into row wipe, list-driven dynamic SET, or a Rust column
+ * literal. This is how the un-receipted-eraser class stays dead, not just
+ * the instances the review found.
+ */
+const ALLOWED_WRITERS: ReadonlyMap<string, string> = new Map([
+    ["features/magic-context/system-region.ts", "the receipted funnel itself"],
+    [
+        "features/magic-context/storage-meta-shared.ts",
+        "fold-row transaction path: persistCachedM0's explicit UPDATE (single production caller, pinned by law below)",
+    ],
+]);
+
+const ALLOWED_DYNAMIC_SET: ReadonlyMap<string, string> = new Map([
+    [
+        "features/magic-context/storage-meta-session.ts",
+        "generic updateSessionMeta dispatcher; column names come from the fixed property->column map",
+    ],
+    [
+        "features/magic-context/storage-meta-shared.ts",
+        "same dispatcher for the shared harness; the region column is reachable only through persistCachedM0's pinned positional bind",
+    ],
+    [
+        "features/magic-context/migrations.ts",
+        "v34 clears-list and ensureColumn; the region column may not appear as a list pair (sub-law)",
+    ],
+    [
+        "features/magic-context/store-generation-rebase.ts",
+        "JSON-array prune columns; the region column may not be named at all (sub-law)",
+    ],
+    [
+        "features/magic-context/storage-meta-persisted.ts",
+        "CAS helper with a hard two-column allowlist; the region column may not be named at all (sub-law)",
+    ],
+    [
+        "features/magic-context/storage-identity-merge.ts",
+        "generic table-descriptor merge (never targets session_meta; asserted behaviorally in the merge law); static SQL may not assign the region column",
+    ],
+    [
+        "features/magic-context/storage-schema-helpers.ts",
+        "fallback defaults list for non-region columns only (sub-law: may not name cached_m0 columns)",
+    ],
+]);
+
+const ALLOWED_RUST: ReadonlyMap<string, string> = new Map([
+    [
+        "mc-module/src/single_store_repair.rs",
+        "baseline-set consistent reset (nulls the whole cached_m0_* family together; readers self-heal via first_render; region is never active on the Rust lane)",
+    ],
+    [
+        "db.rs",
+        "dashboard invalidate_all_memory_block_caches (external editor's cache-format reset, sanctioned class like the memory-epoch bump; erases the whole baseline family together and region rows self-heal through the reader contract — absent region folds at the next boundary)",
+    ],
+]);
+
+/** Deny-shape checks per dynamic-SET exemption. Returns a violation string or null. */
+function subLawViolation(rel: string, text: string): string | null {
+    const namesRegion = /cached_m0_bytes/.test(text);
+    switch (rel) {
+        case "features/magic-context/storage-meta-session.ts": {
+            if (!namesRegion) return null;
+            for (const m of text.matchAll(/cached_m0_bytes/g)) {
+                const line = text.slice(text.lastIndexOf("\n", m.index) + 1, text.indexOf("\n", m.index));
+                if (
+                    !/NULL AS cached_m0_bytes|cached_m0_bytes:\s*"cached_m0_bytes"|cached_m0_bytes:\s*"NULL AS/i.test(
+                        line,
+                    )
+                ) {
+                    return `region column named outside projections/column-map: ${line.trim()}`;
+                }
+            }
+            return null;
+        }
+        case "features/magic-context/storage-meta-shared.ts": {
+            if (!namesRegion) return null;
+            // Deny shapes: an erase-list pair (the C1-era reset-list form) or
+            // an assignment whose value is not the fold's positional bind.
+            if (/\[\s*"cached_m0_bytes"\s*,/.test(text)) {
+                return "region column in an erase-list pair";
+            }
+            for (const m of text.matchAll(/cached_m0_bytes\s*=\s*([^\n,;]*)/g)) {
+                if (m[1].trim() !== "?") return `assignment to ${m[1].trim() || "<empty>"}`;
+            }
+            return null;
+        }
+        case "features/magic-context/migrations.ts": {
+            if (/\[\s*"cached_m0_bytes"\s*,/.test(text)) {
+                return "region column reachable through a clears list";
+            }
+            if (/cached_m0_bytes\s*=\s*(NULL|:|\$|@|excluded\.)/i.test(text)) {
+                return "static assignment of the region column";
+            }
+            return null;
+        }
+        case "features/magic-context/store-generation-rebase.ts":
+        case "features/magic-context/storage-meta-persisted.ts":
+            return namesRegion ? "names the region column" : null;
+        case "features/magic-context/storage-identity-merge.ts":
+            return /cached_m0_bytes\s*=\s*(NULL|\?|[:@$]\w|excluded\.)/i.test(text)
+                ? "static assignment of the region column"
+                : null;
+        case "features/magic-context/storage-schema-helpers.ts":
+            return /cached_m0/.test(text) ? "names cached_m0 columns" : null;
+        default:
+            return `dynamic-SET file ${rel} has no sub-law`;
+    }
+}
+
+function collectTsFiles(dir: string, out: string[]): void {
+    for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+            if (!entry.startsWith(".")) collectTsFiles(full, out);
+            continue;
+        }
+        if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) out.push(full);
+    }
+}
+
 describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
     it("the production tree has no raw cached_m0_bytes eraser outside the sanctioned funnel", () => {
-        // Sanctioned writers: the funnel (system-region.ts) and the fold-row
-        // transaction path (storage-meta-shared updateSessionMeta, reached
-        // only through the fold's persist callback). Everything else that
-        // nulls or overwrites the region column is a law violation — this is
-        // how the un-receipted-eraser class stays dead, not just this fix.
-        const allowed = new Set([
-            relative(SRC_ROOT, join(SRC_ROOT, "features/magic-context/system-region.ts")),
-            relative(SRC_ROOT, join(SRC_ROOT, "features/magic-context/storage-meta-shared.ts")),
-        ]);
         const offenders: string[] = [];
-        const walk = (dir: string) => {
-            for (const entry of readdirSync(dir)) {
-                const full = join(dir, entry);
-                if (statSync(full).isDirectory()) {
-                    walk(full);
-                    continue;
+        const tsFiles: string[] = [];
+        collectTsFiles(SRC_ROOT, tsFiles);
+        for (const full of tsFiles) {
+            const rel = relative(SRC_ROOT, full);
+            const text = readFileSync(full, "utf8");
+            if (!ALLOWED_WRITERS.has(rel)) {
+                if (/cached_m0_bytes\s*=\s*(NULL|\?|[:@$]\w|excluded\.)/i.test(text)) {
+                    offenders.push(`${rel} (assignment)`);
                 }
-                if (!entry.endsWith(".ts") || entry.endsWith(".test.ts")) continue;
-                const rel = relative(SRC_ROOT, full);
-                if (allowed.has(rel)) continue;
-                const text = readFileSync(full, "utf8");
-                // UPDATE ... SET cached_m0_bytes = NULL / ? / values
-                if (/cached_m0_bytes\s*=\s*(NULL|\?)/i.test(text)) offenders.push(rel);
+                if (/REPLACE\s+INTO\s+session_meta/i.test(text)) {
+                    offenders.push(`${rel} (REPLACE nulls the row)`);
+                }
             }
-        };
-        walk(SRC_ROOT);
+            if (/session_meta/i.test(text) && /SET\s+\$\{/.test(text)) {
+                if (!ALLOWED_DYNAMIC_SET.has(rel)) offenders.push(`${rel} (dynamic SET, unnamed)`);
+                else {
+                    const violation = subLawViolation(rel, text);
+                    if (violation) offenders.push(`${rel} (dynamic-SET exemption broken: ${violation})`);
+                }
+            }
+        }
+        // The Rust lane and the dashboard share context.db: their
+        // column-literal writers are inventoried too, with named exemptions.
+        // (A1: the census must not be silently narrower than the "production
+        // tree" claim — every producer able to raw-null the column, in any
+        // language that touches the DB, appears here or offends.)
+        const RUST_ROOTS: Array<{ root: string; allowed: ReadonlyMap<string, string> }> = [
+            { root: join(SRC_ROOT, "..", "..", "..", "crates"), allowed: ALLOWED_RUST },
+            {
+                root: join(SRC_ROOT, "..", "..", "dashboard", "src-tauri", "src"),
+                allowed: ALLOWED_RUST,
+            },
+        ];
+        for (const { root, allowed } of RUST_ROOTS) {
+            if (!statSync(root).isDirectory()) continue;
+            const walkRs = (dir: string) => {
+                for (const entry of readdirSync(dir)) {
+                    const full = join(dir, entry);
+                    if (statSync(full).isDirectory()) {
+                        if (entry !== "target") walkRs(full);
+                        continue;
+                    }
+                    if (!entry.endsWith(".rs") || entry.endsWith("_tests.rs")) continue;
+                    const rel = relative(root, full);
+                    if (allowed.has(rel)) continue;
+                    if (/"cached_m0_bytes"|cached_m0_bytes\s*=\s*NULL/i.test(readFileSync(full, "utf8"))) {
+                        offenders.push(`${rel} (rust column writer, root=${root})`);
+                    }
+                }
+            };
+            walkRs(root);
+        }
+        // Exemption lists are load-bearing: an entry without a real reason is
+        // a hole waiting to widen.
+        for (const [file, reason] of [
+            ...ALLOWED_WRITERS,
+            ...ALLOWED_DYNAMIC_SET,
+            ...ALLOWED_RUST,
+        ]) {
+            if (!reason || reason.length < 10) offenders.push(`unreasoned exemption ${file}`);
+        }
+        if (offenders.length > 0) console.log("OFFENDERS:", JSON.stringify(offenders, null, 1));
         expect(offenders).toEqual([]);
+    });
+
+    it("the region column has exactly one production writer channel", () => {
+        // persistCachedM0 is the fold-row writer: exactly one production call
+        // site, inside the materialization fold. And no production caller may
+        // push cachedM0Bytes through the generic updateSessionMeta dispatcher
+        // (that would bypass both the funnel and the fold).
+        const tsFiles: string[] = [];
+        collectTsFiles(SRC_ROOT, tsFiles);
+        const persistCallers = tsFiles
+            .filter((f) => {
+                const text = readFileSync(f, "utf8");
+                if (/export function persistCachedM0\b/.test(text)) return false;
+                return /persistCachedM0\s*\(/.test(text);
+            })
+            .map((f) => relative(SRC_ROOT, f));
+        expect(persistCallers).toEqual(["hooks/magic-context/inject-compartments.ts"]);
+        const dispatcherAbusers = tsFiles
+            .filter((f) =>
+                /updateSessionMeta\s*\([\s\S]{0,400}?cachedM0Bytes/.test(readFileSync(f, "utf8")),
+            )
+            .map((f) => relative(SRC_ROOT, f));
+        expect(dispatcherAbusers).toEqual([]);
+    });
+
+    it("the baseline invalidation funnel receipts region erases", async () => {
+        // clearCachedM0M1 (structural compartment invalidation) must route the
+        // region column through the receipted funnel, never the clears list.
+        const { clearCachedM0M1 } = await import(
+            "../../features/magic-context/storage-meta-shared"
+        );
+        const db = freshDb();
+        seedRegion(db, "ses-baseline-clear");
+        lines.length = 0;
+        clearCachedM0M1(db as never, "ses-baseline-clear", "boundary_repair");
+        expect(readSystemRegion(db, "ses-baseline-clear")).toBeNull();
+        expect(clearedLines()).toEqual(["system-region cleared reason=boundary_repair"]);
     });
 
     it("clearSystemRegion receipts the event and leaves the row unreadable as a region", () => {
         const db = freshDb();
         seedRegion(db, "ses-clear-funnel");
         lines.length = 0;
-        clearSystemRegion(db, "ses-clear-funnel", "test_reason");
+        clearSystemRegion(db as never, "ses-clear-funnel", "test_reason");
         expect(readSystemRegion(db, "ses-clear-funnel")).toBeNull();
         expect(clearedLines()).toEqual(["system-region cleared reason=test_reason"]);
     });
 
-    it("clearAllSystemRegions receipts once with the cleared count", () => {
+    it("clearing an absent region is not an event and leaves no line", () => {
         const db = freshDb();
-        seedRegion(db, "ses-bulk-1");
-        seedRegion(db, "ses-bulk-2");
-        getOrCreateSessionMeta(db, "ses-bulk-plain");
+        getOrCreateSessionMeta(db, "ses-absent-clear");
         lines.length = 0;
-        expect(clearAllSystemRegions(db, "migration")).toBe(2);
-        expect(readSystemRegion(db, "ses-bulk-1")).toBeNull();
-        expect(readSystemRegion(db, "ses-bulk-2")).toBeNull();
-        expect(clearedLines()).toEqual(["system-region cleared reason=migration count=2"]);
-    });
-
-    it("a no-op clear is not an event: no receipt without a region row", () => {
-        const db = freshDb();
-        getOrCreateSessionMeta(db, "ses-clear-noop");
-        lines.length = 0;
-        clearSystemRegion(db, "ses-clear-noop", "test_reason");
+        clearSystemRegion(db as never, "ses-absent-clear", "nothing_here");
         expect(clearedLines()).toEqual([]);
     });
 
@@ -122,14 +307,19 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         // Give the merge a changed row to process (it early-returns on a
         // zero-change audit — and the raw eraser historically lived behind
         // that early return).
-        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
-        insertMemory(db, {
+        const { insertMemory } = await import(
+            "../../features/magic-context/memory/storage-memory"
+        );
+        insertMemory(db as never, {
             projectPath: "/identity/from",
             category: "ARCHITECTURE",
             content: "merge me",
         });
         lines.length = 0;
-        mergeProjectIdentities(db, "/identity/from", "/identity/to");
+        const report = mergeProjectIdentities(db as never, "/identity/from", "/identity/to");
+        // The generic table-descriptor writer must never target the region's
+        // home table: session_meta is not a project-identity-scoped table.
+        expect(report.auditedTables.some((t) => t.tableName === "session_meta")).toBe(false);
         expect(readSystemRegion(db, "ses-merge-a")).toBeNull();
         expect(readSystemRegion(db, "ses-merge-b")).toBeNull();
         const receipts = clearedLines().filter((line) => line.includes("reason=identity_merge"));
@@ -157,13 +347,14 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         const db = freshDb();
         seedRegion(db, "ses-clone-src");
         seedRegion(db, "ses-clone-dst");
-        lines.length = 0;
-        copySessionStateForClone(db, "ses-clone-src", "ses-clone-dst", {
+        const filter = {
             resolveBoundaryOrdinal: () => 1,
             includeTag: () => true,
             includeMessageId: () => true,
             selectPendingPiMarker: () => null,
-        } as never);
+        };
+        lines.length = 0;
+        copySessionStateForClone(db as never, "ses-clone-src", "ses-clone-dst", filter as never);
         expect(readSystemRegion(db, "ses-clone-dst")).toBeNull();
         expect(clearedLines().some((line) => line.includes("reason=storage_clone"))).toBe(true);
         // The source row is untouched by a clone.
@@ -181,16 +372,58 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
             compactionOff: true,
             historianRunnable: false,
             compartmentInProgress: false,
-            cleanupMarkers: () =>
-                ({
-                    cleaned: true,
-                    clearedMarkerCount: 0,
-                    markerStates: [],
-                }) as never,
+            cleanupMarkers: () => ({
+                cleaned: true,
+                clearedMarkerCount: 0,
+                markerStates: [],
+            }) as never,
         });
         expect(readSystemRegion(db, "ses-off-transition")).toBeNull();
         expect(
             clearedLines().some((line) => line.includes("reason=compaction_off_transition")),
         ).toBe(true);
+    });
+});
+
+describe("system-region migration erasers route through the funnel", () => {
+    it.each([26, 30, 34])("migration v%i clears installed regions with a named receipt", async (v) => {
+        const { MIGRATIONS } = await import("../../features/magic-context/migrations");
+        const db = freshDb();
+        seedRegion(db, `ses-mig-${v}`);
+        lines.length = 0;
+        const entry = MIGRATIONS.find((m) => m.version === v);
+        expect(entry).toBeDefined();
+        entry!.up(db as never);
+        expect(readSystemRegion(db, `ses-mig-${v}`)).toBeNull();
+        expect(
+            clearedLines().some((line) => line.includes(`reason=migration_v${v}`)),
+        ).toBe(true);
+    });
+});
+
+describe("system-region baseline-invalidation per-call receipts (A1)", () => {
+    it("every production clearCachedM0M1 call site passes a named reason", () => {
+        // Structural law: the region column's fate rides the baseline
+        // invalidation funnel, and L7 requires a NAMED reason per CALL — a
+        // per-file or defaulted reason would let new callers erase regions
+        // anonymously. The signature makes the parameter required (compile
+        // time); this law pins the value: non-empty literal or `reason`
+        // forwarded from the enclosing signature.
+        const tsFiles: string[] = [];
+        collectTsFiles(SRC_ROOT, tsFiles);
+        const violations: string[] = [];
+        for (const full of tsFiles) {
+            const rel = relative(SRC_ROOT, full);
+            if (rel === "features/magic-context/storage-meta-shared.ts") continue;
+            const text = readFileSync(full, "utf8");
+            for (const m of text.matchAll(/clearCachedM0M1\(([^)]*)\)/g)) {
+                const args = m[1];
+                const third = args.split(",").slice(2).join(",").trim();
+                if (!/^(?:"[a-z0-9_]{3,}"|reason)$/.test(third)) {
+                    violations.push(`${rel}: (${args.trim()})`);
+                }
+            }
+        }
+        expect(violations).toEqual([]);
     });
 });

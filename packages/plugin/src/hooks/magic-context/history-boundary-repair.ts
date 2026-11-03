@@ -143,7 +143,7 @@ function dropCompartmentsAfter(
         ).run(sessionId, anchor.endMessage);
         deleteChunkEmbedBackoffForSession(db, sessionId);
         queueM0Mutation(db, { sessionId, mutationType: "recomp_boundary_change" });
-        clearCachedM0M1(db, sessionId);
+        clearCachedM0M1(db, sessionId, "compartment_drop_after");
         db.exec("COMMIT");
         finished = true;
         return dropped.map((row) => row.sequence);
@@ -238,7 +238,7 @@ export function repairMissingHistoryBoundary(args: {
         return { kind: "intact" };
     }
     if (isInHostStore(baseline.boundary) !== false) return { kind: "intact" };
-    clearCachedM0M1(db, sessionId);
+    clearCachedM0M1(db, sessionId, "boundary_repair");
     forgetCachedPrefix(sessionId);
     sessionLog(
         sessionId,

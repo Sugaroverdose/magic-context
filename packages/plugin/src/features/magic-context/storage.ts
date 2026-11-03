@@ -114,7 +114,6 @@ export {
     casChannel2NudgeClaim,
     casChannel2NudgeState,
     claimChannel2NudgeState,
-    clearCachedM0,
     clearCachedM0M1,
     clearDetectedContextLimit,
     clearEmergencyDrainLatch,

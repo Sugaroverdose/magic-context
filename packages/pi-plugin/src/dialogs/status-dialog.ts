@@ -734,12 +734,17 @@ export function buildPiStatusDetail(
 	// Facts retired → 0). Falls back to Σp1 / on-demand v2 memory render cold.
 	const decodeCachedBytes = (
 		bytes: Buffer | Uint8Array | string | null | undefined,
-	): string =>
-		bytes instanceof Uint8Array
-			? Buffer.from(bytes).toString("utf8")
-			: typeof bytes === "string"
-				? bytes
-				: "";
+	): string => {
+		const text =
+			bytes instanceof Uint8Array
+				? Buffer.from(bytes).toString("utf8")
+				: typeof bytes === "string"
+					? bytes
+					: "";
+		// Frozen system-region rows reuse cached_m0_bytes for system-resident
+		// panel bytes: not head text, so the breakdown reports none of it.
+		return text.startsWith("<!-- mc:system-region v1 -->") ? "" : text;
+	};
 	const m0Blocks = computeM0BlockTokens(deps.db, sessionId, {
 		m0Text: decodeCachedBytes(metaRow?.cached_m0_bytes),
 		m1Text: decodeCachedBytes(metaRow?.cached_m1_bytes),

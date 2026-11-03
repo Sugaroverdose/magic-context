@@ -1510,6 +1510,10 @@ pub fn get_context_token_breakdown(
     let m0_history = m0_bytes
         .as_ref()
         .and_then(|b| String::from_utf8(b.clone()).ok())
+        // Frozen system-region rows reuse this column for system-resident
+        // panel bytes; they are not head text and carry no session-history
+        // slice. Counting them as history would mislabel the meter.
+        .filter(|text| !text.starts_with("<!-- mc:system-region v1 -->"))
         .and_then(|text| extract_session_history_slice(&text));
     let m1_compartments = m1_bytes
         .as_ref()
