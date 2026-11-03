@@ -1902,6 +1902,15 @@ export async function runPostTransformPhase(
         (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory) &&
         (args.fullFeatureMode || compactionOff);
     const freezeM0M1 = args.freezeM0M1 === true;
+    // The restore-only pass serves the persisted bytes — m[0] included — so
+    // a re-anchor request raised by the host's post-restart replay is moot
+    // on it: discharge it instead of parking it. A parked request would
+    // ride a later bust, rewrite bytes the restore already made identical,
+    // and drag the stale backlog with it. (Local flags above are snapshotted
+    // from the set at pass start, so clearing it changes nothing this pass.)
+    if (restoreOnlyBootPass && pendingMaterializationAtPassStart && !freezeM0M1) {
+        args.pendingMaterializationSessions.delete(args.sessionId);
+    }
     const foldDueArgs: M0SnapshotMarkerReadArgs & { state: M0M1State } = {
         db: args.db,
         sessionId: args.sessionId,
@@ -2189,10 +2198,12 @@ export async function runPostTransformPhase(
         // flush — a fold ride that re-decides drops on a healthy wire at half
         // a window. A positional re-anchor is not fold permission: while the
         // pass is restore-only the flush ride is suppressed (the LKG restore
-        // serves the byte-identical pre-restart wire); the request is NOT
-        // consumed — the drain lives behind materialization success, so the
-        // first pass with real usage rides the flush. The force/emergency
-        // signal is separate and stays ungated.
+        // serves the byte-identical pre-restart wire), the flush conjuncts
+        // below are gated alike, and the request itself is discharged at pass
+        // start (see the restore-only discharge above) — the restore already
+        // served m[0], so parking it would only let a later ride rewrite
+        // bytes the restore made identical. The force/emergency signal is
+        // separate and stays ungated.
         explicitFlush:
             (isExplicitFlush || (deferredMaterialize && !prefixPreflightFailed)) &&
             !restoreOnlyBootPass,
@@ -2220,12 +2231,17 @@ export async function runPostTransformPhase(
     // exception is the aborted-fold retry, where the provider is already cold
     // (prefixPreflightFailed). Subagent passes keep their execute-band pressure
     // semantics via the fullFeatureMode bypass.
+    // The raw isExplicitFlush conjunct must carry the same restore-only gate
+    // as the flush ride arm above: a boot pass that entered with unknown
+    // usage may not open reclaim on a host-raised re-anchor request (the
+    // leaf law, restore-only-boot-pass.ts). The publishedHistory arm is a
+    // separate signal and stays ungated.
     const systemReclaimAllowed =
         !args.fullFeatureMode ||
         (!compactionOff &&
             (rideSignals.hardFold ||
                 rideSignals.force ||
-                isExplicitFlush ||
+                (isExplicitFlush && !restoreOnlyBootPass) ||
                 rideSignals.publishedHistory ||
                 (deferredMaterialize && prefixPreflightFailed)));
     const shouldApplyPendingOps = publishedWorkDrainAllowed;
@@ -2233,7 +2249,10 @@ export async function runPostTransformPhase(
         !compactionOff &&
         systemReclaimAllowed &&
         (rideSignals.publishedHistory ||
-            isExplicitFlush ||
+            // Same restore-only gate as systemReclaimAllowed's flush arm: the
+            // boot re-anchor admits no heuristic lanes (dedup, injection strip,
+            // caveman) — wire byte-identity at boot is the leaf law.
+            (isExplicitFlush && !restoreOnlyBootPass) ||
             (deferredMaterialize && prefixPreflightFailed) ||
             forceMaterialization ||
             // The off-wire fold changed the served prefix, so the prefix already

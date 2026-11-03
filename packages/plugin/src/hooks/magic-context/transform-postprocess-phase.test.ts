@@ -9570,8 +9570,9 @@ describe("restore-only boot pass (rust-law port)", () => {
             // and the pass arrives as an explicit flush on a cold, healthy
             // session. The flush ride folds and drops the backlog; the gate
             // suppresses it: the wire replays the byte-identical restore, the
-            // queued op stays queued, and the flush request SURVIVES for the
-            // first pass that can materialize (drain is never reached).
+            // queued op stays queued, and the request is DISCHARGED at pass
+            // start — the restore already served m[0], so a parked re-anchor
+            // would only let a later ride rewrite identical bytes.
             {
                 const { messages, targets } = freshWire();
                 await runPostTransformPhase(
@@ -9679,6 +9680,90 @@ describe("restore-only boot pass (rust-law port)", () => {
             expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
                 "dropped",
             );
+        } finally {
+            setRestoreOnlyBootPassEnabledForTests(false);
+        }
+    });
+
+    it("boot flush admits nothing: wire byte-identical, backlog queued, request discharged", async () => {
+        setRestoreOnlyBootPassEnabledForTests(true);
+        try {
+            db = new Database(":memory:");
+            initializeDatabase(db);
+            const sessionId = "fpe-flush-heat-leak";
+            const dupOwner = "m-dup";
+            const makeRead = (callId: string) => ({
+                type: "tool",
+                tool: "read",
+                callID: callId,
+                state: { status: "completed", input: { path: "src/a.ts" }, output: "same bytes" },
+            });
+            const make = () => {
+                const messages = [
+                    makeCall("m-1", "cold-call-1", bigCommand),
+                    makeCall("m-2", "cold-call-2", "ls -la"),
+                    {
+                        info: { id: dupOwner, role: "assistant" },
+                        parts: [makeRead("dup-old"), makeRead("dup-new")],
+                    } as unknown as MessageLike,
+                    {
+                        info: { id: "m-next", role: "user" },
+                        parts: [{ type: "text", text: "next prompt" }],
+                    } as unknown as MessageLike,
+                ];
+                const tagger = createTagger();
+                tagger.initFromDb(sessionId, db);
+                const tagged = tagMessages(sessionId, messages, tagger, db);
+                applyFlushedStatuses(sessionId, db, tagged.targets);
+                return { messages, tagged };
+            };
+            insertTag(db, sessionId, "cold-call-1", "tool", 1000, 1, 0, "bash", 0, "m-1");
+            insertTag(db, sessionId, "cold-call-2", "tool", 1000, 2, 0, "bash", 0, "m-2");
+            insertTag(db, sessionId, "dup-old", "tool", 1000, 3, 0, "read", 0, dupOwner);
+            insertTag(db, sessionId, "dup-new", "tool", 1000, 4, 0, "read", 0, dupOwner);
+            queuePendingOp(db, sessionId, 1, "drop");
+
+            // The identical read pair is the discriminator: heuristic cleanup's
+            // dedup lane is threshold-free — once heuristics are admitted at all
+            // it drops the older copy to a sweeper skeleton. The ungated raw
+            // isExplicitFlush conjuncts in systemReclaimAllowed/shouldRunHeuristics
+            // admitted them on a restore-only boot pass, so wire byte-identity
+            // here is what the law ("a pass that entered with unknown provider
+            // usage may not mutate the served wire") actually enforces.
+            const { messages, tagged } = make();
+            const wireAtEntry = JSON.stringify(messages.map((m) => m.parts));
+            const flushSet = new Set([sessionId]);
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, messages, {
+                    schedulerDecision: "defer",
+                    schedulerDeferReason: null,
+                    usageUnknownAtPassStart: true,
+                    contextUsage: { percentage: 49, inputTokens: 127_000 },
+                    targets: tagged.targets,
+                    messageTagNumbers: tagged.messageTagNumbers,
+                    tags: getActiveTagsBySession(db, sessionId),
+                    pendingMaterializationSessions: flushSet,
+                    m0M1: {
+                        hardSignals: {
+                            systemHash: "s",
+                            modelKey: "k",
+                            cacheExpired: true,
+                            lastResponseTime: 0,
+                        } as M0HardSignals,
+                    },
+                }),
+            );
+            expect(JSON.stringify(messages.map((m) => m.parts))).toBe(wireAtEntry);
+            expect(getPendingOps(db, sessionId).map((op) => op.tagId)).toEqual([1]);
+            for (const tagNumber of [1, 2, 3, 4]) {
+                expect(
+                    getTagsBySession(db, sessionId).find((t) => t.tagNumber === tagNumber)?.status,
+                ).toBe("active");
+            }
+            // The restore already served m[0] byte-identically, so the boot-raised
+            // re-anchor request is discharged at pass start (restore-only-boot-pass
+            // .ts, Discharge) — not consumed by a heuristics-success drain.
+            expect(flushSet.has(sessionId)).toBe(false);
         } finally {
             setRestoreOnlyBootPassEnabledForTests(false);
         }

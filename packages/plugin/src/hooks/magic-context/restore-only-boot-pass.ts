@@ -24,8 +24,10 @@
  * any warm one — a session genuinely at or over the band owes its work even
  * at boot. `schedulerDecision === "execute"` is deliberately NOT admission:
  * the census shows healthy sessions booting `dec=execute reason=ttl_idle`,
- * and boot execute is exactly the reading this law distrusts. Explicit user
- * flushes and published history are never gated (separate signals).
+ * and boot execute is exactly the reading this law distrusts. Published
+ * history is a separate signal and stays ungated; a boot-raised
+ * materialization flush admits no reclaim or heuristic lane and is
+ * discharged at pass start (see Discharge below).
  *
  * Discharge, not parking: the restore serves the persisted bytes — m[0]
  * included — so a re-anchor request raised by the host's post-restart replay
