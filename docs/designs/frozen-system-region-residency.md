@@ -7,10 +7,11 @@ ruled: slots survive rotation, §7.4). Step 2 (durable-slot honesty) has landed.
 
 Base: this lane was rebased off assembly onto the v0.45.0 tag (`cb6724d69`) on 2026-11-03
 (backup tag `archive/synthetic-head-pre-rebase-2026-11-03`). The lane is
-`v0.45.0 + 2 prereqs + frozen-region feature`: prereq 1 `8953bc4ee` (LKG telemetry
-honesty), prereq 2 `0c606a9ff` (R12 system-reclaim boundary, adapted — see §7.2). The
-extraction property `git diff v0.45.0...HEAD` minus the two prereqs = the feature only is
-the invariant to preserve.
+`v0.45.0 + prereqs + frozen-region feature`, the prerequisite commits contiguous at the
+base: step-2 LKG slot honesty `8953bc4ee` + `dd67ed427`, then the R12 system-reclaim
+boundary `6526ca687` (adapted — see §7.2). The extraction property — `git diff
+v0.45.0...HEAD` minus the prerequisite commits = the feature only — is the invariant to
+preserve.
 
 Audience: the lane owner and the implementers of the OpenCode 1, OpenCode 2, Pi and Rust
 lanes. Purpose: approve what the frozen system region is, when its bytes may rotate, how the
@@ -102,7 +103,7 @@ silently.
   through `lkgSlotStructuralRejection` at both gates with logging refusal paths
   (`lkg-slot.ts:381-396`, `lkg-persist.ts:221`, `:372-378`, `lkg-slot.ts:576`,
   `lkg-replay.ts:393`). Obsoletes: per-incident receipt patches (the five-path hunt of
-  `17006a72b` became a law, not a fix). Tests: receipt rows count lines per event
+  `dd67ed427` became a law, not a fix). Tests: receipt rows count lines per event
   (red-first, silent paths fail CI); negative controls removed one receipt and the row
   went red.
 - **L8 — One invalidation per event.** Structure: the cause sets are disjoint by
@@ -359,8 +360,8 @@ and never was. Consequences:
   itself a bust pass, so the capture refreshes on the same pass and no boot-rebuild
   window opens between rotation and first capture). Stale panels on a fault replay are
   acceptable and cheaper than dropping the recovery ladder.
-- Boot-cache-bust honesty (landed, step 2, commits `8953bc4ee` prereq + `17006a72b` on the
-  rebased base; was `1210bf8c3`/`a49c8611e` pre-rebase): the observed
+- Boot-cache-bust honesty (landed, step 2, prerequisite commits `8953bc4ee` + `dd67ed427`
+  on the rebased base; was `1210bf8c3`/`a49c8611e` pre-rebase): the observed
   wipe (22 chunks to 0 rows, `captured_at` reading NULL, zero `lkg_capture_declined`
   lines) was reproduced red-first and closed at every silent path. `captureSlot` and the
   durable writer now share `lkgSlotStructuralRejection` (`lkg-slot.ts:381-395`, reasons
