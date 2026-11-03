@@ -25,7 +25,7 @@ const {
     decodeSystemRegionRow,
     readSystemRegion,
     writeSystemRegion,
-} = await import("./system-region");
+} = await import("../../features/magic-context/system-region");
 
 import type { Database } from "../../shared/sqlite";
 

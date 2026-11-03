@@ -17,7 +17,7 @@ import {
     readSystemRegion,
     SYSTEM_REGION_SENTINEL,
     writeSystemRegion,
-} from "./system-region";
+} from "../../features/magic-context/system-region";
 import type { MessageLike } from "./tag-messages";
 import { regionRotationPromotion } from "./transform-postprocess-phase";
 

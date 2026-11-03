@@ -7,6 +7,7 @@ import { splitLkgSlotPrefixes, splitReplayDecisions } from "./migration-v94-writ
 import { repairOpenCode2HarnessLabels } from "./opencode2-relabel";
 import { installCompartmentHistoryVersions } from "./storage-compartment-history-version";
 import { ensureColumn, healAllNullColumns } from "./storage-schema-helpers";
+import { clearAllSystemRegions } from "./system-region";
 import { bumpEpochsForWorkspaceMemberSet } from "./workspaces";
 
 /** First version reserved for downstream migrations; upstream versions stay below it. */
@@ -1220,9 +1221,9 @@ export const MIGRATIONS: Migration[] = [
             ensureColumn(db, "session_meta", "memory_block_cache", "TEXT DEFAULT ''");
             ensureColumn(db, "session_meta", "memory_block_count", "INTEGER DEFAULT 0");
             ensureColumn(db, "session_meta", "memory_block_ids", "TEXT DEFAULT ''");
+            clearAllSystemRegions(db, "migration_v26");
             db.prepare(
                 `UPDATE session_meta SET
-                    cached_m0_bytes = NULL,
                     cached_m1_bytes = NULL,
                     cached_m0_project_memory_epoch = NULL,
                     cached_m0_project_user_profile_version = NULL,
@@ -1350,9 +1351,9 @@ export const MIGRATIONS: Migration[] = [
                 ).map((column) => column.name),
             );
             if (columns.has("cached_m0_bytes")) {
+                clearAllSystemRegions(db, "migration_v30");
                 db.prepare(
                     `UPDATE session_meta SET
-                        cached_m0_bytes = NULL,
                         cached_m1_bytes = NULL,
                         cached_m0_materialized_at = NULL,
                         cached_m0_system_hash = NULL,

@@ -68,10 +68,7 @@ export function readSystemRegion(db: Database, sessionId: string): string | null
     if (decoded === CORRUPT) {
         // Honest store: a region the reader cannot serve is named, not
         // silently treated as absent (the LKG wipe lesson).
-        sessionLog(
-            sessionId,
-            "system-region read declined session=" + sessionId + " reason=corrupt",
-        );
+        sessionLog(sessionId, `system-region read declined session=${sessionId} reason=corrupt`);
         return null;
     }
     return decoded;
@@ -106,11 +103,63 @@ export function writeSystemRegion(db: Database, sessionId: string, region: strin
 }
 
 export function clearSystemRegion(db: Database, sessionId: string, reason: string): void {
-    // Destructive arms leave receipts, same law as the LKG store.
-    sessionLog(sessionId, `system-region cleared reason=${reason}`);
-    db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?").run(
-        sessionId,
-    );
+    // Destructive arms leave receipts, same law as the LKG store — and only
+    // for actual events: clearing an absent region is not an event.
+    const result = db
+        .prepare(
+            "UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ? AND cached_m0_bytes IS NOT NULL",
+        )
+        .run(sessionId);
+    if ((result.changes ?? 0) > 0) {
+        sessionLog(sessionId, `system-region cleared reason=${reason}`);
+    }
+}
+
+/**
+ * Bulk clear for maintenance passes (identity merge, migrations, clone).
+ * One receipt with the count: the event is the bulk operation, not N rows.
+ */
+export function clearAllSystemRegions(db: Database, reason: string): number {
+    const rows = db
+        .prepare("SELECT session_id FROM session_meta WHERE cached_m0_bytes IS NOT NULL")
+        .all() as Array<{ session_id: string }>;
+    if (rows.length === 0) return 0;
+    const clear = db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?");
+    let cleared = 0;
+    for (const row of rows) {
+        const result = clear.run(row.session_id);
+        if ((result.changes ?? 0) > 0) cleared++;
+    }
+    if (cleared > 0) sessionLog("", `system-region cleared reason=${reason} count=${cleared}`);
+    return cleared;
+}
+
+export function clearSystemRegionsByProjectIdentity(
+    db: Database,
+    identities: string[],
+    reason: string,
+): number {
+    if (identities.length === 0) return 0;
+    const placeholders = identities.map(() => "?").join(", ");
+    const rows = db
+        .prepare(
+            `SELECT session_id FROM session_meta WHERE cached_m0_bytes IS NOT NULL AND cached_m0_project_identity IN (${placeholders})`,
+        )
+        .all(...identities) as Array<{ session_id: string }>;
+    if (rows.length === 0) return 0;
+    const clear = db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?");
+    let cleared = 0;
+    for (const row of rows) {
+        const result = clear.run(row.session_id);
+        if ((result.changes ?? 0) > 0) cleared++;
+    }
+    if (cleared > 0) {
+        sessionLog(
+            "",
+            `system-region cleared reason=${reason} count=${cleared} identities=${identities.length}`,
+        );
+    }
+    return cleared;
 }
 
 /**
@@ -232,11 +281,15 @@ export function executeSystemRegionRotation(
         typeof region === "string" &&
         region.length > 0 &&
         !region.startsWith(SYSTEM_REGION_SENTINEL);
-    const ok = valid
-        ? persist
-            ? (persist(encodeSystemRegionRow(region), capturedMarkers), true)
-            : writeSystemRegion(db, sessionId, region)
-        : false;
+    let ok = false;
+    if (valid) {
+        if (persist) {
+            persist(encodeSystemRegionRow(region), capturedMarkers);
+            ok = true;
+        } else {
+            ok = writeSystemRegion(db, sessionId, region);
+        }
+    }
     sessionLog(
         sessionId,
         `system-region rotation: reason=${reason} executed=${ok ? "true" : "false"} bytes=${valid ? Buffer.byteLength(region) : -1}`,

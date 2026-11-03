@@ -10396,7 +10396,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
             isCacheBustingPass: true,
             systemRegion: { enabled: true, reason: "first_render" },
         } as never);
-        const { readSystemRegion } = await import("./system-region");
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
         expect(readSystemRegion(db, sessionId)).toContain("C3-MEM-ONE");
         return db;
     }
@@ -10404,7 +10404,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
     it("warm deferred region passes emit no cached_m1_missing receipt and rotate nothing", async () => {
         const sessionId = "ses-region-c3-census";
         const db = await installedRegionDb(sessionId);
-        const { readSystemRegion } = await import("./system-region");
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
         const before = readSystemRegion(db, sessionId);
         const logs: string[] = [];
         const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
@@ -10466,7 +10466,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
             ),
         ).toBe(true);
         expect(logs.filter((line) => line.includes("cached_m1_missing"))).toEqual([]);
-        const { readSystemRegion } = await import("./system-region");
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
         expect(readSystemRegion(db, sessionId)).toContain("C3-MEM-TWO-NEW");
     });
 

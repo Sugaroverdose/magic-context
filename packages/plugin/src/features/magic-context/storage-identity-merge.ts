@@ -1,5 +1,6 @@
 import type { Database } from "../../shared/sqlite";
 import { nextDueAtMs } from "./dreamer/cron";
+import { clearSystemRegionsByProjectIdentity } from "./system-region";
 
 const IDENTITY_COLUMNS = new Set(["project_path", "project_identity"]);
 const DERIVED_TABLE_SUFFIXES = [
@@ -667,8 +668,9 @@ export function mergeProjectIdentities(
             db.prepare(
                 `UPDATE git_sweep_coordinator SET lease_holder = NULL, lease_expires_at = NULL, last_swept_at = NULL WHERE project_path = ?`,
             ).run(toIdentity);
+            clearSystemRegionsByProjectIdentity(db, [fromIdentity, toIdentity], "identity_merge");
             db.prepare(
-                `UPDATE session_meta SET cached_m0_bytes = NULL, cached_m0_project_identity = NULL WHERE cached_m0_project_identity IN (?, ?)`,
+                `UPDATE session_meta SET cached_m0_project_identity = NULL WHERE cached_m0_project_identity IN (?, ?)`,
             ).run(fromIdentity, toIdentity);
             db.prepare(
                 `INSERT INTO project_state

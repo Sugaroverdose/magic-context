@@ -18,7 +18,7 @@ import {
     resolveCtxReduceAvailabilityFromMessages,
 } from "./ctx-reduce-availability";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
-import { encodeSystemRegionRow } from "./system-region";
+import { encodeSystemRegionRow } from "../../features/magic-context/system-region";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;

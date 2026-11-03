@@ -23,7 +23,7 @@ import {
     spawnAgentFromOpenCodeDb,
 } from "./ctx-reduce-availability";
 import { estimateTokens } from "./read-session-formatting";
-import { decodeSystemRegionRow } from "./system-region";
+import { decodeSystemRegionRow } from "../../features/magic-context/system-region";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
