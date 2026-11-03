@@ -644,6 +644,10 @@ state), and Pi's `decodeCachedM0` refuses it (seeded-sentinel and
 materialized-head laws on both sides, inert-guard controls). The schema
 describes the v1-TS-only scope; v2 setup and Pi boot log an ignored-flag
 warning on the plugin log (log lines, not laws).
+*(Superseded 2026-11-03 by the flag-deletion ruling, §21: no config key
+exists to read or ignore; the v1-TS scoping is a boot-time capability
+(`isSystemRegionLane`) plus the C2 laws, and the boot warnings were
+deleted with the key.)*
 
 ## 14. Review round 3 (class-closure review, coordinator-verified)
 
@@ -941,8 +945,8 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   (`prependM0M1Messages` deletion, region composition beside the guidance
   block, watcher-split mirror) and the full Rust migration (module stops
   emitting heads). Both remain the enabled-state plan: the region ships
-  v1-TS-only (C2), Pi/Rust boot warn on the ignored flag, and the Pi/Rust
-  region serves are gated behind that. This stage delivered the
+  v1-TS-only (C2, re-expressed: boot capability, no config key — see §21),
+  and the Pi/Rust region serves are gated behind that. This stage delivered the
   coordinator's dispatched scope — the Pi LAW audit + reader-property
   closure, and the Rust CONTRACT audit + the owed R11 port — and does not
   reinterpret §9 as complete.
@@ -983,3 +987,33 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   any Rust-mode enablement. TS-side gates (plugin 6852, Pi 1500, tsc,
   unfiltered biome) are unaffected by the Rust edits (`crates/` is outside
   the TS build graph).
+
+## 21. Flag deletion (owner ruling 2026-11-03): enablement is a capability
+
+Dated law line: **the `system_region.enabled` switch is dead — no config
+surface; recovery is rollback (spec flip), never a config flip.** The
+region lane is an install-time capability of the OpenCode-1 TypeScript
+host: one exported decider, `isSystemRegionLane(config)`
+(`src/config/system-region-lane.ts`), computed once per handler boot from
+`transform_mode` + compaction (composing `isCompactionEnabled`) and
+threaded as `systemRegionLane` — no per-site re-derivation (L0 spirit:
+one decider; the promotion's redundant `compactionOff` input and the
+five `&& !compactionOff` site conjuncts were deleted with the flag).
+
+Deleted: the schema key + zod block + default (`config/schema/magic-context.ts`),
+the `assets/magic-context.schema.json` entry (regenerated), the schema
+default-row test, the v2/Pi ignored-flag boot warnings, the
+`systemRegionEnabled` prop (renamed `systemRegionLane`), the serve
+gate-off law and the flag-level inert controls (re-pointed:
+inert-CAPABILITY controls force `transform_mode: rust` /
+`compaction.enabled: false` and pin the region arm dead; the predicate's
+decision table carries the six-row law). The C2 spy law stays,
+re-expressed against the predicate.
+
+Behavior after deletion: a TS + compaction-on install serves the region
+from the first pass after upgrade — legacy raw rows decode to NULL
+(R11 reader contract) → `region_first_install` fold per session, priced
+once, receipt named (the rationale stays: pre-existing-data transition,
+not ceremony). Rust/v2/Pi/compaction-off keep heads as the **sole
+implementation** on those lanes (capability branch, not a fallback).
+`grep \.system_region\b` over production files = 0 (census law).
