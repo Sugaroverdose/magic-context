@@ -695,7 +695,10 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   migrate clear now routes through `clearSystemRegion` (reason
   `migrate_session`), and both censuses walk the whole production surface:
   plugin src + scripts, `packages/cli/src`, `packages/pi-plugin/src`
-  (zone-tagged rels), Rust roots unchanged. Honest scope statements: the Rust
+  (zone-tagged rels); the eraser census's Rust roots are unchanged, and since
+  round 8 (K2) the boundary-reader census walks the same standard too
+  (`crates/`, dashboard `src-tauri/src`, repo-root `scripts/`) with named
+  members — no census stops at the TypeScript zones. Honest scope statements: the Rust
   deny-shapes catch column literals, `ResetValue::Null` reset lists, and
   staged/format! column names — fully opaque runtime-computed names are beyond
   regex and the census comment says so.
@@ -875,3 +878,43 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   R12-prereq `system-reclaim-boundary-pi.test.ts` non-null rows; zero lane
   files in the residual. Four lane test files + two Pi lane files were
   formatter-dirty (heredoc/python-written) and are now `--write`n clean.
+
+## 19. Review round 8 (adjudicated K1–K3)
+
+- **No live defect at HEAD** — X1 churn worry falsified by the reviewer at
+  source (self-heal persists from live-config numbers); X3(c)/X4/X5 clean.
+- **K1 (design ruling: the floor must not be fatal)** — `requireReasonToken`
+  threw inside the materialization transaction, so ANY mint the census cannot
+  see (return-position templates — the epoch's own shrink mint was one;
+  concat assembly; third-file variable-passed helpers) that interpolates
+  store content re-opened the full H1/J1 wedge: throw, re-mint, wedge. The
+  funnel now sanitizes and proceeds: `sanitizeReasonToken` collapses
+  whitespace, clamps to the grammar bounds (stem ≤48, detail ≤120, illegal
+  stem → `malformed:<rest>`), and emits
+  `system-region receipt-violation: fn=<name> raw=<JSON-quoted original>
+  sanitized=<used>` before continuing. Rationale: reason is receipt text,
+  not policy — wedging the fold lane to enforce a spelling is
+  mechanism-broken. Programmer typos remain caught by the test-time grammar
+  laws and the mint census, and are loud in production with the raw token
+  preserved verbatim. The round-5 G2b premise ("a bad token is a programmer
+  error, fail loud") is SUPERSEDED; the H1/J1 mint fixes stay as
+  defense-in-depth (canonical mints + census keep receipts clean, the
+  sanitizer bounds what the census cannot see). G2b law re-pinned to the new
+  contract (non-fatal, per-entry violation receipt, sanitized token
+  grammar-valid, refusal still `executed=false` and erases nothing); control
+  transcripted. Census widened per (c): reason-shaped templates anywhere in
+  the mint files (arrow/fence-stem trigger — the return-position epoch mint
+  is now scanned) + concat-assembled reasons referencing stored properties;
+  planted return-position and concat rogues both redden. Deterrence scope
+  stated honestly in the comment: census deters, sanitizer bounds, nothing
+  fatals; multi-hop computed fragments stay in the disclosed class.
+- **K2 (boundary census to repo standard)** — the boundary-reader census now
+  walks the same roots as the F1-adjudicated eraser census: `crates/`
+  (`single_store_repair.rs` reset-list writer — named exemption imported from
+  the eraser census as never-active on the Rust lane), dashboard
+  `src-tauri/src` (`db.rs` guarded reader), and repo-root `scripts/`
+  (`b2-drill/repair-history-host-probe.ts`, read-only handle). Planted
+  out-of-root rogues in `crates/` and `scripts/` both redden the census;
+  removed greens.
+- **K3** — §18's "Rust roots unchanged" sentence qualified: post-K2 no
+  census stops at the TypeScript zones.
