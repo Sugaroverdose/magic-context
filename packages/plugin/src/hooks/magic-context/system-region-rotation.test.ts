@@ -228,6 +228,21 @@ describe("system-region rotation execution", () => {
         ).toBe(true);
     });
 
+    it("a persist throw propagates with no success receipt (L6: capture rides the fold transaction)", () => {
+        const db = fixture();
+        lines.length = 0;
+        expect(() =>
+            executeSystemRegionRotation(db, "sesthrow", "memory", "region-bytes", BASE, () => {
+                throw new Error("db busy");
+            }),
+        ).toThrow("db busy");
+        // The rotation performs no write of its own when a persist callback is
+        // given, so the fold transaction owns (and can roll back) the install;
+        // and an unlanded rotation never prints executed=true.
+        expect(readSystemRegion(db, "sesthrow")).toBeNull();
+        expect(lines.some((l) => l.includes("executed=true"))).toBe(false);
+    });
+
     it("markers are never captured for a refused rotation", () => {
         const db = fixture();
         lines.length = 0;
