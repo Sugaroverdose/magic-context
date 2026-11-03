@@ -12662,7 +12662,18 @@ fn legacy_system_strip_candidates(
 }
 
 fn provider_sentinel_text(req: &TransformRequest) -> String {
-    if request_accepts_empty_content(req) {
+    if request_accepts_empty_dropped_content(req) {
+        String::new()
+    } else {
+        "[dropped]".to_string()
+    }
+}
+
+/// Whole-message drop sentinel (R11 role gate): an anthropic USER row keeps
+/// the filler — emptying it would remove the turn anchor with the part;
+/// assistant rows and every station role may empty.
+fn dropped_message_sentinel_text(req: &TransformRequest, role: &str) -> String {
+    if provider_accepts_empty_dropped_message(req.provider_id.as_deref(), role) {
         String::new()
     } else {
         "[dropped]".to_string()
@@ -13123,7 +13134,7 @@ fn new_frozen_strip_units(
                     units.insert(unit.key.clone(), unit);
                 }
             }
-            if request_accepts_empty_content(req)
+            if request_accepts_empty_dropped_content(req)
                 && index < protected_start
                 && blocks.iter().any(is_reduce_block)
             {
@@ -13140,7 +13151,7 @@ fn new_frozen_strip_units(
             }
             continue;
         }
-        let is_stale_reduce = request_accepts_empty_content(req)
+        let is_stale_reduce = request_accepts_empty_dropped_content(req)
             && index < protected_start
             && blocks.iter().any(is_reduce_block);
         if is_stale_reduce {
@@ -13150,7 +13161,7 @@ fn new_frozen_strip_units(
             }
         }
         if has_assistant_response
-            && request_accepts_empty_content(req)
+            && request_accepts_empty_dropped_content(req)
             && age_cutoff.is_some_and(|cutoff| {
                 // Missing tags are age zero in the TypeScript lane. This decision is still
                 // minted only on a bust and then frozen by message/block id for stable replay.
@@ -13337,7 +13348,12 @@ fn apply_surface_strips(
                 .flatten()
         });
     if whole_strip.is_some() {
-        rebuilt.content = vec![CkWireBlock::bare(ck_wire::CkKind::Text { text: sentinel })];
+        // R11 role gate: the filtering adapter would erase an emptied
+        // user-role part WITH its turn anchor, so anthropic user rows keep
+        // the filler; assistant rows and every station role empty.
+        rebuilt.content = vec![CkWireBlock::bare(ck_wire::CkKind::Text {
+            text: dropped_message_sentinel_text(req, message.ck.role.as_str()),
+        })];
         rebuilt.mark_modified();
         return;
     }
@@ -13368,17 +13384,17 @@ fn apply_surface_strips(
             }
         }
 
-        let should_strip = (request_accepts_empty_content(req)
+        let should_strip = (request_accepts_empty_dropped_content(req)
             && stale_reduce
             && is_reduce_block(&message.ck.content[index]))
             || ((image_seed
-                && request_accepts_empty_content(req)
+                && request_accepts_empty_dropped_content(req)
                 && image_block_is_large(block.wire_shape()))
-                || (request_accepts_empty_content(req)
+                || (request_accepts_empty_dropped_content(req)
                     && frozen_units
                         .red_by_block_id(block.id())
                         .is_some_and(|unit| unit.kind == "image")))
-            || (request_accepts_empty_content(req)
+            || (request_accepts_empty_dropped_content(req)
                 && is_structural_noise(&message.ck.content[index]));
         if should_strip {
             replace_with_sentinel(&mut rebuilt.content[index], &sentinel);
@@ -15693,6 +15709,34 @@ fn latest_assistant_message_mutation_exempt_mid(
 /// use the non-empty placeholder, just as TypeScript's exact-provider helper does.
 pub(crate) fn request_accepts_empty_content(req: &TransformRequest) -> bool {
     req.provider_id.as_deref() == Some("anthropic")
+}
+
+/// R11 route gate (TS twin `routeAcceptsEmptyDroppedContent`): whether an
+/// empty string survives the route's validator. Measured 2026-10-31: the
+/// station route returned HTTP 200 for empty user content, an empty
+/// assistant message, and consecutive user messages; strict validators
+/// (`must not be empty`) reject those shapes, so unknown providers keep the
+/// bracketed fillers. Wider than `request_accepts_empty_content`, which is
+/// the ANTHROPIC-ADAPTER seam predicate (the AI-SDK filters empty text
+/// parts off the wire; reasoning-clear lanes depend on that).
+pub(crate) fn provider_accepts_empty_dropped_content(provider_id: Option<&str>) -> bool {
+    matches!(provider_id, Some("anthropic") | Some("station"))
+}
+
+/// Role-aware refinement (TS twin `routeAcceptsEmptyDroppedMessage`) for
+/// whole-MESSAGE drops: the anthropic adapter filters an emptied user part
+/// away with its turn anchor, so only assistant rows may empty there;
+/// station transmits bytes as given, so every role is safe.
+pub(crate) fn provider_accepts_empty_dropped_message(
+    provider_id: Option<&str>,
+    role: &str,
+) -> bool {
+    provider_accepts_empty_dropped_content(provider_id)
+        && (provider_id != Some("anthropic") || role == "assistant")
+}
+
+fn request_accepts_empty_dropped_content(req: &TransformRequest) -> bool {
+    provider_accepts_empty_dropped_content(req.provider_id.as_deref())
 }
 
 /// Capture the next durable reasoning cutoff only on a pass that is already busting.
@@ -28393,6 +28437,118 @@ pub(crate) mod tests {
                 )
                 .unwrap(),
                 serde_json::to_vec(first.ck_messages.as_ref().unwrap()).unwrap()
+            );
+        }
+    }
+
+    #[test]
+    fn r11_route_gate_decision_table_matches_the_typescript_twin() {
+        // Ported decision table (R11, ctxv13 audit): the route gate is
+        // anthropic + station (station HTTP 200 probed 2026-10-31 for empty
+        // user content, empty assistant content, and consecutive users);
+        // unknown/undefined providers keep the bracketed fillers because
+        // strict validators reject empty parts. Exact ids, like the TS twin.
+        for (provider, accepts) in [
+            (Some("anthropic"), true),
+            (Some("station"), true),
+            (Some("openai-compatible"), false),
+            (Some("Station"), false),
+            (Some("station-anthropic-proxy"), false),
+            (None, false),
+        ] {
+            assert_eq!(
+                provider_accepts_empty_dropped_content(provider),
+                accepts,
+                "route gate {provider:?}"
+            );
+        }
+        // Role refinement: the anthropic adapter filters an emptied text part
+        // off the wire, taking the user turn anchor with it — only assistant
+        // rows may empty there; station transmits bytes as given.
+        for (provider, role, accepts) in [
+            (Some("anthropic"), "user", false),
+            (Some("anthropic"), "assistant", true),
+            (Some("station"), "user", true),
+            (Some("station"), "assistant", true),
+            (Some("openai-compatible"), "assistant", false),
+            (None, "assistant", false),
+        ] {
+            assert_eq!(
+                provider_accepts_empty_dropped_message(provider, role),
+                accepts,
+                "route message gate {provider:?}/{role}"
+            );
+        }
+    }
+
+    #[test]
+    fn r11_sentinels_route_by_gate_and_the_model_gate_stays_anthropic_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let _store = store(dir.path());
+        let mut request = req(
+            &"r11-gates".to_string(),
+            "cfg0",
+            vec![wire_item("user", "user", 1, &["hi"])],
+        );
+        // The ANTHROPIC-ADAPTER seam predicate (reasoning-clear lanes) must
+        // not widen with the route gate: station has no filtering AI-SDK.
+        request.provider_id = Some("anthropic".into());
+        assert!(request_accepts_empty_content(&request));
+        assert_eq!(dropped_message_sentinel_text(&request, "assistant"), "");
+        assert_eq!(
+            dropped_message_sentinel_text(&request, "user"),
+            "[dropped]"
+        );
+        request.provider_id = Some("station".into());
+        assert!(!request_accepts_empty_content(&request));
+        assert_eq!(dropped_message_sentinel_text(&request, "assistant"), "");
+        assert_eq!(dropped_message_sentinel_text(&request, "user"), "");
+        request.provider_id = Some("kimi-strict".into());
+        assert!(!request_accepts_empty_content(&request));
+        assert_eq!(
+            dropped_message_sentinel_text(&request, "assistant"),
+            "[dropped]"
+        );
+        assert_eq!(
+            dropped_message_sentinel_text(&request, "user"),
+            "[dropped]"
+        );
+    }
+
+    #[test]
+    fn r11_station_blank_final_assistant_empties_like_anthropic_and_replays() {
+        // Wire-level mirror of the TS law rows: the station arm must serve
+        // the empty sentinel like anthropic (and strict routes the filler),
+        // and the frozen shape must replay byte-stably after an append.
+        for (provider, sentinel) in [("station", ""), ("anthropic", ""), ("kimi-strict", "[dropped]")]
+        {
+            let dir = tempfile::tempdir().unwrap();
+            let store = store(dir.path());
+            let session = format!("r11-blank-{provider}");
+            let mut request = req(
+                &session,
+                "cfg0",
+                vec![
+                    wire_item("user", "user", 1, &["continue"]),
+                    wire_item("assistant", "last", 2, &[" \t"]),
+                ],
+            );
+            request.provider_id = Some(provider.into());
+            let first = run(&store, &request, &spine());
+            assert_eq!(tail_bytes(&first, "last"), sentinel, "{provider} first serve");
+            request
+                .messages
+                .push(wire_item("assistant", "new", 3, &["answer"]));
+            let second = run(&store, &request, &spine());
+            assert_eq!(tail_bytes(&second, "last"), sentinel, "{provider} replay");
+            assert_eq!(
+                serde_json::to_vec(
+                    &second.ck_messages.as_ref().unwrap()
+                        [..first.ck_messages.as_ref().unwrap().len()]
+                )
+                .unwrap(),
+                serde_json::to_vec(first.ck_messages.as_ref().unwrap()).unwrap(),
+                "{provider} replay is byte-stable"
             );
         }
     }
