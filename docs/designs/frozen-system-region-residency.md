@@ -536,8 +536,8 @@ serve rows for L2 boot-replay (fresh handler on reopened store, byte-identical, 
 bust-schedule sets) and L1 zero-read (instrumented `prepare`: exactly one session_meta
 SELECT, zero region/panel-table reads; control: an extra meta read reddens the row);
 rotation row for L6 persist-throw (propagates, no executed=true receipt); stage P
-(§19): Pi row-reader property closure + named-member census (three laws, controls);
-stage R (§19): the R11 route-gate port with table-mirroring tests (NOT compiled —
+(§20): Pi row-reader property closure + named-member census (three laws, controls);
+stage R (§20): the R11 route-gate port with table-mirroring tests (NOT compiled —
 no cargo on the build host, disclosed unbuilt-Rust-lane class). Remaining:
 the pass-level integration of promotion through the real postprocess entry (covered at
 the predicate level today) and the §9 Rust region migration (module stops emitting head
@@ -935,7 +935,7 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   Deliberately unaggregated: the violation line is named and loud per
   entry; revisit aggregation only if one ever appears in production logs.
 
-## 19. Stage ports (Pi seam + Rust lane, coordinator-dispatched)
+## 20. Stage ports (Pi seam + Rust lane, coordinator-dispatched)
 
 - **Scope note (§9 vs dispatch)** — §9 describes the full Pi migration
   (`prependM0M1Messages` deletion, region composition beside the guidance
