@@ -249,9 +249,10 @@ and never was. Consequences:
 - Replay serves the current stored region with the replayed array. After a rotation the
   replayed array is stale-by-one-generation only in the sense that it was built against an
   older region; since a rotation is a priced bust, and replay only fires on fault, the
-  proposal is to keep slots across rotations (no new fence). Stale panels on a fault replay
-  are acceptable and cheaper than dropping the recovery ladder. This is the default in
-  force; §12.6 keeps the confirmation open.
+  slots are kept across rotations (no new fence; owner ruling, §12.6: a rotation is
+  itself a bust pass, so the capture refreshes on the same pass and no boot-rebuild
+  window opens between rotation and first capture). Stale panels on a fault replay are
+  acceptable and cheaper than dropping the recovery ladder.
 - Boot-cache-bust honesty (landed, prerequisite step 2, commit `a49c8611e`): the observed
   wipe (22 chunks to 0 rows, `captured_at` reading NULL, zero `lkg_capture_declined`
   lines) was reproduced red-first and closed at every silent path. `captureSlot` and the
@@ -382,10 +383,13 @@ Ruled by the owner (2026-11-03 review of this document):
    (`transform-postprocess-phase.ts:2060-2107`) as its boundary and bust-permission
    pattern, with the FPE lane as the reference.
 
-Open, proposed default in force:
+6. (Ruled, 2026-11-03) LKG slots survive rotations without a fence (§7.4). A rotation
+   pass is by construction a bust pass (the served prefix moves at the boundary), so the
+   capture refreshes on that same pass; keeping the durable row across the rotation event
+   is consistent with the capture-on-bust cadence and avoids manufacturing a boot-rebuild
+   window between rotation and first capture.
 
-6. LKG slots survive rotations without a fence (§7.4). Default: keep; stale-panel replay
-   on fault is accepted. A ruling is still requested.
+Open:
 7. ARCHITECTURE.md's `mc:protected` region documents m[0]/m[1] as the head architecture and
    is human-edit-only. After implementation it needs a deliberate human rewrite; the lane
    will flag it rather than touch it.
