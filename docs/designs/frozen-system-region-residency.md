@@ -731,3 +731,45 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   `prepareCachedM0M1PiReplay` refuse region rows (the replay path had been
   serving `"" + m1` behind `decodeCachedM0`'s refusal). Law with
   guard-neutralized control.
+
+## 16. Review round 5 (adjudicated G1–G7)
+
+- **G1 (wire defect)** — `replayCompletePiPrefix` served `decodeCachedM0() ?? ""`
+  (empty head + m[1] tail) for a region row when materialization lost the lock 3×
+  with `allowFreshContentionFallback` off; both contention-fallback callers gated on
+  truthiness only. Fixed at both layers: callers discriminate with
+  `isSystemRegionBytes` before replaying; the reader throws on region/undecodable
+  bytes as the structural floor. Laws: forced-`BEGIN IMMEDIATE` contention over a
+  seeded region row serves the fresh head; exported reader-refusal law; predicate
+  row. Control (transcript): neutralizing the caller conjunctions reddens the first
+  law through the reader's throw.
+- **G2** — (a) the per-call receipt-naming census walks all four zones now
+  (planted-rogue in `cli/src` caught/removed). (b) The round-4 report claim that
+  funnel validation rejected malformed reason tokens was **false at HEAD** — it was
+  a test-time-only property. Correction + fix: `requireReasonToken` throws at all
+  four funnel entries on any token outside `[a-z][a-z0-9_]{2,47}` (L7 fail-loud).
+- **G3** — the `UPDATE session_meta SET` fragment is census scope by itself: the 21
+  production holders form a closed named set (per-file reason; the set doubles as
+  the session_meta writer census); identifier-led `prepare(<ident> + / .join(`
+  assembly in a session_meta file offends. Planted-rogues: const-split and
+  array-join-split both caught. Honest boundary: fragments that exist only at
+  runtime (computed character-wise) are beyond regex — disclosed here and in the
+  census comment, same class as the Rust zone.
+- **G4** — `DELETE FROM ${…table…}` arms added to the pending_ops census matcher;
+  storage-session-tables (teardown), clone (copy), identity-merge (relocation),
+  opencode2-relabel (static rule list, shape-inclusive) join as named reasoned
+  members. Row carries the blind-class disclosure (variable table names,
+  schema-qualified forms, out-of-root zones).
+- **G5** — §4's fence restated as a synchronized review vocabulary (bi-equality;
+  authority for review language; consistent renames stay green by design). Scanner
+  blind classes: template-literal composites captured by stem (`render_config`,
+  added to the fence — 25 members), variable-passed reasons resolved through an
+  explicit map (unmapped = red), fence duplicate check. Controls executed both ways.
+- **G6** — the force-drain arms are pinned permanently: `>= 95` arm row (96% +
+  non-zero sample), sample-arm-alone row (88% + sample 0), neither-arm row (88% +
+  non-zero sample, defer: rows stay queued). Standing rule adopted: controls
+  reported = controls committed or transcripted.
+- **Corrections pass** — the round-4 §15/F4 text's funnel-validation implication is
+  superseded by G2's runtime throw; the round-4 style commit additionally touched
+  five pre-existing test files with formatting-only (semantics-null) changes,
+  verified at review.
