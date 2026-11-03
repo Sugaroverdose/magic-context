@@ -63,6 +63,11 @@ import {
     markTagsCompactedByMessageIds,
     updateTagStatus,
 } from "../../features/magic-context/storage-tags";
+import {
+    decideSystemRegionRotation,
+    type RegionMarkers,
+    readSystemRegion,
+} from "../../features/magic-context/system-region";
 import type { Tagger } from "../../features/magic-context/tagger";
 import type { SessionMeta, TagEntry } from "../../features/magic-context/types";
 import type { PluginContext } from "../../plugin/types";
@@ -172,7 +177,6 @@ import {
     buildSupersessionReclaimOps,
     recentSupersessionOwnerMessageIds,
 } from "./supersession-reclaim";
-import { decideSystemRegionRotation, type RegionMarkers, readSystemRegion } from "../../features/magic-context/system-region";
 import { byteSize, prependTag } from "./tag-content-primitives";
 import {
     assertTailHygieneContentUnchanged,
@@ -2048,10 +2052,7 @@ export async function runPostTransformPhase(
                     args.systemRegionEnabled === true && !compactionOff
                         ? {
                               enabled: true,
-                              reason:
-                                  regionRotationReason ??
-                                  foldDueDecision.reason ??
-                                  "hard_fold",
+                              reason: regionRotationReason ?? foldDueDecision.reason ?? "hard_fold",
                           }
                         : undefined,
                 forceMaterializeReason: regionRotationReason ?? undefined,
@@ -2074,7 +2075,12 @@ export async function runPostTransformPhase(
             preparedPrefix = foldResult;
             prefixPreflightFailed = foldResult.materializationContentionRetryExhausted === true;
             foldExecutedThisPass = foldExecutesThisPass(
-                foldDueDecision.value || softRefreshOpportunity,
+                // A promoted region rotation IS this pass's fold: it rewrote
+                // served bytes, so it must be priced as an executed fold and
+                // its bust permission earned (A4). Head-lane behavior is
+                // unchanged — regionRotationReason is only ever set on the
+                // region lane.
+                foldDueDecision.value || softRefreshOpportunity || regionRotationReason !== null,
                 foldResult.m0RematerializedThisPass,
             );
             // Every executed fold commits through the hook above. Should one ever
@@ -2126,7 +2132,7 @@ export async function runPostTransformPhase(
         }
         sessionLog(
             args.sessionId,
-            `m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
+            `m[0] HARD fold decision: reason=${foldDueDecision.reason ?? regionRotationReason ?? "unknown"} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
         );
     }
 

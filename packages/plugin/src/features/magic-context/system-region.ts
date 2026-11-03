@@ -236,6 +236,14 @@ export interface SystemRegionRotationInput {
 export function decideSystemRegionRotation(
     args: SystemRegionRotationInput,
 ): SystemRegionRotationDecision {
+    // Every arm is bust-gated (A3 / L4): a rotation rewrites served bytes, so
+    // it is itself a bust and requires the single per-pass permission. No
+    // caller may treat a rotate=true verdict as licensed work on a pass that
+    // is not already busting — install (first_render / missing_markers) is
+    // the fold lane's job (mustMaterialize region_first_install), which is
+    // itself a boundary. The promotion caller passes true only after its
+    // boundaryPermission check upstream (transform-postprocess-phase).
+    if (!args.bustPermission) return { rotate: false, reason: "none" };
     if (args.storedRegion === null) return { rotate: true, reason: "first_render" };
     if (args.capturedMarkers === null) return { rotate: true, reason: "missing_markers" };
     for (const [field, reason] of CONTENT_TRIGGER_FIELDS) {
@@ -243,25 +251,19 @@ export function decideSystemRegionRotation(
             return { rotate: true, reason };
         }
     }
-    // Pressure arms and the m[1]-delta triggers are ride-only: they fire only
-    // on a pass that is already busting (invariant 4 — automatic reclaim never
-    // originates a bust).
-    if (args.bustPermission) {
-        for (const [field, reason] of DELTA_TRIGGER_FIELDS) {
-            if (args.capturedMarkers[field] !== args.currentMarkers[field]) {
-                return { rotate: true, reason };
-            }
+    for (const [field, reason] of DELTA_TRIGGER_FIELDS) {
+        if (args.capturedMarkers[field] !== args.currentMarkers[field]) {
+            return { rotate: true, reason };
         }
-        if (args.forceBand) return { rotate: true, reason: "force_band" };
-        if (
-            args.pendingBytes !== undefined &&
-            args.pendingBytesCap !== undefined &&
-            args.pendingBytes > args.pendingBytesCap &&
-            (args.pendingBytesMinFloor === undefined ||
-                args.pendingBytes >= args.pendingBytesMinFloor)
-        ) {
-            return { rotate: true, reason: "pending_growth" };
-        }
+    }
+    if (args.forceBand) return { rotate: true, reason: "force_band" };
+    if (
+        args.pendingBytes !== undefined &&
+        args.pendingBytesCap !== undefined &&
+        args.pendingBytes > args.pendingBytesCap &&
+        (args.pendingBytesMinFloor === undefined || args.pendingBytes >= args.pendingBytesMinFloor)
+    ) {
+        return { rotate: true, reason: "pending_growth" };
     }
     return { rotate: false, reason: "none" };
 }

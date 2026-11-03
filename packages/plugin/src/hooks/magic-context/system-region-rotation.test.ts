@@ -58,7 +58,11 @@ function stored(region: string | null): { storedRegion: string | null } {
 }
 
 describe("system-region rotation decision: content triggers", () => {
-    it("first render rotates", () => {
+    it("first render rotates only with the bust permission (A3: rotation IS the bust)", () => {
+        // A rotation rewrites served bytes; per L4 no arm — install, content,
+        // delta, or pressure — may claim rotate without the single per-pass
+        // bust permission. Installs are the fold lane's job (mustMaterialize
+        // region_first_install), which is itself a boundary.
         expect(
             decideSystemRegionRotation({
                 ...stored(null),
@@ -66,7 +70,23 @@ describe("system-region rotation decision: content triggers", () => {
                 currentMarkers: BASE,
                 bustPermission: false,
             }).rotate,
+        ).toBe(false);
+        expect(
+            decideSystemRegionRotation({
+                ...stored(null),
+                capturedMarkers: BASE,
+                currentMarkers: BASE,
+                bustPermission: true,
+            }).rotate,
         ).toBe(true);
+        expect(
+            decideSystemRegionRotation({
+                ...stored("r"),
+                capturedMarkers: null,
+                currentMarkers: BASE,
+                bustPermission: false,
+            }).rotate,
+        ).toBe(false);
     });
 
     it.each([
@@ -80,12 +100,22 @@ describe("system-region rotation decision: content triggers", () => {
         ["memory_render_epoch", "memoryRenderEpoch", 2],
         ["rendered_budgets", "renderedBudgets", "b"],
     ] as const)("rotation reason=%s", (reason, field, value) => {
+        // Content arms share the delta arms' gating: rotate only on a pass
+        // that already holds the bust permission.
         expect(
             decideSystemRegionRotation({
                 ...stored("r"),
                 capturedMarkers: BASE,
                 currentMarkers: { ...BASE, [field]: value },
                 bustPermission: false,
+            }),
+        ).toEqual({ rotate: false, reason: "none" });
+        expect(
+            decideSystemRegionRotation({
+                ...stored("r"),
+                capturedMarkers: BASE,
+                currentMarkers: { ...BASE, [field]: value },
+                bustPermission: true,
             }),
         ).toEqual({ rotate: true, reason });
     });

@@ -9494,7 +9494,7 @@ describe("pending-ops and heuristics permission labels", () => {
         // that is true, so the pass must be labelled differently from the one above.
         const forceBand = await permissionLines("ses-ride-force-band", {
             fullFeatureMode: false,
-            contextUsage: { percentage: 96, inputTokens: 1_000 },
+            contextUsage: { percentage: 88, inputTokens: 1_000 },
         });
 
         expect(publishedHistory).toEqual([
@@ -9620,7 +9620,7 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         initializeDatabase(db);
         const sessionId = "ses-system-reclaim-force";
         const { sweepTag } = await seededPass(sessionId, {
-            contextUsage: { percentage: 96, inputTokens: 1_000 },
+            contextUsage: { percentage: 88, inputTokens: 1_000 },
         });
         expect(getPendingOps(db, sessionId)).toEqual([]);
         expect(
@@ -10468,6 +10468,70 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
         expect(logs.filter((line) => line.includes("cached_m1_missing"))).toEqual([]);
         const { readSystemRegion } = await import("../../features/magic-context/system-region");
         expect(readSystemRegion(db, sessionId)).toContain("C3-MEM-TWO-NEW");
+    });
+
+    it("A4: a promoted pass prices its fold honestly — one reason, one executed state, earned bust", async () => {
+        // The promotion path rewrites served bytes (the rotation line says
+        // executed=true); the fold receipt must not contradict it with
+        // reason=unknown executed=false, and the earned bust must propagate so
+        // queue lanes ride the pass that already paid (deliberate
+        // amortization). L8's contradictory-executed shape re-entered via the
+        // promotion path; this row pins it shut.
+        const sessionId = "ses-region-a4-receipt";
+        const db = await installedRegionDb(sessionId);
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "A4-MEM-NEW",
+        });
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            // Force band, not execute: on an execute pass the pre-existing
+            // softRefreshOpportunity already prices the fold; the earned-bust
+            // loss showed up on boundary passes the scheduler deferred.
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    contextUsage: { percentage: 88, inputTokens: 1_000 },
+                    systemRegionEnabled: true,
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        const foldLines = logs.filter((line) => line.includes("m[0] HARD fold decision"));
+        expect(foldLines).toHaveLength(1);
+        // No contradictory pair on one pass: same cause, opposite verdicts.
+        expect(foldLines[0]).not.toContain("reason=unknown executed=false");
+        expect(foldLines[0]).toContain("reason=max_memory_id");
+        expect(foldLines[0]).toContain("executed=true");
+        expect(foldLines[0]).toContain("bustsServedPrefix=true");
+    });
+
+    it("A4: a warm non-boundary region pass prints no fold-decision line at all", async () => {
+        const sessionId = "ses-region-a4-warm-silent";
+        const db = await installedRegionDb(sessionId);
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    systemRegionEnabled: true,
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        expect(logs.filter((line) => line.includes("m[0] HARD fold decision"))).toEqual([]);
     });
 
     it("control: gate-off head lane keeps its cached_m1_missing fold behavior intact", async () => {

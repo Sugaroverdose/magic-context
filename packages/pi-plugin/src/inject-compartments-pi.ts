@@ -3084,7 +3084,7 @@ export function clearM0M1PiCache(
 	sessionId: string,
 	reason: string,
 ): void {
-	clearCachedM0M1(db, sessionId);
+	clearCachedM0M1(db, sessionId, reason);
 	setCachedBoundary(db, sessionId, null);
 	cachedMuralBySession.delete(sessionId);
 	logSession(sessionId, `cleared cached m[0] (${reason})`);

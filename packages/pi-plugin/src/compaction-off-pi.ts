@@ -84,7 +84,7 @@ export function reconcilePiCompactionMode(args: {
 				: NO_TRANSITION;
 		}
 
-		clearCachedM0M1(args.db, args.sessionId);
+		clearCachedM0M1(args.db, args.sessionId, "compaction_off_transition");
 		if (!args.historianRunnable) {
 			return {
 				...NO_TRANSITION,
@@ -133,7 +133,7 @@ export function reconcilePiCompactionMode(args: {
 			compartmentInProgress: false,
 		});
 	}
-	clearCachedM0M1(args.db, args.sessionId);
+	clearCachedM0M1(args.db, args.sessionId, "compaction_off_transition");
 	sessionLog(
 		args.sessionId,
 		`Pi compaction-off transition: clearedPendingMarker=${clearedSomething}`,
