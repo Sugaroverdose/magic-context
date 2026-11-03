@@ -3,6 +3,7 @@ import {
     DEFAULT_HISTORIAN_TIMEOUT_MS,
     DEFAULT_HISTORY_BUDGET_PERCENTAGE,
     DEFAULT_LOCAL_EMBEDDING_MODEL,
+    LIVE_RELOAD_CONFIG_PATHS,
     type MagicContextConfig,
     MagicContextConfigSchema,
     PER_HARNESS_MIGRATION_INVENTORY,
@@ -802,5 +803,26 @@ describe("MagicContextConfigSchema", () => {
                 }),
             ).toThrow();
         });
+    });
+});
+
+// N2 (round 10): the system-region capability is boot-frozen —
+// isSystemRegionLane is computed once per handler boot from transform_mode
+// + compaction, and the whole stale-lane safety rests on those paths never
+// entering the live-reload whitelist. A future whitelist addition would
+// silently flip the lane mid-session (served bytes change without a
+// rotation boundary). Pinned by exact-string membership, permanently.
+describe("system-region capability inputs are never live-reloadable", () => {
+    const LANE_INPUT_PATHS = ["transform_mode", "compaction", "compaction.enabled"] as const;
+    function laneSafetyViolations(paths: readonly string[]): string[] {
+        return LANE_INPUT_PATHS.filter((p) => paths.includes(p));
+    }
+    it("LIVE_RELOAD_CONFIG_PATHS excludes every capability input", () => {
+        expect(laneSafetyViolations(LIVE_RELOAD_CONFIG_PATHS)).toEqual([]);
+    });
+    it("control: the checker reddens on each prospective whitelist addition", () => {
+        for (const p of LANE_INPUT_PATHS) {
+            expect(laneSafetyViolations([...LIVE_RELOAD_CONFIG_PATHS, p])).toEqual([p]);
+        }
     });
 });

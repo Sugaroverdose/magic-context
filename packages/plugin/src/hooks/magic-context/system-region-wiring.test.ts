@@ -2,7 +2,7 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { isSystemRegionLane } from "../../config/system-region-lane";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
@@ -25,19 +25,6 @@ import type { MessageLike } from "./tag-messages";
 import { regionRotationPromotion } from "./transform-postprocess-phase";
 
 const SRC_PLUGIN = join(import.meta.dir, "..", "..");
-function walkProd(dir: string, prefix: string): Array<{ rel: string; full: string }> {
-    const out: Array<{ rel: string; full: string }> = [];
-    for (const entry of readdirSync(dir)) {
-        const full = join(dir, entry);
-        if (statSync(full).isDirectory()) {
-            if (entry === "node_modules") continue;
-            out.push(...walkProd(full, `${prefix}${entry}/`));
-        } else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) {
-            out.push({ rel: `${prefix}${entry}`, full });
-        }
-    }
-    return out;
-}
 
 const SESSION_ID = "ses_region_wiring";
 const PROJECT_PATH = "/tmp/test-region-wiring";
@@ -437,16 +424,93 @@ describe("system-region capability lane (flag deletion)", () => {
         });
     }
 
-    it("no production file reads the deleted config key", () => {
-        const offenders: string[] = [];
-        for (const { rel, full } of [
-            ...walkProd(SRC_PLUGIN, "plugin/"),
-            ...walkProd(join(SRC_PLUGIN, "..", "..", "pi-plugin", "src"), "pi/"),
-        ]) {
-            // Config ACCESS pattern, not a bare substring: the predicate
-            // module documents the deleted key in its rationale comment.
-            if (/\.system_region\b/.test(readFileSync(full, "utf8"))) offenders.push(rel);
+    // N1 (round 10): the census guards a DEAD key, so its survivability IS
+    // the guard. Denied shapes: property access (`.system_region`) and
+    // bracket access (`["system_region"]` / `['system_region']`) — neither
+    // matches the predicate module's rationale comment (no leading dot, no
+    // bracket+quote). Roots follow the repo's own F1/#2665 eraser-census
+    // standard: every production tree that could read config, in any
+    // language touching the shared store. No wholesale directory exemptions;
+    // a sanctioned reader needs a named member (list is empty by design —
+    // the key is deleted).
+    const FLAG_READ = /\.system_region\b|\[['"]system_region['"]\]/;
+    const PKG = join(SRC_PLUGIN, "..", "..");
+    const CENSUS_TS_ROOTS: Array<[string, string]> = [
+        [SRC_PLUGIN, "plugin/"],
+        [join(PKG, "pi-plugin", "src"), "pi/"],
+        [join(PKG, "cli", "src"), "cli/"],
+        [join(SRC_PLUGIN, "..", "scripts"), "plugin-scripts/"],
+        [join(PKG, "dashboard", "src"), "dashboard/"],
+    ];
+    const CENSUS_RS_ROOTS = [join(PKG, "..", "crates"), join(PKG, "dashboard", "src-tauri", "src")];
+    // Named exemptions for sanctioned readers: none. Add a member only with
+    // a written justification, like the eraser census requires.
+    const ALLOWED_READERS = new Set<string>();
+    function walkProdAll(
+        dir: string,
+        prefix: string,
+        exts: string[],
+    ): Array<{ rel: string; full: string }> {
+        const out: Array<{ rel: string; full: string }> = [];
+        for (const entry of readdirSync(dir)) {
+            const full = join(dir, entry);
+            if (statSync(full).isDirectory()) {
+                if (entry === "node_modules" || entry === "target") continue;
+                out.push(...walkProdAll(full, `${prefix}${entry}/`, exts));
+            } else if (exts.some((ext) => entry.endsWith(ext)) && !entry.endsWith(".test.ts")) {
+                out.push({ rel: `${prefix}${entry}`, full });
+            }
         }
-        expect(offenders).toEqual([]);
+        return out;
+    }
+    function censusOffenders(): string[] {
+        const offenders: string[] = [];
+        const files = [
+            ...CENSUS_TS_ROOTS.flatMap(([root, prefix]) =>
+                walkProdAll(root, prefix, [".ts", ".tsx", ".mjs"]),
+            ),
+            ...CENSUS_RS_ROOTS.flatMap((root) =>
+                statSync(root).isDirectory()
+                    ? walkProdAll(root, "rs/", [".rs"]).filter((f) => !f.full.endsWith("_tests.rs"))
+                    : [],
+            ),
+        ];
+        for (const { rel, full } of files) {
+            if (ALLOWED_READERS.has(rel)) continue;
+            if (FLAG_READ.test(readFileSync(full, "utf8"))) offenders.push(rel);
+        }
+        return offenders;
+    }
+
+    it("no production file reads the deleted config key (dot + bracket, full roots)", () => {
+        expect(censusOffenders()).toEqual([]);
+    });
+
+    it("planted-rogue control: each denied shape inside a covered root reddens the census", () => {
+        const plants: Array<{ name: string; body: string }> = [
+            {
+                name: "dot-access rogue (plugin/src)",
+                body: "export const v = (c: { system_region?: unknown }) => c.system_region;\n",
+            },
+            {
+                name: "bracket-access rogue (plugin/src)",
+                body: 'export const v = (c: Record<string, unknown>) => c["system_region"];\n',
+            },
+        ];
+        for (const plant of plants) {
+            const target = join(
+                SRC_PLUGIN,
+                `__census-rogue-${plant.name.startsWith("dot") ? "dot" : "bracket"}.ts`,
+            );
+            writeFileSync(target, plant.body);
+            try {
+                const found = censusOffenders();
+                expect(found.some((o) => o.includes("__census-rogue-"))).toBe(true);
+            } finally {
+                rmSync(target, { force: true });
+            }
+        }
+        // Removed plants must not leave residue reddening the steady law.
+        expect(censusOffenders()).toEqual([]);
     });
 });

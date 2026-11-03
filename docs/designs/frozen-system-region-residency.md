@@ -1016,4 +1016,11 @@ from the first pass after upgrade — legacy raw rows decode to NULL
 once, receipt named (the rationale stays: pre-existing-data transition,
 not ceremony). Rust/v2/Pi/compaction-off keep heads as the **sole
 implementation** on those lanes (capability branch, not a fallback).
-`grep \.system_region\b` over production files = 0 (census law).
+Census law (N1-hardened, round 10): no production file matches
+`.system_region` (property access) or `["system_region"]` / `['system_region']`
+(bracket access) across plugin/src, pi-plugin/src, cli/src, plugin/scripts,
+dashboard/src, dashboard/src-tauri/src and crates/ (`_tests.rs` skipped) —
+same roots as the F1/#2665 eraser census; named-reader exemption list empty
+by design; planted-rogue control covers both shapes. Neither shape matches
+the predicate module's rationale comment (deliberate: it documents the dead
+key).
