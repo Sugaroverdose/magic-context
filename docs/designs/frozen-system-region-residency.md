@@ -752,9 +752,13 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   production holders form a closed named set (per-file reason; the set doubles as
   the session_meta writer census); identifier-led `prepare(<ident> + / .join(`
   assembly in a session_meta file offends. Planted-rogues: const-split and
-  array-join-split both caught. Honest boundary: fragments that exist only at
-  runtime (computed character-wise) are beyond regex — disclosed here and in the
-  census comment, same class as the Rust zone.
+  array-join-split both caught. Honest boundary (corrected in round 6, §17): the
+  census deters accidental and semi-deliberate shapes; character-wise assembly
+  AND multi-hop computed fragments (identifiers rebound through helpers before
+  reaching `prepare`) are beyond regex — disclosed here and in the census
+  comment, same class as the Rust zone. The dominant close is the closed named
+  set: any file holding the fragment (whole or split at any single string
+  boundary) without a named exemption offends regardless of what it assembles.
 - **G4** — `DELETE FROM ${…table…}` arms added to the pending_ops census matcher;
   storage-session-tables (teardown), clone (copy), identity-merge (relocation),
   opencode2-relabel (static rule list, shape-inclusive) join as named reasoned

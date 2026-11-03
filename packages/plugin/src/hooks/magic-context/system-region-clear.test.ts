@@ -276,19 +276,35 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
                 /UPDATE\s+session_meta\s+SET\s*["'`]\s*\+/.test(text) ||
                 /UPDATE\s+session_meta\s+SET["'`]?\s*\.join\(/.test(text) ||
                 /["'`]UPDATE session_meta SET ["'`]?\s*\+\s*\w+/.test(text);
-            // G3: the fragment is in census scope regardless of assembly
-            // adjacency (const-split defeats proximity checks), and any
-            // identifier-led statement assembly inside a session_meta file
-            // offends — a `prepare(<ident> + …)` / `.join(` call has zero
-            // legitimate production uses today, so new ones must be named
-            // and justified at review, not slipped past the adjacency
-            // regexes.
+            // G3/H2: the fragment is in census scope regardless of assembly
+            // adjacency (const-split defeats proximity checks). Honest
+            // boundary: the census deters ACCIDENTAL and SEMI-DELIBERATE
+            // shapes — character-wise assembly and multi-hop computed
+            // fragments (identifiers rebound through helpers before
+            // reaching prepare) are uncoverable at regex strength, the same
+            // disclosed class as the Rust zone. What is closed: any file
+            // holding the fragment as text (whole or split at any single
+            // string boundary) while also holding an assembly operator.
             if (/UPDATE session_meta SET/.test(text) && !FRAGMENT_ALLOWED.has(rel)) {
                 offenders.push(`${rel} (unnamed session_meta SET writer)`);
             }
+            // H2: the SET-less fragment is the other half of the split —
+            // "UPDATE session_meta" closing its quote before SET, combined
+            // in the same file with any SQL-assembly operator (+, .join(,
+            // .concat(). A two-way split of the fragment cannot present
+            // both halves without tripping this or the SET-side rule.
+            if (
+                /["'`]UPDATE\s+session_meta\s+["'`]/.test(text) &&
+                /\+|\.join\(|\.concat\(/.test(text) &&
+                !FRAGMENT_ALLOWED.has(rel)
+            ) {
+                offenders.push(`${rel} (SET-less session_meta fragment + assembly)`);
+            }
             if (
                 /session_meta/i.test(text) &&
-                /(?:prepare|exec)\(\s*\w+\s*(?:\+|\.join\()/.test(text)
+                /(?:prepare|exec|run|all|get|iterate)\(\s*\w+\s*(?:\+|\.join\(|\.concat\()/.test(
+                    text,
+                )
             ) {
                 offenders.push(`${rel} (identifier-led statement assembly)`);
             }
