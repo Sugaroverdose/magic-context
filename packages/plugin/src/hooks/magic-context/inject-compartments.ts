@@ -42,6 +42,7 @@ import {
     isSystemRegionBytes,
     type RegionMarkers,
     readSystemRegion,
+    sanitizeReceiptOperand,
 } from "../../features/magic-context/system-region";
 import {
     getActiveUserMemories,
@@ -1846,7 +1847,7 @@ export function mustMaterialize(args: {
     ) {
         return {
             value: true,
-            reason: `render_config:budget(${cachedUpgradeIdentity.renderBudgetIdentity}→${current.renderBudgetIdentity})`,
+            reason: `render_config:budget(${sanitizeReceiptOperand(cachedUpgradeIdentity.renderBudgetIdentity ?? "")}→${sanitizeReceiptOperand(current.renderBudgetIdentity ?? "")})`,
         };
     }
 
