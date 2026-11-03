@@ -78,6 +78,16 @@ export function readSystemRegion(db: Database, sessionId: string): string | null
 }
 
 export function writeSystemRegion(db: Database, sessionId: string, region: string): boolean {
+    if (typeof region !== "string" || region.length === 0) {
+        // The region is never empty (placeholder-floor law, same reason as m[1]:
+        // an empty head slot is a provider-structure risk and a silent no-op
+        // rotation that would still capture markers and claim success).
+        sessionLog(
+            sessionId,
+            `system-region write declined session=${sessionId} reason=empty_region`,
+        );
+        return false;
+    }
     if (region.startsWith(SYSTEM_REGION_SENTINEL)) {
         // A payload that forges the sentinel would decode one layer short on
         // the serve path. The assembler emits panel-tagged content, so this is
@@ -101,4 +111,106 @@ export function clearSystemRegion(db: Database, sessionId: string, reason: strin
     db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?").run(
         sessionId,
     );
+}
+
+/**
+ * The marker set captured at the last rotation, mirroring the `cached_m0_*`
+ * columns. Rotation eligibility is a pure comparison of the current store
+ * markers against this snapshot; the comparison list is the content-trigger
+ * half of the `mustMaterialize` set, and the deliberate non-triggers (compartment
+ * sequence, profile version, memory watermark, docs hash) are absent by
+ * construction — new history and new memories are deltas, not boundaries.
+ */
+export interface RegionMarkers {
+    projectMemoryEpoch: number;
+    maxCompartmentSeq: number;
+    maxMemoryId: number;
+    maxMutationId: number;
+    maxMemoryMutationId: number;
+    projectDocsHash: string;
+    upgradeState: string;
+    compartmentRenderEpoch: number;
+    muralEnabled: boolean;
+    renderBudgetIdentity: string;
+    memoryRenderEpoch: number;
+    renderedBudgets: string | null;
+    profileVersion: number;
+}
+
+const CONTENT_TRIGGER_FIELDS: ReadonlyArray<readonly [keyof RegionMarkers, string]> = [
+    ["projectMemoryEpoch", "project_memory_epoch"],
+    ["maxMutationId", "max_mutation_id"],
+    ["maxMemoryMutationId", "max_memory_mutation_id"],
+    ["upgradeState", "upgrade_state"],
+    ["compartmentRenderEpoch", "compartment_render_epoch"],
+    ["muralEnabled", "mural_enabled"],
+    ["renderBudgetIdentity", "render_budget_identity"],
+    ["memoryRenderEpoch", "memory_render_epoch"],
+    ["renderedBudgets", "rendered_budgets"],
+];
+
+export interface SystemRegionRotationDecision {
+    rotate: boolean;
+    reason: string;
+}
+
+export interface SystemRegionRotationInput {
+    storedRegion: string | null;
+    capturedMarkers: RegionMarkers | null;
+    currentMarkers: RegionMarkers;
+    /** The single per-pass bust permission (R12 `systemReclaimAllowed` shape). */
+    bustPermission: boolean;
+    forceBand?: boolean;
+    pendingBytes?: number;
+    pendingBytesCap?: number;
+    pendingBytesMinFloor?: number;
+}
+
+export function decideSystemRegionRotation(
+    args: SystemRegionRotationInput,
+): SystemRegionRotationDecision {
+    if (args.storedRegion === null) return { rotate: true, reason: "first_render" };
+    if (args.capturedMarkers === null) return { rotate: true, reason: "missing_markers" };
+    for (const [field, reason] of CONTENT_TRIGGER_FIELDS) {
+        if (args.capturedMarkers[field] !== args.currentMarkers[field]) {
+            return { rotate: true, reason };
+        }
+    }
+    // Pressure arms are ride-only: they fire only on a pass that is already
+    // busting (invariant 4 — automatic reclaim never originates a bust).
+    if (args.bustPermission) {
+        if (args.forceBand) return { rotate: true, reason: "force_band" };
+        if (
+            args.pendingBytes !== undefined &&
+            args.pendingBytesCap !== undefined &&
+            args.pendingBytes > args.pendingBytesCap &&
+            (args.pendingBytesMinFloor === undefined ||
+                args.pendingBytes >= args.pendingBytesMinFloor)
+        ) {
+            return { rotate: true, reason: "pending_growth" };
+        }
+    }
+    return { rotate: false, reason: "none" };
+}
+
+/**
+ * Install a freshly assembled region and print the rotation receipt beside the
+ * fold line. Refusals are loud too: `executed=false` on the same line shape,
+ * so a rotation that decided but did not land can never pass as silent success.
+ */
+export function executeSystemRegionRotation(
+    db: Database,
+    sessionId: string,
+    reason: string,
+    region: string,
+    capturedMarkers: RegionMarkers,
+    persistMarkers?: (markers: RegionMarkers) => void,
+): boolean {
+    const ok = typeof region === "string" && writeSystemRegion(db, sessionId, region);
+    if (ok) persistMarkers?.(capturedMarkers);
+    sessionLog(
+        sessionId,
+        `system-region rotation: reason=${reason} executed=${ok ? "true" : "false"} bytes=${typeof region === "string" ? Buffer.byteLength(region) : -1}`,
+    );
+    return ok;
 }
