@@ -1217,3 +1217,51 @@ it("the event hook flushes notices on session.idle, never on a terminal assistan
     await hook.event!({ event: { type: "session.idle", properties: { sessionID } } } as never);
     expect(promptMocks.prompt).toHaveBeenCalledTimes(1);
 });
+
+// Round-2 review C2b: the region flag must never reach a lane that composes
+// its own heads — the Rust transform mode composes m[0] panel heads inside
+// the module, so appending the stored region there double-serves panels from
+// two baselines. The gate is v1-TS-only.
+describe("system_region lane gate", () => {
+    it("transform_mode rust keeps the region off on both the system handler and the transform", async () => {
+        const { spyOn } = await import("bun:test");
+        const spm = await import("./system-prompt-hash");
+        const tf = await import("./transform");
+        const handlerOpts: Array<Record<string, unknown>> = [];
+        const transformOpts: Array<Record<string, unknown>> = [];
+        const spyHandler = spyOn(spm, "createSystemPromptHashHandler").mockImplementation(((
+            opts: Record<string, unknown>,
+        ) => {
+            handlerOpts.push(opts);
+            return { handler: async () => {}, clearSession: () => {} };
+        }) as never);
+        const spyTransform = spyOn(tf, "createTransform").mockImplementation(((
+            opts: Record<string, unknown>,
+        ) => {
+            transformOpts.push(opts);
+            return Object.assign(async () => {}, {});
+        }) as never);
+        try {
+            const deps = createMockDeps();
+            deps.config = {
+                ...deps.config,
+                system_region: { enabled: true },
+                transform_mode: "rust",
+            };
+            createMagicContextHook(deps);
+            expect(handlerOpts.length).toBeGreaterThan(0);
+            expect(transformOpts.length).toBeGreaterThan(0);
+            expect(handlerOpts[0].systemRegionEnabled).toBe(false);
+            expect(transformOpts[0].systemRegionEnabled).toBe(false);
+
+            const depsTs = createMockDeps();
+            depsTs.config = { ...depsTs.config, system_region: { enabled: true } };
+            createMagicContextHook(depsTs);
+            expect(handlerOpts.at(-1)?.systemRegionEnabled).toBe(true);
+            expect(transformOpts.at(-1)?.systemRegionEnabled).toBe(true);
+        } finally {
+            spyHandler.mockRestore();
+            spyTransform.mockRestore();
+        }
+    });
+});

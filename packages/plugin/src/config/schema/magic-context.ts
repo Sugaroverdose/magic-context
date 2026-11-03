@@ -926,6 +926,8 @@ export interface MagicContextConfig {
     transform_mode: "ts" | "rust";
     /** Experimental frozen system-region residency: the store-backed panels serve as
      *  one frozen string inside system[0] instead of synthetic user-role heads.
+     *  v1-TS-lane only: Rust transform mode, the OpenCode 2 adapter and Pi/OMP
+     *  ignore it (they keep serving heads; a boot line says so).
      *  Default: false (head lane, today's bytes). */
     system_region?: { enabled: boolean };
     /** Auto-update the cached OpenCode plugin wrapper when a newer npm version is available.
@@ -1137,7 +1139,7 @@ export const MagicContextConfigSchema = z
             .object({ enabled: z.boolean().default(false) })
             .default({ enabled: false })
             .describe(
-                "Experimental: serve the store-backed panels (project docs, user profile, memories, session history) as one frozen byte string appended inside system[0], rotating only at materialization boundaries, instead of synthetic user-role head messages. Off by default; see docs/designs/frozen-system-region-residency.md.",
+                "Experimental: serve the store-backed panels (project docs, user profile, memories, session history) as one frozen byte string appended inside system[0], rotating only at materialization boundaries, instead of synthetic user-role head messages. Applies to the OpenCode 1 TypeScript lane only: Rust transform mode, the OpenCode 2 adapter and Pi/OMP ignore this key and keep serving heads. Off by default; see docs/designs/frozen-system-region-residency.md.",
             ),
         auto_update: z
             .boolean()

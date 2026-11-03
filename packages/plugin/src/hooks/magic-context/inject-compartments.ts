@@ -38,6 +38,12 @@ import {
     readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
 import {
+    executeSystemRegionRotation,
+    isSystemRegionBytes,
+    type RegionMarkers,
+    readSystemRegion,
+} from "../../features/magic-context/system-region";
+import {
     getActiveUserMemories,
     type UserMemory,
 } from "../../features/magic-context/user-memory/storage-user-memory";
@@ -74,12 +80,6 @@ import { isHostRenderedSystemMessage } from "./host-served-rows";
 import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
-import {
-    executeSystemRegionRotation,
-    type RegionMarkers,
-    readSystemRegion,
-    SYSTEM_REGION_SENTINEL,
-} from "../../features/magic-context/system-region";
 import type { MessageLike } from "./tag-messages";
 import { formatDate } from "./temporal-awareness";
 import { renderUserProfileContent } from "./user-profile-render";
@@ -1785,6 +1785,12 @@ export function mustMaterialize(args: {
 }): MaterializeDecision {
     if (!args.state.cachedM0Bytes) return { value: true, reason: "first_render" };
     const regionMode = args.systemRegionMode === true;
+    if (!regionMode && isSentinelRegionRow(toBuffer(args.state.cachedM0Bytes))) {
+        // Cross-lane discrimination: a region row is never head content. A
+        // head-lane reader treats it as absent and the next fold rebuilds
+        // head-era bytes (the region is derived state, self-healing).
+        return { value: true, reason: "first_render" };
+    }
     if (!args.state.cachedM1Bytes && !regionMode) {
         return { value: true, reason: "cached_m1_missing" };
     }
@@ -3947,11 +3953,13 @@ function trimToPreparedPrefix(
 export function prepareCachedM0M1Replay(
     db: Database,
     sessionId: string,
+    regionLane = false,
 ): InjectM0M1Result | undefined {
     const row = readCachedM0M1Row(db, sessionId);
     if (!row?.cached_m0_bytes) return undefined;
     const m0Bytes = toBuffer(row.cached_m0_bytes);
     const regionReplay = isSentinelRegionRow(m0Bytes);
+    if (regionReplay && !regionLane) return undefined;
     if (!regionReplay && !row.cached_m1_bytes) return undefined;
     const m1Text = regionReplay ? "" : toBuffer(row.cached_m1_bytes!).toString("utf8");
     const mural = row.cached_m0_mural_data_url
@@ -3976,14 +3984,14 @@ export function prepareCachedM0M1Replay(
 }
 
 function isSentinelRegionRow(bytes: Buffer | Uint8Array): boolean {
-    return (
-        Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-            .subarray(0, SYSTEM_REGION_SENTINEL.length)
-            .toString("utf8") === SYSTEM_REGION_SENTINEL
-    );
+    return isSystemRegionBytes(bytes);
 }
 
-export function hasCompleteCachedM0M1(db: Database, sessionId: string): boolean {
+export function hasCompleteCachedM0M1(
+    db: Database,
+    sessionId: string,
+    regionLane = false,
+): boolean {
     const row = db
         .prepare("SELECT cached_m0_bytes, cached_m1_bytes FROM session_meta WHERE session_id = ?")
         .get(sessionId) as {
@@ -3993,7 +4001,7 @@ export function hasCompleteCachedM0M1(db: Database, sessionId: string): boolean 
     if (!row?.cached_m0_bytes || row.cached_m0_bytes.byteLength === 0) return false;
     // A region row legitimately has no m[1]: the region is the complete served
     // prefix; completeness is decided by the reader contract, not by columns.
-    if (isSentinelRegionRow(row.cached_m0_bytes)) return true;
+    if (isSentinelRegionRow(row.cached_m0_bytes)) return regionLane;
     return row.cached_m1_bytes !== null && row.cached_m1_bytes.byteLength > 0;
 }
 

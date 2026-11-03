@@ -27,6 +27,7 @@
 
 import { MEMORY_MURAL_BLOCK } from "@magic-context/core/agents/magic-context-prompt";
 import { isPartialCompartmentEnd } from "@magic-context/core/features/magic-context/compartment-storage";
+import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
 import {
 	getMaxMemoryIdForProjects,
 	getMemoriesByProject,
@@ -770,6 +771,9 @@ export interface PiM0M1InjectionResult extends PiInjectionResult {
 
 function decodeCachedM0(value: Buffer | Uint8Array | null): string | null {
 	if (!value) return null;
+	// Cross-lane discrimination: a frozen-system-region row belongs to the
+	// OpenCode-1-TS region store; Pi never serves those bytes as head text.
+	if (isSystemRegionBytes(value)) return null;
 	return Buffer.from(value.buffer, value.byteOffset, value.byteLength).toString(
 		"utf8",
 	);

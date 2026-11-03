@@ -6,18 +6,18 @@ import { insertMemory } from "../../features/magic-context/memory/storage-memory
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
+    type RegionMarkers,
+    readSystemRegion,
+    SYSTEM_REGION_SENTINEL,
+    writeSystemRegion,
+} from "../../features/magic-context/system-region";
+import {
     hasCompleteCachedM0M1,
     injectM0M1,
     type M0M1State,
     mustMaterialize,
     prepareCachedM0M1Replay,
 } from "./inject-compartments";
-import {
-    type RegionMarkers,
-    readSystemRegion,
-    SYSTEM_REGION_SENTINEL,
-    writeSystemRegion,
-} from "../../features/magic-context/system-region";
 import type { MessageLike } from "./tag-messages";
 import { regionRotationPromotion } from "./transform-postprocess-phase";
 
@@ -292,8 +292,8 @@ describe("system-region wiring: replay plumbing is sentinel-aware", () => {
     it("a sentinel row counts as a complete cached prefix and replays without heads", () => {
         const db = makeDb();
         writeSystemRegion(db, SESSION_ID, "<project-memory>frozen</project-memory>");
-        expect(hasCompleteCachedM0M1(db, SESSION_ID)).toBe(true);
-        const replay = prepareCachedM0M1Replay(db, SESSION_ID);
+        expect(hasCompleteCachedM0M1(db, SESSION_ID, true)).toBe(true);
+        const replay = prepareCachedM0M1Replay(db, SESSION_ID, true);
         expect(replay).toBeDefined();
         expect(replay!.preparedMessages.length).toBe(0);
     });
@@ -305,5 +305,51 @@ describe("system-region wiring: replay plumbing is sentinel-aware", () => {
         ).run(Buffer.from("<session-history>head</session-history>", "utf8"), SESSION_ID);
         expect(hasCompleteCachedM0M1(db, SESSION_ID)).toBe(false);
         expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined();
+    });
+});
+
+// Round-2 review C2c: a sentinel row must never be served as head text by a
+// lane that does not run the region. Head-lane readers treat it as absent.
+describe("system-region wiring: cross-lane reader discrimination", () => {
+    function seedSentinelRow(sessionId: string) {
+        const db = new Database(":memory:");
+        initializeDatabase(db);
+        getOrCreateSessionMeta(db, sessionId);
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?",
+        ).run(encodeSystemRegionRowSafe("<project-memory>foreign</project-memory>"), sessionId);
+        return db;
+    }
+    function encodeSystemRegionRowSafe(text: string): Uint8Array {
+        return new TextEncoder().encode(`<!-- mc:system-region v1 -->\n${text}`);
+    }
+
+    it("head lane: a sentinel row is first_render, not a complete prefix", async () => {
+        const { mustMaterialize, prepareCachedM0M1Replay, hasCompleteCachedM0M1 } = await import(
+            "./inject-compartments"
+        );
+        const db = seedSentinelRow("ses-c2-headlane");
+        const state = getOrCreateSessionMeta(db, "ses-c2-headlane");
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: "ses-c2-headlane",
+                state,
+                projectPath: "/p",
+                projectDirectory: "",
+                systemRegionMode: false,
+            } as never).reason,
+        ).toBe("first_render");
+        expect(prepareCachedM0M1Replay(db, "ses-c2-headlane", false)).toBeUndefined();
+        expect(hasCompleteCachedM0M1(db, "ses-c2-headlane", false)).toBe(false);
+    });
+
+    it("control region lane: the same row is a complete served prefix", async () => {
+        const { prepareCachedM0M1Replay, hasCompleteCachedM0M1 } = await import(
+            "./inject-compartments"
+        );
+        const db = seedSentinelRow("ses-c2-regionlane");
+        expect(prepareCachedM0M1Replay(db, "ses-c2-regionlane", true)).toBeDefined();
+        expect(hasCompleteCachedM0M1(db, "ses-c2-regionlane", true)).toBe(true);
     });
 });

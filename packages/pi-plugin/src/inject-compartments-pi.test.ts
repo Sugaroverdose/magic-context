@@ -3275,3 +3275,30 @@ it("Pi shrinking budget refolds an oversized baseline once with empty m1", () =>
 		closeQuietly(db);
 	}
 });
+
+// Round-2 review C2c: a session row written by the OpenCode-1 frozen-region
+// store must never surface as Pi head text. The Pi reader treats sentinel
+// rows as absent (fold/first-render path), never as content.
+describe("frozen-region cross-lane discrimination (Pi reader)", () => {
+	const SENTINEL = "<!-- mc:system-region v1 -->";
+
+	it("a sentinel row folds instead of serving region bytes as head text", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-sentinel", process.cwd());
+		// Real materialized cache first: markers are complete, only the
+		// bytes are foreign (a region row written by the v1-TS lane).
+		materializeM0Pi(state, db);
+		db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(
+			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
+			state.sessionId,
+		);
+		expect(mustMaterializePi(state, db)).toEqual({ value: true, reason: "cache_invalid" });
+	});
+
+	it("control: the same cache with its own head bytes is not invalid", () => {
+		const db = createTestDb();
+		const state = piState("ses-pi-headlane", process.cwd());
+		materializeM0Pi(state, db);
+		expect(mustMaterializePi(state, db).reason).not.toBe("cache_invalid");
+	});
+});
