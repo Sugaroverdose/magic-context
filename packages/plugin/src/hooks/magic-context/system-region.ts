@@ -149,6 +149,20 @@ const CONTENT_TRIGGER_FIELDS: ReadonlyArray<readonly [keyof RegionMarkers, strin
     ["renderedBudgets", "rendered_budgets"],
 ];
 
+/**
+ * The head-lane m[1]-delta fields. They are deliberate non-triggers of the
+ * m[0] HARD fold because they used to re-render m[1] on every cache-busting
+ * pass; region mode has no m[1], so that role transfers to a rotation trigger
+ * gated on the bust permission — they surface on exactly the passes where
+ * m[1] used to refresh, and never originate a bust of their own.
+ */
+const DELTA_TRIGGER_FIELDS: ReadonlyArray<readonly [keyof RegionMarkers, string]> = [
+    ["maxMemoryId", "max_memory_id"],
+    ["maxCompartmentSeq", "max_compartment_seq"],
+    ["profileVersion", "profile_version"],
+    ["projectDocsHash", "project_docs_hash"],
+];
+
 export interface SystemRegionRotationDecision {
     rotate: boolean;
     reason: string;
@@ -176,9 +190,15 @@ export function decideSystemRegionRotation(
             return { rotate: true, reason };
         }
     }
-    // Pressure arms are ride-only: they fire only on a pass that is already
-    // busting (invariant 4 — automatic reclaim never originates a bust).
+    // Pressure arms and the m[1]-delta triggers are ride-only: they fire only
+    // on a pass that is already busting (invariant 4 — automatic reclaim never
+    // originates a bust).
     if (args.bustPermission) {
+        for (const [field, reason] of DELTA_TRIGGER_FIELDS) {
+            if (args.capturedMarkers[field] !== args.currentMarkers[field]) {
+                return { rotate: true, reason };
+            }
+        }
         if (args.forceBand) return { rotate: true, reason: "force_band" };
         if (
             args.pendingBytes !== undefined &&

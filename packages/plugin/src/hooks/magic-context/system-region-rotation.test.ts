@@ -102,23 +102,35 @@ describe("system-region rotation decision: content triggers", () => {
     });
 });
 
-describe("system-region rotation decision: deliberate non-triggers", () => {
-    // The m[1]-delta members must never rotate the region on their own; they
-    // fold in at the next genuine boundary (the mustMaterialize non-trigger list).
+describe("system-region rotation decision: m[1]-delta fields are bust-gated triggers", () => {
+    // Region mode has no m[1] surface: the head-lane m[1]-delta fields are the
+    // fields whose change re-rendered m[1] on every bust pass. They must
+    // rotate the region on a pass that already holds the bust permission —
+    // otherwise new memories/compartments/profile/docs never surface — and
+    // must never originate a bust of their own (the mustMaterialize
+    // non-trigger semantics transfer to the gating, not to exclusion).
     it.each([
-        ["new compartment sequence", { maxCompartmentSeq: 8 }],
-        ["profile version", { profileVersion: 5 }],
-        ["maxMemoryId watermark", { maxMemoryId: 13 }],
-        ["project-docs hash", { projectDocsHash: "hash-b" }],
-    ] as const)("no rotation for %s", (_label, patch) => {
+        ["new compartment sequence", { maxCompartmentSeq: 8 }, "max_compartment_seq"],
+        ["profile version", { profileVersion: 5 }, "profile_version"],
+        ["maxMemoryId watermark", { maxMemoryId: 13 }, "max_memory_id"],
+        ["project-docs hash", { projectDocsHash: "hash-b" }, "project_docs_hash"],
+    ] as const)("%s rotates only with the bust permission", (_label, patch, reason) => {
+        expect(
+            decideSystemRegionRotation({
+                ...stored("r"),
+                capturedMarkers: BASE,
+                currentMarkers: { ...BASE, ...patch },
+                bustPermission: false,
+            }).rotate,
+        ).toBe(false);
         expect(
             decideSystemRegionRotation({
                 ...stored("r"),
                 capturedMarkers: BASE,
                 currentMarkers: { ...BASE, ...patch },
                 bustPermission: true,
-            }).rotate,
-        ).toBe(false);
+            }),
+        ).toEqual({ rotate: true, reason });
     });
 
     it("no rotation when markers are identical", () => {
