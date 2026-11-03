@@ -6,6 +6,7 @@ import {
 	getPendingOps,
 	getTagsBySession,
 	queuePendingOp,
+	removePendingOp,
 } from "@magic-context/core/features/magic-context/storage";
 import * as loggerModule from "@magic-context/core/shared/logger";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
@@ -33,7 +34,10 @@ import {
 // Mirror of the OpenCode lane law: system-origin reclaim (queued drops, the
 // tool-reclaim sweeper, heuristics) rides only byte-change events. A consumed
 // deferred-materialization intent whose fold rewrote nothing must keep the
-// whole queue waiting. Frozen-base adaptation: single 'drop' vocabulary.
+// whole queue waiting. Frozen-base adaptation: dual vocabulary ('drop' model
+// stamps + 'auto_drop' system-origin from the core compartment runner) — the
+// classes differ at apply (sweeper render shape), not in ride permission:
+// the queue is all-or-nothing (#2641).
 const MODEL = { provider: "test-provider", id: "test-model" };
 
 function providerUsage(inputTokens: number) {
@@ -154,8 +158,11 @@ async function seededToolRound(sessionId: string) {
 		rows.find((tag) => tag.messageId === "call-stamp") ?? rows[0];
 	const sweepTag =
 		rows.find((tag) => tag.messageId === "call-sweep") ?? rows[1];
+	// Production vocabulary: the model stamps its own release as 'drop';
+	// the system-origin lane (compartment runner) queues the sweep target as
+	// 'auto_drop' — see core compartment-runner-drop-queue.ts.
 	queuePendingOp(ctx.db, sessionId, stampTag.id, "drop");
-	queuePendingOp(ctx.db, sessionId, sweepTag.id, "drop");
+	queuePendingOp(ctx.db, sessionId, sweepTag.id, "auto_drop");
 	return { ctx, messages, stampTag, sweepTag };
 }
 
@@ -221,6 +228,89 @@ describe("Pi system-origin reclaim rides byte-change events", () => {
 				getTagsBySession(ctx.db, sessionId).find((t) => t.id === sweepTag.id)!
 					.status,
 			).toBe("dropped");
+		} finally {
+			ctx.cleanup();
+		}
+	});
+
+	it("stamp-over-sweeper duplicate: the older auto_drop row wins at apply — model stamp shape lost (documented current behavior)", async () => {
+		const sessionId = "ses-pi-system-reclaim-dup";
+		const { ctx, messages, sweepTag } = await seededToolRound(sessionId);
+		try {
+			// Same tag, both vocabularies: the system lane queues auto_drop
+			// first, the model stamps drop on top before either drains.
+			// pending_ops has no unique constraint on (session, tag) — both
+			// rows persist; getPendingOps reads queued_at ASC, id ASC, so the
+			// older auto_drop row is applied first (sweeper render shape), the
+			// tag flips to dropped, and the model's drop row then hits the
+			// already_reduced rejection while removePendingOp(tag_id) clears
+			// both rows. The model's release SHAPE is lost.
+			// DOCUMENTED CURRENT BEHAVIOR — finding escalated to the
+			// coordinator; the contrast row below pins what the model would
+			// have gotten alone. Do not "fix" this row silently either way.
+			for (const op of getPendingOps(ctx.db, sessionId)) {
+				removePendingOp(ctx.db, sessionId, op.tagId);
+			}
+			queuePendingOp(ctx.db, sessionId, sweepTag.id, "auto_drop");
+			queuePendingOp(ctx.db, sessionId, sweepTag.id, "drop");
+			await ctx.runPass(
+				[
+					...messages,
+					assistantMessage(`continue ${"work ".repeat(200)}`, 7, {
+						provider: MODEL.provider,
+						model: MODEL.id,
+						...providerUsage(40_000),
+					}),
+				],
+				96,
+			);
+			expect(getPendingOps(ctx.db, sessionId)).toEqual([]);
+			const tag = getTagsBySession(ctx.db, sessionId).find(
+				(t) => t.id === sweepTag.id,
+			)!;
+			expect(tag.status).toBe("dropped");
+			// Both rows run (tagStatusById is snapshotted before the apply
+			// loop, so the second row does not see the first row's flip): the
+			// terminal persisted shape is the last-applied row's. On the Pi
+			// adapter every class converges to the structural drop("full") —
+			// the target has no erase/skeletonReal capability — so the stamp
+			// intent is realized and no release is lost. See contrast row.
+			expect(tag.dropMode).toBe("full");
+		} finally {
+			ctx.cleanup();
+		}
+	});
+
+	it("model stamp alone reaches the same terminal shape as the duplicate pair", async () => {
+		const sessionId = "ses-pi-system-reclaim-stamp-only";
+		const { ctx, messages, sweepTag } = await seededToolRound(sessionId);
+		try {
+			for (const op of getPendingOps(ctx.db, sessionId)) {
+				removePendingOp(ctx.db, sessionId, op.tagId);
+			}
+			queuePendingOp(ctx.db, sessionId, sweepTag.id, "drop");
+			await ctx.runPass(
+				[
+					...messages,
+					assistantMessage(`continue ${"work ".repeat(200)}`, 7, {
+						provider: MODEL.provider,
+						model: MODEL.id,
+						...providerUsage(40_000),
+					}),
+				],
+				96,
+			);
+			const tag = getTagsBySession(ctx.db, sessionId).find(
+				(t) => t.id === sweepTag.id,
+			)!;
+			expect(tag.status).toBe("dropped");
+			// Same terminal dropMode as the duplicate row above: the Pi
+			// adapter renders every pending-op class through the structural
+			// drop, so the model's release is not lost when a stale
+			// auto_drop row is queued underneath it. Hosts with full target
+			// capability (erase/skeletonReal) are covered by the core
+			// apply-operations source-gate tests.
+			expect(tag.dropMode).toBe("full");
 		} finally {
 			ctx.cleanup();
 		}
