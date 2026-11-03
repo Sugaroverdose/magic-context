@@ -598,3 +598,51 @@ state), and Pi's `decodeCachedM0` refuses it (seeded-sentinel and
 materialized-head laws on both sides, inert-guard controls). The schema
 describes the v1-TS-only scope; v2 setup and Pi boot log an ignored-flag
 warning on the plugin log (log lines, not laws).
+
+## 14. Review round 3 (class-closure review, coordinator-verified)
+
+Round 3 attacked classes, not instances; the adjudicated list and their closures:
+
+- **A1 (eraser class, census strength)** — the census was narrower than its
+  "production tree" claim. Two more erasers found at census time: migration v34's
+  clears-list and the central baseline-invalidation funnel `clearCachedM0M1`
+  (nine production call sites). The funnel now requires a per-CALL named reason
+  (compile-time required, structurally pinned by a call-site law); the bulk
+  helpers are single-statement atomic UPDATEs (a pre-SELECT + per-row loop could
+  undercount the receipt against concurrent writes); the v34 clear is
+  column-existence-safe. The census walks TS under `src/`, Rust under `crates/`
+  AND the dashboard's `src-tauri/src` (its cache-format reset is a named,
+  reasoned external-editor exemption — reader contract self-heals), with
+  deny-shape sub-laws per dynamic-SET file replacing instance allow-lists.
+  Zero-consumer `clearCachedM0` deleted (obsoletion duty).
+- **A2 (reader census)** — `repairMissingHistoryBoundary` read
+  `cached_m0_bytes IS NOT NULL` as head-baseline existence: a foreign region row
+  presented as a head baseline, and its stale boundary drove an un-invited
+  baseline-reset erasure (the v2-reachable column-eraser path). `readBaseline`
+  discriminates the sentinel now; laws pin sentinel→intact with the row alive,
+  head bytes→baseline-reset as control. Cosmetic L9 guards: the dashboard
+  history meter and both status dialogs refuse to render sentinel bytes as head
+  text.
+- **A3 (trigger-set drift)** — the doc carried the head-lane non-trigger list
+  while the code (correctly, per the round-2 discovery) had made the four delta
+  fields bust-gated rotation triggers; §4/§5/L3 now state the two-tier set
+  honestly. The contract divergence in `decideSystemRegionRotation` (content and
+  install arms ignoring `bustPermission`, dead only because the sole caller
+  hard-set true) was closed per L4: every arm requires the permission; installs
+  are the fold lane's verdict. The L0 census's reason-enumeration row makes a
+  code-only trigger an immediate CI failure.
+- **A4 (receipt + permission integrity)** — a promoted pass printed
+  `reason=unknown executed=false` on the fold line while the rotation line said
+  `executed=true` (L8's shape re-entered via promotion), and the earned bust
+  never reached `foldBustsServedPrefixThisPass`, so queue lanes could not ride
+  the paid pass. The promotion now counts as the pass's fold decision on the
+  region lane; the receipt carries the rotation reason, `executed=true`, and
+  `bustsServedPrefix=true` (deliberate amortization, owner-endorsed). Laws run
+  a real force-band deferred boundary pass; removing the gate reddens the
+  executed/bust assertions.
+- **L0 (owner law)** — single writer, schedule-only, added above L1, with the
+  per-actor producer census `system-region-producers.test.ts`: rotation executor
+  single caller, region writer API reachable only from named actors, closed set
+  of `pending_ops` writers, `ctx_reduce` enqueue-only through the queue API, one
+  bust-permission definition, and every `systemRegion` reason literal drawn from
+  §4's enumeration (planted-rogue verified).
