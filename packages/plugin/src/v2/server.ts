@@ -49,11 +49,8 @@ export async function setup(context: V2Context) {
     bindStaleBuildNotice({}, import.meta.url, "opencode2");
     const duties = await registerContext(context);
     const pluginConfig = loadPluginConfigDetailed(context.location.directory).config;
-    if (pluginConfig.system_region?.enabled === true) {
-        // Honest surface: this lane keeps serving synthetic heads; the
-        // frozen-region store is v1-TS-only while the port lands.
-        log("[magic-context] system_region.enabled is ignored on the v2 lane (heads kept)");
-    }
+    // The frozen system-region lane is an OpenCode-1-TS capability (no
+    // config key); this lane keeps serving synthetic heads (design doc §9).
     const checks = pluginConfig.auto_update === false ? undefined : startUpdateChecks(context);
     // The plugin log, not the console: the host passes plugin output straight
     // through to the operator's terminal. Flushed now so a host that dies

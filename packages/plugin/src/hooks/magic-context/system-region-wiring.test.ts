@@ -2,6 +2,9 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
+import { readdirSync, readFileSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { isSystemRegionLane } from "../../config/system-region-lane";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -20,6 +23,21 @@ import {
 } from "./inject-compartments";
 import type { MessageLike } from "./tag-messages";
 import { regionRotationPromotion } from "./transform-postprocess-phase";
+
+const SRC_PLUGIN = join(import.meta.dir, "..", "..");
+function walkProd(dir: string, prefix: string): Array<{ rel: string; full: string }> {
+    const out: Array<{ rel: string; full: string }> = [];
+    for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+            if (entry === "node_modules") continue;
+            out.push(...walkProd(full, `${prefix}${entry}/`));
+        } else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) {
+            out.push({ rel: `${prefix}${entry}`, full });
+        }
+    }
+    return out;
+}
 
 const SESSION_ID = "ses_region_wiring";
 const PROJECT_PATH = "/tmp/test-region-wiring";
@@ -99,7 +117,7 @@ describe("system-region wiring: gate on collapses the head lane", () => {
         expect(after.cached_m1_bytes).toBeNull();
     });
 
-    it("gate off control: the head lane still prepends its two synthetic messages", () => {
+    it("inert capability lane (head): the head lane still prepends its two synthetic messages", () => {
         const db = makeDb();
         const messages: MessageLike[] = [
             { info: { id: "u3", role: "user" }, parts: [{ type: "text", text: "hi" }] },
@@ -191,8 +209,7 @@ describe("system-region wiring: rotation promotion (L3/L4)", () => {
     };
     const live = (over: Partial<RegionMarkers>): RegionMarkers => ({ ...captured, ...over });
     const base = {
-        systemRegionEnabled: true,
-        compactionOff: false,
+        systemRegionLane: true,
         freezeM0M1: false,
         foldDue: false,
         boundaryPermission: true,
@@ -253,9 +270,12 @@ describe("system-region wiring: rotation promotion (L3/L4)", () => {
         });
     });
 
-    it("compaction-off and freezeM0M1 decline even with a stale manifest", () => {
+    it("an inert capability lane and freezeM0M1 decline even with a stale manifest", () => {
+        // Inert-CAPABILITY control (the flag's inert-gate control, re-pointed):
+        // the boot predicate yields lane=false for rust/compaction-off installs
+        // (table laws below); the promotion must go fully dead on that.
         const stale = { ...base, currentMarkers: live({ projectMemoryEpoch: 2 }) };
-        expect(regionRotationPromotion({ ...stale, compactionOff: true })).toEqual({
+        expect(regionRotationPromotion({ ...stale, systemRegionLane: false })).toEqual({
             promote: false,
             reason: null,
         });
@@ -263,7 +283,7 @@ describe("system-region wiring: rotation promotion (L3/L4)", () => {
             promote: false,
             reason: null,
         });
-        expect(regionRotationPromotion({ ...stale, systemRegionEnabled: false })).toEqual({
+        expect(regionRotationPromotion({ ...stale, systemRegionLane: false })).toEqual({
             promote: false,
             reason: null,
         });
@@ -378,5 +398,55 @@ describe("prepareCachedM0M1Replay truth table (lint-refactor pin)", () => {
         expect(regionPass?.m1Text).toBe("");
         // Region row off the region lane: refused.
         expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined();
+    });
+});
+
+// Owner ruling (2026-11-03): the system_region.enabled flag is DEAD — no
+// config switch; the region lane is an install-time capability, and
+// recovery is rollback (spec flip), never a config flip. One exported
+// decider, computed once per handler boot from transformMode + compaction
+// (L0 spirit: one decider, threaded — no per-site re-derivation).
+describe("system-region capability lane (flag deletion)", () => {
+    const TABLE: Array<{
+        name: string;
+        config: { transform_mode?: "ts" | "rust"; compaction?: { enabled?: boolean } | false };
+        want: boolean;
+    }> = [
+        { name: "ts + compaction on (defaults)", config: {}, want: true },
+        {
+            name: "ts explicit + compaction on",
+            config: { transform_mode: "ts", compaction: { enabled: true } },
+            want: true,
+        },
+        { name: "rust transform mode", config: { transform_mode: "rust" }, want: false },
+        {
+            name: "rust + compaction on",
+            config: { transform_mode: "rust", compaction: { enabled: true } },
+            want: false,
+        },
+        { name: "compaction off (legacy false)", config: { compaction: false }, want: false },
+        {
+            name: "compaction off (object)",
+            config: { compaction: { enabled: false } },
+            want: false,
+        },
+    ];
+    for (const row of TABLE) {
+        it(`isSystemRegionLane: ${row.name} -> ${row.want}`, () => {
+            expect(isSystemRegionLane(row.config)).toBe(row.want);
+        });
+    }
+
+    it("no production file reads the deleted config key", () => {
+        const offenders: string[] = [];
+        for (const { rel, full } of [
+            ...walkProd(SRC_PLUGIN, "plugin/"),
+            ...walkProd(join(SRC_PLUGIN, "..", "..", "pi-plugin", "src"), "pi/"),
+        ]) {
+            // Config ACCESS pattern, not a bare substring: the predicate
+            // module documents the deleted key in its rationale comment.
+            if (/\.system_region\b/.test(readFileSync(full, "utf8"))) offenders.push(rel);
+        }
+        expect(offenders).toEqual([]);
     });
 });

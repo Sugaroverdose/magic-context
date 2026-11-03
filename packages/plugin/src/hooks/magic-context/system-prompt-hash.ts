@@ -208,7 +208,7 @@ export function createSystemPromptHashHandler(deps: {
     experimentalCavemanTextCompression?: boolean;
     /** When true, serve the frozen system region (stored panel bytes) inside
      *  system[0] and keep it out of the watched hash. Off = today's bytes. */
-    systemRegionEnabled?: boolean;
+    systemRegionLane?: boolean;
 }): {
     handler: (
         input: {
@@ -497,7 +497,7 @@ export function createSystemPromptHashHandler(deps: {
         // reads beyond the session meta the handler already loaded.
         const hostContent = output.system.join("\n");
         let regionServed: string | null = null;
-        if (deps.systemRegionEnabled === true && sessionMetaEarly) {
+        if (deps.systemRegionLane === true && sessionMetaEarly) {
             regionServed = decodeSystemRegionRow(sessionMetaEarly.cachedM0Bytes);
             if (regionServed !== null) {
                 output.system[0] = `${output.system[0]}${SYSTEM_PROMPT_GUIDANCE_SEPARATOR}${regionServed}`;
@@ -565,11 +565,9 @@ export function createSystemPromptHashHandler(deps: {
         // the hash even if token estimation fails, so the next pass doesn't re-detect
         // a phantom hash change and re-flush.
         const regionChanged =
-            deps.systemRegionEnabled === true &&
-            servedRegionBySession.get(sessionId) !== regionServed;
+            deps.systemRegionLane === true && servedRegionBySession.get(sessionId) !== regionServed;
         if (currentHash !== previousHash || regionChanged) {
-            if (deps.systemRegionEnabled === true)
-                servedRegionBySession.set(sessionId, regionServed);
+            if (deps.systemRegionLane === true) servedRegionBySession.set(sessionId, regionServed);
             let systemPromptTokens = sessionMeta.systemPromptTokens;
             try {
                 systemPromptTokens = estimateTokens(systemContent);

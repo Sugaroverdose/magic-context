@@ -1433,10 +1433,11 @@ interface RunPostTransformPhaseArgs {
     /** Use the defer reason resolved with the scheduler decision at the boundary; do not recompute it from this phase's inputs, which may no longer reflect that decision. */
     schedulerDeferReason?: "scheduler_defer" | null;
     fullFeatureMode: boolean;
-    /** Experimental frozen system-region residency (config `system_region`):
-     *  materialization boundaries install the sentinel region row and the
-     *  array carries no heads. Off = head lane, today's bytes. */
-    systemRegionEnabled?: boolean;
+    /** Frozen system-region residency CAPABILITY (boot-resolved via
+     *  isSystemRegionLane — no config key): materialization boundaries
+     *  install the sentinel region row and the array carries no heads.
+     *  False = head lane, today's bytes (rust/v2/Pi/compaction-off). */
+    systemRegionLane?: boolean;
     /**
      * Compaction-off mode (issue #266), boot-resolved. Every mutating gate in
      * this phase becomes `existingGate && !compactionOff`; the m[0]/m[1]
@@ -1747,8 +1748,7 @@ export function finalizeMessageRepresentation(
  * and a missing region is installed by mustMaterialize, not here.
  */
 export function regionRotationPromotion(input: {
-    systemRegionEnabled: boolean;
-    compactionOff: boolean;
+    systemRegionLane: boolean;
     freezeM0M1: boolean;
     foldDue: boolean;
     boundaryPermission: boolean;
@@ -1760,8 +1760,7 @@ export function regionRotationPromotion(input: {
 }): { promote: boolean; reason: string | null } {
     const decline = { promote: false, reason: null } as const;
     if (
-        !input.systemRegionEnabled ||
-        input.compactionOff ||
+        !input.systemRegionLane ||
         input.freezeM0M1 ||
         input.foldDue ||
         !input.boundaryPermission ||
@@ -1919,19 +1918,14 @@ export async function runPostTransformPhase(
                   historyBudgetTokens: args.m0M1.historyBudgetTokens,
                   historyBudgetPolicyIdentity: args.m0M1.historyBudgetPolicyIdentity,
                   hardSignals: args.m0M1.hardSignals,
-                  systemRegionMode: args.systemRegionEnabled === true && !compactionOff,
+                  systemRegionMode: args.systemRegionLane === true && !compactionOff,
               })
             : { value: false, reason: null };
     // Region rotation promotion: a named boundary with a stale region manifest
     // turns this pass's ordinary fold into the rotation transaction (same
     // transaction, one bust). Never originates a bust of its own.
     let regionRotationReason: string | null = null;
-    if (
-        args.systemRegionEnabled === true &&
-        !compactionOff &&
-        m0M1EnabledForFold &&
-        !foldDueDecision.value
-    ) {
+    if (args.systemRegionLane === true && m0M1EnabledForFold && !foldDueDecision.value) {
         const storedRegion = readSystemRegion(args.db, args.sessionId);
         if (storedRegion !== null) {
             const boundaryPermission =
@@ -1946,8 +1940,7 @@ export async function runPostTransformPhase(
                 (args.sessionMeta as M0M1State).snapshotMarkers ??
                 snapshotMarkersFromCachedM0(args.sessionMeta as M0M1State);
             const promotion = regionRotationPromotion({
-                systemRegionEnabled: true,
-                compactionOff,
+                systemRegionLane: args.systemRegionLane === true,
                 freezeM0M1,
                 foldDue: false,
                 boundaryPermission,
@@ -1974,7 +1967,7 @@ export async function runPostTransformPhase(
         m0M1EnabledForFold &&
         !emergencyDropEligible &&
         !freezeM0M1;
-    const regionLaneActive = args.systemRegionEnabled === true && !compactionOff;
+    const regionLaneActive = args.systemRegionLane === true;
     const cachedPrefixBeforePreflight = shouldCaptureCachedPrefix
         ? prepareCachedM0M1Replay(args.db, args.sessionId, regionLaneActive)
         : undefined;
@@ -2049,7 +2042,7 @@ export async function runPostTransformPhase(
                 muralEnabled: args.m0M1.muralEnabled,
                 compactionOff,
                 systemRegion:
-                    args.systemRegionEnabled === true && !compactionOff
+                    args.systemRegionLane === true
                         ? {
                               enabled: true,
                               reason: regionRotationReason ?? foldDueDecision.reason ?? "hard_fold",
@@ -2971,7 +2964,7 @@ export async function runPostTransformPhase(
                 // compartment rows never reach <session-history>.
                 compactionOff,
                 systemRegion:
-                    args.systemRegionEnabled === true && !compactionOff
+                    args.systemRegionLane === true
                         ? {
                               enabled: true,
                               reason:

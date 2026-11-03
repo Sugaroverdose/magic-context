@@ -49,7 +49,7 @@ function buildHandler(opts?: {
     pendingMaterializationSessions?: Set<string>;
     promptSurface?: PromptSurfaceConfig;
     promptSurfaceRuntime?: PromptSurfaceRuntime;
-    systemRegionEnabled?: boolean;
+    systemRegionLane?: boolean;
 }): ReturnType<typeof createSystemPromptHashHandler> {
     return createSystemPromptHashHandler({
         db: openDatabase(),
@@ -61,7 +61,7 @@ function buildHandler(opts?: {
         systemPromptRefreshSessions: opts?.systemPromptRefreshSessions ?? new Set<string>(),
         pendingMaterializationSessions: opts?.pendingMaterializationSessions ?? new Set<string>(),
         lastHeuristicsTurnId: new Map<string, string>(),
-        systemRegionEnabled: opts?.systemRegionEnabled,
+        systemRegionLane: opts?.systemRegionLane,
     });
 }
 
@@ -102,7 +102,7 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
             historyRefreshSessions,
             systemPromptRefreshSessions,
             pendingMaterializationSessions,
-            systemRegionEnabled: true,
+            systemRegionLane: true,
         });
 
         const first = await pass(handler, sessionId, "Base host prompt");
@@ -136,7 +136,7 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
             historyRefreshSessions,
             systemPromptRefreshSessions,
             pendingMaterializationSessions,
-            systemRegionEnabled: true,
+            systemRegionLane: true,
         });
 
         await pass(handler, sessionId, "Base host prompt");
@@ -161,7 +161,7 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
         const sessionId = "ses-srg-split";
         freezeReduce(sessionId);
         seedRegion(sessionId, "<project-docs>SHORT</project-docs>");
-        const { handler } = buildHandler({ systemRegionEnabled: true });
+        const { handler } = buildHandler({ systemRegionLane: true });
 
         await pass(handler, sessionId, "Base host prompt");
         const meta1 = getOrCreateSessionMeta(openDatabase(), sessionId);
@@ -183,20 +183,13 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
         clearCtxReduceAvailability(sessionId);
     });
 
-    it("gate off: the stored region is invisible — today's bytes exactly", async () => {
-        useTempDataHome("srg-gate-off-");
-        const sessionId = "ses-srg-off";
+    it("no region row yet: serve is byte-stable host-prompt only (boot before first install)", async () => {
+        useTempDataHome("srg-preinstall-");
+        const sessionId = "ses-srg-preinstall";
         freezeReduce(sessionId);
-        seedRegion(sessionId, "<project-docs>SHOULD-NOT-APPEAR</project-docs>");
-        const { handler } = buildHandler({});
-
-        const served = await pass(handler, sessionId, "Base host prompt");
-        expect(served).not.toContain("SHOULD-NOT-APPEAR");
-        // And with no region row at all, gated serve is also byte-stable H-only
-        // (boot before first install).
         seedRegion(sessionId, null);
-        const { handler: gated } = buildHandler({ systemRegionEnabled: true });
-        const bare = await pass(gated, sessionId, "Base host prompt");
+        const { handler } = buildHandler({ systemRegionLane: true });
+        const bare = await pass(handler, sessionId, "Base host prompt");
         expect(bare).toContain("Base host prompt");
         expect(bare).not.toContain("mc:system-region");
         clearCtxReduceAvailability(sessionId);
@@ -209,7 +202,7 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
         const REGION_WITH_DATE =
             "<session-history>\n## 1-9 · 2024-01-01 · Old work\nToday's date: Wed Jan 01 2025 was the day.\n</session-history>";
         seedRegion(sessionId, REGION_WITH_DATE);
-        const { handler } = buildHandler({ systemRegionEnabled: true });
+        const { handler } = buildHandler({ systemRegionLane: true });
 
         const first = await pass(handler, sessionId, "Host\nToday's date: Fri Oct 02 2026");
         expect(first).toContain("Today's date: Fri Oct 02 2026");
@@ -229,7 +222,7 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
         const sessionId = "ses-srg-restart";
         freezeReduce(sessionId);
         seedRegion(sessionId, "<project-docs>DOC-R</project-docs>\n<memory>R</memory>");
-        const { handler } = buildHandler({ systemRegionEnabled: true });
+        const { handler } = buildHandler({ systemRegionLane: true });
         const before = await pass(handler, sessionId, "Host prompt");
         const metaBefore = getOrCreateSessionMeta(openDatabase(), sessionId);
         const hashBefore = metaBefore.systemPromptHash;
@@ -245,7 +238,7 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
             historyRefreshSessions,
             systemPromptRefreshSessions,
             pendingMaterializationSessions,
-            systemRegionEnabled: true,
+            systemRegionLane: true,
         });
         const after = await pass(revived.handler, sessionId, "Host prompt");
         expect(after).toBe(before);
@@ -271,7 +264,7 @@ describe("system-region serve: frozen bytes in the watched system channel", () =
             return originalPrepare(sql);
         }) as typeof db.prepare;
         try {
-            const { handler } = buildHandler({ systemRegionEnabled: true });
+            const { handler } = buildHandler({ systemRegionLane: true });
             const served = await pass(handler, sessionId, "Host prompt");
             expect(served).toContain("<project-docs>DOC-Z</project-docs>");
             // Zero store reads on the serve path beyond what the pass already
