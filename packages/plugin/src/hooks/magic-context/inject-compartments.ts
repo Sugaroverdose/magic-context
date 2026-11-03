@@ -71,6 +71,7 @@ import {
     decodeCachedM0UpgradeIdentity,
     encodeCachedM0UpgradeIdentity,
     MEMORY_RENDER_FORMAT_EPOCH,
+    PROFILE_RENDER_EPOCH,
     renderBudgetIdentityChanged,
     renderedBudgetShrinkReason,
     renderedBudgetSnapshot,
@@ -83,7 +84,7 @@ import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
 import { formatDate } from "./temporal-awareness";
-import { renderUserProfileContent } from "./user-profile-render";
+import { renderUserProfileContent, USER_PROFILE_DESCRIPTION } from "./user-profile-render";
 
 export interface PreparedCompartmentInjection {
     block: string;
@@ -874,6 +875,9 @@ export interface M0SnapshotMarkers {
     compartmentRenderEpoch: string | null;
     /** Records the renderer used by cached bytes; written on a natural HARD but never triggers one. */
     memoryRenderEpoch: string | null;
+    /** Render template of the `<user-profile>` block: compared loud — a template
+     *  change must fold cached m[0] / rotate stored regions exactly once. */
+    profileRenderEpoch: string;
     // HARD-bust markers are captured from runtime signals at the injectM0M1
     // call site (NOT a pure DB read), so readCurrentM0SnapshotMarkers takes
     // them as inputs. The tool-set hash is retained for attribution only: its
@@ -1617,6 +1621,7 @@ function readCurrentM0SnapshotMarkersUncached(args: M0SnapshotMarkerReadArgs): {
             upgradeState: getUpgradeState(args.db, args.sessionId),
             compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
             memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
+            profileRenderEpoch: PROFILE_RENDER_EPOCH,
             systemHash: hard.systemHash,
             toolSetHash: hard.toolSetHash ?? "",
             modelKey: piModelRefToCanonical(hard.modelKey),
@@ -1734,6 +1739,7 @@ export function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers
         upgradeState: cachedUpgradeIdentity.upgradeState,
         compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
         memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
+        profileRenderEpoch: cachedUpgradeIdentity.profileRenderEpoch ?? "",
         systemHash: state.cachedM0SystemHash ?? "",
         toolSetHash: state.cachedM0ToolSetHash ?? "",
         modelKey: state.cachedM0ModelKey ?? "",
@@ -1827,6 +1833,13 @@ export function mustMaterialize(args: {
     // mix with a stale baseline. Persisting the new component consumes this trigger.
     if (cachedUpgradeIdentity.compartmentRenderEpoch !== current.compartmentRenderEpoch) {
         return { value: true, reason: "compartment_render_epoch" };
+    }
+    // The user-profile template (self-description, row shape) changes bytes on the
+    // wire without touching any store row: like the compartment epoch it adopts
+    // LOUD — legacy rows (component absent → null) fold once with the fleet, the
+    // one-time bust pre-authorized as a content event.
+    if (cachedUpgradeIdentity.profileRenderEpoch !== current.profileRenderEpoch) {
+        return { value: true, reason: "profile_render_epoch" };
     }
     // The memory-render epoch is intentionally NOT compared here. Selection changes
     // affect m[0] bytes only when the next natural HARD rebuilds the frozen prefix.
@@ -2312,7 +2325,10 @@ export function renderMemoryBlockV2(
 
 function renderUserProfileBlock(memories: UserMemory[], wrapper = "user-profile"): string {
     if (memories.length === 0) return "";
-    const lines = [`<${wrapper}>`];
+    // The delta variant carries the same full description: one template, no
+    // second set of bytes to freeze, and the authority framing matters most
+    // exactly where fresh store rows just reached the wire.
+    const lines = [`<${wrapper}>`, USER_PROFILE_DESCRIPTION];
     for (const memory of memories) {
         lines.push(`- ${escapeXmlContent(renderUserProfileContent(memory.content))}`);
     }
@@ -2428,6 +2444,7 @@ function applyMarkersToState(
         markers.renderBudgetIdentity,
         markers.memoryRenderEpoch,
         markers.renderedBudgets ?? null,
+        markers.profileRenderEpoch,
     );
     // Runtime markers must be mirrored into flat state because the next
     // mustMaterialize pass reads cachedM0SystemHash/ToolSetHash/ModelKey directly
@@ -2492,6 +2509,7 @@ export function regionMarkersFromSnapshot(markers: M0SnapshotMarkers): RegionMar
         memoryRenderEpoch: markers.memoryRenderEpoch,
         renderedBudgets: markers.renderedBudgets ?? null,
         profileVersion: markers.projectUserProfileVersion,
+        profileRenderEpoch: markers.profileRenderEpoch,
     };
 }
 
@@ -2706,6 +2724,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             upgradeState: getUpgradeState(options.db, options.sessionId),
             compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
             memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
+            profileRenderEpoch: PROFILE_RENDER_EPOCH,
             // HARD-bust markers are flight-constant (system/tool/model identity of
             // THIS request) — they cannot change mid-materialization-transaction,
             // so carry the captured values and exclude them from the stale check.
@@ -2781,6 +2800,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
                     snapshotMarkers.renderBudgetIdentity,
                     snapshotMarkers.memoryRenderEpoch,
                     snapshotMarkers.renderedBudgets ?? null,
+                    snapshotMarkers.profileRenderEpoch,
                 ),
                 systemHash: snapshotMarkers.systemHash,
                 toolSetHash: snapshotMarkers.toolSetHash,
@@ -3243,6 +3263,7 @@ function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
         upgradeState: cachedUpgradeIdentity.upgradeState,
         compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
         memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
+        profileRenderEpoch: cachedUpgradeIdentity.profileRenderEpoch ?? "",
         systemHash: row.cached_m0_system_hash ?? "",
         toolSetHash: row.cached_m0_tool_set_hash ?? "",
         modelKey: row.cached_m0_model_key ?? "",

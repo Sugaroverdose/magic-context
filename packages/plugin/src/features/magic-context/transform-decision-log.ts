@@ -114,6 +114,7 @@ const canonicalReasons = new Set<string>([
     "cached_m1_missing",
     "project_change",
     "compartment_render_epoch",
+    "profile_render_epoch",
     "m1_delta",
     "ttl_expiry",
     "epoch_change",

@@ -26,9 +26,11 @@ import {
 	COMPARTMENT_RENDER_EPOCH,
 	encodeCachedM0UpgradeIdentity,
 	MEMORY_RENDER_FORMAT_EPOCH,
+	PROFILE_RENDER_EPOCH,
 } from "@magic-context/core/hooks/magic-context/compartment-render-epoch";
 import { renderMemoryBlockV2 } from "@magic-context/core/hooks/magic-context/inject-compartments";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
+import { USER_PROFILE_DESCRIPTION } from "@magic-context/core/hooks/magic-context/user-profile-render";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
 import {
@@ -508,10 +510,67 @@ describe("user-profile rendering fixture", () => {
 			);
 			const expectedBlock = [
 				"<user-profile>",
+				USER_PROFILE_DESCRIPTION,
 				...fixture.cases.map(({ expected }) => `- ${expected}`),
 				"</user-profile>",
 			].join("\n");
 			expect(rendered).toContain(expectedBlock);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("describes the block and renders no orphan header for an empty profile", () => {
+		const db = createTestDb();
+		const cwd = createTestTempDirFromPath(
+			join(tmpdir(), "pi-user-profile-laws-"),
+		);
+		try {
+			// Empty store: no <user-profile> block at all (no orphan header).
+			const empty = renderM0Pi(
+				{
+					...piState("ses-pi-user-profile-laws-empty", cwd),
+					userProfileBudgetTokens: 10_000,
+				},
+				db,
+				"",
+				1,
+				[],
+				[],
+				[],
+			);
+			expect(empty).not.toContain("<user-profile>");
+
+			// Non-empty store: the description is the first line inside the block.
+			const desc = USER_PROFILE_DESCRIPTION;
+			const rendered = renderM0Pi(
+				{
+					...piState("ses-pi-user-profile-laws-desc", cwd),
+					userProfileBudgetTokens: 10_000,
+				},
+				db,
+				"",
+				1,
+				[],
+				[],
+				[
+					{
+						id: 1,
+						content: "User prefers terse replies.",
+						status: "active",
+						promotedAt: 0,
+						sourceCandidateIds: [],
+						sourceProvenance: null,
+						createdAt: 0,
+						updatedAt: 0,
+					},
+				],
+			);
+			const blockIndex = rendered.indexOf("<user-profile>");
+			expect(blockIndex).toBeGreaterThanOrEqual(0);
+			const lines = rendered.slice(blockIndex).split("\n");
+			expect(lines[1]).toBe(desc);
+			expect(lines[2]).toBe("- Prefers terse replies.");
 		} finally {
 			closeQuietly(db);
 		}
@@ -535,7 +594,7 @@ describe("user-profile rendering fixture", () => {
 			setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
 			const baseline = materializeM0Pi(state, db);
 			expect(baseline.m0).toContain(
-				"<user-profile>\n- Strongly pushes back on untested changes.\n</user-profile>",
+				`<user-profile>\n${USER_PROFILE_DESCRIPTION}\n- Strongly pushes back on untested changes.\n</user-profile>`,
 			);
 
 			insertUserMemory(db, "User expects changes to be tested.", []);
@@ -550,9 +609,50 @@ describe("user-profile rendering fixture", () => {
 				baseline.snapshotMarkers,
 				baseline.renderedMemoryIds,
 			);
-			expect(delta).toContain("<new-user-profile>");
-			expect(delta).toContain("- Strongly pushes back on untested changes.");
+			expect(delta).toContain(
+				`<new-user-profile>\n${USER_PROFILE_DESCRIPTION}\n- Strongly pushes back on untested changes.`,
+			);
 			expect(delta).toContain("- Expects changes to be tested.");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("profile_render_epoch folds once per template change, then replays (adoption law)", () => {
+		const db = createTestDb();
+		const cwd = createTestTempDirFromPath(
+			join(tmpdir(), "pi-user-profile-template-fold-"),
+		);
+		try {
+			const state = {
+				...piState("ses-pi-user-profile-template-fold", cwd),
+				userProfileBudgetTokens: 10_000,
+			};
+			insertUserMemory(
+				db,
+				"User strongly pushes back on untested changes.",
+				[],
+			);
+			setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
+			materializeM0Pi(state, db);
+			const stable = mustMaterializePi(state, db);
+			expect(stable).toMatchObject({ value: false, reason: null });
+
+			// A row written before the template component existed: the head lane
+			// must fold ONCE, adopt the epoch, and stop folding.
+			db.exec(
+				`UPDATE session_meta SET cached_m0_upgrade_state = replace(cached_m0_upgrade_state, '|profile-render:${PROFILE_RENDER_EPOCH}', '') WHERE session_id = '${state.sessionId}'`,
+			);
+			const adopted = mustMaterializePi(state, db);
+			expect(adopted).toMatchObject({
+				value: true,
+				reason: "profile_render_epoch",
+			});
+			materializeM0Pi(state, db);
+			expect(mustMaterializePi(state, db)).toMatchObject({
+				value: false,
+				reason: null,
+			});
 		} finally {
 			closeQuietly(db);
 		}
@@ -3140,10 +3240,13 @@ it("Pi review: legacy replay survives restart and only a natural HARD records po
 			undefined,
 			false,
 		);
-		const legacyIdentity = getOrCreateSessionMeta(
-			db,
-			legacy.sessionId,
-		).cachedM0UpgradeState?.split("|rendered-budgets:")[0];
+		// The crafted legacy row is "written before rendered-budgets joined the
+		// identity" relative to the current epoch world: it keeps the trailing
+		// profile-render epoch (rows in the wild after the template-epoch ship
+		// always carry it) but drops the numeric budgets component.
+		const legacyIdentity =
+			`${getOrCreateSessionMeta(db, legacy.sessionId).cachedM0UpgradeState?.split("|rendered-budgets:")[0] ?? ""}` +
+			`|profile-render:${PROFILE_RENDER_EPOCH}`;
 		db.prepare(
 			"UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?",
 		).run(legacyIdentity, legacy.sessionId);

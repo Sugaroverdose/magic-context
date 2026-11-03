@@ -39,6 +39,7 @@ import {
     COMPARTMENT_RENDER_EPOCH,
     encodeCachedM0UpgradeIdentity,
     MEMORY_RENDER_FORMAT_EPOCH,
+    PROFILE_RENDER_EPOCH,
 } from "./compartment-render-epoch";
 import {
     capturePrefixTrimSourceOrder,
@@ -62,6 +63,7 @@ import { withRawMessageProvider } from "./read-session-chunk";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
+import { USER_PROFILE_DESCRIPTION } from "./user-profile-render";
 
 const SESSION_ID = "ses_test_inject";
 const PROJECT_PATH = "/tmp/test-inject-project";
@@ -711,7 +713,7 @@ describe("user-profile baseline and delta rendering", () => {
 
         const baseline = materializeM0(options);
         expect(baseline.m0Text).toContain(
-            "<user-profile>\n- Strongly pushes back on untested changes.\n</user-profile>",
+            `<user-profile>\n${USER_PROFILE_DESCRIPTION}\n- Strongly pushes back on untested changes.\n</user-profile>`,
         );
 
         insertUserMemory(db, "User expects changes to be tested.", []);
@@ -731,8 +733,63 @@ describe("user-profile baseline and delta rendering", () => {
             baseline.renderedMemoryIds,
         );
         expect(delta).toContain("<new-user-profile>");
-        expect(delta).toContain("- Strongly pushes back on untested changes.");
+        expect(delta).toContain(
+            `<new-user-profile>\n${USER_PROFILE_DESCRIPTION}\n- Strongly pushes back on untested changes.`,
+        );
         expect(delta).toContain("- Expects changes to be tested.");
+    });
+
+    it("profile_render_epoch folds once per template change, then replays (adoption law)", () => {
+        db = makeDb();
+        createUserMemoryTable();
+        const projectDirectory = makeProjectDir();
+        insertUserMemory(db, "User strongly pushes back on untested changes.", []);
+        setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
+        const options = {
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            injectDocs: false,
+            userProfileBudgetTokens: 10_000,
+        };
+        materializeM0(options);
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state: readStateFromMeta(),
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }),
+        ).toEqual({ value: false, reason: null });
+
+        // A session whose stored identity predates the template change (a row
+        // written before the component existed): the head lane must fold ONCE,
+        // adopt the epoch, and stop folding.
+        db.prepare(
+            "UPDATE session_meta SET cached_m0_upgrade_state = replace(cached_m0_upgrade_state, ?, '')",
+        ).run(`|profile-render:${PROFILE_RENDER_EPOCH}`);
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state: readStateFromMeta(),
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }),
+        ).toMatchObject({ value: true, reason: "profile_render_epoch" });
+        materializeM0(options);
+        expect(
+            mustMaterialize({
+                db,
+                sessionId: SESSION_ID,
+                state: readStateFromMeta(),
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+            }),
+        ).toEqual({ value: false, reason: null });
     });
 });
 
@@ -1238,8 +1295,13 @@ describe("m[0]/m[1] materialization", () => {
             historyBudgetTokens: 12000,
         };
         const first = injectM0M1({ ...options, state: readStateFromMeta() });
+        // The crafted legacy row is "written before rendered-budgets joined the
+        // identity" relative to the CURRENT epoch world: it keeps the trailing
+        // profile-render epoch (rows in the wild after the template-epoch ship
+        // always carry it) but drops the numeric budgets component.
         const legacy =
-            readStateFromMeta().cachedM0UpgradeState?.split("|rendered-budgets:")[0] ?? null;
+            `${readStateFromMeta().cachedM0UpgradeState?.split("|rendered-budgets:")[0] ?? ""}` +
+            `|profile-render:${PROFILE_RENDER_EPOCH}`;
         db.prepare("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?").run(
             legacy,
             SESSION_ID,

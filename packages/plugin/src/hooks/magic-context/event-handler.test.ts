@@ -397,6 +397,9 @@ describe("createEventHandler", () => {
         expect(normalizeMaterializeReason("pi", "renderer_upgrade", true)).toBe("upgrade_state");
         expect(normalizeMaterializeReason("pi", "cache_invalid", true)).toBe("cached_m1_missing");
         expect(normalizeMaterializeReason("pi", "drift", true)).toBe("pressure_refold");
+        expect(normalizeMaterializeReason("opencode", "profile_render_epoch", true)).toBe(
+            "profile_render_epoch",
+        );
         expect(normalizeMaterializeReason("opencode", "comparting", true)).toBeNull();
     });
 

@@ -70,6 +70,7 @@ import {
 	decodeCachedM0UpgradeIdentity,
 	encodeCachedM0UpgradeIdentity,
 	MEMORY_RENDER_FORMAT_EPOCH,
+	PROFILE_RENDER_EPOCH,
 	renderBudgetIdentityChanged,
 	renderedBudgetShrinkReason,
 	renderedBudgetSnapshot,
@@ -94,7 +95,10 @@ import {
 } from "@magic-context/core/hooks/magic-context/inject-compartments";
 
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
-import { renderUserProfileContent } from "@magic-context/core/hooks/magic-context/user-profile-render";
+import {
+	renderUserProfileContent,
+	USER_PROFILE_DESCRIPTION,
+} from "@magic-context/core/hooks/magic-context/user-profile-render";
 import { piModelRefToCanonical } from "@magic-context/core/shared/harness-provider-map";
 import { sessionLog as logSession } from "@magic-context/core/shared/logger";
 import { logSlowWriteTransaction } from "@magic-context/core/shared/write-transaction-timing";
@@ -556,6 +560,9 @@ export interface PiM0SnapshotMarkers {
 	compartmentRenderEpoch: string | null;
 	/** Records the renderer used by cached bytes; written on a natural HARD but never triggers one. */
 	memoryRenderEpoch: string | null;
+	/** `<user-profile>` render template edition: emptied ("" on legacy rows) — a
+	 *  template change folds cached m[0] exactly once, mirroring OpenCode. */
+	profileRenderEpoch: string;
 	lastBaselineEndMessageId: string | null;
 	// HARD-bust markers (parity with OpenCode M0SnapshotMarkers) are captured
 	// from PiM0HardSignals. Pi has no tool-set hash because it has no equivalent
@@ -959,6 +966,7 @@ function getCachedMarkers(
 		upgradeState: cachedUpgradeIdentity.upgradeState ?? "",
 		compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
 		memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
+		profileRenderEpoch: cachedUpgradeIdentity.profileRenderEpoch ?? "",
 		// The boundary that was persisted WITH these cached m[0] bytes (may be
 		// null for a legitimately-boundaryless baseline — see the guard above).
 		lastBaselineEndMessageId: cachedBoundary,
@@ -1055,6 +1063,7 @@ function readCurrentMarkersFromCompartments(
 		}`,
 		compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
 		memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
+		profileRenderEpoch: PROFILE_RENDER_EPOCH,
 		lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 		systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
 		modelKey: piModelRefToCanonical(
@@ -1122,6 +1131,16 @@ export function mustMaterializePi(
 			"compartmentRenderEpoch",
 			cached.compartmentRenderEpoch,
 			current.compartmentRenderEpoch,
+		);
+	}
+	// Template bytes adopt loud (parity with OpenCode): a legacy row's "" vs the
+	// current epoch folds once, then the persisted component consumes the arm.
+	if (cached.profileRenderEpoch !== current.profileRenderEpoch) {
+		return piMaterializeMismatch(
+			"profile_render_epoch",
+			"profileRenderEpoch",
+			cached.profileRenderEpoch,
+			current.profileRenderEpoch,
 		);
 	}
 	if (cached.muralEnabled !== current.muralEnabled) {
@@ -1293,7 +1312,9 @@ function renderUserProfileBlock(
 ): string {
 	const memories = memoriesOverride ?? safeGetActiveUserMemoriesPi(db);
 	if (memories.length === 0) return "";
-	return `<${wrapper}>\n${memories
+	// The delta variant carries the same full description: one template, no
+	// second set of bytes to freeze (bytes must match OpenCode renderUserProfileBlock).
+	return `<${wrapper}>\n${USER_PROFILE_DESCRIPTION}\n${memories
 		.map(
 			(memory) =>
 				`- ${escapeXmlContent(renderUserProfileContent(memory.content))}`,
@@ -1568,6 +1589,7 @@ function readFrozenM0InputsPi(
 			}`,
 			compartmentRenderEpoch: COMPARTMENT_RENDER_EPOCH,
 			memoryRenderEpoch: MEMORY_RENDER_FORMAT_EPOCH,
+			profileRenderEpoch: PROFILE_RENDER_EPOCH,
 			lastBaselineEndMessageId: lastBaselineEndMessageId(compartments),
 			systemHash: (state.hardSignals ?? EMPTY_PI_HARD_SIGNALS).systemHash,
 			modelKey: piModelRefToCanonical(
@@ -1832,6 +1854,7 @@ export function materializeM0Pi(
 				snapshotMarkers.renderBudgetIdentity,
 				snapshotMarkers.memoryRenderEpoch,
 				snapshotMarkers.renderedBudgets ?? null,
+				snapshotMarkers.profileRenderEpoch,
 			),
 			systemHash: snapshotMarkers.systemHash,
 			modelKey: snapshotMarkers.modelKey,
@@ -2328,6 +2351,7 @@ function markersFromCachedPiRow(
 		upgradeState: cachedUpgradeIdentity.upgradeState ?? "",
 		compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
 		memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
+		profileRenderEpoch: cachedUpgradeIdentity.profileRenderEpoch ?? "",
 		lastBaselineEndMessageId:
 			typeof row.cached_m0_last_baseline_end_message_id === "string" &&
 			row.cached_m0_last_baseline_end_message_id.length > 0
@@ -2369,6 +2393,7 @@ function cachedPiRowMatchesSnapshot(args: {
 		rowMarkers.sessionFactsVersion === args.markers.sessionFactsVersion &&
 		(rowMarkers.upgradeState ?? null) === (args.markers.upgradeState ?? null) &&
 		rowMarkers.compartmentRenderEpoch === args.markers.compartmentRenderEpoch &&
+		rowMarkers.profileRenderEpoch === args.markers.profileRenderEpoch &&
 		// HARD-bust markers (parity with OpenCode cachedRowMatchesState): a sibling
 		// that re-materialized under a new system/tool/model identity must invalidate
 		// this process's cached row so the soft-refresh CAS adopts the sibling's m[0].

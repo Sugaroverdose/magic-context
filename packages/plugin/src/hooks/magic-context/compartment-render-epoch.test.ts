@@ -25,6 +25,31 @@ describe("legacy upgrade-identity crossing (R3 F7)", () => {
         expect(decoded.memoryRenderEpoch).toBe("mre3");
         expect(decoded.muralEnabled).toBe(true);
         expect(decoded.renderBudgetIdentity).toBe("m15000-h96000");
+        expect(decoded.profileRenderEpoch).toBe("upe1");
+    });
+});
+
+describe("profile render epoch component (template rollout law)", () => {
+    test("a full identity round-trips the profile epoch", () => {
+        const encoded = encodeCachedM0UpgradeIdentity("ready");
+        const decoded = decodeCachedM0UpgradeIdentity(encoded);
+        expect(decoded.profileRenderEpoch).toBe("upe1");
+    });
+
+    test("a legacy row written before the component decodes the profile epoch as null", () => {
+        // Encode with a null profile epoch: exactly the identity older binaries
+        // wrote, with no |profile-render: component anywhere.
+        const legacy = encodeCachedM0UpgradeIdentity(
+            "ready",
+            "cre2",
+            null,
+            null,
+            "mre3",
+            null,
+            null,
+        );
+        expect(decodeCachedM0UpgradeIdentity(legacy).profileRenderEpoch).toBeNull();
+        expect(decodeCachedM0UpgradeIdentity("|memory-render:mre3").profileRenderEpoch).toBeNull();
     });
 });
 

@@ -245,6 +245,10 @@ export interface RegionMarkers {
     renderBudgetIdentity: string | null;
     memoryRenderEpoch: string | null;
     renderedBudgets: string | null;
+    /** Render template of the `<user-profile>` block: a content trigger because
+     *  the template bytes themselves change (a shipped template change adopts
+     *  once per session at a bust-gated boundary). */
+    profileRenderEpoch: string;
     profileVersion: number;
 }
 
@@ -258,6 +262,7 @@ const CONTENT_TRIGGER_FIELDS: ReadonlyArray<readonly [keyof RegionMarkers, strin
     ["renderBudgetIdentity", "render_budget_identity"],
     ["memoryRenderEpoch", "memory_render_epoch"],
     ["renderedBudgets", "rendered_budgets"],
+    ["profileRenderEpoch", "profile_render_epoch"],
 ];
 
 /**
