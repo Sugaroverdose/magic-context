@@ -118,6 +118,40 @@ const ALLOWED_DYNAMIC_SET: ReadonlyMap<string, string> = new Map([
     ],
 ]);
 
+// G3: `UPDATE session_meta SET` as a bare fragment is the closed set of
+// every file allowed to write session_meta rows at all. A new file with the
+// fragment is an offender until named here with a reason — this is what makes
+// const-split / join-split assembly (`const sql = "UPDATE session_meta SET ";
+// db.prepare(sql + cols)`) unable to hide: the fragment itself is census
+// scope, not just its adjacency to an assembly operator. Files already
+// sanctioned as writers or dynamic-SET exemptions are merged in below.
+const STATIC_SET_WRITERS: ReadonlyMap<string, string> = new Map([
+    ["cli/commands/migrate-session.ts", "project re-home: static cached_m1_bytes clear; region goes through the funnel"],
+    ["features/magic-context/compartment-storage.ts", "compartment marker/watermark meta columns (static)"],
+    ["features/magic-context/migration-v94-write-split.ts", "migration backfill of split columns (static)"],
+    ["features/magic-context/migrations.ts", "schema backfill statements (dynamic list pinned by sub-law)"],
+    ["features/magic-context/pi-content-decisions.ts", "Pi decision columns (static)"],
+    ["features/magic-context/session-decision-calibration.ts", "calibration columns (static)"],
+    ["features/magic-context/storage-db.ts", "fence/init meta column (static)"],
+    ["features/magic-context/storage-identity-merge.ts", "identity rewrite (dynamic form pinned by sub-law; never targets session_meta)"],
+    ["features/magic-context/storage-meta-persisted.ts", "persisted meta CAS writers (dynamic form pinned by sub-law)"],
+    ["features/magic-context/storage-meta-session.ts", "generic meta dispatcher (dynamic form pinned by sub-law)"],
+    ["features/magic-context/storage-replay-document.ts", "replay-document column (static)"],
+    ["features/magic-context/storage-schema-helpers.ts", "bulk column-safe resets (dynamic form pinned by sub-law)"],
+    ["features/magic-context/store-generation-rebase.ts", "generation rebase markers (dynamic form pinned by sub-law)"],
+    ["hooks/magic-context/compaction-off-transition.ts", "transition resets (static)"],
+    ["hooks/magic-context/inject-compartments.ts", "m[0] marker/CAS columns (static)"],
+    ["hooks/magic-context/note-nudger.ts", "note columns (static)"],
+    ["pi/inject-compartments-pi.ts", "Pi head-cache writers (static; region rows are refused by the lane readers)"],
+    ["scripts/bench-store-generation-rebase.ts", "bench fixture meta seeding (static)"],
+    ["scripts/clone-session.ts", "clone meta copy (dynamic form pinned by sub-law)"],
+]);
+const FRAGMENT_ALLOWED = new Set<string>([
+    ...ALLOWED_WRITERS.keys(),
+    ...ALLOWED_DYNAMIC_SET.keys(),
+    ...STATIC_SET_WRITERS.keys(),
+]);
+
 const ALLOWED_RUST: ReadonlyMap<string, string> = new Map([
     [
         "mc-module/src/single_store_repair.rs",
@@ -242,6 +276,22 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
                 /UPDATE\s+session_meta\s+SET\s*["'`]\s*\+/.test(text) ||
                 /UPDATE\s+session_meta\s+SET["'`]?\s*\.join\(/.test(text) ||
                 /["'`]UPDATE session_meta SET ["'`]?\s*\+\s*\w+/.test(text);
+            // G3: the fragment is in census scope regardless of assembly
+            // adjacency (const-split defeats proximity checks), and any
+            // identifier-led statement assembly inside a session_meta file
+            // offends — a `prepare(<ident> + …)` / `.join(` call has zero
+            // legitimate production uses today, so new ones must be named
+            // and justified at review, not slipped past the adjacency
+            // regexes.
+            if (/UPDATE session_meta SET/.test(text) && !FRAGMENT_ALLOWED.has(rel)) {
+                offenders.push(`${rel} (unnamed session_meta SET writer)`);
+            }
+            if (
+                /session_meta/i.test(text) &&
+                /(?:prepare|exec)\(\s*\w+\s*(?:\+|\.join\()/.test(text)
+            ) {
+                offenders.push(`${rel} (identifier-led statement assembly)`);
+            }
             if (dynamicSet) {
                 if (!ALLOWED_DYNAMIC_SET.has(rel)) offenders.push(`${rel} (dynamic SET, unnamed)`);
                 else {
