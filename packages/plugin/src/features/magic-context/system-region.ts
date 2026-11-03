@@ -126,20 +126,20 @@ export function clearSystemRegion(db: Database, sessionId: string, reason: strin
 }
 
 /**
- * Bulk clear for maintenance passes (identity merge, migrations, clone).
- * One receipt with the count: the event is the bulk operation, not N rows.
+ * Bulk clear for maintenance passes (identity merge, migrations).
+ * A single statement (atomic on its own — never a SELECT-then-loop, which
+ * can erase rows published between the read and the writes and undercount
+ * the receipt); one receipt with the true affected count.
  */
 export function clearAllSystemRegions(db: Database, reason: string): number {
-    const rows = db
-        .prepare("SELECT session_id FROM session_meta WHERE cached_m0_bytes IS NOT NULL")
-        .all() as Array<{ session_id: string }>;
-    if (rows.length === 0) return 0;
-    const clear = db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?");
-    let cleared = 0;
-    for (const row of rows) {
-        const result = clear.run(row.session_id);
-        if ((result.changes ?? 0) > 0) cleared++;
-    }
+    // Column-safe: pre-region schemas have nothing to clear and no column to
+    // name (migration fixtures legitimately start below its introduction).
+    const cols = db.prepare("PRAGMA table_info(session_meta)").all() as Array<{ name?: string }>;
+    if (!cols.some((c) => c.name === "cached_m0_bytes")) return 0;
+    const result = db
+        .prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE cached_m0_bytes IS NOT NULL")
+        .run();
+    const cleared = result.changes ?? 0;
     if (cleared > 0) sessionLog("", `system-region cleared reason=${reason} count=${cleared}`);
     return cleared;
 }
@@ -151,18 +151,12 @@ export function clearSystemRegionsByProjectIdentity(
 ): number {
     if (identities.length === 0) return 0;
     const placeholders = identities.map(() => "?").join(", ");
-    const rows = db
+    const result = db
         .prepare(
-            `SELECT session_id FROM session_meta WHERE cached_m0_bytes IS NOT NULL AND cached_m0_project_identity IN (${placeholders})`,
+            `UPDATE session_meta SET cached_m0_bytes = NULL WHERE cached_m0_bytes IS NOT NULL AND cached_m0_project_identity IN (${placeholders})`,
         )
-        .all(...identities) as Array<{ session_id: string }>;
-    if (rows.length === 0) return 0;
-    const clear = db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?");
-    let cleared = 0;
-    for (const row of rows) {
-        const result = clear.run(row.session_id);
-        if ((result.changes ?? 0) > 0) cleared++;
-    }
+        .run(...identities);
+    const cleared = result.changes ?? 0;
     if (cleared > 0) {
         sessionLog(
             "",
