@@ -6,7 +6,7 @@ import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { LkgPersistenceBackend, LkgSlot } from "./lkg-slot";
-import { getInMemorySlot } from "./lkg-slot";
+import { getInMemorySlot, lkgSlotStructuralRejection } from "./lkg-slot";
 
 /**
  * Durable persistence for last-known-good (LKG) transform snapshots.
@@ -214,6 +214,15 @@ function slotFingerprint(slot: LkgSlot): string {
  * hash a load verifies) commit in one transaction.
  */
 export function saveLkgSlotToDb(db: Database, sessionId: string, slot: LkgSlot): boolean {
+    // Validate before the transaction deletes anything: a slot this function
+    // could never load back must not rewrite the row it protects. The writer
+    // used to trust its caller, and one malformed save emptied a session's
+    // slices without a single refusal line.
+    const refusal = lkgSlotStructuralRejection(slot);
+    if (refusal !== null) {
+        sessionLog(sessionId, `lkg_persist_declined reason=${refusal}`);
+        return false;
+    }
     const fingerprint = slotFingerprint(slot);
     if (persistedFingerprints.get(db)?.get(sessionId) === fingerprint) return true;
     const layout = layoutLkgPrefix(slot.jsonPrefix);
@@ -364,6 +373,7 @@ export function loadPersistedLkgSlot(db: Database, sessionId: string): LkgSlot |
         // length and hash, can never become replayable; remove the slot so later
         // captures start clean instead of tripping the same failure.
         if (!prefix) sessionLog(sessionId, "LKG snapshot slices failed verification; slot cleared");
+        else sessionLog(sessionId, "LKG snapshot parse failed; slot cleared");
         clearPersistedLkgSlot(db, sessionId);
         return undefined;
     }
