@@ -35,6 +35,7 @@ import {
 	createPiM0M1PassSnapshot,
 	injectM0M1Pi,
 	materializeM0Pi,
+	prepareCachedM0M1PiReplay,
 	materializeM0PiWithRetry,
 	mustMaterializePi,
 	renderM0Pi,
@@ -3293,6 +3294,21 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 			state.sessionId,
 		);
 		expect(mustMaterializePi(state, db)).toEqual({ value: true, reason: "cache_invalid" });
+	});
+
+	it("F6: the marker reader refuses a sentinel row on the replay path too", () => {
+		// markersFromCachedPiRow previously accepted the row on truthiness
+		// plus marker columns — a region row could satisfy CAS/marker reads
+		// even though decodeCachedM0 refuses its bytes. The replay entry
+		// point must produce no prefix for a foreign row.
+		const db = createTestDb();
+		const state = piState("ses-pi-sentinel-replay", process.cwd());
+		materializeM0Pi(state, db);
+		db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(
+			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
+			state.sessionId,
+		);
+		expect(prepareCachedM0M1PiReplay(state, db)).toBeUndefined();
 	});
 
 	it("control: the same cache with its own head bytes is not invalid", () => {
