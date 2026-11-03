@@ -256,6 +256,64 @@ describe("system-region receipts: store-derived operands cannot wedge the fold l
         expect(healed.cachedM0UpgradeState ?? "").not.toMatch(/render-budgets:\S*\s/);
     });
 
+    // J1: the parser gate bounds charset and finiteness, NOT length — a
+    // 200-digit finite value parses and minted a >120-char detail before the
+    // parsed-number fix. Same wedge shape as H1's budget arm.
+    it("a corrupt oversize rendered-budgets operand cannot wedge the fold lane", () => {
+        const db = makeDb();
+        seedPanels(db);
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            projectPath: PROJECT_PATH,
+            projectDirectory: "",
+            systemRegion: { enabled: true, reason: "first_render" },
+        });
+        const stored = (
+            db
+                .prepare(
+                    "SELECT cached_m0_upgrade_state AS v FROM session_meta WHERE session_id = ?",
+                )
+                .get(SESSION_ID) as { v: string | null }
+        ).v!;
+        expect(stored).toContain("|rendered-budgets:");
+        db.prepare("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?").run(
+            stored.replace(/(\|rendered-budgets:)[^|]*/, `$1m${"9".repeat(200)}-h1.5`),
+            SESSION_ID,
+        );
+        const state = getOrCreateSessionMeta(db, SESSION_ID);
+        const { mustMaterialize } = require("./inject-compartments") as {
+            mustMaterialize: (a: never) => { value: boolean; reason: string | null };
+        };
+        const decision = mustMaterialize({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory: "",
+            systemRegionMode: true,
+        } as never);
+        expect(decision.value).toBe(true);
+        expect(decision.reason).toStartWith("render_config:budget_shrink(");
+        expect(decision.reason).not.toMatch(/\s/);
+        expect(decision.reason.length).toBeLessThanOrEqual(48 + 1 + 120);
+        expect(() =>
+            materializeM0({
+                db,
+                sessionId: SESSION_ID,
+                state: getOrCreateSessionMeta(db, SESSION_ID),
+                projectPath: PROJECT_PATH,
+                projectDirectory: "",
+                systemRegion: { enabled: true, reason: decision.reason! },
+            }),
+        ).not.toThrow();
+        expect(readSystemRegion(db, SESSION_ID)).not.toBeNull();
+        // Self-heal: the rewrite stores a canonical parsed-number operand.
+        const healed = getOrCreateSessionMeta(db, SESSION_ID);
+        expect(healed.cachedM0UpgradeState ?? "").not.toContain("9".repeat(200));
+    });
+
     it("the shrink arm is parser-gated: a whitespace-bearing stored operand can never mint", async () => {
         const { renderedBudgetShrinkReason } = await import("./compartment-render-epoch");
         // Baseline: clean operands fire and mint a whitespace-free token.

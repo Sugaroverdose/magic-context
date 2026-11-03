@@ -132,7 +132,12 @@ export function renderedBudgetShrinkReason(
     // trigger once their total exceeds the tolerance; growth never triggers.
     const shrunk = (oldTokens: number, newTokens: number) =>
         oldTokens - newTokens > Math.max(64, oldTokens * 0.01);
+    // J1: mint from the PARSED numbers, never the raw stored strings — the
+    // parser gate bounds charset and finiteness but not length, and a raw
+    // 200-digit operand minted an over-budget detail that threw at the
+    // rotation funnel every pass (fold-lane wedge). Number formatting keeps
+    // the token grammar-bounded by construction.
     return shrunk(before.memory, after.memory) || shrunk(before.history, after.history)
-        ? `render_config:budget_shrink(${cached}→${current})`
+        ? `render_config:budget_shrink(m${before.memory}-h${before.history}→m${after.memory}-h${after.history})`
         : null;
 }

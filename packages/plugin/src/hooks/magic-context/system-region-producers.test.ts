@@ -171,6 +171,42 @@ describe("system-region L0: per-actor producer census", () => {
         expect(definers.map(rel)).toEqual(["hooks/magic-context/transform-postprocess-phase.ts"]);
     });
 
+    it("no region rotation reason mints from a raw store-read string (J1)", () => {
+        // Property: every \${...} interpolation inside a reason template on
+        // the rotation mint surface is either sanitizeReceiptOperand(...) or
+        // a PARSED canonical value from this allowlist (numbers parsed by
+        // the epoch parser, booleans parsed by decode) — grammar-bounded by
+        // construction. A raw stored string interpolated here can re-mint
+        // every pass and throw inside the materialization transaction: the
+        // fold that would rewrite it is the thing that throws (H1/J1 wedge).
+        const PARSED_CANONICAL = new Map<string, string>([
+            ["cachedUpgradeIdentity.muralEnabled", "boolean|null parsed from the stored component"],
+            ["current.muralEnabled", "live boolean, never store text"],
+            ["before.memory", "Number() parsed by readRenderedBudgets"],
+            ["before.history", "Number() parsed by readRenderedBudgets"],
+            ["after.memory", "Number() parsed by readRenderedBudgets"],
+            ["after.history", "Number() parsed by readRenderedBudgets"],
+        ]);
+        const MINT_FILES = [
+            "hooks/magic-context/inject-compartments.ts",
+            "hooks/magic-context/compartment-render-epoch.ts",
+        ];
+        const offenders: string[] = [];
+        for (const rel of MINT_FILES) {
+            const text = readFileSync(join(SRC_ROOT, rel), "utf8");
+            for (const m of text.matchAll(/reason:\s*`([^`]*)`/g)) {
+                for (const interp of m[1].matchAll(/\$\{([^}]*)\}/g)) {
+                    const expr = interp[1].trim();
+                    if (expr.startsWith("sanitizeReceiptOperand(")) continue;
+                    if (!PARSED_CANONICAL.has(expr)) {
+                        offenders.push(`${rel}: reason interpolates ${expr}`);
+                    }
+                }
+            }
+        }
+        expect(offenders).toEqual([]);
+    });
+
     it("the §4 rotation-reason list and the code's reason literals are the same set", () => {
         // F4: the doc list is the single source of truth, parsed at test
         // time. Drift is red in BOTH directions: a doc entry without a code
