@@ -52,7 +52,7 @@ import { getEmbedDrainUiStatus } from "@magic-context/core/hooks/magic-context/e
 import { resolveExecuteThresholdDetail } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/legacy-compartments";
 import { computeM0BlockTokens } from "@magic-context/core/hooks/magic-context/m0-token-breakdown";
-import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
+import { SYSTEM_REGION_SENTINEL } from "@magic-context/core/features/magic-context/system-region";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import {
 	formatCacheTtlDisplay,
@@ -744,7 +744,7 @@ export function buildPiStatusDetail(
 					: "";
 		// Frozen system-region rows reuse cached_m0_bytes for system-resident
 		// panel bytes: not head text, so the breakdown reports none of it.
-		return isSystemRegionBytes(text) ? "" : text;
+		return text.startsWith(SYSTEM_REGION_SENTINEL) ? "" : text;
 	};
 	const m0Blocks = computeM0BlockTokens(deps.db, sessionId, {
 		m0Text: decodeCachedBytes(metaRow?.cached_m0_bytes),
