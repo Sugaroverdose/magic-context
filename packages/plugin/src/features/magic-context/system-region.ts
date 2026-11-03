@@ -118,7 +118,10 @@ export function writeSystemRegion(db: Database, sessionId: string, region: strin
  * Reasons are internal literals — a malformed token is a programmer error,
  * so it fails loud at the entry instead of logging an uncensusable string.
  */
-const REASON_TOKEN = /^[a-z][a-z0-9_]{2,47}$/;
+// Stem law + optional non-whitespace detail (render_config:budget(...)-style
+// composite receipts keep their exact operands, L7 precedent). Whitespace in
+// a reason would break the key=value shape of the receipt line.
+const REASON_TOKEN = /^[a-z][a-z0-9_]{2,47}(?::[^\s]{1,120})?$/;
 function requireReasonToken(fn: string, reason: string): void {
     if (!REASON_TOKEN.test(reason)) {
         throw new Error(

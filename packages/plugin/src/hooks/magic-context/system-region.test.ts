@@ -152,10 +152,10 @@ describe("system-region store: R11 reader contract", () => {
         try {
             expect(writeSystemRegion(db, "ses", "content")).toBe(true);
             lines.length = 0;
-            clearSystemRegion(db, "ses", "lane-teardown");
+            clearSystemRegion(db, "ses", "lane_teardown");
             expect(readSystemRegion(db, "ses")).toBeNull();
             expect(
-                lines.some((line) => line.includes("system-region cleared reason=lane-teardown")),
+                lines.some((line) => line.includes("system-region cleared reason=lane_teardown")),
             ).toBe(true);
         } finally {
             db.close?.();
