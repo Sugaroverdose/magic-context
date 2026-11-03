@@ -2260,11 +2260,13 @@ export function createRustModeTransform(
             rowVersion: plan.rowVersion,
             captureSequence: plan.captureSequence,
         };
-        const rejection = lkgSlotRejection(plan.sessionId, slot);
-        const captured = rejection === null && captureSlot(plan.sessionId, slot);
+        // captureSlot itself must see every attempt: the pre-check short-circuit
+        // skipped its refusal receipt, so declined captures left no
+        // lkg_capture_declined line in the session log.
+        const captured = captureSlot(plan.sessionId, slot);
         if (!captured)
             throw new Error(
-                `LKG slot rejected the prepared snapshot: ${rejection ?? "over the LKG heap budget"}`,
+                `LKG slot rejected the prepared snapshot: ${lkgSlotRejection(plan.sessionId, slot) ?? "over the LKG heap budget"}`,
             );
         state.lkgAcceptedCapture = {
             inputs,
