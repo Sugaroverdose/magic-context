@@ -9636,6 +9636,41 @@ describe("system-origin reclaim rides byte-change events, not deferred intent", 
         ).toBe("dropped");
     });
 
+    // G6: the two arms of the force drain (>= 95 || emergencyInputSample === 0)
+    // pinned PERMANENTLY, each arm alone — the F3 controls promoted from
+    // transcript to rows.
+    it("the sample arm alone drains: 88% with an untouched (zero) emergency sample", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-system-reclaim-sample-arm";
+        const { sweepTag } = await seededPass(sessionId, {
+            contextUsage: { percentage: 88, inputTokens: 1_000 },
+        });
+        expect(getPendingOps(db, sessionId)).toEqual([]);
+        expect(
+            getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === sweepTag)!.status,
+        ).toBe("dropped");
+    });
+
+    it("neither arm: 88% with a non-zero emergency sample keeps rows queued (defer pass)", async () => {
+        db = new Database(":memory:");
+        initializeDatabase(db);
+        const sessionId = "ses-system-reclaim-no-arm";
+        const { setEmergencyDropSample } = await import(
+            "../../features/magic-context/storage-meta-persisted"
+        );
+        setEmergencyDropSample(db, sessionId, 1234);
+        const { stampTag, sweepTag } = await seededPass(sessionId, {
+            contextUsage: { percentage: 88, inputTokens: 1_000 },
+        });
+        expect(getPendingOps(db, sessionId).length).toBe(2);
+        for (const tag of [stampTag, sweepTag]) {
+            expect(
+                getTagsBySession(db, sessionId).find((t) => t.tagNumber === tag)!.status,
+            ).not.toBe("dropped");
+        }
+    });
+
     it("drains queued rows on an explicit flush", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
