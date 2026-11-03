@@ -257,3 +257,50 @@ describe("repairMissingHistoryBoundary", () => {
         expect(cachedPair(database).m0).not.toBeNull();
     });
 });
+
+describe("repairMissingHistoryBoundary: frozen-region rows are not head baselines (A2)", () => {
+    const SENTINEL = "<!-- mc:system-region v1 -->";
+
+    function seedRegion(options: { boundary?: string | null } = {}): Database {
+        const database = seed({ baseline: options.boundary ?? "m-5" });
+        database
+            .prepare("UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?")
+            .run(Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"), SESSION);
+        return database;
+    }
+
+    function regionRow(database: Database): { m0: unknown; boundary: string | null } {
+        return database
+            .prepare(
+                "SELECT cached_m0_bytes AS m0, cached_m0_last_baseline_end_message_id AS boundary FROM session_meta WHERE session_id = ?",
+            )
+            .get(SESSION) as { m0: unknown; boundary: string | null };
+    }
+
+    it("a sentinel row with a stale boundary is intact: no baseline-reset erasure", () => {
+        // A foreign region row read by a head lane (v2/Pi/rust, or head-lane
+        // repair in v1) must never present as a head baseline. Its boundary
+        // belongs to a region fold, not this lane's cached pair; clearing it
+        // here would be an un-invited erasure of the region store.
+        const database = seedRegion({ boundary: "m-5" });
+        const result = repairMissingHistoryBoundary({
+            db: database,
+            sessionId: SESSION,
+            isInHostStore: store(["m-2", "m-4", "m-6"]),
+        });
+        expect(result.kind).toBe("intact");
+        const row = regionRow(database);
+        expect(row.m0).not.toBeNull();
+        expect(Buffer.from(row.m0 as Uint8Array).toString("utf8")).toContain(SENTINEL);
+    });
+
+    it("control: the same shape with real head bytes still baseline-resets", () => {
+        const database = seed({ baseline: "m-5" });
+        const result = repairMissingHistoryBoundary({
+            db: database,
+            sessionId: SESSION,
+            isInHostStore: store(["m-2", "m-4", "m-6"]),
+        });
+        expect(result.kind).toBe("baseline-reset");
+    });
+});

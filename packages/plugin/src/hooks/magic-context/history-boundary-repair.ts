@@ -15,6 +15,7 @@ import type { Database } from "../../shared/sqlite";
 import { getActiveCompartmentRun } from "./compartment-runner";
 import { invalidateAutoEmbedSession } from "./embed-session-state";
 import { clearInjectionCache, resetPrefixTrimFallbackState } from "./inject-compartments";
+import { isSystemRegionBytes } from "../../features/magic-context/system-region";
 
 // ── Repair for a history boundary the host store no longer has ──────────
 //
@@ -77,11 +78,19 @@ interface BaselineRow {
 function readBaseline(db: Database, sessionId: string): BaselineRow {
     const row = db
         .prepare(
-            "SELECT cached_m0_bytes IS NOT NULL AS hasM0, cached_m0_last_baseline_end_message_id AS boundary FROM session_meta WHERE session_id = ?",
+            "SELECT cached_m0_bytes AS m0, cached_m0_last_baseline_end_message_id AS boundary FROM session_meta WHERE session_id = ?",
         )
-        .get(sessionId) as { hasM0: number | null; boundary: string | null } | null | undefined;
+        .get(sessionId) as
+        | { m0: Buffer | Uint8Array | null; boundary: string | null }
+        | null
+        | undefined;
+    // A frozen system-region row is not a head baseline: this lane never
+    // serves it and its boundary belongs to a region fold. Presenting it as
+    // head bytes let a stale foreign boundary drive an un-invited
+    // baseline-reset erasure of the region store (A2).
+    const hasHeadBytes = row?.m0 != null && !isSystemRegionBytes(row.m0);
     return {
-        hasCachedM0: row?.hasM0 === 1,
+        hasCachedM0: hasHeadBytes,
         boundary: row?.boundary && row.boundary.length > 0 ? row.boundary : null,
     };
 }
