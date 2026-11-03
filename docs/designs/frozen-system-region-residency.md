@@ -697,8 +697,10 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   plugin src + scripts, `packages/cli/src`, `packages/pi-plugin/src`
   (zone-tagged rels); the eraser census's Rust roots are unchanged, and since
   round 8 (K2) the boundary-reader census walks the same standard too
-  (`crates/`, dashboard `src-tauri/src`, repo-root `scripts/`) with named
-  members — no census stops at the TypeScript zones. Honest scope statements: the Rust
+  (`crates/`, repo-root `scripts/`) with named members — no census stops at
+  the TypeScript zones; the dashboard is covered by the ERASER census for
+  `cached_m0_bytes` (round-9 M2: `src-tauri` carries no boundary-column
+  literal, so it is not a boundary-census root). Honest scope statements: the Rust
   deny-shapes catch column literals, `ResetValue::Null` reset lists, and
   staged/format! column names — fully opaque runtime-computed names are beyond
   regex and the census comment says so.
@@ -909,12 +911,21 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   stated honestly in the comment: census deters, sanitizer bounds, nothing
   fatals; multi-hop computed fragments stay in the disclosed class.
 - **K2 (boundary census to repo standard)** — the boundary-reader census now
-  walks the same roots as the F1-adjudicated eraser census: `crates/`
-  (`single_store_repair.rs` reset-list writer — named exemption imported from
-  the eraser census as never-active on the Rust lane), dashboard
-  `src-tauri/src` (`db.rs` guarded reader), and repo-root `scripts/`
-  (`b2-drill/repair-history-host-probe.ts`, read-only handle). Planted
-  out-of-root rogues in `crates/` and `scripts/` both redden the census;
-  removed greens.
+  walks the repo-standard roots where the boundary column actually exists:
+  `crates/` (`single_store_repair.rs` reset-list writer — named exemption
+  imported from the eraser census as never-active on the Rust lane) and
+  repo-root `scripts/` (`b2-drill/repair-history-host-probe.ts`, read-only
+  handle). The dashboard is covered by the ERASER census for
+  `cached_m0_bytes`; the boundary census covers boundary columns within its
+  walk roots, and `src-tauri` holds no boundary-column literal — the
+  initially-added `tauri/db.rs` allow entry was inert and is dropped
+  (round-9 M2; removal verified non-reddening, so the content-filter
+  analysis held). Planted out-of-root rogues in `crates/` and `scripts/`
+  both redden the census; removed greens.
 - **K3** — §18's "Rust roots unchanged" sentence qualified: post-K2 no
   census stops at the TypeScript zones.
+- **M3 (residual disclosure, round 9)** — under the non-fatal floor the
+  residual worst case for a census-invisible malformed mint is one
+  `receipt-violation` log line per pass (noise class), never a wedge.
+  Deliberately unaggregated: the violation line is named and loud per
+  entry; revisit aggregation only if one ever appears in production logs.
