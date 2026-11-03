@@ -2599,7 +2599,7 @@ function prependM0M1Messages(
 
 // Cached bytes and their boundary come from one row. Replaying them must not
 // depend on live marker validation or fresh rendering succeeding.
-function replayCompletePiPrefix(
+export function replayCompletePiPrefix(
 	state: PiM0M1State,
 	row: CachedPiM0M1Row,
 	compartments: PiCompartment[],
@@ -2607,7 +2607,22 @@ function replayCompletePiPrefix(
 	entryIds: readonly (string | undefined)[] | undefined,
 	reason: string | null,
 ): PiM0M1InjectionResult {
-	let m0 = decodeCachedM0(row.cached_m0_bytes) ?? "";
+	// Refusal at the reader, not only at callers (G1): serving `"" + m1` for a
+	// foreign row is the exact defect this closes — a region row (or any row
+	// whose bytes the head decoder refuses) must never produce a head-less
+	// prefix. Callers discriminate first; this throw is the structural floor.
+	if (isSystemRegionBytes(row.cached_m0_bytes)) {
+		throw new Error(
+			`pi replay refused: cached_m0_bytes is a frozen system-region row for session ${state.sessionId}`,
+		);
+	}
+	const decodedM0 = decodeCachedM0(row.cached_m0_bytes);
+	if (decodedM0 === null) {
+		throw new Error(
+			`pi replay refused: cached_m0_bytes are not decodable head bytes for session ${state.sessionId}`,
+		);
+	}
+	let m0 = decodedM0;
 	const m1 = decodeCachedM1(row, state.sessionId);
 	rememberPiMuralPayload(
 		state.sessionId,
@@ -2769,7 +2784,11 @@ export function injectM0M1Pi(
 			const cached = state.allowFreshContentionFallback
 				? null
 				: snapshot.cachedRow;
-			if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
+			if (
+				cached?.cached_m0_bytes &&
+				cached.cached_m1_bytes &&
+				!isSystemRegionBytes(cached.cached_m0_bytes)
+			) {
 				return replayCompletePiPrefix(
 					state,
 					cached,
@@ -2814,7 +2833,11 @@ export function injectM0M1Pi(
 				const cached = state.allowFreshContentionFallback
 					? null
 					: snapshot.cachedRow;
-				if (cached?.cached_m0_bytes && cached.cached_m1_bytes) {
+				if (
+					cached?.cached_m0_bytes &&
+					cached.cached_m1_bytes &&
+					!isSystemRegionBytes(cached.cached_m0_bytes)
+				) {
 					return replayCompletePiPrefix(
 						state,
 						cached,
