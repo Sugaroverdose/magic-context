@@ -16,6 +16,7 @@ import {
 	queueMemoryMutation,
 	setProjectState,
 } from "@magic-context/core/features/magic-context/storage";
+import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
 import {
 	getActiveUserMemories,
 	insertUserMemory,
@@ -38,13 +39,12 @@ import {
 	materializeM0PiWithRetry,
 	mustMaterializePi,
 	prepareCachedM0M1PiReplay,
-	replayCompletePiPrefix,
 	renderM0Pi,
 	renderM1Pi,
+	replayCompletePiPrefix,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import { createTestDb, textOf, userMessage } from "./test-utils.test";
-import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
 
 function user(text: string, timestamp = 1) {
 	return { role: "user" as const, content: text, timestamp };
@@ -3335,11 +3335,16 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 		materializeM0Pi(state, db);
 		db.prepare(
 			"UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
-		).run(Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"), state.sessionId);
+		).run(
+			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
+			state.sessionId,
+		);
 		const locking = {
 			exec: (sql: string) => {
 				if (/BEGIN\s+IMMEDIATE/i.test(String(sql))) {
-					throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
+					throw Object.assign(new Error("database is locked"), {
+						code: "SQLITE_BUSY",
+					});
 				}
 				return (db as never as { exec: (s: string) => unknown }).exec(sql);
 			},
@@ -3368,8 +3373,12 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 	// kept as transcript, not a permanent source-mutating row). The predicate
 	// the guard uses is pinned directly:
 	it("G1: the guard predicate discriminates the region row shape", () => {
-		expect(isSystemRegionBytes(Buffer.from(`${SENTINEL}\nx`, "utf8"))).toBe(true);
-		expect(isSystemRegionBytes(Buffer.from("<session-history>x", "utf8"))).toBe(false);
+		expect(isSystemRegionBytes(Buffer.from(`${SENTINEL}\nx`, "utf8"))).toBe(
+			true,
+		);
+		expect(isSystemRegionBytes(Buffer.from("<session-history>x", "utf8"))).toBe(
+			false,
+		);
 		expect(isSystemRegionBytes(null)).toBe(false);
 	});
 
@@ -3385,7 +3394,14 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 			"utf8",
 		);
 		expect(() =>
-			replayCompletePiPrefix(state, row, [], [userMessage("hello")], undefined, null),
+			replayCompletePiPrefix(
+				state,
+				row,
+				[],
+				[userMessage("hello")],
+				undefined,
+				null,
+			),
 		).toThrow(/region/i);
 		closeQuietly(db);
 	});
@@ -3398,67 +3414,75 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 	});
 });
 
-	// Round-6 review H3: property closure — no Pi path may derive
-	// wire-affecting decisions from region rows unguarded. The trim-to-cached-
-	// boundary reader previously truth-tested m0/m1, so a region row keeping
-	// a head-era boundary could drive tail trims. Closed at BOTH ends: the
-	// region write site nulls the head-era boundary column, and the reader
-	// refuses sentinel bytes defensively.
-	it("H3: a region installed over a head-era boundary must not drive trimming", () => {
-		const db = createTestDb();
-		const state = piState("ses-pi-trim-region", process.cwd());
-		const sessionId = state.sessionId;
-		const { appendCompartments } = require("@magic-context/core/features/magic-context/compartment-storage");
-		appendCompartments(db, sessionId, [
-			{
-				sequence: 1,
-				startMessage: 1,
-				endMessage: 1,
-				startMessageId: "m1-id",
-				endMessageId: "m2-id",
-				title: "Covered",
-				content: "U: covered\ncompartment body",
-			},
-		]);
-		// Head-era row: real head bytes, m1 payload, live boundary "m2-id".
-		db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run(sessionId);
-		db.prepare(
-			`UPDATE session_meta
+// Round-6 review H3: property closure — no Pi path may derive
+// wire-affecting decisions from region rows unguarded. The trim-to-cached-
+// boundary reader previously truth-tested m0/m1, so a region row keeping
+// a head-era boundary could drive tail trims. Closed at BOTH ends: the
+// region write site nulls the head-era boundary column, and the reader
+// refuses sentinel bytes defensively.
+it("H3: a region installed over a head-era boundary must not drive trimming", () => {
+	const db = createTestDb();
+	const state = piState("ses-pi-trim-region", process.cwd());
+	const sessionId = state.sessionId;
+	const {
+		appendCompartments,
+	} = require("@magic-context/core/features/magic-context/compartment-storage");
+	appendCompartments(db, sessionId, [
+		{
+			sequence: 1,
+			startMessage: 1,
+			endMessage: 1,
+			startMessageId: "m1-id",
+			endMessageId: "m2-id",
+			title: "Covered",
+			content: "U: covered\ncompartment body",
+		},
+	]);
+	// Head-era row: real head bytes, m1 payload, live boundary "m2-id".
+	db.prepare("INSERT INTO session_meta (session_id) VALUES (?)").run(sessionId);
+	db.prepare(
+		`UPDATE session_meta
 			    SET cached_m0_bytes = ?, cached_m1_bytes = ?,
 			        cached_m0_last_baseline_end_message_id = ?
 			  WHERE session_id = ?`,
-		).run(
-			Buffer.from("<session-history>baseline</session-history>", "utf8"),
-			Buffer.from("<session-history-since>delta</session-history-since>", "utf8"),
-			"m2-id",
-			sessionId,
-		);
-		const messages = [userMessage("covered"), userMessage("covered2"), userMessage("live tail")];
-		const ids = ["m1-id", "m2-id", "m3-id"];
-		// Instrument sanity: the boundary is live and the head row trims.
-		expect(
-			trimPiMessagesToCachedBoundary(db, sessionId, [...messages], [...ids]),
-		).toBeGreaterThan(0);
-		// Convert to a region row through the store's writer (the shape the
-		// reviewer named: install without touching head-era columns).
-		const { writeSystemRegion } = require("@magic-context/core/features/magic-context/system-region");
-		writeSystemRegion(db, sessionId, "<project-memory>frozen</project-memory>");
-		// Write-site property: the head-era boundary column is gone.
-		expect(
-			(
-				db
-					.prepare(
-						"SELECT cached_m0_last_baseline_end_message_id AS b FROM session_meta WHERE session_id = ?",
-					)
-					.get(sessionId) as { b: string | null }
-			).b,
-		).toBeNull();
-		// Reader property: no trim on a region row, even with a boundary
-		// re-seeded behind the writer (defense in depth).
-		db.prepare(
-			"UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
-		).run("m2-id", sessionId);
-		expect(
-			trimPiMessagesToCachedBoundary(db, sessionId, [...messages], [...ids]),
-		).toBe(0);
-	});
+	).run(
+		Buffer.from("<session-history>baseline</session-history>", "utf8"),
+		Buffer.from("<session-history-since>delta</session-history-since>", "utf8"),
+		"m2-id",
+		sessionId,
+	);
+	const messages = [
+		userMessage("covered"),
+		userMessage("covered2"),
+		userMessage("live tail"),
+	];
+	const ids = ["m1-id", "m2-id", "m3-id"];
+	// Instrument sanity: the boundary is live and the head row trims.
+	expect(
+		trimPiMessagesToCachedBoundary(db, sessionId, [...messages], [...ids]),
+	).toBeGreaterThan(0);
+	// Convert to a region row through the store's writer (the shape the
+	// reviewer named: install without touching head-era columns).
+	const {
+		writeSystemRegion,
+	} = require("@magic-context/core/features/magic-context/system-region");
+	writeSystemRegion(db, sessionId, "<project-memory>frozen</project-memory>");
+	// Write-site property: the head-era boundary column is gone.
+	expect(
+		(
+			db
+				.prepare(
+					"SELECT cached_m0_last_baseline_end_message_id AS b FROM session_meta WHERE session_id = ?",
+				)
+				.get(sessionId) as { b: string | null }
+		).b,
+	).toBeNull();
+	// Reader property: no trim on a region row, even with a boundary
+	// re-seeded behind the writer (defense in depth).
+	db.prepare(
+		"UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+	).run("m2-id", sessionId);
+	expect(
+		trimPiMessagesToCachedBoundary(db, sessionId, [...messages], [...ids]),
+	).toBe(0);
+});
