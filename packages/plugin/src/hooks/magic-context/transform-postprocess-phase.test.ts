@@ -9494,7 +9494,7 @@ describe("pending-ops and heuristics permission labels", () => {
         // that is true, so the pass must be labelled differently from the one above.
         const forceBand = await permissionLines("ses-ride-force-band", {
             fullFeatureMode: false,
-            contextUsage: { percentage: 88, inputTokens: 1_000 },
+            contextUsage: { percentage: 96, inputTokens: 1_000 },
         });
 
         expect(publishedHistory).toEqual([
