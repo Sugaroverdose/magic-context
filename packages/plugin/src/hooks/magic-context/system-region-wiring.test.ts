@@ -353,3 +353,27 @@ describe("system-region wiring: cross-lane reader discrimination", () => {
         expect(hasCompleteCachedM0M1(db, "ses-c2-regionlane", true)).toBe(true);
     });
 });
+
+describe("prepareCachedM0M1Replay truth table (lint-refactor pin)", () => {
+    it("head rows need m1; region rows never read m1", () => {
+        const db = makeDb();
+        expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined(); // no row
+        db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(
+            Buffer.from("<session-history>head</session-history>", "utf8"),
+            SESSION_ID,
+        );
+        // Head m0, null m1: refused (no empty-head serve).
+        expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined();
+        db.prepare("UPDATE session_meta SET cached_m1_bytes = ? WHERE session_id = ?").run(
+            Buffer.from("<session-history-since>d</session-history-since>", "utf8"),
+            SESSION_ID,
+        );
+        expect(prepareCachedM0M1Replay(db, SESSION_ID)?.injected).toBe(true);
+        // Region m0 with null m1 on the region lane: serves, m1 text never read.
+        writeSystemRegion(db, SESSION_ID, "<project-memory>r</project-memory>");
+        const regionPass = prepareCachedM0M1Replay(db, SESSION_ID, true);
+        expect(regionPass?.injected).toBe(true);
+        // Region row off the region lane: refused.
+        expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined();
+    });
+});
