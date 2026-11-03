@@ -535,9 +535,14 @@ control, `region_first_install`, sentinel-aware replay plumbing, and eight
 serve rows for L2 boot-replay (fresh handler on reopened store, byte-identical, zero
 bust-schedule sets) and L1 zero-read (instrumented `prepare`: exactly one session_meta
 SELECT, zero region/panel-table reads; control: an extra meta read reddens the row);
-rotation row for L6 persist-throw (propagates, no executed=true receipt). Remaining:
+rotation row for L6 persist-throw (propagates, no executed=true receipt); stage P
+(§19): Pi row-reader property closure + named-member census (three laws, controls);
+stage R (§19): the R11 route-gate port with table-mirroring tests (NOT compiled —
+no cargo on the build host, disclosed unbuilt-Rust-lane class). Remaining:
 the pass-level integration of promotion through the real postprocess entry (covered at
-the predicate level today) and the Rust lane port.
+the predicate level today) and the §9 Rust region migration (module stops emitting head
+items; plan-level [inferred], gated on subc enablement — the region stays off the Rust
+lane, pinned by the C2 spy law).
 
 ## 11. What gets deleted
 
@@ -929,3 +934,52 @@ Round 3 attacked classes, not instances; the adjudicated list and their closures
   `receipt-violation` log line per pass (noise class), never a wedge.
   Deliberately unaggregated: the violation line is named and loud per
   entry; revisit aggregation only if one ever appears in production logs.
+
+## 19. Stage ports (Pi seam + Rust lane, coordinator-dispatched)
+
+- **Scope note (§9 vs dispatch)** — §9 describes the full Pi migration
+  (`prependM0M1Messages` deletion, region composition beside the guidance
+  block, watcher-split mirror) and the full Rust migration (module stops
+  emitting heads). Both remain the enabled-state plan: the region ships
+  v1-TS-only (C2), Pi/Rust boot warn on the ignored flag, and the Pi/Rust
+  region serves are gated behind that. This stage delivered the
+  coordinator's dispatched scope — the Pi LAW audit + reader-property
+  closure, and the Rust CONTRACT audit + the owed R11 port — and does not
+  reinterpret §9 as complete.
+- **Stage P (Pi)** — property closure at the single row reader
+  (`readCachedPiM0M1Row` nulls region-shaped m0): every Pi serve/decision
+  lane (pass snapshot → firstRenderBust, replay pair, soft-refresh CAS)
+  consumes that row, so truthiness decisions are structurally correct
+  instead of per-caller guarded. Three laws red-first (snapshot absent +
+  head control; L1 first-render decision shape with frozen bytes never
+  served); control transcripted (neutralizing the reader discriminator
+  reddens the snapshot law). Named-member census
+  (`system-region-pi-census.test.ts`): production readers of
+  `cached_m0_bytes` limited to the three discriminated files; Pi imports
+  no rotation executor/writer and carries no sentinel literal (L0). Both
+  censuses planted-rogue verified. Pi battery 1500/0, tsc 0, unfiltered
+  biome unchanged (4 errors, disclosed set).
+- **Stage R (Rust)** — audit verdict: the module never reads/writes the
+  region or boundary columns outside the adjudicated `single_store_repair.rs`
+  reset lists (already census-named), mints no rotation reasons
+  (`render_config` is opaque input — the TS coordinator owns receipt text,
+  matching L0), and no region receipts exist. Head composition
+  (`m0_compose.rs`, `M0_EMPTY_BODY`) persists as §9's pre-enablement
+  migration target. The owed R11 port landed per the parity record:
+  `provider_accepts_empty_dropped_content` (exact `anthropic | station`)
+  and `provider_accepts_empty_dropped_message` (anthropic user rows keep
+  the filler — the filtering adapter would erase the anchor with the part;
+  station transmits as given) added beside the anthropic-only
+  `request_accepts_empty_content`; block-drop lanes (stale_reduce, image,
+  structural noise) and the sentinel move to the route gate, whole-message
+  drops to the role gate, reasoning-clear/adapter-seam consumers keep the
+  model gate; the decision digest is untouched (both predicates are pure
+  functions of the already-digested `provider_id`). Three tests mirror the
+  TS table rows including case/substring negatives and byte-stable replay.
+- **Verification class disclosure (R)** — no `cargo`/`rustc` exists on this
+  host: the Rust changes are NOT compile-verified. The station-arm claims
+  carry the known-unbuilt-Rust-lane label; the first host with a Rust
+  toolchain owes `cargo test -p mc-module` for these three tests before
+  any Rust-mode enablement. TS-side gates (plugin 6852, Pi 1500, tsc,
+  unfiltered biome) are unaffected by the Rust edits (`crates/` is outside
+  the TS build graph).
