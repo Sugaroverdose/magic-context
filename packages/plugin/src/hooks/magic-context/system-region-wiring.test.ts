@@ -373,6 +373,9 @@ describe("prepareCachedM0M1Replay truth table (lint-refactor pin)", () => {
         writeSystemRegion(db, SESSION_ID, "<project-memory>r</project-memory>");
         const regionPass = prepareCachedM0M1Replay(db, SESSION_ID, true);
         expect(regionPass?.injected).toBe(true);
+        // The region row owns the head text; the m1 slot must render as the
+        // empty placeholder text, never as stored bytes.
+        expect(regionPass?.m1Text).toBe("");
         // Region row off the region lane: refused.
         expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined();
     });
