@@ -1025,6 +1025,10 @@ export interface M0M1RenderOptions {
      * fold reason becomes the rotation receipt reason. Off = head bytes, today.
      */
     systemRegion?: { enabled: boolean; reason: string };
+    /** Region rotation promotion: fold as if this HARD reason had fired (the
+     *  rotation transaction). Only ever set by the region promotion on a pass
+     *  that already holds the boundary permission. */
+    forceMaterializeReason?: string;
 }
 
 export interface MaterializeDecision {
@@ -1357,7 +1361,7 @@ function getGlobalUserProfileVersion(db: Database): number {
     return getProjectState(db, GLOBAL_USER_PROFILE_PROJECT_PATH)?.projectUserProfileVersion ?? 0;
 }
 
-interface M0SnapshotMarkerReadArgs {
+export interface M0SnapshotMarkerReadArgs {
     db: Database;
     sessionId: string;
     projectPath?: string;
@@ -1699,7 +1703,7 @@ export function readCurrentM0SnapshotMarkers(args: M0SnapshotMarkerReadArgs): M0
     return fresh.markers;
 }
 
-function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null {
+export function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers | null {
     if (!state.cachedM0Bytes) return null;
     const cachedUpgradeIdentity = decodeCachedM0UpgradeIdentity(state.cachedM0UpgradeState);
     if (state.cachedM0ProjectMemoryEpoch === null) return null;
@@ -2458,6 +2462,26 @@ function resolveMuralForM0(
     return resolveMuralWire(options.db, projectPath, modelKey, true, budgetTokens);
 }
 
+/** The rotation manifest captured at install: the fields the region's
+ *  content triggers compare against, mapped from a snapshot read. */
+export function regionMarkersFromSnapshot(markers: M0SnapshotMarkers): RegionMarkers {
+    return {
+        projectMemoryEpoch: markers.projectMemoryEpoch,
+        maxCompartmentSeq: markers.maxCompartmentSeq,
+        maxMemoryId: markers.maxMemoryId,
+        maxMutationId: markers.maxMutationId,
+        maxMemoryMutationId: markers.maxMemoryMutationId,
+        projectDocsHash: markers.projectDocsHash,
+        upgradeState: String(markers.upgradeState),
+        compartmentRenderEpoch: markers.compartmentRenderEpoch,
+        muralEnabled: markers.muralEnabled,
+        renderBudgetIdentity: markers.renderBudgetIdentity,
+        memoryRenderEpoch: markers.memoryRenderEpoch,
+        renderedBudgets: markers.renderedBudgets ?? null,
+        profileVersion: markers.projectUserProfileVersion,
+    };
+}
+
 export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     const projectPath = options.projectPath;
     const projectDirectory = options.projectDirectory ?? projectPath ?? "";
@@ -2720,21 +2744,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             ...new Set([...renderedMemoryIds, ...m1Render.renderedMemoryIds]),
         ];
 
-        const foldMarkers: RegionMarkers = {
-            projectMemoryEpoch: snapshotMarkers.projectMemoryEpoch,
-            maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
-            maxMemoryId: snapshotMarkers.maxMemoryId,
-            maxMutationId: snapshotMarkers.maxMutationId,
-            maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
-            projectDocsHash: snapshotMarkers.projectDocsHash,
-            upgradeState: String(snapshotMarkers.upgradeState),
-            compartmentRenderEpoch: snapshotMarkers.compartmentRenderEpoch,
-            muralEnabled: snapshotMarkers.muralEnabled,
-            renderBudgetIdentity: snapshotMarkers.renderBudgetIdentity,
-            memoryRenderEpoch: snapshotMarkers.memoryRenderEpoch,
-            renderedBudgets: snapshotMarkers.renderedBudgets ?? null,
-            profileVersion: snapshotMarkers.projectUserProfileVersion,
-        };
+        const foldMarkers = regionMarkersFromSnapshot(snapshotMarkers);
         const persistFoldRow = (m0Payload: Buffer, m1Payload: Buffer | null) => {
             persistCachedM0(options.db, options.sessionId, {
                 m0Bytes: m0Payload,
@@ -4024,7 +4034,7 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         options.state.cachedM0Bytes != null && options.state.cachedM1Bytes != null;
     let contentionReplayBoundary = options.contentionFallbackPrefix?.preparedTrimBoundaryId ?? null;
 
-    const decision = mustMaterialize({
+    const decisionFromCompare = mustMaterialize({
         db: options.db,
         sessionId: options.sessionId,
         state: options.state,
@@ -4040,6 +4050,9 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         historyBudgetPolicyIdentity: options.historyBudgetPolicyIdentity,
         systemRegionMode: options.systemRegion?.enabled === true,
     });
+    const decision: MaterializeDecision = options.forceMaterializeReason
+        ? { value: true, reason: options.forceMaterializeReason }
+        : decisionFromCompare;
     const regionMode = options.systemRegion?.enabled === true;
     let rematerialized = false;
     let contentionExhausted = false;

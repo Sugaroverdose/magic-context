@@ -116,13 +116,17 @@ import {
     injectM0M1,
     type M0HardSignals,
     type M0M1State,
+    type M0SnapshotMarkerReadArgs,
     type MaterializeDecision,
     mustMaterialize,
     type PrefixTrimSourceOrder,
     type PrefixTrimStatus,
     type PreparedCompartmentInjection,
     prepareCachedM0M1Replay,
+    readCurrentM0SnapshotMarkers,
+    regionMarkersFromSnapshot,
     renderCompartmentInjection,
+    snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
 import { lkgReplayStateLabel } from "./lkg-persist";
 import { markNoteNudgeDelivered, peekNoteNudgeText } from "./note-nudger";
@@ -168,6 +172,7 @@ import {
     buildSupersessionReclaimOps,
     recentSupersessionOwnerMessageIds,
 } from "./supersession-reclaim";
+import { decideSystemRegionRotation, type RegionMarkers, readSystemRegion } from "./system-region";
 import { byteSize, prependTag } from "./tag-content-primitives";
 import {
     assertTailHygieneContentUnchanged,
@@ -1728,6 +1733,54 @@ export function finalizeMessageRepresentation(
     return { clearedParts, mergedReasoningParts };
 }
 
+/**
+ * Frozen system-region rotation promotion (L3/L4): on a pass that is already
+ * busting for a named reason (execute, force band, explicit flush, deferred
+ * materialization, published history), a region whose captured manifest
+ * differs from the live store — or whose bytes have aged past the growth cap
+ * — promotes the ordinary fold into a rotation of the same transaction. The
+ * promotion never originates a bust: outside a boundary it always declines,
+ * and a missing region is installed by mustMaterialize, not here.
+ */
+export function regionRotationPromotion(input: {
+    systemRegionEnabled: boolean;
+    compactionOff: boolean;
+    freezeM0M1: boolean;
+    foldDue: boolean;
+    boundaryPermission: boolean;
+    forceBand: boolean;
+    storedRegion: string | null;
+    capturedMarkers: RegionMarkers | null;
+    currentMarkers: RegionMarkers;
+    historyBudgetTokens?: number;
+}): { promote: boolean; reason: string | null } {
+    const decline = { promote: false, reason: null } as const;
+    if (
+        !input.systemRegionEnabled ||
+        input.compactionOff ||
+        input.freezeM0M1 ||
+        input.foldDue ||
+        !input.boundaryPermission ||
+        input.storedRegion === null ||
+        input.storedRegion.length === 0
+    ) {
+        return decline;
+    }
+    const decision = decideSystemRegionRotation({
+        storedRegion: input.storedRegion,
+        capturedMarkers: input.capturedMarkers,
+        currentMarkers: input.currentMarkers,
+        bustPermission: true,
+        forceBand: input.forceBand,
+        // Length proxy, not estimateTokens: this runs on every boundary pass
+        // and the cap is a coarse pressure gate (~4 chars/token, the same
+        // ratio the estimator applies).
+        pendingBytes: input.storedRegion.length,
+        pendingBytesCap: (input.historyBudgetTokens ?? 40000) * 0.2 * 4,
+    });
+    return decision.rotate ? { promote: true, reason: decision.reason } : decline;
+}
+
 export async function runPostTransformPhase(
     args: RunPostTransformPhaseArgs,
 ): Promise<PostTransformPhaseResult> {
@@ -1833,6 +1886,20 @@ export async function runPostTransformPhase(
         (!!args.m0M1.projectPath || !!args.m0M1.projectDirectory) &&
         (args.fullFeatureMode || compactionOff);
     const freezeM0M1 = args.freezeM0M1 === true;
+    const foldDueArgs: M0SnapshotMarkerReadArgs & { state: M0M1State } = {
+        db: args.db,
+        sessionId: args.sessionId,
+        state: args.sessionMeta as M0M1State,
+        projectPath: args.m0M1?.projectPath,
+        projectDirectory: args.m0M1?.projectDirectory,
+        injectDocs: args.m0M1?.injectDocs,
+        memoryEnabled: args.m0M1?.memoryEnabled,
+        muralEnabled: args.m0M1?.muralEnabled,
+        memoryInjectionBudgetTokens: args.m0M1?.memoryInjectionBudgetTokens,
+        historyBudgetTokens: args.m0M1?.historyBudgetTokens,
+        historyBudgetPolicyIdentity: args.m0M1?.historyBudgetPolicyIdentity,
+        hardSignals: args.m0M1?.hardSignals,
+    };
     const foldDueDecision =
         m0M1EnabledForFold && args.m0M1 && !freezeM0M1
             ? mustMaterialize({
@@ -1850,6 +1917,52 @@ export async function runPostTransformPhase(
                   hardSignals: args.m0M1.hardSignals,
               })
             : { value: false, reason: null };
+    // Region rotation promotion: a named boundary with a stale region manifest
+    // turns this pass's ordinary fold into the rotation transaction (same
+    // transaction, one bust). Never originates a bust of its own.
+    let regionRotationReason: string | null = null;
+    if (
+        args.systemRegionEnabled === true &&
+        !compactionOff &&
+        m0M1EnabledForFold &&
+        !foldDueDecision.value
+    ) {
+        const storedRegion = readSystemRegion(args.db, args.sessionId);
+        if (storedRegion !== null) {
+            const boundaryPermission =
+                args.schedulerDecision === "execute" ||
+                emergencyDropEligible ||
+                isExplicitFlush ||
+                deferredMaterialize ||
+                args.historyRebuiltThisPass === true ||
+                (args.canConsumeDeferredLate === true &&
+                    args.deferredHistoryWasPendingAtPassStart === true);
+            const captured =
+                (args.sessionMeta as M0M1State).snapshotMarkers ??
+                snapshotMarkersFromCachedM0(args.sessionMeta as M0M1State);
+            const promotion = regionRotationPromotion({
+                systemRegionEnabled: true,
+                compactionOff,
+                freezeM0M1,
+                foldDue: false,
+                boundaryPermission,
+                forceBand: emergencyDropEligible && boundaryPermission,
+                storedRegion,
+                capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+                currentMarkers: regionMarkersFromSnapshot(
+                    readCurrentM0SnapshotMarkers(foldDueArgs),
+                ),
+                historyBudgetTokens: args.m0M1?.historyBudgetTokens,
+            });
+            if (promotion.promote && promotion.reason) {
+                regionRotationReason = promotion.reason;
+                sessionLog(
+                    args.sessionId,
+                    `system-region rotation promoted: reason=${promotion.reason} scheduler=${args.schedulerDecision}`,
+                );
+            }
+        }
+    }
     let preparedPrefix: InjectM0M1Result | undefined;
     const shouldCaptureCachedPrefix =
         (foldDueDecision.value || args.schedulerDecision === "execute") &&
@@ -1901,7 +2014,11 @@ export async function runPostTransformPhase(
         m1Bytes: args.sessionMeta.cachedM1Bytes ?? null,
         muralDataUrl: (args.sessionMeta as M0M1State).cachedM0MuralDataUrl ?? null,
     };
-    if ((foldDueDecision.value || softRefreshOpportunity) && m0M1EnabledForFold && args.m0M1) {
+    if (
+        (foldDueDecision.value || softRefreshOpportunity || regionRotationReason !== null) &&
+        m0M1EnabledForFold &&
+        args.m0M1
+    ) {
         let committedFoldBustsServedPrefix: boolean | undefined;
         try {
             const previousM1 = args.sessionMeta.cachedM1Bytes?.toString("utf8");
@@ -1930,12 +2047,15 @@ export async function runPostTransformPhase(
                         ? {
                               enabled: true,
                               reason:
-                                  (foldDueDecision.value && foldDueDecision.reason) || "hard_fold",
+                                  regionRotationReason ??
+                                  foldDueDecision.reason ??
+                                  "hard_fold",
                           }
                         : undefined,
+                forceMaterializeReason: regionRotationReason ?? undefined,
                 onFoldCommit: (db, rendered) => {
                     committedFoldBustsServedPrefix = foldBustsServedPrefix(
-                        foldDueDecision.reason,
+                        regionRotationReason ?? foldDueDecision.reason,
                         servedPrefixBeforeFold,
                         rendered,
                     );
