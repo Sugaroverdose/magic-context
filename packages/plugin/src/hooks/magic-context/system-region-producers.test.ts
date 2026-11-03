@@ -188,12 +188,12 @@ describe("system-region L0: per-actor producer census", () => {
         const doc = readFileSync(docPath, "utf8");
         const fence = doc.match(/```rotation-reasons\n([^`]+)```/);
         expect(fence).not.toBeNull();
-        const docReasons = new Set(
-            fence![1]
-                .split("\n")
-                .map((l) => l.trim())
-                .filter(Boolean),
-        );
+        const docLines = fence![1]
+            .split("\n")
+            .map((l) => l.trim())
+            .filter(Boolean);
+        const docReasons = new Set(docLines);
+        expect(docLines.length).toBe(docReasons.size); // no duplicates
 
         // Code side: the decision tables + arms in the store module, the
         // region-reachable fold arms in mustMaterialize, and the fold-lane
@@ -214,6 +214,25 @@ describe("system-region L0: per-actor producer census", () => {
         const mmEndRel = injectText.slice(mmStart + 1).search(/^export (async )?function/m);
         const mmBody = injectText.slice(mmStart, mmStart + 1 + mmEndRel);
         for (const m of mmBody.matchAll(/reason:\s*"([a-z_]+)"/g)) codeReasons.add(m[1]);
+        // G5 blind classes:
+        // (1) template-literal composite reasons match on the STEM before
+        //     `:` or `(` (render_config:budget(...));
+        for (const m of mmBody.matchAll(/reason:\s*`([a-z_]+)(?::|[(:])/g))
+            codeReasons.add(m[1]);
+        // (2) variable-passed reasons: captured by name and resolved through
+        //     this explicit map — the producer's own return literals are not
+        //     regex-guaranteed reachable, so an unmapped variable name fails
+        //     the census and the mapping is reviewed by hand (excluded with
+        //     reason, the cached_m1_missing discipline).
+        const VARIABLE_REASONS: Record<string, string> = {
+            budgetShrinkReason: "render_config",
+        };
+        for (const m of mmBody.matchAll(/reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/g)) {
+            if (["null", "undefined", "true", "false"].includes(m[1])) continue;
+            const stem = VARIABLE_REASONS[m[1]];
+            expect(stem, `variable-passed reason ${m[1]} is not mapped`).toBeDefined();
+            codeReasons.add(stem);
+        }
         // Head-lane-only fold reason: region mode guards around it (`&& !regionMode`).
         codeReasons.delete("cached_m1_missing");
         // Call-site fold-lane defaults: reason literals inside the

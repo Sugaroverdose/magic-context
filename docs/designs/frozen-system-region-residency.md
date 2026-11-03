@@ -285,10 +285,14 @@ became smaller) already reach this arm on installs that leave MC's own `compacti
 key unset, which is the shipped default here. The RPC command surfaces are untouched by
 this lane.
 
-The canonical rotation-reason vocabulary (F4: this list is the single source of truth;
-`system-region-producers.test.ts` parses it and asserts set-equality with the code's
-reason literals in both directions — a doc entry without a code arm reddens, a code
-literal absent from this doc reddens):
+The rotation-reason vocabulary. This is a **synchronized review vocabulary**, not a
+generator: `system-region-producers.test.ts` parses it and enforces doc↔code
+bi-equality (a doc entry without a code arm reddens; a code literal absent here
+reddens). Authority is for review language — it does not govern spellings L0 does
+not police, and a rename applied to BOTH sides stays green by design; the code's
+decision tables remain the runtime authority. Composite reasons match on their
+stem before `:` or `(` (e.g. `render_config:budget_shrink(...)` is the
+`render_config` member).
 
 ```rotation-reasons
 hard_fold
@@ -315,6 +319,7 @@ profile_version
 project_docs_hash
 force_band
 pending_growth
+render_config
 ```
 
 ## 5. Rotation markers (the generalized profileVersion pattern)
