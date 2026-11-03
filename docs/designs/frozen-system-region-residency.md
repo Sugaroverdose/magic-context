@@ -452,10 +452,15 @@ controls; law 3 named-reason rows), `system-region-serve.test.ts` (laws 1, 2, 8:
 replay, watcher split, pressure estimate, gate-off, date-freeze containment),
 `system-region-fold.test.ts` (law 6 capture==served, gate-off control, legacy-row
 replacement, marker atomicity) — 41 rows, each with a verified negative control.
-Remaining: rows 1 and 4 need the boot-restart harness (fresh-process replay), row 2's
-rotation-rides-the-bust half needs the postprocess wiring, row 6's force-band leg needs
-the estimator assertion through the pass entry. L1's zero-store-read attack row and L6's
-persist-throw rollback row are the two mechanism-attacks still to write.
+Landed since: `system-region-wiring.test.ts` (16 rows — gate-on head collapse, gate-off
+control, `region_first_install`, sentinel-aware replay plumbing, and eight
+`regionRotationPromotion` laws incl. ride-only decline and non-trigger preservation);
+serve rows for L2 boot-replay (fresh handler on reopened store, byte-identical, zero
+bust-schedule sets) and L1 zero-read (instrumented `prepare`: exactly one session_meta
+SELECT, zero region/panel-table reads; control: an extra meta read reddens the row);
+rotation row for L6 persist-throw (propagates, no executed=true receipt). Remaining:
+the pass-level integration of promotion through the real postprocess entry (covered at
+the predicate level today) and the Rust lane port.
 
 ## 11. What gets deleted
 
