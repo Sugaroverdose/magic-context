@@ -12,8 +12,14 @@ import {
     mustMaterialize,
     prepareCachedM0M1Replay,
 } from "./inject-compartments";
-import { readSystemRegion, SYSTEM_REGION_SENTINEL, writeSystemRegion } from "./system-region";
+import {
+    type RegionMarkers,
+    readSystemRegion,
+    SYSTEM_REGION_SENTINEL,
+    writeSystemRegion,
+} from "./system-region";
 import type { MessageLike } from "./tag-messages";
+import { regionRotationPromotion } from "./transform-postprocess-phase";
 
 const SESSION_ID = "ses_region_wiring";
 const PROJECT_PATH = "/tmp/test-region-wiring";
@@ -164,6 +170,112 @@ describe("system-region wiring: mustMaterialize arms in region mode", () => {
         });
         expect(decision.value).toBe(true);
         expect(decision.reason).toBe("cached_m1_missing");
+    });
+});
+
+describe("system-region wiring: rotation promotion (L3/L4)", () => {
+    const captured: RegionMarkers = {
+        projectMemoryEpoch: 1,
+        maxCompartmentSeq: 7,
+        maxMemoryId: 12,
+        maxMutationId: 3,
+        maxMemoryMutationId: 0,
+        projectDocsHash: "hash-a",
+        upgradeState: "up",
+        compartmentRenderEpoch: "2",
+        muralEnabled: false,
+        renderBudgetIdentity: "rb",
+        memoryRenderEpoch: "1",
+        renderedBudgets: null,
+        profileVersion: 4,
+    };
+    const live = (over: Partial<RegionMarkers>): RegionMarkers => ({ ...captured, ...over });
+    const base = {
+        systemRegionEnabled: true,
+        compactionOff: false,
+        freezeM0M1: false,
+        foldDue: false,
+        boundaryPermission: true,
+        forceBand: false,
+        storedRegion: "<!-- mc:system-region v1 -->panel bytes",
+        capturedMarkers: captured,
+        currentMarkers: live({}),
+        historyBudgetTokens: 40000,
+    };
+
+    it("stale manifest on a boundary pass promotes the fold into a rotation", () => {
+        expect(
+            regionRotationPromotion({ ...base, currentMarkers: live({ projectMemoryEpoch: 2 }) }),
+        ).toEqual({ promote: true, reason: "project_memory_epoch" });
+        // Deliberate non-triggers (m[1]-lane fields) stay non-triggers.
+        expect(
+            regionRotationPromotion({ ...base, currentMarkers: live({ maxMemoryId: 13 }) }),
+        ).toEqual({ promote: false, reason: null });
+    });
+
+    it("no boundary permission: a stale manifest never promotes (ride-only)", () => {
+        expect(
+            regionRotationPromotion({
+                ...base,
+                boundaryPermission: false,
+                currentMarkers: live({ projectMemoryEpoch: 2 }),
+            }),
+        ).toEqual({ promote: false, reason: null });
+    });
+
+    it("fresh manifest on a warm boundary pass never promotes (never originates a bust)", () => {
+        expect(regionRotationPromotion(base)).toEqual({ promote: false, reason: null });
+    });
+
+    it("a fold already due is left to mustMaterialize (no double decision)", () => {
+        expect(
+            regionRotationPromotion({
+                ...base,
+                foldDue: true,
+                currentMarkers: live({ projectMemoryEpoch: 2 }),
+            }),
+        ).toEqual({ promote: false, reason: null });
+    });
+
+    it("an absent region is installed by the fold path, not promoted here", () => {
+        expect(regionRotationPromotion({ ...base, storedRegion: null })).toEqual({
+            promote: false,
+            reason: null,
+        });
+    });
+
+    it("compaction-off and freezeM0M1 decline even with a stale manifest", () => {
+        const stale = { ...base, currentMarkers: live({ projectMemoryEpoch: 2 }) };
+        expect(regionRotationPromotion({ ...stale, compactionOff: true })).toEqual({
+            promote: false,
+            reason: null,
+        });
+        expect(regionRotationPromotion({ ...stale, freezeM0M1: true })).toEqual({
+            promote: false,
+            reason: null,
+        });
+        expect(regionRotationPromotion({ ...stale, systemRegionEnabled: false })).toEqual({
+            promote: false,
+            reason: null,
+        });
+    });
+
+    it("force band re-tiers an aged region even with a fresh manifest", () => {
+        expect(regionRotationPromotion({ ...base, forceBand: true })).toEqual({
+            promote: true,
+            reason: "force_band",
+        });
+    });
+
+    it("region bytes past the growth cap promote on the boundary", () => {
+        const big = {
+            ...base,
+            storedRegion: `<b>${"x".repeat(200_000)}</b>`,
+            historyBudgetTokens: 40000,
+        };
+        expect(regionRotationPromotion(big).promote).toBe(true);
+        // Inert control: a region under the cap with fresh markers does not.
+        expect(regionRotationPromotion(base).promote).toBe(false);
     });
 });
 
