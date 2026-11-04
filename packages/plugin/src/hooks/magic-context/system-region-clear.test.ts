@@ -2,16 +2,8 @@
 
 import { Database as BunDatabase } from "bun:sqlite";
 import { describe, expect, it, mock } from "bun:test";
-import {
-    mkdirSync,
-    readdirSync,
-    readFileSync,
-    rmSync,
-    statSync,
-    writeFileSync,
-} from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { join, relative } from "node:path";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -22,6 +14,7 @@ import {
     executeSystemRegionRotation,
     readSystemRegion,
 } from "../../features/magic-context/system-region";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
 // F1: the walk roots are the whole production surface that can open
@@ -354,12 +347,7 @@ function subLawViolation(rel: string, text: string): string | null {
 // in-zone file; only VCS/build noise is excluded, BY NAME. The extension
 // set is the full TS module family: the old /\.(ts|mjs|cjs)$/ missed
 // .tsx/.cts/.mts sources.
-const WALK_DENY_DIRS: ReadonlySet<string> = new Set([
-    ".git",
-    "node_modules",
-    "dist",
-    ".codegraph",
-]);
+const WALK_DENY_DIRS: ReadonlySet<string> = new Set([".git", "node_modules", "dist", ".codegraph"]);
 const PRODUCTION_FILE = /\.(ts|tsx|mts|cts|mjs|cjs)$/;
 function collectTsFiles(dir: string, out: string[]): void {
     for (const entry of readdirSync(dir)) {
@@ -522,7 +510,8 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
     it("control: .tsx and in-zone dot-dir rogues redden the eraser census (H4)", () => {
         const dir = createTestTempDirFromPath(join(tmpdir(), "mc-h4-plant-"));
         try {
-            const sql = 'db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?")';
+            const sql =
+                'db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?")';
             writeFileSync(
                 join(dir, "rogue.tsx"),
                 `export const erase = (db: { prepare: (q: string) => unknown }) => ${sql};\n`,
@@ -703,146 +692,154 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
             ).toBe(false);
             rmSync(join(dir, "rogue_alias_dispatcher.ts"), { force: true });
 
-             // Steady state after removals: holder censuses match the
-             // blessed sets again (plants leave no residue).
-             const c2 = scanPersistCensuses([{ dir, prefix: "planted/" }]);
-             expect(c2.persistHolders.sort()).toEqual([...BLESSED_PERSIST_HOLDERS.keys()].sort());
-             expect(c2.dispatcherHolders.sort()).toEqual(
-                 [...BLESSED_DISPATCHER_HOLDERS.keys()].sort(),
-             );
-         } finally {
-             rmSync(dir, { recursive: true, force: true });
-         }
-     });
+            // Steady state after removals: holder censuses match the
+            // blessed sets again (plants leave no residue).
+            const c2 = scanPersistCensuses([{ dir, prefix: "planted/" }]);
+            expect(c2.persistHolders.sort()).toEqual([...BLESSED_PERSIST_HOLDERS.keys()].sort());
+            expect(c2.dispatcherHolders.sort()).toEqual(
+                [...BLESSED_DISPATCHER_HOLDERS.keys()].sort(),
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
 
-     // H1 (round 3): the holder census is FILE-granular — membership says
-     // nothing about a blessed file's internals. Three shapes stay green
-     // under G1 alone: (a) a second persistCachedM0() call inside a fold
-     // file (holders/callers are sets, not counts); (b) an alias origin +
-     // alias call inside a blessed barrel — the file is already blessed so
-     // holders equality passes, and the canonical caller regex has no
-     // `persistCachedM0(` paren to find; (c) `const u = updateSessionMeta;
-     // u(db, s, { cachedM0Bytes })` inside a blessed dispatcher holder —
-     // the abusers window requires the literal `updateSessionMeta(`.
-     // Closure is PER-FILE BEHAVIOR: each blessed file must keep the
-     // behavior its blessing justifies.
-     const BLESSED_FOLD_CALL_COUNTS: ReadonlyMap<string, number> = new Map([
-         ["hooks/magic-context/inject-compartments.ts", 1],
-         ["pi/inject-compartments-pi.ts", 2],
-     ]);
-     function locateBlessedFile(rel: string): string | null {
-         for (const { dir, prefix } of TS_ROOTS) {
-             if (!rel.startsWith(prefix)) continue;
-             const f = join(dir, rel.slice(prefix.length));
-             if (statSync(f, { throwIfNoEntry: false })?.isFile()) return f;
-         }
-         return null;
-     }
-     function blessedBehaviorViolations(
-         textOverrides: ReadonlyMap<string, string> = new Map(),
-     ): string[] {
-         const violations: string[] = [];
-         for (const [rel, justification] of BLESSED_PERSIST_HOLDERS) {
-             const f = locateBlessedFile(rel);
-             if (!f) {
-                 violations.push(`${rel}: blessed file missing from the production tree`);
-                 continue;
-             }
-             const text = textOverrides.get(rel) ?? readFileSync(f, "utf8");
-             const aliasOrigin =
-                 /persistCachedM0\s+as\s+\w/.test(text) || /=\s*persistCachedM0\b/.test(text);
-             const canonicalCalls = (text.match(/\bpersistCachedM0\s*\(/g) ?? []).length;
-             if (justification.startsWith("barrel")) {
-                 // The blessing claims: re-export entry only, no call site,
-                 // no local binding. Anything else voids the blessing.
-                 if (canonicalCalls > 0)
-                     violations.push(`${rel}: barrel carries a canonical call site`);
-                 if (aliasOrigin) violations.push(`${rel}: barrel carries an alias origin`);
-             } else {
-                 const blessed = BLESSED_FOLD_CALL_COUNTS.get(rel);
-                 if (blessed === undefined)
-                     violations.push(`${rel}: fold-lane holder without a blessed call count`);
-                 else if (canonicalCalls !== blessed)
-                     violations.push(
-                         `${rel}: ${canonicalCalls} canonical persistCachedM0 calls, blessed ${blessed}`,
-                     );
-                 if (aliasOrigin)
-                     violations.push(`${rel}: alias origin bypasses the canonical-name count`);
-             }
-         }
-         for (const rel of BLESSED_DISPATCHER_HOLDERS.keys()) {
-             const f = locateBlessedFile(rel);
-             if (!f) {
-                 violations.push(`${rel}: blessed file missing from the production tree`);
-                 continue;
-             }
-             const text = textOverrides.get(rel) ?? readFileSync(f, "utf8");
-             const aliases = new Set<string>();
-             for (const m of text.matchAll(/(?:const|let)\s+(\w+)\s*=\s*updateSessionMeta\b/g))
-                 aliases.add(m[1]);
-             for (const m of text.matchAll(/updateSessionMeta\s+as\s+(\w+)/g)) aliases.add(m[1]);
-             for (const alias of aliases) {
-                 if (new RegExp(`\\b${alias}\\s*\\([\\s\\S]{0,400}?cachedM0Bytes`).test(text))
-                     violations.push(
-                         `${rel}: ${alias} (bound from updateSessionMeta) called near a column key`,
-                     );
-             }
-         }
-         return violations;
-     }
+    // H1 (round 3): the holder census is FILE-granular — membership says
+    // nothing about a blessed file's internals. Three shapes stay green
+    // under G1 alone: (a) a second persistCachedM0() call inside a fold
+    // file (holders/callers are sets, not counts); (b) an alias origin +
+    // alias call inside a blessed barrel — the file is already blessed so
+    // holders equality passes, and the canonical caller regex has no
+    // `persistCachedM0(` paren to find; (c) `const u = updateSessionMeta;
+    // u(db, s, { cachedM0Bytes })` inside a blessed dispatcher holder —
+    // the abusers window requires the literal `updateSessionMeta(`.
+    // Closure is PER-FILE BEHAVIOR: each blessed file must keep the
+    // behavior its blessing justifies.
+    const BLESSED_FOLD_CALL_COUNTS: ReadonlyMap<string, number> = new Map([
+        ["hooks/magic-context/inject-compartments.ts", 1],
+        ["pi/inject-compartments-pi.ts", 2],
+    ]);
+    function locateBlessedFile(rel: string): string | null {
+        for (const { dir, prefix } of TS_ROOTS) {
+            if (!rel.startsWith(prefix)) continue;
+            const f = join(dir, rel.slice(prefix.length));
+            if (statSync(f, { throwIfNoEntry: false })?.isFile()) return f;
+        }
+        return null;
+    }
+    function blessedBehaviorViolations(
+        textOverrides: ReadonlyMap<string, string> = new Map(),
+    ): string[] {
+        const violations: string[] = [];
+        for (const [rel, justification] of BLESSED_PERSIST_HOLDERS) {
+            const f = locateBlessedFile(rel);
+            if (!f) {
+                violations.push(`${rel}: blessed file missing from the production tree`);
+                continue;
+            }
+            const text = textOverrides.get(rel) ?? readFileSync(f, "utf8");
+            const aliasOrigin =
+                /persistCachedM0\s+as\s+\w/.test(text) || /=\s*persistCachedM0\b/.test(text);
+            const canonicalCalls = (text.match(/\bpersistCachedM0\s*\(/g) ?? []).length;
+            if (justification.startsWith("barrel")) {
+                // The blessing claims: re-export entry only, no call site,
+                // no local binding. Anything else voids the blessing.
+                if (canonicalCalls > 0)
+                    violations.push(`${rel}: barrel carries a canonical call site`);
+                if (aliasOrigin) violations.push(`${rel}: barrel carries an alias origin`);
+            } else {
+                const blessed = BLESSED_FOLD_CALL_COUNTS.get(rel);
+                if (blessed === undefined)
+                    violations.push(`${rel}: fold-lane holder without a blessed call count`);
+                else if (canonicalCalls !== blessed)
+                    violations.push(
+                        `${rel}: ${canonicalCalls} canonical persistCachedM0 calls, blessed ${blessed}`,
+                    );
+                if (aliasOrigin)
+                    violations.push(`${rel}: alias origin bypasses the canonical-name count`);
+            }
+        }
+        for (const rel of BLESSED_DISPATCHER_HOLDERS.keys()) {
+            const f = locateBlessedFile(rel);
+            if (!f) {
+                violations.push(`${rel}: blessed file missing from the production tree`);
+                continue;
+            }
+            const text = textOverrides.get(rel) ?? readFileSync(f, "utf8");
+            const aliases = new Set<string>();
+            for (const m of text.matchAll(/(?:const|let)\s+(\w+)\s*=\s*updateSessionMeta\b/g))
+                aliases.add(m[1]);
+            for (const m of text.matchAll(/updateSessionMeta\s+as\s+(\w+)/g)) aliases.add(m[1]);
+            for (const alias of aliases) {
+                if (new RegExp(`\\b${alias}\\s*\\([\\s\\S]{0,400}?cachedM0Bytes`).test(text))
+                    violations.push(
+                        `${rel}: ${alias} (bound from updateSessionMeta) called near a column key`,
+                    );
+            }
+        }
+        return violations;
+    }
 
-     it("blessed files keep the per-file behavior their blessing justifies (H1)", () => {
-         expect(blessedBehaviorViolations()).toEqual([]);
-     });
+    it("blessed files keep the per-file behavior their blessing justifies (H1)", () => {
+        expect(blessedBehaviorViolations()).toEqual([]);
+    });
 
-     it("control: rogues planted INSIDE blessed-file copies redden the per-file law (H1)", () => {
-         // Blessed-file copies in memory (the production tree is never
-         // written); each plant must (1) redden blessedBehaviorViolations
-         // and (2) be blind to the pre-H1 file-granular censuses — holders
-         // equality (file already blessed) and the canonical regexes.
-         const read = (rel: string) => {
-             const f = locateBlessedFile(rel);
-             if (!f) throw new Error(`missing blessed file ${rel}`);
-             return readFileSync(f, "utf8");
-         };
+    it("control: rogues planted INSIDE blessed-file copies redden the per-file law (H1)", () => {
+        // Blessed-file copies in memory (the production tree is never
+        // written); each plant must (1) redden blessedBehaviorViolations
+        // and (2) be blind to the pre-H1 file-granular censuses — holders
+        // equality (file already blessed) and the canonical regexes.
+        const read = (rel: string) => {
+            const f = locateBlessedFile(rel);
+            if (!f) throw new Error(`missing blessed file ${rel}`);
+            return readFileSync(f, "utf8");
+        };
 
-         // (a) second canonical call inside the OpenCode-1 fold file.
-         const foldPlant = `${read("hooks/magic-context/inject-compartments.ts")}\npersistCachedM0(db, "s", { m0Bytes: null });\n`;
-         expect(
-             blessedBehaviorViolations(
-                 new Map([["hooks/magic-context/inject-compartments.ts", foldPlant]]),
-             ).some((v) => v.includes("blessed 1")),
-         ).toBe(true);
-         // Pre-H1 blindness: sets of files, counts unchanged.
-         expect((read("hooks/magic-context/inject-compartments.ts").match(/\bpersistCachedM0\s*\(/g) ?? []).length).toBe(1);
+        // (a) second canonical call inside the OpenCode-1 fold file.
+        const foldPlant = `${read("hooks/magic-context/inject-compartments.ts")}\npersistCachedM0(db, "s", { m0Bytes: null });\n`;
+        expect(
+            blessedBehaviorViolations(
+                new Map([["hooks/magic-context/inject-compartments.ts", foldPlant]]),
+            ).some((v) => v.includes("blessed 1")),
+        ).toBe(true);
+        // Pre-H1 blindness: sets of files, counts unchanged.
+        expect(
+            (
+                read("hooks/magic-context/inject-compartments.ts").match(
+                    /\bpersistCachedM0\s*\(/g,
+                ) ?? []
+            ).length,
+        ).toBe(1);
 
-         // (b) alias origin + alias call inside a blessed barrel.
-         const barrelPlant = `${read("features/magic-context/storage.ts")}\nimport { persistCachedM0 as pp } from "x";\npp(db, "s", {});\n`;
-         const barrelViolations = blessedBehaviorViolations(
-             new Map([["features/magic-context/storage.ts", barrelPlant]]),
-         );
-         expect(barrelViolations.some((v) => v.includes("storage.ts") && v.includes("alias origin"))).toBe(true);
-         // Pre-H1 blindness: file already in holders; no canonical paren for
-         // the callers list — both censuses unchanged by this plant.
-         expect(/\bpersistCachedM0\s*\(/.test(barrelPlant)).toBe(false);
+        // (b) alias origin + alias call inside a blessed barrel.
+        const barrelPlant = `${read("features/magic-context/storage.ts")}\nimport { persistCachedM0 as pp } from "x";\npp(db, "s", {});\n`;
+        const barrelViolations = blessedBehaviorViolations(
+            new Map([["features/magic-context/storage.ts", barrelPlant]]),
+        );
+        expect(
+            barrelViolations.some((v) => v.includes("storage.ts") && v.includes("alias origin")),
+        ).toBe(true);
+        // Pre-H1 blindness: file already in holders; no canonical paren for
+        // the callers list — both censuses unchanged by this plant.
+        expect(/\bpersistCachedM0\s*\(/.test(barrelPlant)).toBe(false);
 
-         // (c) alias dispatcher call with the contracted column key inside a
-         // blessed dispatcher holder. Padding keeps the plant outside the
-         // 400-char window of any legitimate canonical updateSessionMeta(
-         // call, so the pre-H1 abusers regex stays blind.
-         const pad = "\n// " + "padding-gap".repeat(60) + "\n";
-         const dispatcherPlant = `${read("hooks/magic-context/transform-postprocess-phase.ts")}${pad}const u = updateSessionMeta;\nu(db, s, { cachedM0Bytes: buf });\n`;
-         expect(
-             blessedBehaviorViolations(
-                 new Map([["hooks/magic-context/transform-postprocess-phase.ts", dispatcherPlant]]),
-             ).some((v) => v.includes("u (bound from updateSessionMeta)")),
-         ).toBe(true);
-         expect(
-             /updateSessionMeta\s*\([\s\S]{0,400}?cachedM0Bytes/.test(
-                 dispatcherPlant.slice(dispatcherPlant.indexOf(pad)),
-             ),
-         ).toBe(false);
-     });
+        // (c) alias dispatcher call with the contracted column key inside a
+        // blessed dispatcher holder. Padding keeps the plant outside the
+        // 400-char window of any legitimate canonical updateSessionMeta(
+        // call, so the pre-H1 abusers regex stays blind.
+        const pad = `\n// ${"padding-gap".repeat(60)}\n`;
+        const dispatcherPlant = `${read("hooks/magic-context/transform-postprocess-phase.ts")}${pad}const u = updateSessionMeta;\nu(db, s, { cachedM0Bytes: buf });\n`;
+        expect(
+            blessedBehaviorViolations(
+                new Map([["hooks/magic-context/transform-postprocess-phase.ts", dispatcherPlant]]),
+            ).some((v) => v.includes("u (bound from updateSessionMeta)")),
+        ).toBe(true);
+        expect(
+            /updateSessionMeta\s*\([\s\S]{0,400}?cachedM0Bytes/.test(
+                dispatcherPlant.slice(dispatcherPlant.indexOf(pad)),
+            ),
+        ).toBe(false);
+    });
 
     it("the eraser census walks every canonical zone, present and non-empty (G3)", () => {
         // Defense against a silently narrowed "production tree": a missing

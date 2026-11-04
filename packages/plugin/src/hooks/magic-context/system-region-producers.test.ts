@@ -11,8 +11,8 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { join, relative } from "node:path";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
 
@@ -20,12 +20,7 @@ const SRC_ROOT = join(import.meta.dir, "..", "..");
 // only VCS/build noise is excluded, BY NAME — and the full TS module
 // extension family (.tsx/.cts/.mts sources were invisible to the old
 // .ts-only filter).
-const WALK_DENY_DIRS: ReadonlySet<string> = new Set([
-    ".git",
-    "node_modules",
-    "dist",
-    ".codegraph",
-]);
+const WALK_DENY_DIRS: ReadonlySet<string> = new Set([".git", "node_modules", "dist", ".codegraph"]);
 const PRODUCTION_FILE = /\.(ts|tsx|mts|cts|mjs|cjs)$/;
 function walkTs(dir: string, prefix: string): Array<{ rel: string; full: string }> {
     const out: Array<{ rel: string; full: string }> = [];
@@ -84,10 +79,8 @@ describe("system-region L0: per-actor producer census", () => {
     ];
     const zoneFiles = (
         extraRoots: ReadonlyArray<{ dir: string; prefix: string }> = [],
-    ): Array<{ rel: string; full: string }> => [
-        ...ZONE_ROOTS,
-        ...extraRoots,
-    ].flatMap(({ dir, prefix }) => walkTs(dir, prefix));
+    ): Array<{ rel: string; full: string }> =>
+        [...ZONE_ROOTS, ...extraRoots].flatMap(({ dir, prefix }) => walkTs(dir, prefix));
     const ALL_ZONE_FILES = zoneFiles();
     const filesUsing = (
         pattern: RegExp,
@@ -158,7 +151,9 @@ describe("system-region L0: per-actor producer census", () => {
                     (m) => m[1],
                 ),
             );
-            for (const h of withoutLits.matchAll(/(^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$]*)(\s*(?:\(|\.))?/g)) {
+            for (const h of withoutLits.matchAll(
+                /(^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$]*)(\s*(?:\(|\.))?/g,
+            )) {
                 const name = h[2];
                 if (!name) continue;
                 if (/^(typeof|new|in|of|return|const|let|var|function)$/.test(name)) continue;
@@ -247,7 +242,11 @@ describe("system-region L0: per-actor producer census", () => {
             for (const m of text.matchAll(
                 /systemRegion:[\s\S]{0,400}?reason\s*:\s*([^\n]{1,120})/g,
             )) {
-                classifyReasonValue(m[1], `systemRegion window in ${rel}`, SYSTEMREGION_VARIABLE_REASONS);
+                classifyReasonValue(
+                    m[1],
+                    `systemRegion window in ${rel}`,
+                    SYSTEMREGION_VARIABLE_REASONS,
+                );
             }
         }
         return codeReasons;
@@ -589,9 +588,10 @@ describe("system-region L0: per-actor producer census", () => {
     // census, closed in the clear file). Plants attack the walk itself.
     it("every producer census zone walks production files, by name (H3/#2665 floor)", () => {
         for (const { dir, prefix } of ZONE_ROOTS) {
-            expect(statSync(dir, { throwIfNoEntry: false })?.isDirectory(), `zone absent: ${prefix}`).toBe(
-                true,
-            );
+            expect(
+                statSync(dir, { throwIfNoEntry: false })?.isDirectory(),
+                `zone absent: ${prefix}`,
+            ).toBe(true);
             expect(walkTs(dir, prefix).length, `zone walked 0 files: ${prefix}`).toBeGreaterThan(0);
         }
     });
@@ -604,7 +604,9 @@ describe("system-region L0: per-actor producer census", () => {
             writeFileSync(join(dir, "rogue.tsx"), rogue);
             mkdirSync(join(dir, ".probe"));
             writeFileSync(join(dir, ".probe", "rogue.ts"), rogue);
-            const found = filesUsing(/executeSystemRegionRotation\(/, [{ dir, prefix: "planted-h4/" }]);
+            const found = filesUsing(/executeSystemRegionRotation\(/, [
+                { dir, prefix: "planted-h4/" },
+            ]);
             expect(found).toContain("planted-h4/rogue.tsx");
             expect(found).toContain("planted-h4/.probe/rogue.ts");
             // Pre-H4 blindness: .ts-only filter and skip-all-dot-dirs.
@@ -695,9 +697,9 @@ describe("system-region L0: per-actor producer census", () => {
         expect(() => collectReasons(planted)).toThrow(/wrapReason/);
         // Pre-H2 blindness: the variable arm terminated at [,}], so a
         // paren-followed identifier matched nothing.
-        expect(/reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/.test('reason: wrapReason("hard_fold")')).toBe(
-            false,
-        );
+        expect(
+            /reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/.test('reason: wrapReason("hard_fold")'),
+        ).toBe(false);
     });
 
     it("control: a ternary reason denies (H2)", () => {
@@ -705,9 +707,9 @@ describe("system-region L0: per-actor producer census", () => {
             'if (p) return { value: true, reason: plantedFlag ? "hard_fold" : "hard_fold" };',
         );
         expect(() => collectReasons(planted)).toThrow(/plantedFlag/);
-        expect(/reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/.test('reason: plantedFlag ? "a" : "b"')).toBe(
-            false,
-        );
+        expect(
+            /reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/.test('reason: plantedFlag ? "a" : "b"'),
+        ).toBe(false);
     });
 
     it("control: a bare-identifier relay in a systemRegion window denies (H2)", () => {

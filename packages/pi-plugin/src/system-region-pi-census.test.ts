@@ -36,7 +36,11 @@ const WALK_DENY_DIRS: ReadonlySet<string> = new Set([
 ]);
 const PRODUCTION_FILE = /\.(ts|tsx|mts|cts|mjs|cjs)$/;
 
-function walk(root: string, prefix: string, dir = root): Array<{ rel: string; full: string }> {
+function walk(
+	root: string,
+	prefix: string,
+	dir = root,
+): Array<{ rel: string; full: string }> {
 	const out: Array<{ rel: string; full: string }> = [];
 	for (const entry of readdirSync(dir)) {
 		const full = join(dir, entry);
@@ -75,30 +79,29 @@ function walkPiCensusZones(
 	return out;
 }
 
-
 // Stage P2 (design §23): Pi is a serving lane. Readers of the shared
 // column (either spelling) must be exactly the discriminated set; a new
 // un-named reader fails here until its discrimination is reviewed. H3
 // (round 3): the scan covers the SHARED Pi zone set (#2665) — src plus the
 // runtime scripts tree — not src alone.
 const ALLOWED_READERS: ReadonlyMap<string, string> = new Map([
-			[
-				"context-handler.ts",
-				"comparison/coverage operands only: firstRenderBust region-aware shape check (isSystemRegionBytes, §23 D7), m0 coverage guard (null → -1), foldBustsServedPrefix before/after fold-byte comparison, and the compaction-transition in-memory baseline invalidation (nulls the local sessionMeta copy, not the DB); the handler never decodes column bytes as text and never persists them — all writes route through the fold lane",
-			],
-			[
-				"dialogs/status-dialog.ts",
-				"display-only breakdown; region rows decoded through the funnel reader for display (§23 D11), never served",
-			],
-			[
-				"inject-compartments-pi.ts",
-				"fold module: installs via the rotation funnel inside the boundary transaction (§23 D4); head-lane row reader nulls region rows; trim uses the fold-co-resident boundary (D6)",
-			],
-			[
-				"system-prompt.ts",
-				"serve path: appends the funnel-decoded region after the host bytes in the watched system channel; hash covers host bytes only (§23 D2/D3); corrupt rows declined by name",
-			],
-	]);
+	[
+		"context-handler.ts",
+		"comparison/coverage operands only: firstRenderBust region-aware shape check (isSystemRegionBytes, §23 D7), m0 coverage guard (null → -1), foldBustsServedPrefix before/after fold-byte comparison, and the compaction-transition in-memory baseline invalidation (nulls the local sessionMeta copy, not the DB); the handler never decodes column bytes as text and never persists them — all writes route through the fold lane",
+	],
+	[
+		"dialogs/status-dialog.ts",
+		"display-only breakdown; region rows decoded through the funnel reader for display (§23 D11), never served",
+	],
+	[
+		"inject-compartments-pi.ts",
+		"fold module: installs via the rotation funnel inside the boundary transaction (§23 D4); head-lane row reader nulls region rows; trim uses the fold-co-resident boundary (D6)",
+	],
+	[
+		"system-prompt.ts",
+		"serve path: appends the funnel-decoded region after the host bytes in the watched system channel; hash covers host bytes only (§23 D2/D3); corrupt rows declined by name",
+	],
+]);
 
 function censusReaderOffenders(): string[] {
 	const offenders: string[] = [];
@@ -230,8 +233,8 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 			rmSync(rogueRotation, { force: true });
 			rmSync(rogueWriter, { force: true });
 		}
-	// Removed plants must not leave residue reddening the steady law.
-	expect(censusWriteOffenders()).toEqual([]);
+		// Removed plants must not leave residue reddening the steady law.
+		expect(censusWriteOffenders()).toEqual([]);
 	});
 
 	it("control: scripts-zone plants redden the census; a dropped zone fails the floor by name (H3)", () => {
@@ -242,9 +245,10 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 		const scriptsDir = join(SRC, "..", "scripts");
 		const rogueReader = join(scriptsDir, "__census-rogue-reader.ts");
 		const rogueWriter = join(scriptsDir, "__census-rogue-writer.ts");
-		expect(rogueReader.startsWith(join(SRC, "subdir")) || rogueReader.startsWith(SRC + "/")).toBe(
-			false,
-		);
+		expect(
+			rogueReader.startsWith(join(SRC, "subdir")) ||
+				rogueReader.startsWith(`${SRC}/`),
+		).toBe(false);
 		writeFileSync(
 			rogueReader,
 			'export const f = (db: { prepare: (q: string) => unknown }, s: string) => db.prepare("SELECT cached_m0_bytes FROM session_meta WHERE session_id = ?").get(s);\n',
@@ -256,12 +260,14 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 		try {
 			expect(
 				censusReaderOffenders().some(
-					(o) => o.startsWith("scripts/") && o.includes("__census-rogue-reader"),
+					(o) =>
+						o.startsWith("scripts/") && o.includes("__census-rogue-reader"),
 				),
 			).toBe(true);
 			expect(
 				censusWriteOffenders().some(
-					(o) => o.startsWith("scripts/") && o.includes("__census-rogue-writer"),
+					(o) =>
+						o.startsWith("scripts/") && o.includes("__census-rogue-writer"),
 				),
 			).toBe(true);
 		} finally {
@@ -271,9 +277,9 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 		// Removal regreens both censuses.
 		expect(censusReaderOffenders()).toEqual([]);
 		expect(censusWriteOffenders()).toEqual([]);
-	// Zone floor: dropping scripts from the walked roots must redden by
-	// NAME against the canonical set, not silently shrink coverage.
-	expect(() => walkPiCensusZones([PI_CENSUS_ZONES[0]])).toThrow(/scripts\//);
+		// Zone floor: dropping scripts from the walked roots must redden by
+		// NAME against the canonical set, not silently shrink coverage.
+		expect(() => walkPiCensusZones([PI_CENSUS_ZONES[0]])).toThrow(/scripts\//);
 	});
 
 	it("control: extension-family rogues redden the Pi censuses (H4)", () => {
@@ -297,11 +303,15 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 		);
 		try {
 			expect(
-				censusReaderOffenders().some((o) => o.includes("__census-rogue-reader.mts")),
+				censusReaderOffenders().some((o) =>
+					o.includes("__census-rogue-reader.mts"),
+				),
 			).toBe(true);
-			expect(censusWriteOffenders().some((o) => o.includes(".probe-h4/rogue-writer.tsx"))).toBe(
-				true,
-			);
+			expect(
+				censusWriteOffenders().some((o) =>
+					o.includes(".probe-h4/rogue-writer.tsx"),
+				),
+			).toBe(true);
 		} finally {
 			rmSync(rogueMts, { force: true });
 			rmSync(dotDir, { recursive: true, force: true });

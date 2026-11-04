@@ -2,27 +2,21 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import {
-    readdirSync,
-    readFileSync,
-    rmSync,
-    statSync,
-    writeFileSync,
-} from "node:fs";
+import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { isSystemRegionLane } from "../../config/system-region-lane";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
-    type RegionMarkers,
     decideSystemRegionRotation,
+    type RegionMarkers,
     readSystemRegion,
     SYSTEM_REGION_SENTINEL,
     writeSystemRegion,
 } from "../../features/magic-context/system-region";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     currentRegionMarkersForPromotion,
     hasCompleteCachedM0M1,
@@ -30,7 +24,6 @@ import {
     type M0M1State,
     mustMaterialize,
     prepareCachedM0M1Replay,
-    readCurrentM0SnapshotMarkers,
     regionMarkersFromSnapshot,
     snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
@@ -601,14 +594,11 @@ describe("system-region wiring: promotion comparator convergence (storm, Fix A)"
             expect(state.cachedM0ProjectDocsHash).toBeTruthy();
             const storedRegion = readSystemRegion(db, SESSION_ID);
             expect(storedRegion).not.toBeNull();
-            const captured =
-                state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+            const captured = state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
             expect(captured).not.toBeNull();
             // Exactly the promotion call-site composition (Fix A helper —
             // the wiring calls the SAME function, pinned below).
-            const currentMarkers = currentRegionMarkersForPromotion(
-                foldDueArgsFor(db, state, dir),
-            );
+            const currentMarkers = currentRegionMarkersForPromotion(foldDueArgsFor(db, state, dir));
             const promotion = regionRotationPromotion({
                 systemRegionLane: true,
                 freezeM0M1: false,
@@ -634,12 +624,16 @@ describe("system-region wiring: promotion comparator convergence (storm, Fix A)"
         const dir = docsDir();
         try {
             const { db, state } = installedRegion(dir);
-            const captured =
-                state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+            const captured = state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
             expect(captured).not.toBeNull();
             const current = currentRegionMarkersForPromotion(foldDueArgsFor(db, state, dir));
             const capturedMarkers = regionMarkersFromSnapshot(captured!);
-            for (const field of ["projectDocsHash", "projectMemoryEpoch", "maxMemoryId", "maxMemoryMutationId"] as const) {
+            for (const field of [
+                "projectDocsHash",
+                "projectMemoryEpoch",
+                "maxMemoryId",
+                "maxMemoryMutationId",
+            ] as const) {
                 expect(current[field], `field ${field}`).toBe(capturedMarkers[field]);
             }
             const decision = decideSystemRegionRotation({
@@ -708,10 +702,7 @@ describe("system-region wiring: promotion comparator convergence (storm, Fix A)"
         );
         const helperStart = inject.indexOf("export function currentRegionMarkersForPromotion(");
         expect(helperStart).toBeGreaterThan(-1);
-        const helper = inject.slice(
-            helperStart,
-            inject.indexOf("\nexport ", helperStart + 1),
-        );
+        const helper = inject.slice(helperStart, inject.indexOf("\nexport ", helperStart + 1));
         expect(helper).toContain("readCurrentM0SnapshotMarkers(");
         expect(helper).toContain("readProjectDocsForM0(");
         expect(helper).not.toContain("createHash"); // no canonicalization reimplementation
@@ -784,6 +775,8 @@ describe("system-region wiring: promotion comparator convergence (storm, Fix A)"
         // a literal; the stored region comes from the store reader; the
         // force band is the gated conjunction.
         expect(phase).toMatch(/const storedRegion = readSystemRegion\(args\.db, args\.sessionId\)/);
-        expect(phase).toMatch(/boundaryPermission,\s*\n\s*forceBand: emergencyDropEligible && boundaryPermission/);
+        expect(phase).toMatch(
+            /boundaryPermission,\s*\n\s*forceBand: emergencyDropEligible && boundaryPermission/,
+        );
     });
 });

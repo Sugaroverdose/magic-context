@@ -114,6 +114,7 @@ import { foldExecutesThisPass } from "./fold-execution-gate";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import {
     clearInjectionCache,
+    currentRegionMarkersForPromotion,
     getVisibleMemoryIds,
     hasCompleteCachedM0M1,
     hydrateCachedM0Mural,
@@ -128,7 +129,6 @@ import {
     type PrefixTrimStatus,
     type PreparedCompartmentInjection,
     prepareCachedM0M1Replay,
-    currentRegionMarkersForPromotion,
     regionMarkersFromSnapshot,
     renderCompartmentInjection,
     snapshotMarkersFromCachedM0,
