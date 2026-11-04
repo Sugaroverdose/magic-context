@@ -82,8 +82,65 @@ describe("system-region L0: per-actor producer census", () => {
         const mmEndRel = text.slice(mmStart + 1).search(/^export (async )?function/m);
         return text.slice(mmStart, mmStart + 1 + mmEndRel);
     }
-    function collectReasons(piTextOverride?: string): Set<string> {
+    function collectReasons(
+        piTextOverride?: string,
+        zoneTextOverride?: ReadonlyMap<string, string>,
+    ): Set<string> {
         const codeReasons = new Set<string>();
+        // H2 shared value classifier — one implementation for every reason
+        // position (fold-body `reason:`, Pi mint first args, call-site
+        // systemRegion windows). Recognized forms contribute their stems;
+        // anything unrecognized THROWS (deny-by-default, mirroring the
+        // unmapped-variable law already enforced on the mint surface).
+        // Bare identifiers are reviewed through the position's explicit map;
+        // decision-table sources (`obj.reason` members, `*Reason` locals not
+        // in call position) skip — their vocabulary is censused where it is
+        // minted. A call wrapper (`buildReason("x")`) is never a source form
+        // and never skips.
+        function classifyReasonValue(
+            raw: string,
+            where: string,
+            varMap: Record<string, string>,
+        ): void {
+            const v = raw.trim();
+            if (/^"[a-z_]*"[\s,;)}]*$/.test(v)) {
+                const lit = v.replace(/^"/, "").replace(/["\s,;)}]+$/, "");
+                if (lit) codeReasons.add(lit);
+                return;
+            }
+            if (/^`/.test(v)) {
+                expect(
+                    /^`[a-z_]+(?::|[(:])/.test(v),
+                    `${where}: reason template ${JSON.stringify(v)} has no doc-listed stem shape (deny-by-default, H2)`,
+                ).toBe(true);
+                codeReasons.add(v.slice(1).match(/^[a-z_]+/)![0]);
+                return;
+            }
+            if (/^(null|undefined|true|false)\b/.test(v)) return;
+            for (const lit of v.matchAll(/"([a-z_]+)"/g)) codeReasons.add(lit[1]);
+            const withoutLits = v.replace(/"[^"]*"/g, " ");
+            const reasonSourced = new Set(
+                [...withoutLits.matchAll(/([A-Za-z_$][A-Za-z0-9_$]*)\s*\.\s*reason\b/g)].map(
+                    (m) => m[1],
+                ),
+            );
+            for (const h of withoutLits.matchAll(/(^|[^.\w$])([A-Za-z_$][A-Za-z0-9_$]*)(\s*(?:\(|\.))?/g)) {
+                const name = h[2];
+                if (!name) continue;
+                if (/^(typeof|new|in|of|return|const|let|var|function)$/.test(name)) continue;
+                if (varMap[name]) {
+                    codeReasons.add(varMap[name]);
+                    continue;
+                }
+                const isCall = /\(/.test(h[3] ?? "");
+                if (!isCall && name.endsWith("Reason")) continue; // decision-sourced local
+                if (!isCall && reasonSourced.has(name)) continue; // decisions-table object
+                expect(
+                    undefined,
+                    `${where}: reason value ${JSON.stringify(v)} carries unmapped identifier ${name} (deny-by-default, H2)`,
+                ).toBeDefined();
+            }
+        }
         const storeText = readFileSync(join(SRC_ROOT, STORE), "utf8");
         for (const m of storeText.matchAll(/\[\s*"[a-zA-Z]+",\s*"([a-z_]+)"\s*\]/g))
             codeReasons.add(m[1]);
@@ -96,55 +153,38 @@ describe("system-region L0: per-actor producer census", () => {
             const body = text.slice(mmStart, mmStart + 1 + mmEndRel);
             for (const m of body.matchAll(/reason:\s*"([a-z_]+)"/g)) codeReasons.add(m[1]);
             if (opts.mismatchMints) {
-                // Pi mint vocabulary: literal first arg…
-                for (const m of body.matchAll(/piMaterializeMismatch\(\s*"([a-z_]+)"/g))
-                    codeReasons.add(m[1]);
-                // …template-composite first arg, stem before `:` or `(`
-                // (G2-i: `render_config:mural(…)` at inject-compartments-pi
-                // .ts:1296 was only bridged via the TS arm before this).
-                for (const m of body.matchAll(/piMaterializeMismatch\(\s*`([a-z_]+)(?::|[(:])/g))
-                    codeReasons.add(m[1]);
-                // …variable first arg: same unmapped-variable law as the
-                // reason: surface (G2-ii) — an unmapped identifier throws,
-                // it can never contribute nothing. The one live variable
-                // mint is budgetShrinkReason (inject-compartments-pi.ts:
-                // 1322), minted by renderedBudgetShrinkReason
-                // (compartment-render-epoch.ts:155-156) as
-                // `render_config:budget_shrink(…)` — reviewed, stem
-                // render_config.
+                // Pi mint vocabulary (G2 → H2): every piMaterializeMismatch
+                // first arg through the shared deny-by-default classifier.
+                // The one live variable mint is budgetShrinkReason
+                // (inject-compartments-pi.ts:1322), minted by
+                // renderedBudgetShrinkReason (compartment-render-epoch.ts:
+                // 155-156) as `render_config:budget_shrink(…)` — reviewed,
+                // stem render_config.
                 const VARIABLE_MISMATCH_REASONS: Record<string, string> = {
                     budgetShrinkReason: "render_config",
                 };
-                for (const m of body.matchAll(
-                    /piMaterializeMismatch\(\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*[,)(]/g,
-                )) {
-                    if (["null", "undefined", "true", "false"].includes(m[1])) continue;
-                    const stem = VARIABLE_MISMATCH_REASONS[m[1]];
-                    expect(
-                        stem,
-                        `variable-passed piMaterializeMismatch first arg ${m[1]} is not mapped`,
-                    ).toBeDefined();
-                    codeReasons.add(stem);
+                for (const m of body.matchAll(/piMaterializeMismatch\(\s*([^\n]{1,120})/g)) {
+                    classifyReasonValue(m[1], `${marker} mint`, VARIABLE_MISMATCH_REASONS);
                 }
             }
             // G5 blind classes:
             // (1) template-literal composite reasons match on the STEM
             //     before `:` or `(` (render_config:budget(...));
             for (const m of body.matchAll(/reason:\s*`([a-z_]+)(?::|[(:])/g)) codeReasons.add(m[1]);
-            // (2) variable-passed reasons: captured by name and resolved
-            //     through this explicit map — the producer's own return
-            //     literals are not regex-guaranteed reachable, so an
-            //     unmapped variable name fails the census and the mapping
-            //     is reviewed by hand (excluded with reason, the
-            //     cached_m1_missing discipline).
+            // (2) variable-passed and composite reasons: DENY-BY-DEFAULT
+            //     (H2) over every value form — the pre-H2 arm terminated at
+            //     [,}] and silently contributed nothing for `reason:
+            //     buildReason("x")` (call wrapper) or `reason: flag ? "a" :
+            //     "b"` (ternary). Unrecognized shapes throw, mirroring the
+            //     mint arm. Reviewed variables resolve through this explicit
+            //     map (the producer's own return literals are not
+            //     regex-guaranteed reachable — the cached_m1_missing
+            //     discipline).
             const VARIABLE_REASONS: Record<string, string> = {
                 budgetShrinkReason: "render_config",
             };
-            for (const m of body.matchAll(/reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/g)) {
-                if (["null", "undefined", "true", "false"].includes(m[1])) continue;
-                const stem = VARIABLE_REASONS[m[1]];
-                expect(stem, `variable-passed reason ${m[1]} is not mapped`).toBeDefined();
-                codeReasons.add(stem);
+            for (const m of body.matchAll(/reason:\s*([^\n]{1,120})/g)) {
+                classifyReasonValue(m[1], `${marker} body`, VARIABLE_REASONS);
             }
         };
         scanFoldBody(
@@ -160,15 +200,21 @@ describe("system-region L0: per-actor producer census", () => {
         // Head-lane-only fold reasons: region mode guards around them
         // (`&& !regionMode`, both lanes).
         codeReasons.delete("cached_m1_missing");
-        // Call-site fold-lane defaults: reason literals inside the
-        // systemRegion option object passed to the fold.
-        for (const { full } of ALL_ZONE_FILES) {
-            const text = readFileSync(full, "utf8");
+        // Call-site fold-lane defaults: the systemRegion option object
+        // passed to the fold, every value form through the shared
+        // deny-by-default classifier (H2: the pre-H2 window regex required a
+        // quoted string; a bare-identifier relay was invisible anywhere).
+        // Reviewed map is empty: live call sites pass literals, `""`
+        // (no-forcing), and decision-sourced expressions only.
+        const SYSTEMREGION_VARIABLE_REASONS: Record<string, string> = {};
+        for (const { rel, full } of ALL_ZONE_FILES) {
+            const text = zoneTextOverride?.get(rel) ?? readFileSync(full, "utf8");
             if (!/systemRegion/.test(text)) continue;
             for (const m of text.matchAll(
-                /systemRegion:[\s\S]{0,400}?reason[\s:\S]{0,120}?"([a-z_]+)"/g,
-            ))
-                codeReasons.add(m[1]);
+                /systemRegion:[\s\S]{0,400}?reason\s*:\s*([^\n]{1,120})/g,
+            )) {
+                classifyReasonValue(m[1], `systemRegion window in ${rel}`, SYSTEMREGION_VARIABLE_REASONS);
+            }
         }
         return codeReasons;
     }
@@ -566,6 +612,59 @@ describe("system-region L0: per-actor producer census", () => {
         expect(planted).not.toBe(piText);
         expect(() => collectReasons(planted)).toThrow(/unmapped_pi_mint_var/);
         // Steady live text has no variable mints → collector stays quiet.
+        expect(() => collectReasons()).not.toThrow();
+    });
+
+    // H2: the reason-value parser was ALLOW-BY-DEFAULT — unrecognized value
+    // forms simply contributed nothing (the arms terminated at literal,
+    // template stem, and identifier-then-[,}]). Three plant classes prove
+    // the deny-by-default classifier closes them; each also asserts the
+    // PRE-H2 arm was blind to the plant, so the control attacks the closed
+    // class, not a coincidence.
+    const H2_ANCHOR = "const hard = state.hardSignals ?? EMPTY_PI_HARD_SIGNALS;";
+    function piWith(code: string): string {
+        const piText = readFileSync(PI_FOLD_FILE, "utf8");
+        const planted = piText.replace(H2_ANCHOR, `${code}\n\t${H2_ANCHOR}`);
+        expect(planted).not.toBe(piText);
+        return planted;
+    }
+
+    it("control: a call-wrapper reason denies (H2)", () => {
+        const planted = piWith('if (p) return { value: true, reason: wrapReason("hard_fold") };');
+        expect(() => collectReasons(planted)).toThrow(/wrapReason/);
+        // Pre-H2 blindness: the variable arm terminated at [,}], so a
+        // paren-followed identifier matched nothing.
+        expect(/reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/.test('reason: wrapReason("hard_fold")')).toBe(
+            false,
+        );
+    });
+
+    it("control: a ternary reason denies (H2)", () => {
+        const planted = piWith(
+            'if (p) return { value: true, reason: plantedFlag ? "hard_fold" : "hard_fold" };',
+        );
+        expect(() => collectReasons(planted)).toThrow(/plantedFlag/);
+        expect(/reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/.test('reason: plantedFlag ? "a" : "b"')).toBe(
+            false,
+        );
+    });
+
+    it("control: a bare-identifier relay in a systemRegion window denies (H2)", () => {
+        const rel = "hooks/magic-context/transform-postprocess-phase.ts";
+        const zone = ALL_ZONE_FILES.find((f) => f.rel === rel);
+        expect(zone).toBeDefined();
+        const text = readFileSync(zone!.full, "utf8");
+        const planted = `${text}\nconst planted_fold = injectM0M1({ systemRegion: { enabled: true, reason: plantedRelayVar } });\n`;
+        expect(() => collectReasons(undefined, new Map([[rel, planted]]))).toThrow(
+            /plantedRelayVar/,
+        );
+        // Pre-H2 blindness: the window regex demanded a quoted string.
+        expect(
+            /systemRegion:[\s\S]{0,400}?reason[\s:\S]{0,120}?"([a-z_]+)"/.test(
+                "{ systemRegion: { enabled: true, reason: plantedRelayVar } }",
+            ),
+        ).toBe(false);
+        // Steady: live call sites classify clean.
         expect(() => collectReasons()).not.toThrow();
     });
 });
