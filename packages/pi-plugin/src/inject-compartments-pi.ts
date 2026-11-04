@@ -686,7 +686,12 @@ export function piRegionRotationPromotion(input: {
 		input.db,
 		input.state,
 		compartments,
-		meta.cachedM0ProjectDocsHash ?? undefined,
+		// Storm mirror (§25, Fix A): the current side must be the LIVE
+		// canonical docs hash (the undefined fallback reads
+		// readProjectDocsForPiM0). Passing meta.cachedM0ProjectDocsHash
+		// here made current==captured and deadened the
+		// project_docs_hash trigger forever.
+		undefined,
 	);
 	const decision = decideSystemRegionRotation({
 		storedRegion,

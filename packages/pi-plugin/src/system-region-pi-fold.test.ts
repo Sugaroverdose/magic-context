@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
@@ -379,6 +381,111 @@ describe("Pi region lane: rotation promotion is ride-only (D7, L3/L4 mirror)", (
 		} finally {
 			closeQuietly(db);
 		}
+	});
+});
+
+// Storm comparator convergence, Pi mirror (§25, Fix A). The Pi promotion
+// wrapper fed readCurrentMarkersFromCompartments meta.cachedM0ProjectDocsHash
+// — the PERSISTED value — on the current side, so captured and current were
+// equal by construction and the project_docs_hash trigger could never fire:
+// a docs edit changed the panel only whenever some other trigger happened
+// to rotate. The TS storm was the same comparator defect in the other
+// direction (placeholder "" current side → rotate forever). Both sides of
+// the pair must be what production reads: captured = persisted, current =
+// live canonical hash, composed by the wrapper itself.
+describe("Pi region lane: promotion comparator convergence (storm, Fix A mirror)", () => {
+	function installedWithDocs(dir: string, sid: string) {
+		writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\npanel doc v1.\n");
+		writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nmap v1.\n");
+		const db = createTestDb();
+		const state = piState(sid, dir);
+		seedStore(db, state);
+		materializeM0Pi(state, db, undefined, { enabled: true, reason: "region_first_install" });
+		return { db, state };
+	}
+
+	it("a docs edit promotes the boundary pass (live current side)", () => {
+		const dir = createTestTempDirFromPath("/tmp/pi-region-docs-edit-");
+		const { db, state } = installedWithDocs(dir, "ses-pi-region-docs-edit");
+		try {
+			// Captured side carries the REAL persisted hash (not the
+			// head-lane placeholder) — the precondition the TS storm
+			// violated.
+			const meta = getOrCreateSessionMeta(db, state.sessionId);
+			expect(meta.cachedM0ProjectDocsHash).toBeTruthy();
+			writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\npanel doc v2.\n");
+			const snapshot = createPiM0M1PassSnapshot({
+				db,
+				sessionId: state.sessionId,
+				compactionOff: false,
+			});
+			expect(
+				piRegionRotationPromotion({
+					state,
+					db,
+					passSnapshot: snapshot,
+					systemRegionLane: true,
+					foldDue: false,
+					boundaryPermission: true,
+					forceBand: false,
+				}),
+			).toEqual({ promote: true, reason: "project_docs_hash" });
+			// Ride-only still holds without the boundary.
+			expect(
+				piRegionRotationPromotion({
+					state,
+					db,
+					passSnapshot: snapshot,
+					systemRegionLane: true,
+					foldDue: false,
+					boundaryPermission: false,
+					forceBand: false,
+				}),
+			).toEqual({ promote: false, reason: null });
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("unchanged docs on a warm boundary never promotes (convergence)", () => {
+		const dir = createTestTempDirFromPath("/tmp/pi-region-docs-warm-");
+		const { db, state } = installedWithDocs(dir, "ses-pi-region-docs-warm");
+		try {
+			const snapshot = createPiM0M1PassSnapshot({
+				db,
+				sessionId: state.sessionId,
+				compactionOff: false,
+			});
+			expect(
+				piRegionRotationPromotion({
+					state,
+					db,
+					passSnapshot: snapshot,
+					systemRegionLane: true,
+					foldDue: false,
+					boundaryPermission: true,
+					forceBand: false,
+				}),
+			).toEqual({ promote: false, reason: null });
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("anti-vacuity: the wrapper composes the current side from the live reader, never the persisted hash", () => {
+		// Property over patch: the Pi promotion wrapper must not pass the
+		// persisted docs hash into the current-side reader (that was the
+		// dead-trigger wiring); the live canonical read is the only
+		// sanctioned source, reached via the undefined-parameter fallback.
+		const text = readFileSync(
+			join(import.meta.dir, "inject-compartments-pi.ts"),
+			"utf8",
+		);
+		expect(
+			/readCurrentMarkersFromCompartments\(\s*[\s\S]{0,200}?meta\.cachedM0ProjectDocsHash\s*\?\?\s*undefined\s*,?\s*\)/.test(
+				text,
+			),
+		).toBe(false);
 	});
 });
 
