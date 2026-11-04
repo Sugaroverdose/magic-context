@@ -6,27 +6,65 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 
 const SRC = import.meta.dir;
 
-function walk(dir: string): Array<{ rel: string; full: string }> {
+// H3 (round 3): the Pi census joins the SHARED zone set (#2665) — the same
+// production surface the OpenCode-1 eraser census walks, Pi side: src plus
+// the pi-plugin runtime scripts tree (benchmarks, probes, generators —
+// writable code that can open context.db). Walking only src/ left the
+// scripts zone census-invisible; membership is asserted, not assumed: both
+// canonical zones must be present on disk and carry production files, or
+// the law fails naming the zone (G3 form).
+const PI_CENSUS_ZONES: ReadonlyArray<{ dir: string; prefix: string }> = [
+	{ dir: SRC, prefix: "" },
+	{ dir: join(SRC, "..", "scripts"), prefix: "scripts/" },
+];
+
+function walk(root: string, prefix: string, dir = root): Array<{ rel: string; full: string }> {
 	const out: Array<{ rel: string; full: string }> = [];
 	for (const entry of readdirSync(dir)) {
 		const full = join(dir, entry);
-		if (statSync(full).isDirectory()) out.push(...walk(full));
+		if (statSync(full).isDirectory()) out.push(...walk(root, prefix, full));
 		else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts"))
-			out.push({ rel: full.slice(SRC.length + 1), full });
+			out.push({ rel: prefix + relative(root, full), full });
 	}
 	return out;
 }
 
-describe("pi region contract: named-member census (stage P / P2)", () => {
-	it("every production file reading cached_m0_bytes is a named member", () => {
-		// Stage P2 (design §23): Pi is a serving lane. Readers of the shared
-		// column (either spelling) must be exactly the discriminated set; a
-		// new un-named reader fails here until its discrimination is reviewed.
-		const ALLOWED: ReadonlyMap<string, string> = new Map([
+function walkPiCensusZones(
+	zones: ReadonlyArray<{ dir: string; prefix: string }> = PI_CENSUS_ZONES,
+): Array<{ rel: string; full: string }> {
+	const out: Array<{ rel: string; full: string }> = [];
+	const issues: string[] = [];
+	// Canonical membership (G3 lesson): a zone dropped from the passed list
+	// must redden by NAME, not silently shrink the census.
+	for (const canonical of PI_CENSUS_ZONES) {
+		if (!zones.some((z) => z.prefix === canonical.prefix))
+			issues.push(`zone absent from roots: ${canonical.prefix || "src/"}`);
+	}
+	for (const zone of zones) {
+		if (!statSync(zone.dir, { throwIfNoEntry: false })?.isDirectory()) {
+			issues.push(`zone absent: ${zone.prefix || "src/"}`);
+			continue;
+		}
+		const files = walk(zone.dir, zone.prefix);
+		if (files.length === 0)
+			issues.push(`zone walked 0 production files: ${zone.prefix || "src/"}`);
+		out.push(...files);
+	}
+	expect(issues, "pi census zone floors").toEqual([]);
+	return out;
+}
+
+
+// Stage P2 (design §23): Pi is a serving lane. Readers of the shared
+// column (either spelling) must be exactly the discriminated set; a new
+// un-named reader fails here until its discrimination is reviewed. H3
+// (round 3): the scan covers the SHARED Pi zone set (#2665) — src plus the
+// runtime scripts tree — not src alone.
+const ALLOWED_READERS: ReadonlyMap<string, string> = new Map([
 			[
 				"context-handler.ts",
 				"comparison/coverage operands only: firstRenderBust region-aware shape check (isSystemRegionBytes, §23 D7), m0 coverage guard (null → -1), foldBustsServedPrefix before/after fold-byte comparison, and the compaction-transition in-memory baseline invalidation (nulls the local sessionMeta copy, not the DB); the handler never decodes column bytes as text and never persists them — all writes route through the fold lane",
@@ -43,15 +81,22 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 				"system-prompt.ts",
 				"serve path: appends the funnel-decoded region after the host bytes in the watched system channel; hash covers host bytes only (§23 D2/D3); corrupt rows declined by name",
 			],
-		]);
-		const offenders: string[] = [];
-		for (const { rel, full } of walk(SRC)) {
-			const text = readFileSync(full, "utf8");
-			if (!text.includes("cached_m0_bytes") && !text.includes("cachedM0Bytes"))
-				continue;
-			if (!ALLOWED.has(rel)) offenders.push(rel);
-		}
-		expect(offenders).toEqual([]);
+	]);
+
+function censusReaderOffenders(): string[] {
+	const offenders: string[] = [];
+	for (const { rel, full } of walkPiCensusZones()) {
+		const text = readFileSync(full, "utf8");
+		if (!text.includes("cached_m0_bytes") && !text.includes("cachedM0Bytes"))
+			continue;
+		if (!ALLOWED_READERS.has(rel)) offenders.push(rel);
+	}
+	return offenders;
+}
+
+describe("pi region contract: named-member census (stage P / P2)", () => {
+	it("every production file reading cached_m0_bytes is a named member", () => {
+		expect(censusReaderOffenders()).toEqual([]);
 	});
 
 	// Stage P2 (design §23 D4): rotation is the boundary transaction (L0
@@ -73,7 +118,7 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 	];
 	function censusWriteOffenders(): string[] {
 		const offenders: string[] = [];
-		for (const { rel, full } of walk(SRC)) {
+		for (const { rel, full } of walkPiCensusZones()) {
 			const text = readFileSync(full, "utf8");
 			for (const token of FORBIDDEN) {
 				if (text.includes(token)) offenders.push(`${rel}: ${token}`);
@@ -100,7 +145,7 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 	// its file and lands on this list.
 	function isSystemRegionLaneHolders(): string[] {
 		const holders: string[] = [];
-		for (const { rel, full } of walk(SRC)) {
+		for (const { rel, full } of walkPiCensusZones()) {
 			if (/\bisSystemRegionLane\b/.test(readFileSync(full, "utf8")))
 				holders.push(rel);
 		}
@@ -168,7 +213,49 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 			rmSync(rogueRotation, { force: true });
 			rmSync(rogueWriter, { force: true });
 		}
-		// Removed plants must not leave residue reddening the steady law.
+	// Removed plants must not leave residue reddening the steady law.
+	expect(censusWriteOffenders()).toEqual([]);
+	});
+
+	it("control: scripts-zone plants redden the census; a dropped zone fails the floor by name (H3)", () => {
+		// The pre-H3 census walked src/ only: a cached_m0_bytes reader or a
+		// raw region writer in the runtime scripts tree — production code
+		// that can open context.db (#2665) — stayed invisible. Plants live
+		// OUTSIDE src/, so they also demonstrate the old walk's blindness.
+		const scriptsDir = join(SRC, "..", "scripts");
+		const rogueReader = join(scriptsDir, "__census-rogue-reader.ts");
+		const rogueWriter = join(scriptsDir, "__census-rogue-writer.ts");
+		expect(rogueReader.startsWith(join(SRC, "subdir")) || rogueReader.startsWith(SRC + "/")).toBe(
+			false,
+		);
+		writeFileSync(
+			rogueReader,
+			'export const f = (db: { prepare: (q: string) => unknown }, s: string) => db.prepare("SELECT cached_m0_bytes FROM session_meta WHERE session_id = ?").get(s);\n',
+		);
+		writeFileSync(
+			rogueWriter,
+			'import { writeSystemRegion } from "@magic-context/core/features/magic-context/system-region";\nexport const g = writeSystemRegion;\n',
+		);
+		try {
+			expect(
+				censusReaderOffenders().some(
+					(o) => o.startsWith("scripts/") && o.includes("__census-rogue-reader"),
+				),
+			).toBe(true);
+			expect(
+				censusWriteOffenders().some(
+					(o) => o.startsWith("scripts/") && o.includes("__census-rogue-writer"),
+				),
+			).toBe(true);
+		} finally {
+			rmSync(rogueReader, { force: true });
+			rmSync(rogueWriter, { force: true });
+		}
+		// Removal regreens both censuses.
+		expect(censusReaderOffenders()).toEqual([]);
 		expect(censusWriteOffenders()).toEqual([]);
+		// Zone floor: dropping scripts from the walked roots must redden by
+		// NAME against the canonical set, not silently shrink coverage.
+		expect(() => walkPiCensusZones([PI_CENSUS_ZONES[0]])).toThrow(/scripts\//);
 	});
 });
