@@ -52,9 +52,40 @@ const REGION_VOCABULARY = [
     "readSystemRegion",
 ];
 
-function rustRefusalOffenders(): string[] {
+// G3 (round 2): the enumeration + existsSync filter above can silently
+// zero a zone (a renamed/removed crate src just vanishes from the walk and
+// every law still sees "no offenders"). The census therefore declares its
+// canonical zone set and the zone-floor law asserts every member is
+// present, in the walk roots, and yields production files — a missing zone
+// fails with its name, not with a green empty scan.
+const CANONICAL_RUST_ZONES = ["mc-core/src", "mc-module/src", "mc-store/src", "mc-tokenizer/src"];
+
+function rustZoneScan(
+    roots: string[] = RUST_PROD_ROOTS,
+    exists: (p: string) => boolean = existsSync,
+) {
+    const issues: string[] = [];
+    const counts: Array<{ zone: string; files: number }> = [];
+    for (const zone of CANONICAL_RUST_ZONES) {
+        const dir = join(CRATES, zone);
+        if (!roots.includes(dir)) {
+            issues.push(`zone ${zone}: absent from the walk roots`);
+            continue;
+        }
+        if (!exists(dir)) {
+            issues.push(`zone ${zone}: directory missing on disk`);
+            continue;
+        }
+        const files = walkRs(dir).length;
+        if (files === 0) issues.push(`zone ${zone}: walked 0 production files`);
+        counts.push({ zone, files });
+    }
+    return { issues, counts };
+}
+
+function rustRefusalOffenders(roots: string[] = RUST_PROD_ROOTS): string[] {
     const offenders: string[] = [];
-    for (const { rel, full } of RUST_PROD_ROOTS.flatMap(walkRs)) {
+    for (const { rel, full } of roots.flatMap(walkRs)) {
         const text = readFileSync(full, "utf8");
         if (text.includes("cached_m0_bytes") && rel !== "mc-module/src/single_store_repair.rs") {
             // The adjudicated reset list is the ONE named member (L0 audit,
@@ -70,6 +101,39 @@ function rustRefusalOffenders(): string[] {
 }
 
 describe("Rust lane serve+refusal parity (stage R2, §24)", () => {
+    it("every canonical crate zone is present, walked, and non-empty (G3)", () => {
+        // Silent-zeroing defense: the existsSync-filtered enumeration can
+        // drop a whole crate from the walk while every law stays green. The
+        // floor names the zone and records the walked count per zone.
+        const { issues, counts } = rustZoneScan();
+        expect(counts.map((c) => `${c.zone}=${c.files}`).join(", ")).not.toBe("");
+        expect(issues).toEqual([]);
+    });
+
+    it("control: a mutated root list that drops a zone reddens the floor with the zone named (G3)", () => {
+        // In-memory mutation only — no production tree is renamed or moved.
+        const mutated = RUST_PROD_ROOTS.filter((r) => !r.endsWith(join("mc-store", "src")));
+        const { issues } = rustZoneScan(mutated);
+        expect(issues.some((i) => i.includes("mc-store/src") && i.includes("absent"))).toBe(true);
+        // A zone present in roots but missing on disk is named too —
+        // in-memory disk-view mutation (no production tree is touched).
+        const blind = rustZoneScan(
+            RUST_PROD_ROOTS,
+            (p) => !p.endsWith(join("mc-tokenizer", "src")),
+        );
+        expect(
+            blind.issues.some(
+                (i) => i.includes("mc-tokenizer/src") && i.includes("missing on disk"),
+            ),
+        ).toBe(true);
+        const ghost = [...RUST_PROD_ROOTS, join(CRATES, "mc-nope", "src")];
+        expect(rustZoneScan(ghost).issues).toEqual([]); // non-canonical extra root is inert
+        const missing = [...RUST_PROD_ROOTS];
+        missing[0] = join(CRATES, "mc-core", "src-renamed-away");
+        // mc-core/src no longer in roots → floor names it.
+        expect(rustZoneScan(missing).issues.some((i) => i.includes("mc-core/src"))).toBe(true);
+    });
+
     it("the module never reads the region column and carries no region vocabulary", () => {
         expect(rustRefusalOffenders()).toEqual([]);
     });

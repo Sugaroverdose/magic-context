@@ -298,6 +298,13 @@ its own mismatch vocabulary for three arms whose TS spellings differ
 reader-decode arm `cache_invalid` (Pi's head-decode guard; the TS lane has
 no such arm); Stage P2 extended the law to parse `mustMaterializePi` and
 its `piMaterializeMismatch` mint sites so a Pi-only rename reddens here.
+Pi's mismatch mints reach the census through all three first-argument
+forms — literal, template-composite (`render_config:mural(…)` at
+`inject-compartments-pi.ts:1296`; its stem `render_config` was carried by
+the TS arm before the G2 stem-arm extension, and is parser-visible on the
+Pi side directly since), and variable (`budgetShrinkReason` at :1322,
+reviewed-mapped to the `render_config` stem — an unmapped variable mint
+throws).
 
 ```rotation-reasons
 hard_fold
@@ -1404,3 +1411,30 @@ enablement? Read sites, in order:
 emitting head items, `injection.rs` mirrors `mustMaterialize`, region bytes
 ride state sync — stays [inferred] plan-level until subc enablement; its
 station arms owe red tests against the hermetic subc harness first.
+
+**Round-2 census residuals (review G1–G3).** The enforced properties,
+stated so future closures check the property, not the list (#2673):
+
+- **P-holder.** Every call-site-count law is a bare-identifier HOLDER
+  census — (callers ∪ identifier-holders outside the definition file)
+  compared against a blessed named set with per-member roles. A
+  call-with-paren regex is blind to `import { f as g }; g(…)` and
+  `const g = f; g(…)`, and downstream raw-write censuses cannot backstop
+  aliases (an aliased call still routes through the sanctioned UPDATE), so
+  identifier presence is the only closable shape. Applied to: the
+  persistCachedM0/dispatcher censuses (system-region-clear.test.ts) and
+  the Pi boot-once law (system-region-pi-census.test.ts).
+- **P-parser.** The rotation-reason fence census shares ONE parser
+  (`collectReasons`) between the law and every control, and reads
+  `piMaterializeMismatch` first args in all three forms: string literal,
+  template stem (before `:`/`(`/`.`), and bare identifier resolved through
+  an explicit map — an unmapped variable mint throws, never contributes
+  nothing. The live Pi mints are covered on the Pi side directly (mural
+  template :1296, budgetShrinkReason :1322 → `render_config`).
+- **P-floor.** Every enumeration/exists-filtered walk declares its
+  canonical zones and asserts, per zone: present in the walk roots,
+  present on disk, > 0 production files walked (count recorded in the
+  failure surface) — failing with the zone NAMED. An empty scan over a
+  dropped zone is never green. Applied to: `crates/*` (rust-parity) and
+  the eraser census's TS_ROOTS + Rust/dashboard roots
+  (system-region-clear.test.ts).

@@ -197,6 +197,86 @@ const ALLOWED_RUST: ReadonlyMap<string, string> = new Map([
     ],
 ]);
 
+// G3 (round 2): silent-zeroing defense for the eraser census. The walk
+// loops `continue` on a missing/renamed root, so a dropped zone would
+// otherwise shrink coverage while every law stays green. The canonical
+// zone sets are declared here, shared by the census law and the floor law,
+// and the floor asserts each root is present and yields production files.
+const ERASER_RUST_ROOTS: Array<{ root: string; allowed: ReadonlyMap<string, string> }> = [
+    { root: join(SRC_ROOT, "..", "..", "..", "crates"), allowed: ALLOWED_RUST },
+    {
+        root: join(SRC_ROOT, "..", "..", "dashboard", "src-tauri", "src"),
+        allowed: ALLOWED_RUST,
+    },
+];
+
+function collectRsFiles(dir: string, out: string[]): void {
+    for (const entry of readdirSync(dir)) {
+        const full = join(dir, entry);
+        if (statSync(full).isDirectory()) {
+            if (entry !== "target") collectRsFiles(full, out);
+            continue;
+        }
+        if (entry.endsWith(".rs") && !entry.endsWith("_tests.rs")) out.push(full);
+    }
+}
+
+function eraserZoneScan(
+    tsRoots: ReadonlyArray<{ dir: string; prefix: string }> = TS_ROOTS,
+    rustRoots: Array<{ root: string }> = ERASER_RUST_ROOTS,
+) {
+    // Canonical membership is checked against the DECLARED zones, never the
+    // passed list — dropping a zone from the scan must be visible, which is
+    // the entire point of the floor.
+    const issues: string[] = [];
+    const counts: Array<{ zone: string; files: number }> = [];
+    for (const canonical of TS_ROOTS) {
+        const zone = canonical.prefix || "plugin/src";
+        const entry = tsRoots.find((r) => r.prefix === canonical.prefix);
+        if (!entry) {
+            issues.push(`zone ${zone}: absent from the walk roots`);
+            continue;
+        }
+        let isDir = false;
+        try {
+            isDir = statSync(entry.dir).isDirectory();
+        } catch {
+            isDir = false;
+        }
+        if (!isDir) {
+            issues.push(`zone ${zone}: directory missing`);
+            continue;
+        }
+        const out: string[] = [];
+        collectTsFiles(entry.dir, out);
+        if (out.length === 0) issues.push(`zone ${zone}: walked 0 production files`);
+        counts.push({ zone, files: out.length });
+    }
+    for (const canonical of ERASER_RUST_ROOTS) {
+        const zone = `rust:${relative(SRC_ROOT, canonical.root)}`;
+        const entry = rustRoots.find((r) => r.root === canonical.root);
+        if (!entry) {
+            issues.push(`zone ${zone}: absent from the walk roots`);
+            continue;
+        }
+        let isDir = false;
+        try {
+            isDir = statSync(entry.root).isDirectory();
+        } catch {
+            isDir = false;
+        }
+        if (!isDir) {
+            issues.push(`zone ${zone}: directory missing`);
+            continue;
+        }
+        const out: string[] = [];
+        collectRsFiles(entry.root, out);
+        if (out.length === 0) issues.push(`zone ${zone}: walked 0 production files`);
+        counts.push({ zone, files: out.length });
+    }
+    return { issues, counts };
+}
+
 /** Deny-shape checks per dynamic-SET exemption. Returns a violation string or null. */
 function subLawViolation(rel: string, text: string): string | null {
     const namesRegion = /cached_m0_bytes/.test(text);
@@ -357,14 +437,9 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         // column-literal writers are inventoried too, with named exemptions.
         // (A1: the census must not be silently narrower than the "production
         // tree" claim — every producer able to raw-null the column, in any
-        // language that touches the DB, appears here or offends.)
-        const RUST_ROOTS: Array<{ root: string; allowed: ReadonlyMap<string, string> }> = [
-            { root: join(SRC_ROOT, "..", "..", "..", "crates"), allowed: ALLOWED_RUST },
-            {
-                root: join(SRC_ROOT, "..", "..", "dashboard", "src-tauri", "src"),
-                allowed: ALLOWED_RUST,
-            },
-        ];
+        // language that touches the DB, appears here or offends. Zone
+        // presence/count floors are a dedicated law, G3.)
+        const RUST_ROOTS = ERASER_RUST_ROOTS;
         for (const { root, allowed } of RUST_ROOTS) {
             if (!statSync(root).isDirectory()) continue;
             const walkRs = (dir: string) => {
@@ -417,6 +492,81 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         expect(offenders).toEqual([]);
     });
 
+    // G1 (round 2) closes the alias/rebind blind class for the call-site
+    // counts by PROPERTY, not by enumerating call shapes (#2673): a
+    // call-with-paren regex is blind to `import { persistCachedM0 as p };
+    // p(…)` and `const p = persistCachedM0; p(…)`, and the raw-write census
+    // cannot backstop it — the aliased call still lands in the sanctioned
+    // funnel UPDATE, so nothing downstream reddens. The census is therefore
+    // (callers ∪ bare-identifier-holders) compared against a blessed set:
+    // ANY occurrence of the identifier outside its definition file must
+    // name its holder file, whatever the syntax.
+    const DEFINITION_PERSIST = "features/magic-context/storage-meta-shared.ts";
+    const BLESSED_PERSIST_HOLDERS: ReadonlyMap<string, string> = new Map([
+        [
+            "hooks/magic-context/inject-compartments.ts",
+            "fold lane caller (OpenCode-1 materializeM0, §23 D4 first named caller)",
+        ],
+        [
+            "pi/inject-compartments-pi.ts",
+            "fold lane caller (Pi materializeM0Pi, §23 D4 second named caller)",
+        ],
+        [
+            "features/magic-context/storage.ts",
+            "barrel re-export list entry (no call site, no local binding)",
+        ],
+        [
+            "features/magic-context/storage-meta.ts",
+            "barrel re-export list entry (no call site, no local binding)",
+        ],
+    ]);
+    // Dispatcher-abuse surface: files carrying BOTH the dispatcher
+    // identifier (any form) and a column-bytes write shape (object key or
+    // member assignment). Each holder is adjudicated here with its role; a
+    // new holder must be blessed or reddens.
+    const BLESSED_DISPATCHER_HOLDERS: ReadonlyMap<string, string> = new Map([
+        [
+            "hooks/magic-context/transform-postprocess-phase.ts",
+            "comparison operands only (null-gate + fold-bust m0Bytes pairing, lines ~1975-2012); never writes cachedM0Bytes",
+        ],
+        [
+            "hooks/magic-context/transform.ts",
+            "pass-local sessionMeta invalidation on a baseline-transition (in-memory object-key null, transform.ts:893); the DB row is erased by the funnel, not here",
+        ],
+        [
+            "pi/context-handler.ts",
+            "comparison/coverage operands (firstRenderBust shape, coverage guard, fold-bust before/after) + in-memory baseline invalidation (context-handler.ts:2788); never decodes or persists column bytes (§23 Pi census twin)",
+        ],
+    ]);
+    function scanPersistCensuses(extraRoots: Array<{ dir: string; prefix: string }> = []) {
+        const persistHolders: string[] = [];
+        const persistCallers: string[] = [];
+        const dispatcherHolders: string[] = [];
+        const dispatcherAbusers: string[] = [];
+        for (const { dir, prefix } of [...TS_ROOTS, ...extraRoots]) {
+            const files: string[] = [];
+            collectTsFiles(dir, files);
+            for (const f of files) {
+                const text = readFileSync(f, "utf8");
+                const rel = prefix + relative(dir, f);
+                if (prefix === "" && rel === DEFINITION_PERSIST) continue;
+                if (/\bpersistCachedM0\b/.test(text)) {
+                    persistHolders.push(rel);
+                    if (/\bpersistCachedM0\s*\(/.test(text)) persistCallers.push(rel);
+                }
+                if (
+                    /\bupdateSessionMeta\b/.test(text) &&
+                    (/cachedM0Bytes\s*:/.test(text) || /\.cachedM0Bytes\s*=/.test(text))
+                ) {
+                    dispatcherHolders.push(rel);
+                    if (/updateSessionMeta\s*\([\s\S]{0,400}?cachedM0Bytes/.test(text))
+                        dispatcherAbusers.push(rel);
+                }
+            }
+        }
+        return { persistHolders, persistCallers, dispatcherHolders, dispatcherAbusers };
+    }
+
     it("the region column has exactly the named fold-lane writer channels", () => {
         // persistCachedM0 is the fold-row writer: one production call site
         // per fold lane — the OpenCode-1 materialize and the Pi materialize
@@ -425,56 +575,136 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         // the funnel and the fold). Stage P2 widened the walk to the full
         // production surface (TS_ROOTS, #2665): the claim is repo-wide, not
         // plugin-package-local.
-        const persistCallers: string[] = [];
-        const dispatcherAbusers: string[] = [];
-        for (const { dir, prefix } of TS_ROOTS) {
-            const files: string[] = [];
-            collectTsFiles(dir, files);
-            for (const f of files) {
-                const text = readFileSync(f, "utf8");
-                if (/export function persistCachedM0\b/.test(text)) continue;
-                if (/persistCachedM0\s*\(/.test(text))
-                    persistCallers.push(prefix + relative(dir, f));
-                if (/updateSessionMeta\s*\([\s\S]{0,400}?cachedM0Bytes/.test(text))
-                    dispatcherAbusers.push(prefix + relative(dir, f));
-            }
-        }
-        expect(persistCallers.sort()).toEqual([
+        const census = scanPersistCensuses();
+        expect(census.persistHolders.sort()).toEqual([...BLESSED_PERSIST_HOLDERS.keys()].sort());
+        expect(census.persistCallers.sort()).toEqual([
             "hooks/magic-context/inject-compartments.ts",
             "pi/inject-compartments-pi.ts",
         ]);
-        expect(dispatcherAbusers).toEqual([]);
+        expect(census.dispatcherHolders.sort()).toEqual(
+            [...BLESSED_DISPATCHER_HOLDERS.keys()].sort(),
+        );
+        // Strict sub-law: no file may pass column bytes in a call-argument
+        // window to the dispatcher — even blessed holders stay clean here.
+        expect(census.dispatcherAbusers).toEqual([]);
     });
 
-    it("control: a planted third persistCachedM0 caller reddens the writer census", () => {
-        // Mechanism attack: the census must fail on a new fold-lane writer,
-        // not just on absence. The plant lives in a temp root (passed as an
-        // extra walk root) so no production tree is ever written.
-        const dir = mkdtempSync(join(tmpdir(), "mc-f2-plant-"));
+    it("control: alias/rebind plants redden the holder censuses (G1)", () => {
+        // Mechanism attacks on the holder property, in a temp root (no
+        // production tree is ever written): (1) import-alias persist rogue —
+        // the call paren sits on the ALIAS, so the pre-G1 caller regex and
+        // the blessed-caller equality would have missed it; (2)
+        // const-rebind persist rogue — same blind class via a local
+        // binding; (3) dispatcher alias rogue — abuse through
+        // `const u = updateSessionMeta; u(db, s, { cachedM0Bytes: x })`,
+        // invisible to the call-adjacency regex. Each plant must surface as
+        // an unblessed holder name; removal regreens.
+        const dir = mkdtempSync(join(tmpdir(), "mc-g1-plant-"));
+        const plant = (name: string, body: string) => writeFileSync(join(dir, name), body);
         try {
-            writeFileSync(
-                join(dir, "rogue_writer.ts"),
-                'import { persistCachedM0 } from "x";\npersistCachedM0(db, "s", {});\n',
+            plant(
+                "rogue_alias_persist.ts",
+                'import { persistCachedM0 as p } from "x";\np(db, "s", {});\n',
             );
-            const persistCallers: string[] = [];
-            for (const { dir: root, prefix } of [...TS_ROOTS, { dir, prefix: "planted/" }]) {
-                const files: string[] = [];
-                collectTsFiles(root, files);
-                for (const f of files) {
-                    const text = readFileSync(f, "utf8");
-                    if (/export function persistCachedM0\b/.test(text)) continue;
-                    if (/persistCachedM0\s*\(/.test(text))
-                        persistCallers.push(prefix + relative(root, f));
-                }
-            }
-            expect(persistCallers).toContain("planted/rogue_writer.ts");
-            expect(persistCallers.sort()).not.toEqual([
-                "hooks/magic-context/inject-compartments.ts",
-                "pi/inject-compartments-pi.ts",
-            ]);
+            let c = scanPersistCensuses([{ dir, prefix: "planted/" }]);
+            expect(c.persistHolders).toContain("planted/rogue_alias_persist.ts");
+            expect(c.persistHolders.sort()).not.toEqual([...BLESSED_PERSIST_HOLDERS.keys()].sort());
+            // Old-shape proof: the canonical name is never followed by a
+            // call paren, so the pre-G1 law was blind to this file.
+            expect(
+                /\bpersistCachedM0\s*\(/.test(
+                    readFileSync(join(dir, "rogue_alias_persist.ts"), "utf8"),
+                ),
+            ).toBe(false);
+            rmSync(join(dir, "rogue_alias_persist.ts"), { force: true });
+
+            plant(
+                "rogue_rebind_persist.ts",
+                'import { persistCachedM0 } from "x";\nconst q = persistCachedM0;\nq(db, "s", {});\n',
+            );
+            c = scanPersistCensuses([{ dir, prefix: "planted/" }]);
+            expect(c.persistHolders).toContain("planted/rogue_rebind_persist.ts");
+            expect(
+                /\bpersistCachedM0\s*\(/.test(
+                    readFileSync(join(dir, "rogue_rebind_persist.ts"), "utf8"),
+                ),
+            ).toBe(false);
+            rmSync(join(dir, "rogue_rebind_persist.ts"), { force: true });
+
+            plant(
+                "rogue_alias_dispatcher.ts",
+                'import { updateSessionMeta as u } from "x";\nu(db, "s", { cachedM0Bytes: buf });\n',
+            );
+            c = scanPersistCensuses([{ dir, prefix: "planted/" }]);
+            expect(c.dispatcherHolders).toContain("planted/rogue_alias_dispatcher.ts");
+            expect(c.dispatcherHolders.sort()).not.toEqual(
+                [...BLESSED_DISPATCHER_HOLDERS.keys()].sort(),
+            );
+            // Old-shape proof: the dispatcher name is never followed by its
+            // call paren with column bytes in the window.
+            expect(
+                /updateSessionMeta\s*\([\s\S]{0,400}?cachedM0Bytes/.test(
+                    readFileSync(join(dir, "rogue_alias_dispatcher.ts"), "utf8"),
+                ),
+            ).toBe(false);
+            rmSync(join(dir, "rogue_alias_dispatcher.ts"), { force: true });
+
+            // Steady state after removals: holder censuses match the
+            // blessed sets again (plants leave no residue).
+            const c2 = scanPersistCensuses([{ dir, prefix: "planted/" }]);
+            expect(c2.persistHolders.sort()).toEqual([...BLESSED_PERSIST_HOLDERS.keys()].sort());
+            expect(c2.dispatcherHolders.sort()).toEqual(
+                [...BLESSED_DISPATCHER_HOLDERS.keys()].sort(),
+            );
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
+    });
+
+    it("the eraser census walks every canonical zone, present and non-empty (G3)", () => {
+        // Defense against a silently narrowed "production tree": a missing
+        // or empty root must fail HERE, naming the zone, not shrink the
+        // eraser census coverage. The walked counts are recorded in the
+        // failure message surface (asserted non-trivial) — every TS zone
+        // and both Rust zones (crates/, dashboard src-tauri) must carry
+        // production files.
+        const { issues, counts } = eraserZoneScan();
+        expect(counts.map((c) => `${c.zone}=${c.files}`).join(" ")).toContain("pi/");
+        expect(counts.length).toBe(TS_ROOTS.length + ERASER_RUST_ROOTS.length);
+        expect(issues).toEqual([]);
+    });
+
+    it("control: mutated root lists redden the zone floor with the zone named (G3)", () => {
+        // In-memory mutations only — no production tree is renamed, moved,
+        // or emptied.
+        const tsMutated = TS_ROOTS.filter((r) => r.prefix !== "pi/");
+        expect(
+            eraserZoneScan(tsMutated).issues.some((i) => i.includes("pi/") && i.includes("absent")),
+        ).toBe(true);
+        const emptyDir = mkdtempSync(join(tmpdir(), "mc-g3-empty-"));
+        try {
+            // A canonical zone whose dir is present-but-empty reddens with
+            // the count, not the existence message (in-memory roots
+            // substitution: the declared zone stays, its dir points at an
+            // empty temp dir).
+            const withEmpty = TS_ROOTS.map((r) =>
+                r.prefix === "cli/" ? { dir: emptyDir, prefix: r.prefix } : r,
+            );
+            const issues = eraserZoneScan(withEmpty).issues;
+            expect(issues.some((i) => i.includes("cli/") && i.includes("0 production files"))).toBe(
+                true,
+            );
+        } finally {
+            rmSync(emptyDir, { recursive: true, force: true });
+        }
+        const rustMutated = ERASER_RUST_ROOTS.filter((r) => !r.root.endsWith("crates"));
+        expect(
+            eraserZoneScan(TS_ROOTS, rustMutated).issues.some(
+                (i) => i.includes("crates") && i.includes("absent"),
+            ),
+        ).toBe(true);
+        // Steady state regreens.
+        expect(eraserZoneScan().issues).toEqual([]);
     });
 
     it("the baseline invalidation funnel receipts region erases", async () => {

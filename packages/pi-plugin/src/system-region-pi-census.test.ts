@@ -92,44 +92,59 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 		expect(censusWriteOffenders()).toEqual([]);
 	});
 
-	it("the region capability is decided exactly once at boot and threaded thereafter (F7, D1)", () => {
-		// §23 D1 is a boot-once law: a second isSystemRegionLane call site —
-		// especially a per-pass re-derivation inside a hook (which would
-		// re-read live config and split one session across two lane
-		// truths) — must redden here, not drift silently.
-		const callers: string[] = [];
-		let indexCalls = 0;
+	// G1 (round 2): the boot-once census is the bare-identifier HOLDER set,
+	// not a call-paren count. An aliased import (`import { isSystemRegionLane
+	// as lane }`) or a const-rebind (`const f = isSystemRegionLane`)
+	// re-derives the capability while hiding from a `\s*\(` regex; any
+	// occurrence of the name outside its (out-of-tree) definition must name
+	// its file and lands on this list.
+	function isSystemRegionLaneHolders(): string[] {
+		const holders: string[] = [];
 		for (const { rel, full } of walk(SRC)) {
-			const text = readFileSync(full, "utf8");
-			const calls = (text.match(/\bisSystemRegionLane\s*\(/g) ?? []).length;
-			// The import statement carries no call parenthesis; count only
-			// call expressions.
-			if (calls > 0) callers.push(rel);
-			if (rel === "index.ts") indexCalls = calls;
+			if (/\bisSystemRegionLane\b/.test(readFileSync(full, "utf8")))
+				holders.push(rel);
 		}
-		expect(callers).toEqual(["index.ts"]);
-		expect(indexCalls).toBe(1);
+		return holders;
+	}
+
+	it("the region capability is decided exactly once at boot and threaded thereafter (F7, D1)", () => {
+		// §23 D1 is a boot-once law: a second capability holder — especially
+		// a per-pass re-derivation inside a hook (which would re-read live
+		// config and split one session across two lane truths) — must redden
+		// here, not drift silently. The one holder (index.ts) must hold
+		// exactly one call expression: the boot resolution that feeds the
+		// threaded boolean.
+		expect(isSystemRegionLaneHolders()).toEqual(["index.ts"]);
+		const indexText = readFileSync(join(SRC, "index.ts"), "utf8");
+		expect((indexText.match(/\bisSystemRegionLane\s*\(/g) ?? []).length).toBe(
+			1,
+		);
 	});
 
-	it("control: a planted second call site reddens the boot-once law", () => {
-		const rogue = join(SRC, "__census_rogue_decider.ts");
+	it("control: alias and rebind plants redden the boot-once law (G1)", () => {
+		// Mechanism attacks, each shape invisible to the pre-G1 call-paren
+		// count: (1) aliased import + aliased per-pass call; (2) const
+		// rebind + bound call. Each must surface as an extra holder; removal
+		// regreens.
+		const rogueAlias = join(SRC, "__census_rogue_alias_lane.ts");
+		const rogueRebind = join(SRC, "__census_rogue_rebind_lane.ts");
 		writeFileSync(
-			rogue,
-			'import { isSystemRegionLane } from "@magic-context/core/config/system-region-lane";\nexport const perPass = (cfg: unknown) => isSystemRegionLane(cfg as never);\n',
+			rogueAlias,
+			'import { isSystemRegionLane as lane } from "@magic-context/core/config/system-region-lane";\nexport const perPass = (cfg: unknown) => lane(cfg as never);\n',
 		);
-		try {
-			const callers: string[] = [];
-			for (const { rel, full } of walk(SRC)) {
-				if (
-					(readFileSync(full, "utf8").match(/\bisSystemRegionLane\s*\(/g) ?? [])
-						.length > 0
-				)
-					callers.push(rel);
-			}
-			expect(callers).toContain("__census_rogue_decider.ts");
-		} finally {
-			rmSync(rogue, { force: true });
-		}
+		let holders = isSystemRegionLaneHolders();
+		expect(holders).toContain("__census_rogue_alias_lane.ts");
+		expect(holders).not.toEqual(["index.ts"]);
+		rmSync(rogueAlias, { force: true });
+		writeFileSync(
+			rogueRebind,
+			'import { isSystemRegionLane } from "@magic-context/core/config/system-region-lane";\nconst f = isSystemRegionLane;\nexport const late = (cfg: unknown) => f(cfg as never);\n',
+		);
+		holders = isSystemRegionLaneHolders();
+		expect(holders).toContain("__census_rogue_rebind_lane.ts");
+		rmSync(rogueRebind, { force: true });
+		// Steady state after removals.
+		expect(isSystemRegionLaneHolders()).toEqual(["index.ts"]);
 	});
 
 	it("control: a planted rogue rotation caller and a raw writer both redden the census", () => {
