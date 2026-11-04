@@ -459,6 +459,44 @@ fn apply_restores_the_backup_history_with_its_ids_and_dependents() {
 }
 
 #[test]
+fn a_frozen_region_row_is_reset_exactly_like_a_head_row() {
+    // Stage R2 (design §24), serve+refusal parity: the module never serves
+    // or reads the region column, but repair shares it — a region row must
+    // be erased with the same arms as head state, or a half-erased row
+    // survives that the TS reader refuses while the module reports the
+    // session clean. Attacks the uniformity of SESSION_META_RESETS: any
+    // future arm that skips sentinel-prefixed rows reddens this law.
+    let fixture = Fixture::new();
+    {
+        let live = fixture.live();
+        let region: Vec<u8> =
+            "<!-- mc:system-region v1 -->\n<project-memory>frozen panel bytes</project-memory>"
+                .as_bytes()
+                .to_vec();
+        live.execute(
+            "UPDATE session_meta SET cached_m0_bytes = ?1, cached_m0_upgrade_state = 'u|e' WHERE session_id = ?2",
+            params![region, SESSION],
+        )
+        .unwrap();
+    }
+    let report = fixture.apply();
+    assert_eq!(report.status, "repaired");
+    let live = fixture.live();
+    let (bytes, upgrade): (Option<Vec<u8>>, Option<String>) = live
+        .query_row(
+            "SELECT cached_m0_bytes, cached_m0_upgrade_state FROM session_meta WHERE session_id = ?1",
+            params![SESSION],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        bytes.is_none(),
+        "the region row is reset to NULL like head bytes — no sentinel row survives a repair"
+    );
+    assert_eq!(upgrade, None, "its capture markers reset with it");
+}
+
+#[test]
 fn compartments_past_the_backup_end_are_kept_and_renumbered() {
     let fixture = Fixture::new();
     let live = fixture.live();

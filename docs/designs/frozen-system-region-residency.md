@@ -539,7 +539,14 @@ SELECT, zero region/panel-table reads; control: an extra meta read reddens the r
 rotation row for L6 persist-throw (propagates, no executed=true receipt); stage P
 (§20): Pi row-reader property closure + named-member census (three laws, controls);
 stage R (§20): the R11 route-gate port with table-mirroring tests (NOT compiled —
-no cargo on the build host, disclosed unbuilt-Rust-lane class). Remaining:
+no cargo on the build host, disclosed unbuilt-Rust-lane class). Landed
+since: stage P2 (§23): Pi serving lane — region serve + watcher split
+(`system-region-pi-serve.test.ts`, 7 rows), fold/rotation/promotion/trim/
+LKG/head-collapse laws (`system-region-pi-fold.test.ts`, 14 rows), census
+amendments + planted-rogue controls (`system-region-pi-census.test.ts`);
+stage R2 (§24): Rust serve+refusal parity — refusal census + repair-reset
+parity (`system-region-rust-parity.test.ts`, 4 rows incl. controls;
+written-not-compiled Rust law in `single_store_repair_tests.rs`). Remaining:
 the pass-level integration of promotion through the real postprocess entry (covered at
 the predicate level today) and the §9 Rust region migration (module stops emitting head
 items; plan-level [inferred], gated on subc enablement — the region stays off the Rust
@@ -1280,3 +1287,83 @@ laws; Pi names its own `system-region serve … reason=` lines. The TS
 `memory_disabled` self-consuming arm has no Pi analogue (Pi has no
 memory-off surface at the watcher). Rust-mode rotation remains out of
 scope (§24).
+
+## 24. Stage R2 (owner-dispatched 2026-11-04): Rust serve+refusal parity
+
+**Investigation.** Question: what must the Rust module (ck-mc) do for the
+frozen system region, given §9 gates the full migration on subc
+enablement? Read sites, in order:
+
+- Head composition: the module re-derives its heads from its own store
+  domain — `compose_m0_from_store_timed` (transform.rs:5391, 5501, 5762,
+  8804) feeds the splice documented as `[m0, m1] ++ tail(by
+  coverage_ordinal)` (transform.rs:12612). It never renders from
+  `session_meta.cached_m0_bytes`.
+- Column consumption: a full-tree scan of `crates/` (excluding `target/`)
+  finds `cached_m0_bytes` in exactly three files — the adjudicated
+  `SESSION_META_RESETS` list (`single_store_repair.rs:62`, ResetValue::Null)
+  and its tests (`single_store_repair_tests.rs`). No production SELECT,
+  no region vocabulary (`mc:system-region`, decode/write/clear/execute
+  names) anywhere in the module or mc-store.
+- State sync: `ModuleStateSyncPayload` (module-state-sync.ts:137-167)
+  carries watermarks, seeds and marker state — no row bytes. The §9
+  "region bytes flow TS to module in the state sync" clause belongs to the
+  future migration, not to today's wire.
+- Reverse direction: `rust-served-m0.ts` parses the module's served head
+  out of the LKG slot (module → TS, for hidden-executor summaries) and
+  refuses non-head shapes rather than guessing.
+
+**Decisions.**
+
+- **Boundary (R2 scope).** The full §9 migration (module stops emitting
+  head items; region assembly mirrored in `injection.rs`; region bytes via
+  state sync) stays gated on subc enablement, plan-level [inferred], as §9
+  and §20 state. R2 implements SERVE + REFUSAL PARITY, not the migration.
+- **Three-way lock keeps the region off the Rust lane.** (1) the boot
+  capability predicate excludes `transform_mode: "rust"`
+  (system-region-lane.ts; wiring truth-table rows), (2) the module never
+  reads the region column — proven structurally by the refusal census, and
+  (3) the C2 spy laws pin no-region-serve under rust boot. Consequence:
+  with a ts→rust→ts config flip, the stored region row is inert during the
+  rust spell (module composes heads; TS serves no region), and on return
+  the TS lane's marker comparison plus `region_first_install` fold refresh
+  it — one baseline at a time, never two on one wire.
+- **No runtime guard added to the module.** A decode-refusal inside the
+  module would guard a path the census proves mechanically unreachable
+  (no reader of the column exists); dead defensive code on an unreachable
+  branch is out of scope by project rule. The enforcement is the census
+  reddening the moment a reader appears.
+- **Laws (red-first, with controls).**
+  1. `packages/plugin/src/hooks/magic-context/system-region-rust-parity.test.ts`
+     — refusal census: `cached_m0_bytes` in Rust production files is
+     confined to the one named member (`mc-module/src/single_store_repair.rs`);
+     zero region vocabulary across `mc-module/src` + `mc-store/src`
+     (`_tests.rs` excluded; inline `#[cfg(test)] mod tests` in scope — a
+     future test read must live in `*_tests.rs` or `crates/*/tests/`).
+     Control: planted rogue reader + planted sentinel both redden, removal
+     regreens.
+  2. Same file — repair-reset parity: the parsed `SESSION_META_RESETS`
+     column set must cover every column the host's receipted clear clears
+     (`const clears` in `storage-meta-shared.ts`) plus `cached_m0_bytes`
+     with the Null value; a context.db/store.db repair can never leave a
+     half-erased region row the TS reader refuses while the module reports
+     clean. Control: the parsed list with the region arm removed reddens
+     the parity predicate.
+  3. `crates/mc-module/src/single_store_repair_tests.rs` —
+     `a_frozen_region_row_is_reset_exactly_like_a_head_row`: plants a
+     sentinel-prefixed region BLOB + capture marker, runs the hermetic
+     repair, asserts NULL + marker reset. Attacks the uniformity of the
+     reset list (a future arm skipping sentinel rows reddens it).
+- **Verification-class disclosure (R).** No `cargo`/`rustc` exists on this
+  host (`which cargo` → not found; same class as the §20 R-stage
+  disclosure). Law 3 is written, not compile-verified; the first
+  Rust-capable host owes `cargo test -p mc-module` on it. Laws 1–2 are
+  TypeScript and run in the plugin battery (agent-run: 4 pass, controls
+  included). The Rust edits touch only `single_store_repair_tests.rs`
+  (`crates/` is outside every TS gate, so the plugin/Pi batteries and tsc
+  are unaffected by them).
+
+**Remaining (not silently dropped).** The §9 full migration — module stops
+emitting head items, `injection.rs` mirrors `mustMaterialize`, region bytes
+ride state sync — stays [inferred] plan-level until subc enablement; its
+station arms owe red tests against the hermetic subc harness first.
