@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import {
+	mkdirSync,
 	readdirSync,
 	readFileSync,
 	rmSync,
@@ -22,12 +23,28 @@ const PI_CENSUS_ZONES: ReadonlyArray<{ dir: string; prefix: string }> = [
 	{ dir: join(SRC, "..", "scripts"), prefix: "scripts/" },
 ];
 
+// H4 (round 3): census walks take a named deny-list (.git/node_modules/
+// dist/.codegraph) instead of skipping nothing/skip-all, and the full TS
+// module extension family — the old .ts-only filter left .tsx/.cts/.mts/
+// .mjs/.cjs sources (the scripts tree really carries .cjs probes) invisible
+// to every Pi census.
+const WALK_DENY_DIRS: ReadonlySet<string> = new Set([
+	".git",
+	"node_modules",
+	"dist",
+	".codegraph",
+]);
+const PRODUCTION_FILE = /\.(ts|tsx|mts|cts|mjs|cjs)$/;
+
 function walk(root: string, prefix: string, dir = root): Array<{ rel: string; full: string }> {
 	const out: Array<{ rel: string; full: string }> = [];
 	for (const entry of readdirSync(dir)) {
 		const full = join(dir, entry);
-		if (statSync(full).isDirectory()) out.push(...walk(root, prefix, full));
-		else if (entry.endsWith(".ts") && !entry.endsWith(".test.ts"))
+		if (statSync(full).isDirectory()) {
+			if (!WALK_DENY_DIRS.has(entry)) out.push(...walk(root, prefix, full));
+			continue;
+		}
+		if (PRODUCTION_FILE.test(entry) && !entry.endsWith(".test.ts"))
 			out.push({ rel: prefix + relative(root, full), full });
 	}
 	return out;
@@ -254,8 +271,42 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 		// Removal regreens both censuses.
 		expect(censusReaderOffenders()).toEqual([]);
 		expect(censusWriteOffenders()).toEqual([]);
-		// Zone floor: dropping scripts from the walked roots must redden by
-		// NAME against the canonical set, not silently shrink coverage.
-		expect(() => walkPiCensusZones([PI_CENSUS_ZONES[0]])).toThrow(/scripts\//);
+	// Zone floor: dropping scripts from the walked roots must redden by
+	// NAME against the canonical set, not silently shrink coverage.
+	expect(() => walkPiCensusZones([PI_CENSUS_ZONES[0]])).toThrow(/scripts\//);
+	});
+
+	it("control: extension-family rogues redden the Pi censuses (H4)", () => {
+		// The pre-H4 Pi walk accepted only .ts — a column reader at a .mts
+		// path, or a raw writer at .tsx under an in-zone dot-directory, was
+		// invisible to all three censuses (the OpenCode-1 side closed the
+		// same class in system-region-clear.test.ts).
+		const scriptsDir = join(SRC, "..", "scripts");
+		const rogueMts = join(scriptsDir, "__census-rogue-reader.mts");
+		const dotDir = join(SRC, ".probe-h4");
+		const rogueTsx = join(dotDir, "rogue-writer.tsx");
+		expect("rogue.mts".endsWith(".ts")).toBe(false); // pre-H4 filter class
+		writeFileSync(
+			rogueMts,
+			'export const f = (db: { prepare: (q: string) => unknown }) => db.prepare("SELECT cached_m0_bytes FROM session_meta");\n',
+		);
+		mkdirSync(dotDir, { recursive: true });
+		writeFileSync(
+			rogueTsx,
+			'import { writeSystemRegion } from "@magic-context/core/features/magic-context/system-region";\nexport const g = (db: never, s: never, b: never) => writeSystemRegion(db, s, b);\n',
+		);
+		try {
+			expect(
+				censusReaderOffenders().some((o) => o.includes("__census-rogue-reader.mts")),
+			).toBe(true);
+			expect(censusWriteOffenders().some((o) => o.includes(".probe-h4/rogue-writer.tsx"))).toBe(
+				true,
+			);
+		} finally {
+			rmSync(rogueMts, { force: true });
+			rmSync(dotDir, { recursive: true, force: true });
+		}
+		expect(censusReaderOffenders()).toEqual([]);
+		expect(censusWriteOffenders()).toEqual([]);
 	});
 });

@@ -1,21 +1,42 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
 
+// H4 (round 3): census walks take a deny-list, not skip-all-dot-dirs —
+// only VCS/build noise is excluded, BY NAME — and the full TS module
+// extension family (.tsx/.cts/.mts sources were invisible to the old
+// .ts-only filter).
+const WALK_DENY_DIRS: ReadonlySet<string> = new Set([
+    ".git",
+    "node_modules",
+    "dist",
+    ".codegraph",
+]);
+const PRODUCTION_FILE = /\.(ts|tsx|mts|cts|mjs|cjs)$/;
 function walkTs(dir: string, prefix: string): Array<{ rel: string; full: string }> {
     const out: Array<{ rel: string; full: string }> = [];
     const walk = (d: string) => {
         for (const entry of readdirSync(d)) {
             const full = join(d, entry);
             if (statSync(full).isDirectory()) {
-                if (!entry.startsWith(".")) walk(full);
+                if (!WALK_DENY_DIRS.has(entry)) walk(full);
                 continue;
             }
-            if (entry.endsWith(".ts") && !entry.endsWith(".test.ts"))
+            if (PRODUCTION_FILE.test(entry) && !entry.endsWith(".test.ts"))
                 out.push({ rel: prefix + relative(dir, full), full });
         }
     };
@@ -29,10 +50,10 @@ function productionTsFiles(): string[] {
         for (const entry of readdirSync(dir)) {
             const full = join(dir, entry);
             if (statSync(full).isDirectory()) {
-                if (!entry.startsWith(".")) walk(full);
+                if (!WALK_DENY_DIRS.has(entry)) walk(full);
                 continue;
             }
-            if (entry.endsWith(".ts") && !entry.endsWith(".test.ts")) out.push(full);
+            if (PRODUCTION_FILE.test(entry) && !entry.endsWith(".test.ts")) out.push(full);
         }
     };
     walk(SRC_ROOT);
@@ -51,16 +72,29 @@ describe("system-region L0: per-actor producer census", () => {
     const files = productionTsFiles();
     const rel = (f: string) => relative(SRC_ROOT, f);
     const STORE = "features/magic-context/system-region.ts";
-    const ALL_ZONE_FILES: Array<{ rel: string; full: string }> = [
-        ...walkTs(SRC_ROOT, ""),
-        ...walkTs(join(SRC_ROOT, "..", "scripts"), "scripts/"),
-        ...walkTs(join(SRC_ROOT, "..", "..", "cli", "src"), "cli/"),
-        ...walkTs(join(SRC_ROOT, "..", "..", "pi-plugin", "src"), "pi/"),
+    // H3/H4 (round 3): the zone set joins the clear file's TS_ROOTS shape —
+    // pi-plugin/scripts is real TS that can open context.db (#2665) and was
+    // missing from this census's claimed production tree.
+    const ZONE_ROOTS: ReadonlyArray<{ dir: string; prefix: string }> = [
+        { dir: SRC_ROOT, prefix: "" },
+        { dir: join(SRC_ROOT, "..", "scripts"), prefix: "scripts/" },
+        { dir: join(SRC_ROOT, "..", "..", "cli", "src"), prefix: "cli/" },
+        { dir: join(SRC_ROOT, "..", "..", "pi-plugin", "src"), prefix: "pi/" },
+        { dir: join(SRC_ROOT, "..", "..", "pi-plugin", "scripts"), prefix: "pi-scripts/" },
     ];
-    const filesUsing = (pattern: RegExp) =>
-        ALL_ZONE_FILES.filter(
-            ({ rel, full }) => rel !== STORE && pattern.test(readFileSync(full, "utf8")),
-        )
+    const zoneFiles = (
+        extraRoots: ReadonlyArray<{ dir: string; prefix: string }> = [],
+    ): Array<{ rel: string; full: string }> => [
+        ...ZONE_ROOTS,
+        ...extraRoots,
+    ].flatMap(({ dir, prefix }) => walkTs(dir, prefix));
+    const ALL_ZONE_FILES = zoneFiles();
+    const filesUsing = (
+        pattern: RegExp,
+        extraRoots: ReadonlyArray<{ dir: string; prefix: string }> = [],
+    ) =>
+        zoneFiles(extraRoots)
+            .filter(({ rel, full }) => rel !== STORE && pattern.test(readFileSync(full, "utf8")))
             .map(({ rel }) => rel)
             .sort();
 
@@ -255,12 +289,7 @@ describe("system-region L0: per-actor producer census", () => {
         // carriers, not new intent; the schedule itself is read and applied
         // only inside the boundary permission. A new writer outside this set
         // is an actor with unauthorized schedule authority.
-        const zoneFiles: Array<{ rel: string; full: string }> = [
-            ...walkTs(SRC_ROOT, ""),
-            ...walkTs(join(SRC_ROOT, "..", "scripts"), "scripts/"),
-            ...walkTs(join(SRC_ROOT, "..", "..", "cli", "src"), "cli/"),
-            ...walkTs(join(SRC_ROOT, "..", "..", "pi-plugin", "src"), "pi/"),
-        ];
+        const opsFiles = zoneFiles();
         // G4 honest boundary — what the regexes cannot see: dynamic
         // table-name VARIABLES (not ${...} interpolations), schema-qualified
         // forms (`main.pending_ops`), aliasing via views, and every file
@@ -268,7 +297,7 @@ describe("system-region L0: per-actor producer census", () => {
         // dynamic-${} arms below are captured by shape; a writer that hides
         // behind an indirect variable is a review-time defect the census
         // cannot promise to catch, same disclosure class as the Rust zone.
-        const writers = zoneFiles
+        const writers = opsFiles
             .filter(({ full }) =>
                 /(?:INSERT INTO|DELETE FROM|UPDATE)\s+pending_ops|INSERT INTO \$\{quoteIdentifier\(table\)\}|DELETE FROM \$\{[^}]*table[^}]*\}/i.test(
                     readFileSync(full, "utf8"),
@@ -363,12 +392,7 @@ describe("system-region L0: per-actor producer census", () => {
             ],
         ]);
         const offenders: string[] = [];
-        const files = [
-            ...walkTs(SRC_ROOT, ""),
-            ...walkTs(join(SRC_ROOT, "..", "scripts"), "scripts/"),
-            ...walkTs(join(SRC_ROOT, "..", "..", "cli", "src"), "cli/"),
-            ...walkTs(join(SRC_ROOT, "..", "..", "pi-plugin", "src"), "pi/"),
-        ];
+        const files = zoneFiles();
         for (const { rel, full } of files) {
             if (rel.endsWith(".test.ts")) continue;
             if (!/cached_m0_last_baseline_end_message_id/.test(readFileSync(full, "utf8")))
@@ -557,6 +581,43 @@ describe("system-region L0: per-actor producer census", () => {
                 .map((l) => l.trim())
                 .filter(Boolean),
         ).toContain("render_config");
+    });
+
+    // H4 (round 3): the walks skipped ALL dot-directories and accepted only
+    // .ts — a rotation-caller rogue at a .tsx path or under an in-zone
+    // dot-directory was invisible to every producer census (and the eraser
+    // census, closed in the clear file). Plants attack the walk itself.
+    it("every producer census zone walks production files, by name (H3/#2665 floor)", () => {
+        for (const { dir, prefix } of ZONE_ROOTS) {
+            expect(statSync(dir, { throwIfNoEntry: false })?.isDirectory(), `zone absent: ${prefix}`).toBe(
+                true,
+            );
+            expect(walkTs(dir, prefix).length, `zone walked 0 files: ${prefix}`).toBeGreaterThan(0);
+        }
+    });
+
+    it("control: .tsx and dot-dir rogues redden the producer census walks (H4)", () => {
+        const dir = mkdtempSync(join(tmpdir(), "mc-h4-producers-"));
+        try {
+            const rogue =
+                'import { executeSystemRegionRotation } from "@magic-context/core/features/magic-context/system-region";\nexport const r = (input: never) => executeSystemRegionRotation(input);\n';
+            writeFileSync(join(dir, "rogue.tsx"), rogue);
+            mkdirSync(join(dir, ".probe"));
+            writeFileSync(join(dir, ".probe", "rogue.ts"), rogue);
+            const found = filesUsing(/executeSystemRegionRotation\(/, [{ dir, prefix: "planted-h4/" }]);
+            expect(found).toContain("planted-h4/rogue.tsx");
+            expect(found).toContain("planted-h4/.probe/rogue.ts");
+            // Pre-H4 blindness: .ts-only filter and skip-all-dot-dirs.
+            expect("rogue.tsx".endsWith(".ts")).toBe(false);
+            expect(".probe".startsWith(".")).toBe(true);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+        // Steady state unchanged by the walk widening: the named lists hold.
+        expect(filesUsing(/executeSystemRegionRotation\(/)).toEqual([
+            "hooks/magic-context/inject-compartments.ts",
+            "pi/inject-compartments-pi.ts",
+        ]);
     });
 
     it("control: a planted Pi template composite with a new stem reddens the fence law (G2-i)", () => {

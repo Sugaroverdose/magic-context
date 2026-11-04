@@ -1,5 +1,13 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+    existsSync,
+    mkdirSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { join, relative } from "node:path";
 
 // Stage R2 (design §24): the Rust module keeps heads (§9's full migration is
@@ -23,12 +31,22 @@ const RUST_PROD_ROOTS = readdirSync(CRATES)
     .map((name) => join(CRATES, name, "src"))
     .filter((dir) => existsSync(dir));
 
+const WALK_DENY_DIRS: ReadonlySet<string> = new Set([
+    ".git",
+    "node_modules",
+    "target",
+    ".codegraph",
+]);
+
 function walkRs(dir: string): Array<{ rel: string; full: string }> {
     const out: Array<{ rel: string; full: string }> = [];
     for (const entry of readdirSync(dir)) {
         const full = join(dir, entry);
         if (statSync(full).isDirectory()) {
-            if (entry !== "target") out.push(...walkRs(full));
+            // H4 (round 3): named deny-list — build/VCS noise only. Every
+            // other directory, dot-dirs included, is census scope: a
+            // reader hidden under src/.probe/ must be visible.
+            if (!WALK_DENY_DIRS.has(entry)) out.push(...walkRs(full));
             continue;
         }
         if (!entry.endsWith(".rs")) continue;
@@ -144,6 +162,10 @@ describe("Rust lane serve+refusal parity (stage R2, §24)", () => {
         // F5: the plant must also land OUTSIDE the module crate — mc-core is
         // now in the walk, and an unscanned root would let this one slip.
         const rogueCore = join(CRATES, "mc-core", "src", "__parity_rogue_core.rs");
+        // H4: the dot-directory class — hidden-path sources are census
+        // scope in the Rust lane too.
+        const dotDir = join(CRATES, "mc-module", "src", ".probe-h4");
+        const rogueDot = join(dotDir, "__parity_rogue_dot.rs");
         writeFileSync(
             rogueReader,
             '// planted\nfn f(db: &Connection) {\n    db.query_row("SELECT cached_m0_bytes FROM session_meta", [], |_| Ok(())).unwrap();\n}\n',
@@ -156,11 +178,17 @@ describe("Rust lane serve+refusal parity (stage R2, §24)", () => {
             rogueCore,
             '// planted\nfn g(db: &Connection) {\n    db.query_row("SELECT cached_m0_bytes FROM session_meta", [], |_| Ok(())).unwrap();\n}\n',
         );
+        mkdirSync(dotDir, { recursive: true });
+        writeFileSync(
+            rogueDot,
+            '// planted\nfn h(db: &Connection) {\n    db.query_row("SELECT cached_m0_bytes FROM session_meta", [], |_| Ok(())).unwrap();\n}\n',
+        );
         try {
             const found = rustRefusalOffenders();
             expect(found.some((o) => o.includes("__parity_rogue_reader.rs: cached_m0_bytes"))).toBe(
                 true,
             );
+            expect(found.some((o) => o.includes(".probe-h4/__parity_rogue_dot.rs"))).toBe(true);
             expect(
                 found.some((o) => o.includes("__parity_rogue_sentinel.rs: mc:system-region")),
             ).toBe(true);
@@ -173,6 +201,7 @@ describe("Rust lane serve+refusal parity (stage R2, §24)", () => {
             rmSync(rogueReader, { force: true });
             rmSync(rogueSentinel, { force: true });
             rmSync(rogueCore, { force: true });
+            rmSync(dotDir, { recursive: true, force: true });
         }
         expect(rustRefusalOffenders()).toEqual([]);
     });

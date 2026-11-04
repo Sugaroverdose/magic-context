@@ -2,7 +2,15 @@
 
 import { Database as BunDatabase } from "bun:sqlite";
 import { describe, expect, it, mock } from "bun:test";
-import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+    mkdirSync,
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
@@ -342,24 +350,39 @@ function subLawViolation(rel: string, text: string): string | null {
     }
 }
 
+// H4 (round 3): deny-list, not skip-all-dot-dirs — census scope is every
+// in-zone file; only VCS/build noise is excluded, BY NAME. The extension
+// set is the full TS module family: the old /\.(ts|mjs|cjs)$/ missed
+// .tsx/.cts/.mts sources.
+const WALK_DENY_DIRS: ReadonlySet<string> = new Set([
+    ".git",
+    "node_modules",
+    "dist",
+    ".codegraph",
+]);
+const PRODUCTION_FILE = /\.(ts|tsx|mts|cts|mjs|cjs)$/;
 function collectTsFiles(dir: string, out: string[]): void {
     for (const entry of readdirSync(dir)) {
         const full = join(dir, entry);
         if (statSync(full).isDirectory()) {
-            if (!entry.startsWith(".")) collectTsFiles(full, out);
+            if (!WALK_DENY_DIRS.has(entry)) collectTsFiles(full, out);
             continue;
         }
-        // Round 11 (P1b): the widened pi-scripts root carries a real .cjs
-        // probe — runtime-writable code is in scope regardless of extension.
-        if (/\.(ts|mjs|cjs)$/.test(entry) && !entry.endsWith(".test.ts")) out.push(full);
+        if (PRODUCTION_FILE.test(entry) && !entry.endsWith(".test.ts")) out.push(full);
     }
 }
 
 describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
     it("the production tree has no raw cached_m0_bytes eraser outside the sanctioned funnel", () => {
+        expect(eraserOffenders()).toEqual([]);
+    });
+
+    function eraserOffenders(
+        extraTsRoots: ReadonlyArray<{ dir: string; prefix: string }> = [],
+    ): string[] {
         const offenders: string[] = [];
         const tsFiles: Array<{ rel: string; full: string }> = [];
-        for (const { dir, prefix } of TS_ROOTS) {
+        for (const { dir, prefix } of [...TS_ROOTS, ...extraTsRoots]) {
             if (!statSync(dir).isDirectory()) continue;
             const out: string[] = [];
             collectTsFiles(dir, out);
@@ -488,8 +511,39 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         ]) {
             if (!reason || reason.length < 10) offenders.push(`unreasoned exemption ${file}`);
         }
-        if (offenders.length > 0) console.log("OFFENDERS:", JSON.stringify(offenders, null, 1));
-        expect(offenders).toEqual([]);
+        return offenders;
+    }
+
+    // H4 (round 3): the walks skipped ALL dot-directories and accepted only
+    // .ts/.mjs/.cjs — a raw-eraser rogue at a .tsx path, or any rogue under
+    // an in-zone dot-directory, was invisible to the entire eraser census.
+    // Deny-list (.git, node_modules, dist, .codegraph by NAME) replaces the
+    // skip-all, and the extension set is the full TS module family.
+    it("control: .tsx and in-zone dot-dir rogues redden the eraser census (H4)", () => {
+        const dir = mkdtempSync(join(tmpdir(), "mc-h4-plant-"));
+        try {
+            const sql = 'db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?")';
+            writeFileSync(
+                join(dir, "rogue.tsx"),
+                `export const erase = (db: { prepare: (q: string) => unknown }) => ${sql};\n`,
+            );
+            mkdirSync(join(dir, ".probe"));
+            writeFileSync(
+                join(dir, ".probe", "rogue.ts"),
+                `export const erase2 = (db: { prepare: (q: string) => unknown }) => ${sql};\n`,
+            );
+            const found = eraserOffenders([{ dir, prefix: "planted-h4/" }]);
+            expect(found.some((o) => o.includes("planted-h4/rogue.tsx"))).toBe(true);
+            expect(found.some((o) => o.includes("planted-h4/.probe/rogue.ts"))).toBe(true);
+            // Pre-H4 blindness: the old filter rejected .tsx outright and the
+            // old walk skipped every dot-directory.
+            expect(/\.(ts|mjs|cjs)$/.test("rogue.tsx")).toBe(false);
+            expect(".probe".startsWith(".")).toBe(true);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+        // Removal regreens the steady census.
+        expect(eraserOffenders()).toEqual([]);
     });
 
     // G1 (round 2) closes the alias/rebind blind class for the call-site
