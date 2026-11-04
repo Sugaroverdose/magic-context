@@ -1140,3 +1140,143 @@ is the guidance/tools/parameter-schemas of `measureAgentSurface()`,
 NOT panel blocks. The panel change cannot move it; gate re-run green:
 "budget fixture matches source: baseline 3095, ratified light ceiling 1917".
 No re-ratification is owed.
+
+## 23. Stage P2 (owner-dispatched 2026-11-04): Pi becomes a serving lane
+
+**Investigation.** Question: how does the §9 Pi plan land against the code as
+it actually stands after Stage P1? The coordinator's §9 plan named four
+Pi sites — `composeMagicContextSystemPrompt` (system-prompt.ts:30),
+`processSystemPromptForCache` (:61), `placePiInitialSystemAtHead` (:12), and
+the fold/rotation path — plus the trim H3 refusal
+(`trimPiMessagesToCachedBoundary`, inject-compartments-pi.ts:829) and the
+Pi census (`system-region-pi-census.test.ts`). Each was read against the TS
+reference (serve: system-prompt-hash.ts:500-570; promotion:
+transform-postprocess-phase.ts:1927-1963; fold: inject-compartments.ts:2805-2835;
+region-mode arms: inject-compartments.ts:1794-1808, 4087, 4185-4188, 4326-4337).
+Key findings that shaped the decisions below:
+
+- Pi's system string is composed once per turn in `before_agent_start`
+  (index.ts:2439-2465); `processSystemPromptForCache` reads the row
+  (`getOrCreateSessionMeta`), hashes the whole composed string, and persists
+  `systemPromptHash` + `systemPromptTokens`. Hashing the region bytes would
+  make every rotation a watcher event — the exact defect the TS watcher
+  split was created to prevent.
+- Pi's pressure wall reads provider-reported usage
+  (`lastInputTokens`/Pi usage, context-handler.ts:2867-2884), not the TS
+  wire estimator, so region bytes enter pressure automatically; no
+  estimator plumbing was ported.
+- The LKG coordinator (`pi-lkg.ts` `beginPass`/`replay`) already refuses
+  replay when system-entry bytes drift (`lkg_system_state_mismatch`), so a
+  rotation between capture and replay downgrades to a managed fallback
+  instead of serving stale region bytes.
+- `regionRotationPromotion` lives in the postprocess module whose runtime
+  imports are the OpenCode-1 coordinator graph; importing it from Pi would
+  load that graph into the Pi process.
+
+**Decisions.**
+
+- **D1 (capability).** Pi reuses the single core decider
+  `isSystemRegionLane` (config/system-region-lane.ts) with `transformMode`
+  pinned `"ts"` (Pi never runs the rust module): enabled && compaction-on.
+  It is called once at Pi boot (index.ts, beside `compactionOff`,
+  which stays boot-resolved like its sibling) and threaded as a boolean
+  into `before_agent_start` (serve) and `registerPiContextHandler` →
+  `RunPipelineArgs.systemRegionLane` (fold decision). §21's
+  "boot-only capability, threaded as a boolean" law extends to Pi; the
+  per-pass branch reads only the threaded flag. v2 stays inert (never
+  calls the decider); rust keeps heads until §24.
+- **D2 (serve, L1/L2).** `processSystemPromptForCache` serves
+  `decodeSystemRegionRow(sessionMeta.cachedM0Bytes)` — the row the pass
+  already loaded (zero additional store reads, zero panel re-derivation) —
+  appended AFTER the watcher split: the hash covers host guidance +
+  composed adjuncts (H) only, the region (P) never enters the hash and
+  never raises the refresh signal. Served bytes are the stored bytes
+  verbatim (`H + "\n\n" + P`). A corrupt region row is named
+  (`system-region serve declined … reason=corrupt`) and never served;
+  legacy/head rows serve nothing. Head-lane sessions are byte-identical
+  to today (lane flag off ⇒ no region read at all).
+- **D3 (token accounting).** The persisted `systemPromptTokens` estimate
+  covers `H + "\n\n" + P` (pressure-display parity with the TS serve), and
+  a process-local served-region watermark forces re-estimation on region
+  change regardless of the ±50-token threshold (mirrors TS
+  `servedRegionBySession`, system-prompt-hash.ts:239,568-570).
+- **D4 (rotation executor).** `materializeM0Pi` grows a `regionOptions`
+  branch mirroring inject-compartments.ts:2805-2835: inside the fold's
+  BEGIN IMMEDIATE transaction the assembled `m0 + "\n\n" + m1` installs
+  through the shared `executeSystemRegionRotation` funnel with a persist
+  callback that writes the same marker capture with `m1Bytes: null`;
+  the boundary UPDATE stays in the same transaction (atomic — this is
+  what makes the fold-written boundary legitimate, D6). Refusal (empty or
+  forged payload, never-empty floor #2638) throws
+  `PiMaterializeContentionError` — the fold never persists head bytes
+  beside a failed rotation. Pi is the second named production caller of
+  the executor; `writeSystemRegion`/`clearSystemRegion`/the sentinel
+  literal stay forbidden in the Pi census (Pi writes regions ONLY through
+  the funnel's receipted rotation).
+- **D5 (mustMaterialize region arms).** `mustMaterializePi` takes
+  `systemRegionMode`: region rows legitimately carry no m[1] (skip
+  `cached_m1_missing`) and are not head bytes (skip the head-decoder
+  `cache_invalid`); a row the funnel reader cannot serve folds once with
+  `region_first_install`. All HARD arms stay (model/system-hash/TTL
+  eviction + genuine-content marker comparisons), and the marker read in
+  region mode uses the live boundary column, not the nulled head row.
+- **D6 (trim + boundary, closes #2674).** The null-guarding columns that
+  feed trim are replaced by region-aware state on the pass snapshot:
+  `createPiM0M1PassSnapshot` captures the raw row's boundary alongside
+  the discriminated shape; `trimPiMessagesToCachedBoundary` trims when
+  the row is a decodable region AND the boundary is non-empty — a
+  boundary co-resident with a region row can only come from the rotation
+  transaction (write-site property, D4). The funnel's direct writers
+  null the boundary, so the H3 reader refusal keeps its force for
+  head-era staleness; the property enforced is now stated as: a boundary
+  may drive trimming only when written in the same transaction as the
+  bytes it claims to cover. Reader-level refusal is unchanged for
+  corrupt/unreadable regions (trim 0).
+- **D7 (promotion, ride-only).** The Pi fold preflight grows the TS
+  promotion block (postprocess 1927-1963) with a Pi thin wrapper
+  (`piRegionRotationPromotion` in context-handler): same gates as TS —
+  declines unless lane ∧ ¬foldDue ∧ boundaryPermission ∧ stored region
+  non-empty; delegates every content/pressure arm to the shared
+  `decideSystemRegionRotation` (one machine-checked table, §5/§16). Pi's
+  six boundaryPermission arms: execute, force band, explicit flush
+  (`hasPendingMaterialization`), deferred materialization, published
+  history (`isCacheBusting`), deferred-history late-consume. The wrapper
+  is harness plumbing around the funnel table (same doctrine as the two
+  decider boots in §21); no new reason literals — the census scans the
+  Pi tree (`packages/pi-plugin/src` is already a walk root) and the
+  producers census names both fold callers with per-actor reasons.
+- **D8 (head collapse, L5).** On the region lane `injectM0M1Pi` splices
+  nothing: `syntheticLeadingCount` counts zero MC heads (Pi's own leading
+  system entries keep their identity), the m[1] replay/soft-refresh/CAS
+  lanes are inert (a structural census pins that no m1-byte UPDATE site
+  survives in the file), contention falls back to serving current stored
+  bytes (replay, never re-render), and `preparedPrefix` is not frozen
+  (no array-side prefix exists to freeze). Trim still applies —
+  summarized messages stay off the wire.
+- **D9 (install timing).** A legacy-head session on the lane installs at
+  its first fold decision (`region_first_install` rides the preflight);
+  the region enters the system string at the NEXT turn's
+  `before_agent_start` (Pi composes system once per turn, not per
+  round-trip). The two priced busts (fold turn on the array,
+  region-append turn at the region breakpoint) match the TS lane's
+  pricing; no attempt is made to fold before `before_agent_start`.
+- **D10 (LKG, L6).** No slot change. The Pi `PiLkgCoordinator` captures
+  array messages + entry ids and integrity-checks array-side `role:"system"`
+  entries at replay (pi-lkg.ts:860-882, `lkg_system_state_mismatch`). Pi's
+  context array never contains the MC region: the served system prompt
+  lives on the separate `before_agent_start` channel, so the slot is region
+  -orthogonal by construction — a rotation between capture and replay
+  leaves the replay byte-identical, and the pre-existing integrity check
+  keeps guarding host system-entry drift on the lane. No slot change, no
+  re-anchoring; the law pins exactly this.
+- **D11 (status surface).** The Pi status dialog decodes `cached_m0_bytes`
+  as head text; on the region lane it shows the region via the funnel
+  reader rather than "" — display-only, no wire effect. (F6's "never
+  serve region bytes as head text" is about serve, not display.)
+
+**Known boundary (not a silent gap).** The `region=`-form serve log and
+`/ctx-status` region line from the TS lane are not ported as log-format
+laws; Pi names its own `system-region serve … reason=` lines. The TS
+`memory_disabled` self-consuming arm has no Pi analogue (Pi has no
+memory-off surface at the watcher). Rust-mode rotation remains out of
+scope (§24).

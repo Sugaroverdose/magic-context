@@ -41,6 +41,7 @@ import type {
 	HistorianConfig,
 	MagicContextConfig,
 } from "@magic-context/core/config/schema/magic-context";
+import { isSystemRegionLane } from "@magic-context/core/config/system-region-lane";
 import {
 	summarizeDreamSchedule,
 	userMemoryCollectionEnabled,
@@ -1416,6 +1417,14 @@ async function startPiMagicContextRuntime(
 	// Pi tools are registered once per process, so this mode is intentionally
 	// boot-resolved rather than following later /cd project config changes.
 	const compactionOff = !isCompactionEnabled(config);
+	// Frozen system-region capability (§23 D1): one core decider, resolved
+	// once at boot beside compactionOff (both process-fixed) and threaded as
+	// a boolean. transform_mode is pinned "ts" because Pi only ever runs the
+	// TypeScript transform — the Rust module is an OpenCode-1 host.
+	const systemRegionLane = isSystemRegionLane({
+		transform_mode: "ts",
+		compaction: config.compaction,
+	});
 	setCtxReduceRegisteredGlobally(!compactionOff);
 	if (!compactionOff) {
 		try {
@@ -1564,6 +1573,7 @@ async function startPiMagicContextRuntime(
 		resolveForProject: resolveContextOptionsForProject,
 		todowriteEnabled: cfg.todowrite.enabled,
 		compactionOff,
+		systemRegionLane,
 		allowHomeProject: cfg.allow_home_project,
 		// Automatic history embedding: silent (no timeline messages) and not
 		// gated on `memory.enabled`; only the embedding provider decides.
@@ -2455,6 +2465,7 @@ async function startPiMagicContextRuntime(
 				systemPrompt: composedPrompt,
 				isCacheBusting,
 				promptSurfacePreset: promptSurface.preset,
+				systemRegionLane,
 			});
 
 			if (result.hashChanged) {

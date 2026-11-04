@@ -16,6 +16,7 @@ import {
 	getOrCreateSessionMeta,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { decodeSystemRegionRow } from "@magic-context/core/features/magic-context/system-region";
 import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-session-formatting";
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { PromptSurfacePreset } from "@magic-context/core/shared/prompt-surface";
@@ -31,6 +32,33 @@ const MAGIC_CONTEXT_MARKER = "## Magic Context";
  * entries when Pi shuts down or switches sessions.
  */
 const stickyDateBySession = new Map<string, string>();
+
+/**
+ * Last region bytes actually appended per session. The token estimate covers
+ * host + region bytes, so a rotation must force a re-estimate even when the
+ * delta sits under the ±50-token threshold (status/dashboard honesty, §23 D3;
+ * mirrors the OpenCode-1 servedRegionBySession watermark).
+ */
+const servedRegionBySession = new Map<string, string | null>();
+
+function servePiSystemRegion(
+	sessionId: string,
+	bytes: Buffer | Uint8Array | null | undefined,
+): string | null {
+	if (!bytes) return null;
+	const decoded = decodeSystemRegionRow(bytes);
+	if (decoded === null) return null;
+	if (typeof decoded !== "string") {
+		// Corrupt store: a row the funnel reader cannot serve is named, never
+		// handed to the wire and never treated as absent-without-a-trace.
+		sessionLog(
+			sessionId,
+			`system-region serve declined session=${sessionId} reason=corrupt`,
+		);
+		return null;
+	}
+	return decoded;
+}
 
 export interface BuildMagicContextBlockOptions {
 	db: ContextDatabase;
@@ -125,6 +153,12 @@ export function processSystemPromptForCache(args: {
 	/** When true, the caller has already determined this turn is busting cache. */
 	isCacheBusting: boolean;
 	promptSurfacePreset?: PromptSurfacePreset;
+	/**
+	 * Boot-resolved frozen-system-region capability (§23 D1/D2). Off (default)
+	 * the region column is never read and served bytes are exactly the
+	 * pre-lane behavior.
+	 */
+	systemRegionLane?: boolean;
 }): SystemPromptHashResult {
 	const { db, sessionId, systemPrompt, isCacheBusting } = args;
 
@@ -210,24 +244,40 @@ export function processSystemPromptForCache(args: {
 		);
 	}
 
+	// Frozen system-region serve (§23 D2): the watcher split keeps the hash
+	// over host bytes (frozenPrompt) ONLY — region rotations are panel events,
+	// not guidance events, and must never raise the refresh signal. Served
+	// bytes are the stored payload appended verbatim after the composed host
+	// prompt; zero re-derivation, read from the row this pass already loaded.
+	const regionServed =
+		args.systemRegionLane === true
+			? servePiSystemRegion(sessionId, sessionMeta?.cachedM0Bytes ?? null)
+			: null;
+	const servedPrompt = regionServed
+		? `${frozenPrompt}\n\n${regionServed}`
+		: frozenPrompt;
+
 	// Persist hash + token estimate so dashboard / status surfaces are
 	// up-to-date and the next turn can compare against this value.
-	const systemPromptTokens = estimateTokens(frozenPrompt);
+	const systemPromptTokens = estimateTokens(servedPrompt);
 	if (sessionMeta) {
+		const regionChanged = servedRegionBySession.get(sessionId) !== regionServed;
 		if (currentHash !== previousHash) {
 			updateSessionMeta(db, sessionId, {
 				systemPromptHash: currentHash,
 				systemPromptTokens,
 			});
 		} else if (
+			regionChanged ||
 			Math.abs(sessionMeta.systemPromptTokens - systemPromptTokens) > 50
 		) {
 			updateSessionMeta(db, sessionId, { systemPromptTokens });
 		}
+		if (regionChanged) servedRegionBySession.set(sessionId, regionServed);
 	}
 
 	return {
-		systemPrompt: frozenPrompt,
+		systemPrompt: servedPrompt,
 		hashChanged,
 		currentHash,
 	};
@@ -240,6 +290,7 @@ export function processSystemPromptForCache(args: {
  */
 export function clearPiSystemPromptSession(sessionId: string): void {
 	stickyDateBySession.delete(sessionId);
+	servedRegionBySession.delete(sessionId);
 }
 
 /** Test-only markers for system-prompt parity assertions. */

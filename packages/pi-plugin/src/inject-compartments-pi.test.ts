@@ -3517,13 +3517,17 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 	});
 });
 
-// Round-6 review H3: property closure — no Pi path may derive
-// wire-affecting decisions from region rows unguarded. The trim-to-cached-
-// boundary reader previously truth-tested m0/m1, so a region row keeping
-// a head-era boundary could drive tail trims. Closed at BOTH ends: the
-// region write site nulls the head-era boundary column, and the reader
-// refuses sentinel bytes defensively.
-it("H3: a region installed over a head-era boundary must not drive trimming", () => {
+// Round-6 review H3, superseded by Stage P2 (design §23 D6): the trim law
+// is now fold-co-residence — a boundary may drive trimming on a region row
+// ONLY when written by the fold rotation transaction (bytes + markers +
+// boundary under one BEGIN IMMEDIATE in materializeM0Pi). The funnel's
+// direct writers null the head-era boundary at the write site, so no
+// funnel-written row reaches the reader with a boundary; the reader keeps
+// its refusal for rows the funnel reader cannot serve (corrupt). The
+// head-lane refusal stands. Out-of-band SQL that re-pairs a boundary with
+// a region row is outside the production writer set and is held by the
+// region-writer census (system-region-pi-census.test.ts).
+it("H3: a funnel-written region (boundary NULLed at the write site) must not drive trimming", () => {
 	const db = createTestDb();
 	const state = piState("ses-pi-trim-region", process.cwd());
 	const sessionId = state.sessionId;
@@ -3580,11 +3584,23 @@ it("H3: a region installed over a head-era boundary must not drive trimming", ()
 				.get(sessionId) as { b: string | null }
 		).b,
 	).toBeNull();
-	// Reader property: no trim on a region row, even with a boundary
-	// re-seeded behind the writer (defense in depth).
+	// Reader property: a funnel-written region has no boundary to derive
+	// from — trim declines (no fold ever wrote this pair).
+	expect(
+		trimPiMessagesToCachedBoundary(db, sessionId, [...messages], [...ids]),
+	).toBe(0);
+	// Reader refusal keeps its force for unservable region rows: an
+	// out-of-band boundary re-seeded behind a CORRUPT region must not trim.
 	db.prepare(
-		"UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
-	).run("m2-id", sessionId);
+		"UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
+	).run(
+		Buffer.concat([
+			Buffer.from("<!-- mc:system-region v1 -->\n", "utf8"),
+			Buffer.from([0xed, 0xa0, 0x80]),
+		]),
+		"m2-id",
+		sessionId,
+	);
 	expect(
 		trimPiMessagesToCachedBoundary(db, sessionId, [...messages], [...ids]),
 	).toBe(0);

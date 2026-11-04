@@ -48,7 +48,10 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getNotes } from "@magic-context/core/features/magic-context/storage-notes";
 import { getTagsBySession } from "@magic-context/core/features/magic-context/storage-tags";
-import { SYSTEM_REGION_SENTINEL } from "@magic-context/core/features/magic-context/system-region";
+import {
+	decodeSystemRegionRow,
+	SYSTEM_REGION_SENTINEL,
+} from "@magic-context/core/features/magic-context/system-region";
 import { getEmbedDrainUiStatus } from "@magic-context/core/hooks/magic-context/embed-session-state";
 import { resolveExecuteThresholdDetail } from "@magic-context/core/hooks/magic-context/event-resolvers";
 import { countCompartmentsNeedingUpgrade } from "@magic-context/core/hooks/magic-context/legacy-compartments";
@@ -743,8 +746,15 @@ export function buildPiStatusDetail(
 					? bytes
 					: "";
 		// Frozen system-region rows reuse cached_m0_bytes for system-resident
-		// panel bytes: not head text, so the breakdown reports none of it.
-		return text.startsWith(SYSTEM_REGION_SENTINEL) ? "" : text;
+		// panel bytes (§23 D11): the region is the same panel structure the
+		// breakdown parses, so decode it through the funnel reader for display.
+		// Not a serve path — nothing here reaches the wire. An unservable
+		// (corrupt) region reports none of it.
+		if (text.startsWith(SYSTEM_REGION_SENTINEL)) {
+			const decoded = decodeSystemRegionRow(Buffer.from(text, "utf8"));
+			return typeof decoded === "string" ? decoded : "";
+		}
+		return text;
 	};
 	const m0Blocks = computeM0BlockTokens(deps.db, sessionId, {
 		m0Text: decodeCachedBytes(metaRow?.cached_m0_bytes),

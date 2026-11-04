@@ -128,6 +128,7 @@ import {
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
 import { getNativeReplayState } from "@magic-context/core/features/magic-context/storage-native-replay";
 import { getSourceContents } from "@magic-context/core/features/magic-context/storage-source";
+import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
 import {
 	createTagger,
 	type Tagger,
@@ -258,6 +259,7 @@ import {
 	type PiM0M1InjectionResult as PiInjectionResult,
 	type PiM0M1PassSnapshot,
 	type PiM0M1State,
+	piRegionRotationPromotion,
 	prepareCachedM0M1PiReplay,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
@@ -1296,6 +1298,13 @@ export interface PiContextHandlerOptions {
 	todowriteEnabled?: boolean;
 	/** Boot-resolved compaction-off flag. It remains fixed for this Pi process. */
 	compactionOff?: boolean;
+	/**
+	 * Boot-resolved frozen-system-region capability (§23 D1): the single core
+	 * decider evaluated once per Pi process (transform_mode pinned "ts"),
+	 * never re-read per pass. On the lane the panels are served from the
+	 * system channel and the array contributes no synthetic heads.
+	 */
+	systemRegionLane?: boolean;
 	/** Allow a session started exactly in the canonical home directory only when user-level configuration enables it. */
 	allowHomeProject?: boolean;
 	maybeAutoEmbedSession?: (
@@ -3406,6 +3415,7 @@ export function registerPiContextHandler(
 				readBranchEntries: resolvePiReadBranchEntries(ctx),
 				isSubagent: sessionMeta.isSubagent,
 				compactionOff: options.compactionOff === true,
+				systemRegionLane: options.systemRegionLane === true,
 				injectionPassSnapshot: piM0M1PassSnapshot,
 			});
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
@@ -5021,6 +5031,8 @@ interface RunPipelineArgs {
 	isSubagent?: boolean;
 	/** Additive-only transform mode: no tags, drops, history trim, markers, or nudges. */
 	compactionOff?: boolean;
+	/** Boot-resolved frozen-system-region capability (§23 D1); fixed for the process. */
+	systemRegionLane?: boolean;
 	/** ceiling = contextLimit × executeThreshold% for the tiered emergency drop. */
 	emergencyCeilingTokens?: number;
 	/** Memory-injection config — when omitted, no <session-history> injection runs. */
@@ -5518,20 +5530,55 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						args.forceMaterialization === true || emergencyDropEligible,
 				}
 			: undefined;
+	const systemRegionLane = args.systemRegionLane === true;
+	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
 	const foldDueDecision = piM0State
 		? mustMaterializePi(
 				piM0State,
 				args.db,
 				injectionPassSnapshot?.compartments,
 				injectionPassSnapshot,
+				{ systemRegionMode: systemRegionLane },
 			)
 		: { value: false, reason: null };
+	// Frozen system-region promotion (§23 D7, L3/L4 mirror): the stale-manifest
+	// and pressure arms of the shared decideSystemRegionRotation table may
+	// turn a boundary-permitted pass into a region rotation. Boundary
+	// permission here is the pre-fold set of genuine bust sources (execute,
+	// force band, flush, published-history, deferred-history drain) — the
+	// fold's own bust (hardFold) is already foldDue and handled by
+	// mustMaterializePi; deferred-materialize intents that turn out warm
+	// (fold rewrote nothing) are deliberately NOT promotion boundaries, the
+	// same ride-only discipline as the head lane.
+	const regionBoundaryPermission =
+		args.schedulerDecision === "execute" ||
+		emergencyDropEligible ||
+		hasPendingMaterializeSignal ||
+		args.isCacheBusting === true ||
+		(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart);
+	const regionRotation =
+		systemRegionLane && piM0State && !foldDueDecision.value
+			? piRegionRotationPromotion({
+					state: piM0State,
+					db: args.db,
+					passSnapshot: injectionPassSnapshot,
+					systemRegionLane: true,
+					foldDue: false,
+					boundaryPermission: regionBoundaryPermission,
+					forceBand: emergencyDropEligible && regionBoundaryPermission,
+				})
+			: { promote: false as const, reason: null as string | null };
 	const firstRenderBust =
 		piM0State !== undefined &&
-		!(
-			injectionPassSnapshot?.cachedRow?.cached_m0_bytes &&
-			injectionPassSnapshot.cachedRow.cached_m1_bytes
-		);
+		(systemRegionLane
+			? !(
+					injectionPassSnapshot?.sessionMeta.cachedM0Bytes &&
+					isSystemRegionBytes(injectionPassSnapshot.sessionMeta.cachedM0Bytes)
+				)
+			: !(
+					injectionPassSnapshot?.cachedRow?.cached_m0_bytes &&
+					injectionPassSnapshot.cachedRow.cached_m1_bytes
+				));
 	let foldExecutedThisPass = false;
 	// The one bust permission an executed fold grants: true only when the fold
 	// also loses the provider's cached prefix (see foldBustsServedPrefix). Every
@@ -5543,6 +5590,7 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	const softRefreshOpportunity = args.schedulerDecision === "execute";
 	const cachedPrefixBeforePreflight =
 		piM0State &&
+		!systemRegionLane &&
 		(foldDueDecision.value || softRefreshOpportunity) &&
 		!emergencyDropEligible
 			? prepareCachedM0M1PiReplay(
@@ -5558,7 +5606,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		persistedM0BeforeFold.cachedM0Bytes === null
 			? -1
 			: persistedM0BeforeFold.cachedM0MaxCompartmentSeq;
-	if ((foldDueDecision.value || softRefreshOpportunity) && piM0State) {
+	if (
+		(foldDueDecision.value ||
+			regionRotation.promote ||
+			softRefreshOpportunity) &&
+		piM0State
+	) {
 		try {
 			// Persist the fold before opening mutation gates. The shadow array keeps
 			// this pre-execution off the outgoing wire; the normal injection below
@@ -5570,6 +5623,18 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				undefined,
 				softRefreshOpportunity,
 				injectionPassSnapshot,
+				{
+					systemRegion: systemRegionLane
+						? {
+								enabled: true,
+								// Empty reason = no forcing: the region arms of
+								// mustMaterializePi decide. A promotion reason from
+								// the shared decision table (discriminated union)
+								// turns this pass's fold into a region rotation.
+								reason: regionRotation.promote ? regionRotation.reason : "",
+							}
+						: undefined,
+				},
 			);
 			prefixPreflightContended =
 				preFoldInjectionResult.contentionExhausted === true;
@@ -5581,7 +5646,9 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						args.sessionId,
 					).cachedM1Bytes?.toString("utf8");
 			foldExecutedThisPass = foldExecutesThisPass(
-				foldDueDecision.value || softRefreshOpportunity,
+				foldDueDecision.value ||
+					regionRotation.promote ||
+					softRefreshOpportunity,
 				preFoldInjectionResult.m0Materialized === true,
 			);
 			if (foldExecutedThisPass) {
@@ -5637,9 +5704,12 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		const mismatch = foldDueDecision.mismatch
 			? ` mismatch=${JSON.stringify(foldDueDecision.mismatch)}`
 			: "";
+		const foldReasonLabel = foldDueDecision.value
+			? (foldDueDecision.reason ?? "unknown")
+			: `rotation:${regionRotation.reason ?? "unknown"}`;
 		sessionLog(
 			args.sessionId,
-			`pi m[0] HARD fold decision: reason=${foldDueDecision.reason ?? "unknown"}${mismatch} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
+			`pi m[0] HARD fold decision: reason=${foldReasonLabel}${mismatch} executed=${foldExecutedThisPass} bustsServedPrefix=${foldBustsServedPrefixThisPass}`,
 		);
 	}
 	// Primary sessions run routine age-sensitive cleanup only once during an
@@ -5656,7 +5726,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		!args.sessionMeta.isSubagent &&
 		executePressureEligible &&
 		routinePressureAppliedBySession.get(args.sessionId) === true;
-	const hasPendingMaterializeSignal = hasPendingMaterialization(args.sessionId);
 	// Pi sessions are primary-equivalent today. If Pi adds subagents on this
 	// transform path, subagents should bypass this once-per-turn guard like
 	// OpenCode does, because they do not share the primary agent's turn cache.
@@ -6851,6 +6920,15 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				// replay stale m[1]. Mirrors OpenCode's isCacheBustingPass gate.
 				isCacheBustingPass,
 				injectionPassSnapshot,
+				{
+					// Region lane (§23 D8): no synthetic heads — the injection only
+					// trims summarized raw messages; the panels are served from the
+					// system channel. Empty reason: the fold already ran (or was
+					// declined) in the preflight; never force a second fold here.
+					systemRegion: systemRegionLane
+						? { enabled: true, reason: "" }
+						: undefined,
+				},
 			);
 			injectionResult = preFoldInjectionResult?.m0Materialized
 				? {

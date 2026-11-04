@@ -53,7 +53,14 @@ import {
 	persistCachedM0,
 	readProjectDocsCanonical,
 } from "@magic-context/core/features/magic-context/storage";
-import { isSystemRegionBytes } from "@magic-context/core/features/magic-context/system-region";
+import {
+	decideSystemRegionRotation,
+	decodeSystemRegionRow,
+	executeSystemRegionRotation,
+	isSystemRegionBytes,
+	type RegionMarkers,
+	readSystemRegion,
+} from "@magic-context/core/features/magic-context/system-region";
 import {
 	getActiveUserMemories,
 	type UserMemory,
@@ -591,6 +598,113 @@ export interface PiM0HardSignals {
 	lastResponseTime: number;
 }
 
+/** Pi mirror of OpenCode's regionMarkersFromSnapshot (design §23 D7). */
+export function regionMarkersFromPiSnapshot(
+	markers: PiM0SnapshotMarkers,
+): RegionMarkers {
+	return {
+		projectMemoryEpoch: markers.projectMemoryEpoch,
+		maxCompartmentSeq: markers.maxCompartmentSeq,
+		maxMemoryId: markers.maxMemoryId,
+		maxMutationId: markers.maxMutationId,
+		maxMemoryMutationId: markers.maxMemoryMutationId,
+		projectDocsHash: markers.projectDocsHash,
+		upgradeState: String(markers.upgradeState),
+		compartmentRenderEpoch: markers.compartmentRenderEpoch,
+		muralEnabled: markers.muralEnabled,
+		renderBudgetIdentity: markers.renderBudgetIdentity,
+		memoryRenderEpoch: markers.memoryRenderEpoch,
+		renderedBudgets: markers.renderedBudgets ?? null,
+		profileVersion: markers.projectUserProfileVersion,
+		profileRenderEpoch: markers.profileRenderEpoch,
+	};
+}
+
+/**
+ * Trim boundary legitimate for a region row (§23 D6): non-empty bytes the
+ * funnel reader can serve AND a non-empty boundary co-resident in the same
+ * row. Co-residence can only be produced by the fold rotation transaction
+ * (materializeM0Pi's region branch writes bytes + boundary under one BEGIN
+ * IMMEDIATE); the funnel's direct writers null the boundary at the write
+ * site, so a non-null pair here is structurally fold-owned.
+ */
+export function derivePiRegionBoundary(
+	db: ContextDatabase,
+	sessionId: string,
+	row?: CachedPiM0M1Row | null,
+): string | null {
+	const source = row ?? readCachedPiM0M1RowRaw(db, sessionId);
+	if (!source?.cached_m0_bytes) return null;
+	if (!isSystemRegionBytes(source.cached_m0_bytes)) return null;
+	const decoded = decodeSystemRegionRow(source.cached_m0_bytes);
+	if (typeof decoded !== "string" || decoded.length === 0) return null;
+	const boundary = source.cached_m0_last_baseline_end_message_id;
+	return typeof boundary === "string" && boundary.length > 0 ? boundary : null;
+}
+
+/**
+ * Pi mirror of the OpenCode-1 regionRotationPromotion (§23 D7, L3/L4): the
+ * stale-manifest / pressure decision runs on the SHARED
+ * decideSystemRegionRotation table — one machine-checked table, both
+ * harnesses. The wrapper is harness plumbing (store reads around the
+ * table), not a second decision: it declines unless the caller's pass is
+ * already busting (boundaryPermission), never originates a bust itself,
+ * and leaves installs to the fold lane (mustMaterialize's
+ * region_first_install).
+ */
+export function piRegionRotationPromotion(input: {
+	state: PiM0M1State;
+	db: ContextDatabase;
+	passSnapshot?: PiM0M1PassSnapshot;
+	systemRegionLane: boolean;
+	foldDue: boolean;
+	boundaryPermission: boolean;
+	forceBand: boolean;
+}): { promote: true; reason: string } | { promote: false; reason: null } {
+	const decline = { promote: false, reason: null } as const;
+	if (!input.systemRegionLane || input.foldDue || !input.boundaryPermission) {
+		return decline;
+	}
+	const storedRegion = readSystemRegion(input.db, input.state.sessionId);
+	if (storedRegion === null || storedRegion.length === 0) return decline;
+	const compartments =
+		input.passSnapshot?.compartments ??
+		getRenderableCompartmentsPi(input.db, input.state);
+	const meta =
+		input.passSnapshot?.sessionMeta ??
+		getOrCreateSessionMeta(input.db, input.state.sessionId);
+	// Region rows present as absent to the pass-snapshot reader, so the
+	// captured markers read their own persisted columns (live boundary).
+	const captured = getCachedMarkers(
+		input.db,
+		input.state,
+		compartments,
+		meta,
+		undefined,
+	);
+	const current = readCurrentMarkersFromCompartments(
+		input.db,
+		input.state,
+		compartments,
+		meta.cachedM0ProjectDocsHash ?? undefined,
+	);
+	const decision = decideSystemRegionRotation({
+		storedRegion,
+		capturedMarkers: captured ? regionMarkersFromPiSnapshot(captured) : null,
+		currentMarkers: regionMarkersFromPiSnapshot(current),
+		bustPermission: true,
+		forceBand: input.forceBand,
+		// Length proxy, not estimateTokens (parity with the OpenCode wrapper):
+		// a coarse pressure gate on a per-boundary-pass hot path.
+		pendingBytes: storedRegion.length,
+		pendingBytesCap:
+			(input.state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS) *
+			0.2 *
+			4,
+	});
+	return decision.rotate ? { promote: true, reason: decision.reason } : decline;
+}
+
 const EMPTY_PI_HARD_SIGNALS: PiM0HardSignals = {
 	systemHash: "",
 	modelKey: "",
@@ -833,40 +947,58 @@ export function trimPiMessagesToCachedBoundary(
 	entryIds: (string | undefined)[] | undefined,
 	passSnapshot?: PiM0M1PassSnapshot,
 ): number {
-	const row = passSnapshot?.cachedRow;
-	const m0 = passSnapshot ? passSnapshot.sessionMeta.cachedM0Bytes : undefined;
-	const m1 = passSnapshot ? passSnapshot.sessionMeta.cachedM1Bytes : undefined;
-	const stored = passSnapshot
-		? {
-				m0,
-				m1,
-				boundary: row?.cached_m0_last_baseline_end_message_id,
-			}
-		: (db
-				.prepare(
-					`SELECT cached_m0_bytes AS m0, cached_m1_bytes AS m1,
-					        cached_m0_last_baseline_end_message_id AS boundary
-					 FROM session_meta WHERE session_id = ?`,
-				)
-				.get(sessionId) as
-				| { m0?: unknown; m1?: unknown; boundary?: unknown }
-				| undefined);
-	if (!stored?.m0 || !stored.m1 || typeof stored.boundary !== "string")
-		return 0;
-	// H3 reader property (defense in depth below the write-site closure):
-	// region bytes never describe head text, so no boundary decision may be
-	// derived from a row whose m0 is a frozen system-region.
-	const rawM0 = stored.m0;
-	if (
-		isSystemRegionBytes(
-			typeof rawM0 === "string"
-				? Buffer.from(rawM0, "utf8")
-				: (rawM0 as Uint8Array),
+	// Region lane (§23 D6, closes #2674): a boundary co-resident with a
+	// servable frozen system region can only come from the fold rotation
+	// transaction — the funnel's direct writers null the boundary at the
+	// write site — so it is legitimate without m[1]. The reader-level
+	// refusal keeps its force: an unservable (corrupt) region or a
+	// funnel-written row yields no boundary here and falls through to the
+	// head-lane guard, which declines both.
+	let boundary: string | null =
+		passSnapshot !== undefined
+			? passSnapshot.regionBoundary
+			: derivePiRegionBoundary(db, sessionId);
+	if (boundary === null) {
+		const row = passSnapshot?.cachedRow;
+		const m0 = passSnapshot
+			? passSnapshot.sessionMeta.cachedM0Bytes
+			: undefined;
+		const m1 = passSnapshot
+			? passSnapshot.sessionMeta.cachedM1Bytes
+			: undefined;
+		const stored = passSnapshot
+			? {
+					m0,
+					m1,
+					boundary: row?.cached_m0_last_baseline_end_message_id,
+				}
+			: (db
+					.prepare(
+						`SELECT cached_m0_bytes AS m0, cached_m1_bytes AS m1,
+						        cached_m0_last_baseline_end_message_id AS boundary
+						 FROM session_meta WHERE session_id = ?`,
+					)
+					.get(sessionId) as
+					| { m0?: unknown; m1?: unknown; boundary?: unknown }
+					| undefined);
+		if (!stored?.m0 || !stored.m1 || typeof stored.boundary !== "string")
+			return 0;
+		// H3 reader property (defense in depth below the write-site closure):
+		// region bytes never describe head text, so no HEAD-lane boundary
+		// decision may be derived from a row whose m0 is a frozen
+		// system-region.
+		const rawM0 = stored.m0;
+		if (
+			isSystemRegionBytes(
+				typeof rawM0 === "string"
+					? Buffer.from(rawM0, "utf8")
+					: (rawM0 as Uint8Array),
+			)
 		)
-	)
-		return 0;
-	const boundary = stored.boundary;
-	if (boundary.length === 0) return 0;
+			return 0;
+		boundary = stored.boundary;
+		if (boundary.length === 0) return 0;
+	}
 	const compartments =
 		passSnapshot?.compartments ?? getCompartments(db, sessionId);
 	const boundaryIsLive = compartments.some(
@@ -1084,17 +1216,31 @@ export function mustMaterializePi(
 	db: ContextDatabase,
 	currentCompartmentsOverride?: readonly PiCompartment[],
 	passSnapshot?: PiM0M1PassSnapshot,
+	options?: { systemRegionMode?: boolean },
 ): PiMaterializeDecision {
 	const meta =
 		passSnapshot?.sessionMeta ?? getOrCreateSessionMeta(db, state.sessionId);
+	const regionMode = options?.systemRegionMode === true;
 	if (!meta.cachedM0Bytes) return { value: true, reason: "first_render" };
-	if (!meta.cachedM1Bytes) return { value: true, reason: "cached_m1_missing" };
-	// Keep invalid cached baselines on the guarded materialize path. The
-	// cache_invalid branch below does not have its own contention fallback, so
-	// detecting empty decoded bytes here prevents a lease-contention false
-	// negative from dropping m[0]/m[1] entirely.
-	if (!decodeCachedM0(meta.cachedM0Bytes)) {
-		return { value: true, reason: "cache_invalid" };
+	if (regionMode) {
+		// Region-lane arms (§23 D5, parity with mustMaterialize's
+		// systemRegionMode): a region row legitimately carries no m[1] and is
+		// not head bytes, so the head-decode arms must not judge it. Anything
+		// the funnel reader cannot serve (absent, legacy, corrupt) folds once
+		// as an install — the fold lane owns installs, never the promotion.
+		if (readSystemRegion(db, state.sessionId) === null) {
+			return { value: true, reason: "region_first_install" };
+		}
+	} else {
+		if (!meta.cachedM1Bytes)
+			return { value: true, reason: "cached_m1_missing" };
+		// Keep invalid cached baselines on the guarded materialize path. The
+		// cache_invalid branch below does not have its own contention fallback,
+		// so detecting empty decoded bytes here prevents a lease-contention
+		// false negative from dropping m[0]/m[1] entirely.
+		if (!decodeCachedM0(meta.cachedM0Bytes)) {
+			return { value: true, reason: "cache_invalid" };
+		}
 	}
 	// Accept a caller-provided snapshot so the materialize decision and the
 	// subsequent cached-marker reload in injectM0M1Pi normalize against the SAME
@@ -1117,7 +1263,10 @@ export function mustMaterializePi(
 		state,
 		currentCompartments,
 		meta,
-		passSnapshot?.cachedRow,
+		// Region mode: the pass-snapshot row presents as absent for a region
+		// (Stage P reader closure), so its null must not be read as "boundary
+		// absent" by the cached-marker CAS. Read the boundary live instead.
+		regionMode ? undefined : passSnapshot?.cachedRow,
 	);
 	if (cached === null) {
 		return { value: true, reason: "cache_invalid" };
@@ -1688,6 +1837,7 @@ export function materializeM0Pi(
 	state: PiM0M1State,
 	db: ContextDatabase,
 	passSnapshot?: PiM0M1PassSnapshot,
+	regionOptions?: { enabled: boolean; reason: string },
 ): {
 	m0: string;
 	m1: string;
@@ -1832,8 +1982,7 @@ export function materializeM0Pi(
 		);
 		const m1Bytes = Buffer.from(m1Render.text, "utf8");
 
-		persistCachedM0(db, state.sessionId, {
-			m0Bytes,
+		const foldPayload = {
 			muralDataUrl: frozenMuralDataUrl,
 			muralHash: frozenMuralHash,
 			projectMemoryEpoch: snapshotMarkers.projectMemoryEpoch,
@@ -1843,7 +1992,6 @@ export function materializeM0Pi(
 			maxMemoryId: snapshotMarkers.maxMemoryId,
 			maxMutationId: snapshotMarkers.maxMutationId,
 			maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
-			m1Bytes,
 			projectDocsHash: snapshotMarkers.projectDocsHash,
 			materializedAt: snapshotMarkers.materializedAt,
 			sessionFactsVersion: snapshotMarkers.sessionFactsVersion,
@@ -1859,20 +2007,69 @@ export function materializeM0Pi(
 			systemHash: snapshotMarkers.systemHash,
 			modelKey: snapshotMarkers.modelKey,
 			projectIdentity: snapshotMarkers.projectIdentity,
-		});
-		// Persist the rendered-memory identity in the SAME transaction as the m[0]
-		// snapshot (parity with OpenCode materializeM0). `memory_block_ids` /
-		// `memory_block_count` are otherwise written only by the dead legacy v1
-		// path, so they'd stay frozen at the last legacy value — wrong sidebar
-		// "Injected" count AND a stale ctx_search hide-already-visible filter after
-		// any memory change (e.g. migration delete+reinserts with new ids).
-		db.prepare(
-			"UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
-		).run(
-			renderedMemoryIds.length,
-			JSON.stringify(renderedMemoryIds),
-			state.sessionId,
-		);
+		};
+		if (regionOptions?.enabled) {
+			// Frozen system-region fold (§23 D4): the assembled m[0] + m[1]
+			// installs as the system channel through the rotation funnel — the
+			// second named production caller, after the OpenCode-1 materialize.
+			// The persist callback runs inside this same BEGIN IMMEDIATE:
+			// region bytes, marker capture, and the trim boundary land
+			// atomically, which is what makes the boundary a legitimate trim
+			// operand on a region row (D6). m[1] is vacated: region mode has
+			// no delta head. A refusal throws — the fold never persists head
+			// bytes beside a region that did not land.
+			const rotated = executeSystemRegionRotation(
+				db,
+				state.sessionId,
+				regionOptions.reason,
+				`${m0}\n\n${m1Render.text}`,
+				regionMarkersFromPiSnapshot(snapshotMarkers),
+				(regionBlob) => {
+					persistCachedM0(db, state.sessionId, {
+						...foldPayload,
+						m0Bytes: regionBlob,
+						m1Bytes: null,
+					});
+					db.prepare(
+						"UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
+					).run(
+						renderedMemoryIds.length,
+						JSON.stringify(renderedMemoryIds),
+						state.sessionId,
+					);
+				},
+			);
+			if (!rotated) {
+				try {
+					db.exec("ROLLBACK");
+				} catch {
+					// already rolled back
+				}
+				throw new PiMaterializeContentionError(
+					`system-region rotation refused for ${state.sessionId}`,
+				);
+			}
+		} else {
+			persistCachedM0(db, state.sessionId, {
+				...foldPayload,
+				m0Bytes,
+				m1Bytes,
+			});
+			// Persist the rendered-memory identity in the SAME transaction as
+			// the m[0] snapshot (parity with OpenCode materializeM0).
+			// `memory_block_ids` / `memory_block_count` are otherwise written
+			// only by the dead legacy v1 path, so they'd stay frozen at the
+			// last legacy value — wrong sidebar "Injected" count AND a stale
+			// ctx_search hide-already-visible filter after any memory change
+			// (e.g. migration delete+reinserts with new ids).
+			db.prepare(
+				"UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
+			).run(
+				renderedMemoryIds.length,
+				JSON.stringify(renderedMemoryIds),
+				state.sessionId,
+			);
+		}
 
 		// Persist the frozen trim boundary INSIDE the materialize transaction,
 		// BEFORE COMMIT. If written after COMMIT, a crash in the window leaves a
@@ -1914,6 +2111,7 @@ export function materializeM0PiWithRetry(
 	db: ContextDatabase,
 	maxRetries = 3,
 	passSnapshot?: PiM0M1PassSnapshot,
+	regionOptions?: { enabled: boolean; reason: string },
 ): {
 	m0: string;
 	m1: string;
@@ -1924,7 +2122,7 @@ export function materializeM0PiWithRetry(
 	let currentSnapshot = passSnapshot;
 	for (let attempt = 0; attempt < maxRetries; attempt++) {
 		try {
-			return materializeM0Pi(state, db, currentSnapshot);
+			return materializeM0Pi(state, db, currentSnapshot, regionOptions);
 		} catch (error) {
 			if (!(error instanceof PiMaterializeContentionError)) throw error;
 			lastError = error;
@@ -2287,6 +2485,12 @@ export interface PiM0M1PassSnapshot {
 	cachedRow: CachedPiM0M1Row | null;
 	/** Highest publish sequence observed when this context pass began. */
 	compartmentSequence: number;
+	/**
+	 * Fold-owned trim boundary co-resident with a servable frozen system
+	 * region (§23 D6), captured with the rest of the pass state so trim never
+	 * re-reads the row on a different snapshot than the decision.
+	 */
+	regionBoundary: string | null;
 }
 
 export function createPiM0M1PassSnapshot(args: {
@@ -2302,14 +2506,17 @@ export function createPiM0M1PassSnapshot(args: {
 		: args.compartments
 			? [...args.compartments]
 			: getCompartments(args.db, args.sessionId);
+	const rawRow = readCachedPiM0M1RowRaw(args.db, args.sessionId);
 	return {
 		sessionMeta:
 			args.sessionMeta ?? getOrCreateSessionMeta(args.db, args.sessionId),
 		compartments,
 		projectDocs: args.projectDocs,
-		cachedRow: readCachedPiM0M1Row(args.db, args.sessionId),
+		cachedRow:
+			rawRow && isSystemRegionBytes(rawRow.cached_m0_bytes) ? null : rawRow,
 		compartmentSequence:
 			compartments.at(-1)?.sequence ?? EMPTY_MAX_COMPARTMENT_SEQ,
+		regionBoundary: derivePiRegionBoundary(args.db, args.sessionId, rawRow),
 	};
 }
 
@@ -2746,6 +2953,115 @@ export function prepareCachedM0M1PiReplay(
 	return snapshot.preparedPrefix;
 }
 
+/**
+ * Region-lane injection (§23 D8, L5): the array side contributes nothing but
+ * trimming. The served bytes (history + memories + profile + docs) live in
+ * the system channel, appended by processSystemPromptForCache from the
+ * stored region; this pass only (a) folds a stale/absent region through the
+ * rotation funnel and (b) removes summarized raw messages. Contention falls
+ * back to serving the current stored bytes — replay, never re-render (L2).
+ */
+function injectM0M1PiRegion(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	piMessages: PiAgentMessage[],
+	entryIds: readonly (string | undefined)[] | undefined,
+	passSnapshot: PiM0M1PassSnapshot | undefined,
+	forcedReason: string,
+): PiM0M1InjectionResult {
+	const snapshot =
+		passSnapshot ??
+		createPiM0M1PassSnapshot({
+			db,
+			sessionId: state.sessionId,
+			compactionOff: state.compactionOff === true,
+		});
+	const currentCompartments = snapshot.compartments;
+	const decision = forcedReason
+		? { value: true as const, reason: forcedReason }
+		: mustMaterializePi(state, db, currentCompartments, snapshot, {
+				systemRegionMode: true,
+			});
+	if (decision.value) {
+		logSession(
+			state.sessionId,
+			`pi system-region fold firing: reason=${decision.reason ?? "unknown"}`,
+		);
+	}
+	let materialized = false;
+	let contentionExhausted = false;
+	if (decision.value) {
+		try {
+			materializeM0PiWithRetry(state, db, 3, snapshot, {
+				enabled: true,
+				reason: decision.reason ?? "first_render",
+			});
+			materialized = true;
+		} catch (error) {
+			if (!(error instanceof PiMaterializeContentionError)) throw error;
+			// The stored region keeps serving unchanged this pass (the serve
+			// path reads the row at before_agent_start; the fold retries next
+			// pass). Never re-render from live state on the losing pass.
+			contentionExhausted = true;
+			logSession(
+				state.sessionId,
+				"pi system-region fold contention exhausted; serving stored bytes",
+			);
+		}
+	}
+	// Trim boundary: fold-owned (region bytes + boundary co-written in one
+	// transaction). After a successful fold the row advanced — re-derive;
+	// otherwise use the pass-captured value.
+	const boundaryId = materialized
+		? derivePiRegionBoundary(db, state.sessionId)
+		: snapshot.regionBoundary;
+	const skippedVisibleMessages = boundaryId
+		? trimPiMessagesToBoundary(
+				piMessages,
+				entryIds,
+				boundaryId,
+				false,
+				state.sessionId,
+				isPartialCompartmentEnd(db, state.sessionId, boundaryId),
+			)
+		: 0;
+	const insertionIndex = placePiInitialSystemAtHead(piMessages);
+	const servedRegion = readSystemRegion(db, state.sessionId);
+	const memPath = memoryProjectPath(state);
+	const workspace = resolveWorkspaceRenderContextPi(state, db);
+	const memoryCount = memPath
+		? workspace.isWorkspaced
+			? getMemoriesByProjects(
+					db,
+					workspace.expandedIdentities,
+					["active", "permanent"],
+					Date.now(),
+					workspace.ownIdentities,
+					workspace.shareCategories,
+				).length
+			: getMemoriesByProject(db, memPath, ["active", "permanent"]).length
+		: 0;
+	return {
+		injected: true,
+		compartmentCount: currentCompartments.length,
+		factCount: 0,
+		memoryCount,
+		skippedVisibleMessages,
+		m0Materialized: materialized,
+		m0Reason: decision.value ? decision.reason : null,
+		m0Bytes: servedRegion?.length ?? 0,
+		m1Bytes: 0,
+		contentionExhausted,
+		renderedBoundary: resolveRenderedCompartmentBoundary(
+			currentCompartments,
+			boundaryId,
+		),
+		m1RenderedCoverage: null,
+		// MC contributes zero heads: only Pi's own leading system entries.
+		syntheticLeadingCount: insertionIndex,
+	};
+}
+
 export function injectM0M1Pi(
 	state: PiM0M1State,
 	db: ContextDatabase,
@@ -2753,7 +3069,27 @@ export function injectM0M1Pi(
 	entryIds?: readonly (string | undefined)[],
 	recomputeM1ThisPass = false,
 	passSnapshot?: PiM0M1PassSnapshot,
+	options?: {
+		/**
+		 * Frozen system-region lane (§23 D8): the history/profile/memory panels
+		 * live in the system channel, so this function splices NO synthetic
+		 * heads onto the wire — it only folds (through the rotation funnel)
+		 * and trims. Set solely from the boot-resolved capability flag.
+		 */
+		systemRegion?: { enabled: boolean; reason: string };
+	},
 ): PiM0M1InjectionResult {
+	const regionMode = options?.systemRegion?.enabled === true;
+	if (regionMode) {
+		return injectM0M1PiRegion(
+			state,
+			db,
+			piMessages,
+			entryIds,
+			passSnapshot,
+			options?.systemRegion?.reason ?? "",
+		);
+	}
 	if (state.preparedPrefix) {
 		const prepared = state.preparedPrefix;
 		const skippedVisibleMessages = prepared.trimBoundaryId

@@ -64,9 +64,14 @@ describe("system-region L0: per-actor producer census", () => {
             .map(({ rel }) => rel)
             .sort();
 
-    it("the rotation executor has exactly one production caller (the fold lane)", () => {
+    it("the rotation executor has exactly the named fold-lane callers", () => {
+        // L0 is one MECHANISM (the boundary transaction), not one file: the
+        // OpenCode-1 fold and the Pi fold (§23 D4) are the two named fold
+        // lanes; both install inside their own BEGIN IMMEDIATE. A third
+        // caller — or a caller outside a fold transaction — is two baselines.
         expect(filesUsing(/executeSystemRegionRotation\(/)).toEqual([
             "hooks/magic-context/inject-compartments.ts",
+            "pi/inject-compartments-pi.ts",
         ]);
     });
 
