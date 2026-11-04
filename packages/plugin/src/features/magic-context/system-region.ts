@@ -295,9 +295,12 @@ export interface SystemRegionRotationInput {
     /** The single per-pass bust permission (R12 `systemReclaimAllowed` shape). */
     bustPermission: boolean;
     forceBand?: boolean;
-    pendingBytes?: number;
-    pendingBytesCap?: number;
-    pendingBytesMinFloor?: number;
+    // No pending-size fields: the pending-growth arm was deleted (§25.3) —
+    // the four DELTA markers above already measure every pending growth
+    // axis with its own reason token, and the region is the m[0] analogue
+    // (a baseline, never a volatile delta to cap). The head-lane pressure
+    // precedent (inject-compartments.ts:4272-4305) caps m[1] DELTA tokens,
+    // never m[0] size. Re-adding a size arm requires a real delta measure.
 }
 
 export function decideSystemRegionRotation(
@@ -324,14 +327,10 @@ export function decideSystemRegionRotation(
         }
     }
     if (args.forceBand) return { rotate: true, reason: "force_band" };
-    if (
-        args.pendingBytes !== undefined &&
-        args.pendingBytesCap !== undefined &&
-        args.pendingBytes > args.pendingBytesCap &&
-        (args.pendingBytesMinFloor === undefined || args.pendingBytes >= args.pendingBytesMinFloor)
-    ) {
-        return { rotate: true, reason: "pending_growth" };
-    }
+    // The pending-growth arm is deleted (§25.3): it received the absolute
+    // stored-region size as if it were an un-folded delta, storming every
+    // large-region session on every boundary pass. Growth is measured by
+    // the DELTA_TRIGGER_FIELDS comparison above.
     return { rotate: false, reason: "none" };
 }
 

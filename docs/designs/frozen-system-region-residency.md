@@ -87,7 +87,8 @@ silently.
   `mural_enabled`, `render_budget_identity`, `memory_render_epoch`, `rendered_budgets`),
   the bust-gated delta-trigger class (`max_memory_id`, `max_compartment_seq`,
   `profile_version`, `project_docs_hash` — rotation triggers here, m[1] refreshers on
-  the head lane), and the pressure arms (`force_band`, `pending_growth`); the install
+  the head lane), and the pressure arm (`force_band` only — the pending-growth class
+  was deleted, §25.3); the install
   arms (`first_render`, `missing_markers`) belong to the fold lane. Every arm of the
   decision requires the single per-pass bust permission (A3) — an anonymous bust, or a
   rotation claimed on a non-busting pass, is not type-expressible. Obsoletes: scattered
@@ -259,11 +260,11 @@ Pressure backstop:
 
 - the force band (about 85%) rotates when markers have moved, mirroring
   `forceMaterialization` today,
-- the pending-growth refold gate: when the not-yet-visible delta (new memories past the
-  captured watermark, unpublished compartments, profile additions, docs drift) exceeds the
-  existing m[1] absolute cap (about 20% of the history budget, with a small-region floor)
-  or the large memory-mutation count, rotation is due; it lands on the next pass that is
-  busting anyway, and the force band is the guarantee it eventually lands.
+- the pending-growth refold gate was DELETED (§25.3): its four growth axes are exactly
+  the DELTA_TRIGGER_FIELDS, each with its own reason token, so a separate size arm added
+  nothing measurable; the one implementation that existed wired the ABSOLUTE region size
+  as the "delta" and stormed every large-region session (field receipts, §25.3).
+  Rotation freshness is marker-driven; the force band is the guarantee it lands.
 
 The four head-lane m[1]-delta fields — a new compartment sequence,
 `project_user_profile_version`, `maxMemoryId`, project-docs hash drift — are deliberate
@@ -272,8 +273,8 @@ region mode there is no m[1] to ride, so they keep their exact role by changing 
 they are the bust-permission-gated DELTA triggers (`DELTA_TRIGGER_FIELDS`) — they rotate
 the region on a pass that is already busting, never originate a bust themselves, and
 without them new memories, compartments, profile additions, and docs edits would never
-surface at all (the round-2 discovery). Their freshness ceiling is the pending-growth
-backstop and the force band. What stays a true non-trigger everywhere: the tool-set hash
+surface at all (the round-2 discovery). Their freshness ceiling is the boundary
+permission itself, with the force band as the pressure guarantee (§25.3). What stays a true non-trigger everywhere: the tool-set hash
 (process-global, false positives; `:1853-1856`).
 
 No new user-facing rotation trigger is designed. The operator's rotation trigger is
@@ -335,7 +336,6 @@ max_compartment_seq
 profile_version
 project_docs_hash
 force_band
-pending_growth
 render_config
 ```
 
@@ -362,8 +362,9 @@ region. A trigger present in code but absent from §4's enumeration is an L0 vio
 
 All of these already exist as `session_meta` columns written by the m[0]/m[1] machinery
 (`readCurrentM0SnapshotMarkers`, `inject-compartments.ts:1561`; `CachedM0M1Row`,
-`:3038-3049`). The marker set is also the "pending delta" estimator input for the backstop:
-the bytes between the captured markers and the current store state are the pending delta.
+`:3038-3049`). The marker set IS the pending-delta measure: the gap between the captured
+markers and the current store state is compared field-by-field by the decider — the
+deleted size arm (§25.3) never consumed a real delta estimate.
 
 No new marker columns are required. The serve path must not read markers (a marker read
 that renders different bytes would be a re-decide at serve); the marker comparison happens
@@ -1613,3 +1614,70 @@ immune to this defect: its bust drop (pi-lkg.ts:729-733) fires only when
 the freshly computed candidate differs from the prior row (`unchanged`
 compares candidate bytes before dropping), so a no-op bust cannot trigger
 it; the field receipts were OpenCode/TS.
+
+### 25.3 Fix C ruling: the pending_growth arm deleted as redundant (§25 chain, second latent storm)
+
+**Field evidence (coordinator-verified, lane-agent session).** Receipts
+04:10:06→04:12:35: `reason=pending_growth` rotate+execute on EVERY
+boundary pass with identical bytes=67,272 (69,790 after the legitimate
+max_compartment_seq fold). The docs hotpatch (§25) unmasked this arm: the
+docs trigger had been returning first in the same comparison loop, so the
+field never saw pending_growth storm while project_docs_hash did.
+
+**Root cause (verified at source this session).**
+`transform-postprocess-phase.ts` regionRotationPromotion wired
+`pendingBytes: input.storedRegion.length` — the ABSOLUTE stored-region size
+— into the decider's pending-growth arm, and omitted the design's small-
+region floor entirely. Any session whose region exceeded
+`historyBudgetTokens * 0.2 * 4` (≈ 36.7 KB at the 40 K default) was
+permanently eligible: size never shrinks below the cap after growth, so
+every boundary pass rotated with executed=true on byte-identical content.
+The Pi wrapper (`inject-compartments-pi.ts`) carried the mirror defect
+(`pendingBytes: storedRegion.length`). Field mitigation: second ctxv16
+hotpatch set `pendingBytes: 0` at both shipped wiring sites
+(backups `.pre-pendinghotpatch.bak`; registry 101be39, memory #2711).
+
+**Head-lane precedent (single source for the semantics).** The pressure
+backstop refold — `inject-compartments.ts:4272-4305` — caps the VOLATILE
+m[1] DELTA: three triggers, all measures of m[1] (token estimate of the
+freshly recomputed m[1] text vs `M1_ABSOLUTE_CAP_RATIO` (0.2) of the
+history budget; m[1]/m[0] token ratio above `M1_DRIFT_RATIO` (0.15) gated
+by the `M0_DRIFT_RATIO_FLOOR_TOKENS` (500) floor; `memoryUpdateCount > 40`
+supersession drift). Nothing in the head lane ever compares m[0]'s size to
+a cap. On the region lane there is no m[1]: the delta lives only in the
+marker gap (memories past the captured watermark, unpublished compartments,
+profile additions, docs drift), and the decider already compares each of
+those axes field-by-field with its own reason token. The region is the
+m[0] analogue — a baseline — so an absolute-size arm has no measured
+quantity to guard.
+
+**Ruling: REDUNDANT — arm deleted, both lanes.** What the arm nominally
+added ("large-mutation-count aspect") is already a compared marker
+(`maxMemoryMutationId` in the delta class); "aging" is measured by the
+markers moving, not by the region's size. The floor requirement became
+moot with the arm. Re-adding any size arm requires a real delta measure
+recorded here first — asserted structurally by the anti-reintroduction law
+(no `pendingBytes`/`pending_growth` vocabulary in the decider, either
+promotion wrapper, or the postprocess phase file).
+
+**Obsoletion (deletion list, #2646).** Reason token `pending_growth` is
+dead: removed from the §4 fence, from the arm census sentence, and from
+the pressure-backstop prose. Unit laws rewritten to their inverse:
+`system-region-rotation.test.ts` pressure describe is now "no size/pressure
+arm" (huge quiescent region must not rotate; structural absence check);
+`system-region-wiring.test.ts` "region bytes past the growth cap promote"
+is now "never promote — promotion is marker/force-band only" (and the
+oversized region still promotes on real marker movement, so the inverse is
+not vacuous). The wrapper's `historyBudgetTokens` input was deleted with
+its sole consumer.
+
+**Laws (red-first).** TS: quiescent warm session with a 200 KB region
+through the PRODUCTION wrapper → RED at the pre-fix state
+(`{promote:true, reason:"pending_growth"}`), green after deletion; the
+generalized anti-vacuity law pins EVERY decider input at both call sites
+(`storedRegion/capturedMarkers/currentMarkers/forceBand` from
+`input.*`, `bustPermission: true` constant, no `pendingBytes` token
+anywhere in the phase file or the Pi file) plus caller-site pins
+(`storedRegion = readSystemRegion(...)`, boundary arm-set variable, gated
+force-band conjunction). Pi: same quiescent big-region law through
+`piRegionRotationPromotion` → RED pre-fix, green post-fix.

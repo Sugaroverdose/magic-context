@@ -699,13 +699,10 @@ export function piRegionRotationPromotion(input: {
 		currentMarkers: regionMarkersFromPiSnapshot(current),
 		bustPermission: true,
 		forceBand: input.forceBand,
-		// Length proxy, not estimateTokens (parity with the OpenCode wrapper):
-		// a coarse pressure gate on a per-boundary-pass hot path.
-		pendingBytes: storedRegion.length,
-		pendingBytesCap:
-			(input.state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS) *
-			0.2 *
-			4,
+		// No size/pressure arm (§25.3): the wrapper used to pass the
+		// absolute stored-region size as if it were an un-folded delta — the
+		// deleted pending-growth class. Growth is the marker comparison
+		// above.
 	});
 	return decision.rotate ? { promote: true, reason: decision.reason } : decline;
 }

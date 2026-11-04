@@ -2,6 +2,8 @@
 
 import { Database as BunDatabase } from "bun:sqlite";
 import { describe, expect, it, mock } from "bun:test";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 
 const lines: string[] = [];
 mock.module("../../shared/logger", () => ({
@@ -177,28 +179,30 @@ describe("system-region rotation decision: m[1]-delta fields are bust-gated trig
     });
 });
 
-describe("system-region rotation decision: pressure arms are ride-only", () => {
-    const pressure = {
-        ...stored("r"),
-        capturedMarkers: BASE,
-        currentMarkers: BASE,
-        pendingBytes: 90_000,
-        pendingBytesCap: 40_000,
-        pendingBytesMinFloor: 10_000,
-    };
-
-    it("a large pending delta rotates on a busting pass", () => {
-        expect(decideSystemRegionRotation({ ...pressure, bustPermission: true })).toEqual({
-            rotate: true,
-            reason: "pending_growth",
-        });
-    });
-
-    it("the same delta on a non-busting pass never rotates (ride-only law)", () => {
-        expect(decideSystemRegionRotation({ ...pressure, bustPermission: false })).toEqual({
-            rotate: false,
-            reason: "none",
-        });
+describe("system-region rotation decision: no size/pressure arm (Fix C, §25.3)", () => {
+    // The pending_growth arm rotated on the ABSOLUTE stored-region size —
+    // every session past ~20% of the history budget stormed on every
+    // boundary pass (field receipts: identical bytes=67,272, rotate+execute
+    // 04:10:06→04:12:35). Deleted as redundant: growth is the marker
+    // comparison, which owns a reason token per axis.
+    it("a stored region far past any conceivable cap never rotates with identical markers", () => {
+        const huge = "r".repeat(400_000);
+        expect(
+            decideSystemRegionRotation({
+                ...stored(huge),
+                capturedMarkers: BASE,
+                currentMarkers: BASE,
+                bustPermission: true,
+            }),
+        ).toEqual({ rotate: false, reason: "none" });
+        expect(
+            decideSystemRegionRotation({
+                ...stored(huge),
+                capturedMarkers: BASE,
+                currentMarkers: BASE,
+                bustPermission: false,
+            }),
+        ).toEqual({ rotate: false, reason: "none" });
     });
 
     it("the force band rotates only with the bust permission", () => {
@@ -222,21 +226,13 @@ describe("system-region rotation decision: pressure arms are ride-only", () => {
         ).toEqual({ rotate: false, reason: "none" });
     });
 
-    it("pending growth below the floor or cap does not rotate even with permission", () => {
-        expect(
-            decideSystemRegionRotation({
-                ...pressure,
-                pendingBytes: 9_000,
-                bustPermission: true,
-            }),
-        ).toEqual({ rotate: false, reason: "none" });
-        expect(
-            decideSystemRegionRotation({
-                ...pressure,
-                pendingBytes: 40_000,
-                bustPermission: true,
-            }),
-        ).toEqual({ rotate: false, reason: "none" });
+    it("the decider carries no pending-size vocabulary at all (structural, anti-reintroduction)", () => {
+        const src = readFileSync(
+            join(import.meta.dir, "..", "..", "features", "magic-context", "system-region.ts"),
+            "utf8",
+        );
+        expect(src).not.toMatch(/pendingBytes/);
+        expect(src).not.toMatch(/pending_growth/);
     });
 });
 
@@ -250,7 +246,7 @@ describe("system-region rotation execution", () => {
             executeSystemRegionRotation(
                 db,
                 "ses",
-                "pending_growth",
+                "max_memory_id",
                 "region-bytes",
                 BASE,
                 (blob, markers) => {
@@ -266,7 +262,7 @@ describe("system-region rotation execution", () => {
         expect(
             lines.some((line) =>
                 line.includes(
-                    "system-region rotation: reason=pending_growth executed=true bytes=12",
+                    "system-region rotation: reason=max_memory_id executed=true bytes=12",
                 ),
             ),
         ).toBe(true);

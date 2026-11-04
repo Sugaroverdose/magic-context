@@ -487,6 +487,60 @@ describe("Pi region lane: promotion comparator convergence (storm, Fix A mirror)
 			),
 		).toBe(false);
 	});
+
+	it(
+		"quiescent warm session with a region far past the cap must NOT rotate (Fix C mirror)",
+		() => {
+			// §25.3: the Pi wrapper wired pendingBytes = storedRegion.length
+			// (absolute size) — same defect class as the TS lane. A quiescent
+			// session (markers equal, no force band) must decline no matter how
+			// large the region is. The region grows through the PRODUCTION fold
+			// (a large memory block, budget raised so the trimmer keeps it) —
+			// post-install writeSystemRegion is NOT quiescent on Pi: its H3
+			// property retires the boundary deliberately.
+			const dir = createTestTempDirFromPath("/tmp/pi-region-big-");
+			writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\npanel doc v1.\n");
+			writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nmap v1.\n");
+			const db = createTestDb();
+			const state = { ...piState("ses-pi-region-big", dir), injectionBudgetTokens: 400_000 };
+			seedStore(db, state);
+			insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "CONSTRAINTS",
+				content: "x".repeat(60_000),
+			});
+			try {
+				materializeM0Pi(state, db, undefined, {
+					enabled: true,
+					reason: "region_first_install",
+				});
+				const region = readSystemRegion(db, state.sessionId);
+				expect(region).not.toBeNull();
+				// Past every historical cap: the old wiring read this length as
+				// the "pending delta" (default budget cap = 40_000 * 0.2 * 4).
+				expect((region ?? "").length).toBeGreaterThan(40_000 * 0.2 * 4);
+				const snapshot = createPiM0M1PassSnapshot({
+					db,
+					sessionId: state.sessionId,
+					compactionOff: false,
+				});
+				expect(
+					piRegionRotationPromotion({
+						state,
+						db,
+						passSnapshot: snapshot,
+						systemRegionLane: true,
+						foldDue: false,
+						boundaryPermission: true,
+						forceBand: false,
+					}),
+				).toEqual({ promote: false, reason: null });
+			} finally {
+				closeQuietly(db);
+			}
+		},
+		20_000,
+	);
 });
 
 describe("Pi region lane: compaction adoption touches zero real messages (F1)", () => {

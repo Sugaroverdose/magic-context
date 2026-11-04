@@ -296,15 +296,20 @@ describe("system-region wiring: rotation promotion (L3/L4)", () => {
         });
     });
 
-    it("region bytes past the growth cap promote on the boundary", () => {
-        const big = {
-            ...base,
-            storedRegion: `<b>${"x".repeat(200_000)}</b>`,
-            historyBudgetTokens: 40000,
-        };
-        expect(regionRotationPromotion(big).promote).toBe(true);
-        // Inert control: a region under the cap with fresh markers does not.
-        expect(regionRotationPromotion(base).promote).toBe(false);
+    it("region bytes past any cap never promote — promotion is marker/force-band only (Fix C, §25.3)", () => {
+        // Obsoleted arm law rewritten to its inverse: the old size arm
+        // promoted here; the deleted pending_growth class must stay dead,
+        // including as a reintroduced parameter (historyBudgetTokens is no
+        // longer even an input of the wrapper — the cap had one consumer).
+        const big = { ...base, storedRegion: `<b>${"x".repeat(200_000)}</b>` };
+        expect(regionRotationPromotion(big)).toEqual({ promote: false, reason: null });
+        // Marker movement still promotes on the same oversized region.
+        expect(
+            regionRotationPromotion({
+                ...big,
+                currentMarkers: live({ projectMemoryEpoch: 2 }),
+            }),
+        ).toEqual({ promote: true, reason: "project_memory_epoch" });
     });
 });
 
@@ -643,8 +648,6 @@ describe("system-region wiring: promotion comparator convergence (storm, Fix A)"
                 currentMarkers: current,
                 bustPermission: true,
                 forceBand: false,
-                pendingBytes: 0,
-                pendingBytesCap: 256 * 1024,
             });
             expect(decision.rotate).toBe(false);
             expect(decision.reason).toBe("none");
@@ -712,5 +715,75 @@ describe("system-region wiring: promotion comparator convergence (storm, Fix A)"
         expect(helper).toContain("readCurrentM0SnapshotMarkers(");
         expect(helper).toContain("readProjectDocsForM0(");
         expect(helper).not.toContain("createHash"); // no canonicalization reimplementation
+    });
+
+    // Fix C (§25.3): the promotion wrappers wired pendingBytes = the
+    // ABSOLUTE stored region size into the decider's pending-growth arm,
+    // with the design's floor omitted. Any session whose region exceeds
+    // ~20% of the history budget rotated with reason=pending_growth on
+    // every boundary pass (field receipts 04:10:06→04:12:35: rotate+execute
+    // every pass, identical bytes=67,272). Ruling: REDUNDANT arm deleted —
+    // see §25.3 for the head-lane precedent (all three pressure triggers
+    // are m[1]-delta measures; the region is the m[0] analogue and has no
+    // unbounded-volatile-delta counterpart; the four DELTA markers already
+    // measure every pending growth axis with its own reason token).
+    it("quiescent warm session with a region far past the cap must NOT rotate (Fix C)", () => {
+        const dir = docsDir();
+        try {
+            const { db, state } = installedRegion(dir);
+            const bigRegion = "r".repeat(200_000); // > 40_000 * 0.2 * 4 = 32_000 cap
+            writeSystemRegion(db, SESSION_ID, bigRegion);
+            const captured = state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+            expect(captured).not.toBeNull();
+            const promotion = regionRotationPromotion({
+                systemRegionLane: true,
+                freezeM0M1: false,
+                foldDue: false,
+                boundaryPermission: true,
+                forceBand: false,
+                storedRegion: bigRegion,
+                capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+                currentMarkers: currentRegionMarkersForPromotion(foldDueArgsFor(db, state, dir)),
+                historyBudgetTokens: 40_000,
+            });
+            expect(promotion).toEqual({ promote: false, reason: null });
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("anti-vacuity: every decider input at both promotion call sites is production-sourced, none size-derived (Fix C generalization)", () => {
+        // Generalizes the Fix A anti-vacuity law to EVERY
+        // decideSystemRegionRotation input at the call sites — the unit
+        // pressure fixture passed while production passed region bytes as
+        // queue delta. Wrapper inputs: production fields only, bust gate as
+        // the documented constant true (boundaryPermission gates upstream),
+        // and the pending-size class absent entirely.
+        const phase = readFileSync(
+            join(SRC_PLUGIN, "hooks", "magic-context", "transform-postprocess-phase.ts"),
+            "utf8",
+        );
+        const at = phase.indexOf("export function regionRotationPromotion(");
+        expect(at).toBeGreaterThan(-1);
+        const wrapper = phase.slice(at, at + phase.slice(at).indexOf("\nexport ") + 1);
+        const callAt = wrapper.indexOf("decideSystemRegionRotation({");
+        expect(callAt).toBeGreaterThan(-1);
+        const deciderCall = wrapper.slice(callAt, wrapper.indexOf("})", callAt));
+        for (const field of ["storedRegion", "capturedMarkers", "currentMarkers", "forceBand"]) {
+            expect(deciderCall).toContain(`${field}: input.${field}`);
+        }
+        expect(deciderCall).toMatch(/bustPermission:\s*true/);
+        expect(deciderCall).not.toMatch(/pendingBytes/);
+        expect(phase).not.toMatch(/pendingBytes/);
+        const pi = readFileSync(
+            join(SRC_PLUGIN, "..", "..", "pi-plugin", "src", "inject-compartments-pi.ts"),
+            "utf8",
+        );
+        expect(pi).not.toMatch(/pendingBytes/);
+        // Caller site: the boundary arm set is the computed permission, not
+        // a literal; the stored region comes from the store reader; the
+        // force band is the gated conjunction.
+        expect(phase).toMatch(/const storedRegion = readSystemRegion\(args\.db, args\.sessionId\)/);
+        expect(phase).toMatch(/boundaryPermission,\s*\n\s*forceBand: emergencyDropEligible && boundaryPermission/);
     });
 });

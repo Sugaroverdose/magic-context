@@ -1742,10 +1742,12 @@ export function finalizeMessageRepresentation(
  * Frozen system-region rotation promotion (L3/L4): on a pass that is already
  * busting for a named reason (execute, force band, explicit flush, deferred
  * materialization, published history), a region whose captured manifest
- * differs from the live store — or whose bytes have aged past the growth cap
- * — promotes the ordinary fold into a rotation of the same transaction. The
- * promotion never originates a bust: outside a boundary it always declines,
- * and a missing region is installed by mustMaterialize, not here.
+ * differs from the live store promotes the ordinary fold into a rotation of
+ * the same transaction. The promotion never originates a bust: outside a
+ * boundary it always declines, and a missing region is installed by
+ * mustMaterialize, not here. There is no size/pressure arm: growth is
+ * measured by the marker comparison, never by the absolute region size —
+ * the deleted pending_growth class (§25.3).
  */
 export function regionRotationPromotion(input: {
     systemRegionLane: boolean;
@@ -1756,7 +1758,6 @@ export function regionRotationPromotion(input: {
     storedRegion: string | null;
     capturedMarkers: RegionMarkers | null;
     currentMarkers: RegionMarkers;
-    historyBudgetTokens?: number;
 }): { promote: boolean; reason: string | null } {
     const decline = { promote: false, reason: null } as const;
     if (
@@ -1775,11 +1776,6 @@ export function regionRotationPromotion(input: {
         currentMarkers: input.currentMarkers,
         bustPermission: true,
         forceBand: input.forceBand,
-        // Length proxy, not estimateTokens: this runs on every boundary pass
-        // and the cap is a coarse pressure gate (~4 chars/token, the same
-        // ratio the estimator applies).
-        pendingBytes: input.storedRegion.length,
-        pendingBytesCap: (input.historyBudgetTokens ?? 40000) * 0.2 * 4,
     });
     return decision.rotate ? { promote: true, reason: decision.reason } : decline;
 }
@@ -1952,7 +1948,6 @@ export async function runPostTransformPhase(
                 // never equal the persisted real hash and rotate forever.
                 // Laws share this exact helper (anti-vacuity, wiring law).
                 currentMarkers: currentRegionMarkersForPromotion(foldDueArgs),
-                historyBudgetTokens: args.m0M1?.historyBudgetTokens,
             });
             if (promotion.promote && promotion.reason) {
                 regionRotationReason = promotion.reason;
