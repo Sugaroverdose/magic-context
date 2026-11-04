@@ -2,7 +2,8 @@
 
 import { Database as BunDatabase } from "bun:sqlite";
 import { describe, expect, it, mock } from "bun:test";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -416,27 +417,64 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         expect(offenders).toEqual([]);
     });
 
-    it("the region column has exactly one production writer channel", () => {
-        // persistCachedM0 is the fold-row writer: exactly one production call
-        // site, inside the materialization fold. And no production caller may
-        // push cachedM0Bytes through the generic updateSessionMeta dispatcher
-        // (that would bypass both the funnel and the fold).
-        const tsFiles: string[] = [];
-        collectTsFiles(SRC_ROOT, tsFiles);
-        const persistCallers = tsFiles
-            .filter((f) => {
+    it("the region column has exactly the named fold-lane writer channels", () => {
+        // persistCachedM0 is the fold-row writer: one production call site
+        // per fold lane — the OpenCode-1 materialize and the Pi materialize
+        // (§23 D4) — and no production caller may push cachedM0Bytes through
+        // the generic updateSessionMeta dispatcher (that would bypass both
+        // the funnel and the fold). Stage P2 widened the walk to the full
+        // production surface (TS_ROOTS, #2665): the claim is repo-wide, not
+        // plugin-package-local.
+        const persistCallers: string[] = [];
+        const dispatcherAbusers: string[] = [];
+        for (const { dir, prefix } of TS_ROOTS) {
+            const files: string[] = [];
+            collectTsFiles(dir, files);
+            for (const f of files) {
                 const text = readFileSync(f, "utf8");
-                if (/export function persistCachedM0\b/.test(text)) return false;
-                return /persistCachedM0\s*\(/.test(text);
-            })
-            .map((f) => relative(SRC_ROOT, f));
-        expect(persistCallers).toEqual(["hooks/magic-context/inject-compartments.ts"]);
-        const dispatcherAbusers = tsFiles
-            .filter((f) =>
-                /updateSessionMeta\s*\([\s\S]{0,400}?cachedM0Bytes/.test(readFileSync(f, "utf8")),
-            )
-            .map((f) => relative(SRC_ROOT, f));
+                if (/export function persistCachedM0\b/.test(text)) continue;
+                if (/persistCachedM0\s*\(/.test(text))
+                    persistCallers.push(prefix + relative(dir, f));
+                if (/updateSessionMeta\s*\([\s\S]{0,400}?cachedM0Bytes/.test(text))
+                    dispatcherAbusers.push(prefix + relative(dir, f));
+            }
+        }
+        expect(persistCallers.sort()).toEqual([
+            "hooks/magic-context/inject-compartments.ts",
+            "pi/inject-compartments-pi.ts",
+        ]);
         expect(dispatcherAbusers).toEqual([]);
+    });
+
+    it("control: a planted third persistCachedM0 caller reddens the writer census", () => {
+        // Mechanism attack: the census must fail on a new fold-lane writer,
+        // not just on absence. The plant lives in a temp root (passed as an
+        // extra walk root) so no production tree is ever written.
+        const dir = mkdtempSync(join(tmpdir(), "mc-f2-plant-"));
+        try {
+            writeFileSync(
+                join(dir, "rogue_writer.ts"),
+                'import { persistCachedM0 } from "x";\npersistCachedM0(db, "s", {});\n',
+            );
+            const persistCallers: string[] = [];
+            for (const { dir: root, prefix } of [...TS_ROOTS, { dir, prefix: "planted/" }]) {
+                const files: string[] = [];
+                collectTsFiles(root, files);
+                for (const f of files) {
+                    const text = readFileSync(f, "utf8");
+                    if (/export function persistCachedM0\b/.test(text)) continue;
+                    if (/persistCachedM0\s*\(/.test(text))
+                        persistCallers.push(prefix + relative(root, f));
+                }
+            }
+            expect(persistCallers).toContain("planted/rogue_writer.ts");
+            expect(persistCallers.sort()).not.toEqual([
+                "hooks/magic-context/inject-compartments.ts",
+                "pi/inject-compartments-pi.ts",
+            ]);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     it("the baseline invalidation funnel receipts region erases", async () => {

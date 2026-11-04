@@ -15,6 +15,7 @@ import {
 } from "@magic-context/core/features/magic-context/system-region";
 import { closeQuietly } from "@magic-context/core/shared/sqlite-helpers";
 import { createTestTempDirFromPath } from "../../plugin/src/shared/test-temp-dir";
+import { piSyntheticHistoryAdoptionWindow } from "./context-handler";
 import {
 	createPiM0M1PassSnapshot,
 	injectM0M1Pi,
@@ -24,6 +25,10 @@ import {
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import { createPiLkgCoordinator } from "./pi-lkg";
+import {
+	adoptPiCompactionSystemSnapshot,
+	resolvePiEffectiveSystemState,
+} from "./system-entry-pi";
 import { createTestDb } from "./test-utils.test";
 
 // Stage P2 (design §23): the Pi fold installs the frozen system region
@@ -374,6 +379,101 @@ describe("Pi region lane: rotation promotion is ride-only (D7, L3/L4 mirror)", (
 		} finally {
 			closeQuietly(db);
 		}
+	});
+});
+
+describe("Pi region lane: compaction adoption touches zero real messages (F1)", () => {
+	const HOST_SYSTEM = {
+		role: "system" as const,
+		content: "Base instructions",
+		toolsAdded: Array.from({ length: 12 }, (_, i) => ({
+			name: `tool${i}`,
+			description: "tool",
+			parameters: { type: "object", properties: {} },
+		})),
+		timestamp: 0,
+	};
+	function compactionEntries() {
+		return [
+			{
+				type: "compaction",
+				id: "cmp-1",
+				summary: "Magic Context compacted",
+				firstKeptEntryId: "entry-2",
+				tokensBefore: 10,
+				systemMessage: structuredClone(HOST_SYSTEM),
+			},
+		];
+	}
+
+	it("head lane: the window is the two synthetic MC heads and adoption restamps them", () => {
+		// Control pinning the pre-existing head-lane behavior the fix must
+		// not disturb: [system, headA, headB, real...] with
+		// syntheticLeadingCount=3 selects exactly [headA, headB].
+		const headA = {
+			role: "user",
+			content: "<session-history>a</session-history>",
+			timestamp: 50,
+		};
+		const headB = {
+			role: "user",
+			content: "<session-history-since>b</session-history-since>",
+			timestamp: 60,
+		};
+		const real = { role: "user", content: "keep me", timestamp: 70 };
+		const messages = [structuredClone(HOST_SYSTEM), headA, headB, real];
+		const window = piSyntheticHistoryAdoptionWindow(
+			messages,
+			{ syntheticLeadingCount: 3 },
+			false,
+		);
+		expect(window).toEqual([headA, headB]);
+		const adoption = adoptPiCompactionSystemSnapshot(
+			messages,
+			compactionEntries(),
+			"cmp-1",
+			resolvePiEffectiveSystemState(messages),
+			window,
+		);
+		expect(adoption.kind).toBe("adopted");
+		// snapshot.timestamp(0) + offset - 2 — the two heads are re-stamped…
+		expect(headA.timestamp).toBe(-2);
+		expect(headB.timestamp).toBe(-1);
+		// …and the real envelope is untouched.
+		expect(real.timestamp).toBe(70);
+	});
+
+	it("region lane: the window is empty and adoption restamps zero real envelopes", () => {
+		// F1: syntheticLeadingCount=1 on this lane (only the Pi system entry),
+		// so the head-lane pair arithmetic [-1, 1) selects REAL messages and
+		// adoption re-stamps their timestamps. The region lane must hand the
+		// adoption an empty window: zero real-message envelopes touched.
+		const question = { role: "user", content: "question", timestamp: 100 };
+		const answer = {
+			role: "assistant",
+			content: [{ type: "text", text: "answer" }],
+			timestamp: 101,
+		};
+		const messages = [structuredClone(HOST_SYSTEM), question, answer];
+		const window = piSyntheticHistoryAdoptionWindow(
+			messages,
+			{ syntheticLeadingCount: 1 },
+			true,
+		);
+		expect(window).toEqual([]);
+		const adoption = adoptPiCompactionSystemSnapshot(
+			messages,
+			compactionEntries(),
+			"cmp-1",
+			resolvePiEffectiveSystemState(messages),
+			window,
+		);
+		expect(adoption.kind).toBe("adopted");
+		expect(question.timestamp).toBe(100);
+		expect(answer.timestamp).toBe(101);
+		// Object identity of the real entries survives the adoption splice.
+		expect(messages).toContain(question);
+		expect(messages).toContain(answer);
 	});
 });
 

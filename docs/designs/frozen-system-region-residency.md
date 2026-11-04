@@ -292,13 +292,22 @@ reddens). Authority is for review language — it does not govern spellings L0 d
 not police, and a rename applied to BOTH sides stays green by design; the code's
 decision tables remain the runtime authority. Composite reasons match on their
 stem before `:` or `(` (e.g. `render_config:budget_shrink(...)` is the
-`render_config` member).
+`render_config` member). The list spans BOTH fold lanes: the Pi lane mints
+its own mismatch vocabulary for three arms whose TS spellings differ
+(`pending_mutations`, `project_memory_change`, `renderer_upgrade`) plus the
+reader-decode arm `cache_invalid` (Pi's head-decode guard; the TS lane has
+no such arm); Stage P2 extended the law to parse `mustMaterializePi` and
+its `piMaterializeMismatch` mint sites so a Pi-only rename reddens here.
 
 ```rotation-reasons
 hard_fold
 first_render
 missing_markers
 region_first_install
+cache_invalid
+pending_mutations
+project_memory_change
+renderer_upgrade
 model_change
 system_hash
 ttl_idle
@@ -1244,21 +1253,34 @@ Key findings that shaped the decisions below:
   (`piRegionRotationPromotion` in context-handler): same gates as TS —
   declines unless lane ∧ ¬foldDue ∧ boundaryPermission ∧ stored region
   non-empty; delegates every content/pressure arm to the shared
-  `decideSystemRegionRotation` (one machine-checked table, §5/§16). Pi's
-  six boundaryPermission arms: execute, force band, explicit flush
-  (`hasPendingMaterialization`), deferred materialization, published
-  history (`isCacheBusting`), deferred-history late-consume. The wrapper
+  `decideSystemRegionRotation` (one machine-checked table, §5/§16). The
+  wrapper
   is harness plumbing around the funnel table (same doctrine as the two
   decider boots in §21); no new reason literals — the census scans the
   Pi tree (`packages/pi-plugin/src` is already a walk root) and the
   producers census names both fold callers with per-actor reasons.
+  Pi's five boundaryPermission arms (review F4 amendment, correcting the
+  six this section first claimed): execute, force
+  band (`emergencyDropEligible`), explicit flush
+  (`hasPendingMaterialization`), published history (`isCacheBusting`),
+  deferred-history late-consume. The deferred-materialization intent arm
+  is deliberately OMITTED (rationale in the code comment above
+  `regionBoundaryPermission` in context-handler.ts): a deferred
+  materialize-signal that turns out warm at the preflight (the fold
+  rewrote nothing) is not a genuine
+  boundary, and promoting a rotation on it would manufacture a bust from
+  a fizzle — the same ride-only discipline as the head lane.
 - **D8 (head collapse, L5).** On the region lane `injectM0M1Pi` splices
   nothing: `syntheticLeadingCount` counts zero MC heads (Pi's own leading
   system entries keep their identity), the m[1] replay/soft-refresh/CAS
   lanes are inert (a structural census pins that no m1-byte UPDATE site
   survives in the file), contention falls back to serving current stored
   bytes (replay, never re-render), and `preparedPrefix` is not frozen
-  (no array-side prefix exists to freeze). Trim still applies —
+  (no array-side prefix exists to freeze). The deferred-marker compaction
+  adoption window is gated by `piSyntheticHistoryAdoptionWindow` (review
+  F1): the head-lane `-2` pair arithmetic selects real messages when MC
+  contributes zero heads, so on the region lane the adoption receives an
+  empty window and re-stamps zero real-message envelopes. Trim still applies —
   summarized messages stay off the wire.
 - **D9 (install timing).** A legacy-head session on the lane installs at
   its first fold decision (`region_first_install` rides the preflight);
@@ -1302,8 +1324,11 @@ enablement? Read sites, in order:
 - Column consumption: a full-tree scan of `crates/` (excluding `target/`)
   finds `cached_m0_bytes` in exactly three files — the adjudicated
   `SESSION_META_RESETS` list (`single_store_repair.rs:62`, ResetValue::Null)
-  and its tests (`single_store_repair_tests.rs`). No production SELECT,
-  no region vocabulary (`mc:system-region`, decode/write/clear/execute
+  and its tests (`single_store_repair_tests.rs`). No production SELECT
+  names the column; the module's only production `session_meta` read is the
+  repair guard's `compartment_in_progress` SELECT
+  (`single_store_repair.rs:664`). No region vocabulary
+  (`mc:system-region`, decode/write/clear/execute
   names) anywhere in the module or mc-store.
 - State sync: `ModuleStateSyncPayload` (module-state-sync.ts:137-167)
   carries watermarks, seeds and marker state — no row bytes. The §9
@@ -1337,11 +1362,23 @@ enablement? Read sites, in order:
   1. `packages/plugin/src/hooks/magic-context/system-region-rust-parity.test.ts`
      — refusal census: `cached_m0_bytes` in Rust production files is
      confined to the one named member (`mc-module/src/single_store_repair.rs`);
-     zero region vocabulary across `mc-module/src` + `mc-store/src`
-     (`_tests.rs` excluded; inline `#[cfg(test)] mod tests` in scope — a
-     future test read must live in `*_tests.rs` or `crates/*/tests/`).
-     Control: planted rogue reader + planted sentinel both redden, removal
-     regreens.
+     zero region vocabulary across every `crates/*/src` production tree
+     (F5: mc-core and mc-tokenizer included; `_tests.rs` excluded; inline
+     `#[cfg(test)] mod tests` in scope — a future test read must live in
+     `*_tests.rs` or `crates/*/tests/`).
+     Control: planted rogue reader (mc-module) + planted sentinel + planted
+     reader in mc-core all redden, removal regreens. Disclosure (F6, with
+     the census correction found while pinning it): the census is
+     string-based, so a `SELECT *` (or ORM-style) reader that never names
+     the column slips past the name check — that shape is held by behavior:
+     today's only production Rust read of `session_meta` is the repair
+     guard's single named-column SELECT (`compartment_in_progress`,
+     single_store_repair.rs:664 — the F6 framing "no production Rust reads
+     session_meta rows at all" was checked against source and corrected to
+     this), and the repair file is exactly the one named member of the
+     column census; any broader reader is new production code the
+     vocabulary half and the review gate must catch. Same confidence class
+     as the computed-fragment disclosure on the reason-token census.
   2. Same file — repair-reset parity: the parsed `SESSION_META_RESETS`
      column set must cover every column the host's receipted clear clears
      (`const clears` in `storage-meta-shared.ts`) plus `cached_m0_bytes`

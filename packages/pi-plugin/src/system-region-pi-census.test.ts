@@ -29,7 +29,7 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 		const ALLOWED: ReadonlyMap<string, string> = new Map([
 			[
 				"context-handler.ts",
-				"firstRenderBust checks the pass-snapshot row shape (region-aware, §23 D7); head-lane replay reads the reader-nulled row",
+				"comparison/coverage operands only: firstRenderBust region-aware shape check (isSystemRegionBytes, §23 D7), m0 coverage guard (null → -1), foldBustsServedPrefix before/after fold-byte comparison, and the compaction-transition in-memory baseline invalidation (nulls the local sessionMeta copy, not the DB); the handler never decodes column bytes as text and never persists them — all writes route through the fold lane",
 			],
 			[
 				"dialogs/status-dialog.ts",
@@ -90,6 +90,46 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 
 	it("region writes happen only through the named rotation caller — raw region writers stay dead", () => {
 		expect(censusWriteOffenders()).toEqual([]);
+	});
+
+	it("the region capability is decided exactly once at boot and threaded thereafter (F7, D1)", () => {
+		// §23 D1 is a boot-once law: a second isSystemRegionLane call site —
+		// especially a per-pass re-derivation inside a hook (which would
+		// re-read live config and split one session across two lane
+		// truths) — must redden here, not drift silently.
+		const callers: string[] = [];
+		let indexCalls = 0;
+		for (const { rel, full } of walk(SRC)) {
+			const text = readFileSync(full, "utf8");
+			const calls = (text.match(/\bisSystemRegionLane\s*\(/g) ?? []).length;
+			// The import statement carries no call parenthesis; count only
+			// call expressions.
+			if (calls > 0) callers.push(rel);
+			if (rel === "index.ts") indexCalls = calls;
+		}
+		expect(callers).toEqual(["index.ts"]);
+		expect(indexCalls).toBe(1);
+	});
+
+	it("control: a planted second call site reddens the boot-once law", () => {
+		const rogue = join(SRC, "__census_rogue_decider.ts");
+		writeFileSync(
+			rogue,
+			'import { isSystemRegionLane } from "@magic-context/core/config/system-region-lane";\nexport const perPass = (cfg: unknown) => isSystemRegionLane(cfg as never);\n',
+		);
+		try {
+			const callers: string[] = [];
+			for (const { rel, full } of walk(SRC)) {
+				if (
+					(readFileSync(full, "utf8").match(/\bisSystemRegionLane\s*\(/g) ?? [])
+						.length > 0
+				)
+					callers.push(rel);
+			}
+			expect(callers).toContain("__census_rogue_decider.ts");
+		} finally {
+			rmSync(rogue, { force: true });
+		}
 	});
 
 	it("control: a planted rogue rotation caller and a raw writer both redden the census", () => {

@@ -5329,6 +5329,27 @@ async function runCompactionOffPipeline(
 	};
 }
 
+/**
+ * The head-lane adoption window: the two MC synthetic history heads that
+ * `adoptPiCompactionSystemSnapshot` may re-stamp after a deferred-marker
+ * drain adopts the host checkpoint. On the frozen-system-region lane the
+ * array carries zero MC heads (§23 D8) — every entry is a real message —
+ * so the window is empty and adoption touches zero real-message envelopes
+ * (review F1). `syntheticLeadingCount - 2` is head-lane pair arithmetic and
+ * must never select real entries.
+ */
+export function piSyntheticHistoryAdoptionWindow(
+	messages: readonly unknown[],
+	injectionResult: { syntheticLeadingCount: number } | null | undefined,
+	regionLane: boolean,
+): unknown[] {
+	if (regionLane || !injectionResult) return [];
+	return messages.slice(
+		Math.max(0, injectionResult.syntheticLeadingCount - 2),
+		injectionResult.syntheticLeadingCount,
+	);
+}
+
 async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	if (args.compactionOff) return runCompactionOffPipeline(args);
 	let foldingSystemState: PiEffectiveSystemState | null = null;
@@ -7122,12 +7143,11 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				);
 				let markerEquivalent = outcome.kind === "stale-skip";
 				if (outcome.kind === "applied" || outcome.kind === "already-current") {
-					const syntheticHistoryMessages = injectionResult
-						? args.messages.slice(
-								Math.max(0, injectionResult.syntheticLeadingCount - 2),
-								injectionResult.syntheticLeadingCount,
-							)
-						: [];
+					const syntheticHistoryMessages = piSyntheticHistoryAdoptionWindow(
+						args.messages,
+						injectionResult,
+						systemRegionLane,
+					);
 					const adoption = adoptPiCompactionSystemSnapshot(
 						args.messages,
 						args.readBranchEntries(),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
 
 // Stage R2 (design §24): the Rust module keeps heads (§9's full migration is
@@ -13,7 +13,15 @@ import { join, relative } from "node:path";
 
 const REPO = join(import.meta.dir, "..", "..", "..", "..", "..");
 const CRATES = join(REPO, "crates");
-const RUST_PROD_ROOTS = [join(CRATES, "mc-module", "src"), join(CRATES, "mc-store", "src")];
+// Review F5: every crate's production tree is in scope — a future reader
+// appearing in mc-core or mc-tokenizer reddens the same way as one in the
+// module. Crates are enumerated, not hardcoded, so a new crate is scanned
+// from the day it exists; `crates/*/tests/` (integration tests) are out of
+// production scope by construction (root is */src).
+const RUST_PROD_ROOTS = readdirSync(CRATES)
+    .filter((name) => statSync(join(CRATES, name)).isDirectory())
+    .map((name) => join(CRATES, name, "src"))
+    .filter((dir) => existsSync(dir));
 
 function walkRs(dir: string): Array<{ rel: string; full: string }> {
     const out: Array<{ rel: string; full: string }> = [];
@@ -69,6 +77,9 @@ describe("Rust lane serve+refusal parity (stage R2, §24)", () => {
     it("control: a planted region-column reader and a planted sentinel both redden the refusal census", () => {
         const rogueReader = join(CRATES, "mc-module", "src", "__parity_rogue_reader.rs");
         const rogueSentinel = join(CRATES, "mc-module", "src", "__parity_rogue_sentinel.rs");
+        // F5: the plant must also land OUTSIDE the module crate — mc-core is
+        // now in the walk, and an unscanned root would let this one slip.
+        const rogueCore = join(CRATES, "mc-core", "src", "__parity_rogue_core.rs");
         writeFileSync(
             rogueReader,
             '// planted\nfn f(db: &Connection) {\n    db.query_row("SELECT cached_m0_bytes FROM session_meta", [], |_| Ok(())).unwrap();\n}\n',
@@ -76,6 +87,10 @@ describe("Rust lane serve+refusal parity (stage R2, §24)", () => {
         writeFileSync(
             rogueSentinel,
             '// planted\nconst S: &str = "<!-- mc:system-region v1 -->";\n',
+        );
+        writeFileSync(
+            rogueCore,
+            '// planted\nfn g(db: &Connection) {\n    db.query_row("SELECT cached_m0_bytes FROM session_meta", [], |_| Ok(())).unwrap();\n}\n',
         );
         try {
             const found = rustRefusalOffenders();
@@ -85,9 +100,15 @@ describe("Rust lane serve+refusal parity (stage R2, §24)", () => {
             expect(
                 found.some((o) => o.includes("__parity_rogue_sentinel.rs: mc:system-region")),
             ).toBe(true);
+            expect(
+                found.some((o) =>
+                    o.includes("mc-core/src/__parity_rogue_core.rs: cached_m0_bytes"),
+                ),
+            ).toBe(true);
         } finally {
             rmSync(rogueReader, { force: true });
             rmSync(rogueSentinel, { force: true });
+            rmSync(rogueCore, { force: true });
         }
         expect(rustRefusalOffenders()).toEqual([]);
     });

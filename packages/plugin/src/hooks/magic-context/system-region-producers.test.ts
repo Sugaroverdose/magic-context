@@ -352,54 +352,126 @@ describe("system-region L0: per-actor producer census", () => {
         expect(docLines.length).toBe(docReasons.size); // no duplicates
 
         // Code side: the decision tables + arms in the store module, the
-        // region-reachable fold arms in mustMaterialize, and the fold-lane
-        // default at the call sites. Scanned from the function bodies, not a
-        // fixed-width window around an identifier.
-        const codeReasons = new Set<string>();
-        const storeText = readFileSync(join(SRC_ROOT, STORE), "utf8");
-        for (const m of storeText.matchAll(/\[\s*"[a-zA-Z]+",\s*"([a-z_]+)"\s*\]/g))
-            codeReasons.add(m[1]);
-        for (const m of storeText.matchAll(/reason:\s*"([a-z_]+)"/g))
-            if (m[1] !== "none") codeReasons.add(m[1]);
-        const injectText = readFileSync(
-            join(SRC_ROOT, "hooks/magic-context/inject-compartments.ts"),
-            "utf8",
-        );
-        const mmStart = injectText.indexOf("export function mustMaterialize(");
-        expect(mmStart).toBeGreaterThan(-1);
-        const mmEndRel = injectText.slice(mmStart + 1).search(/^export (async )?function/m);
-        const mmBody = injectText.slice(mmStart, mmStart + 1 + mmEndRel);
-        for (const m of mmBody.matchAll(/reason:\s*"([a-z_]+)"/g)) codeReasons.add(m[1]);
-        // G5 blind classes:
-        // (1) template-literal composite reasons match on the STEM before
-        //     `:` or `(` (render_config:budget(...));
-        for (const m of mmBody.matchAll(/reason:\s*`([a-z_]+)(?::|[(:])/g)) codeReasons.add(m[1]);
-        // (2) variable-passed reasons: captured by name and resolved through
-        //     this explicit map — the producer's own return literals are not
-        //     regex-guaranteed reachable, so an unmapped variable name fails
-        //     the census and the mapping is reviewed by hand (excluded with
-        //     reason, the cached_m1_missing discipline).
-        const VARIABLE_REASONS: Record<string, string> = {
-            budgetShrinkReason: "render_config",
-        };
-        for (const m of mmBody.matchAll(/reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/g)) {
-            if (["null", "undefined", "true", "false"].includes(m[1])) continue;
-            const stem = VARIABLE_REASONS[m[1]];
-            expect(stem, `variable-passed reason ${m[1]} is not mapped`).toBeDefined();
-            codeReasons.add(stem);
-        }
-        // Head-lane-only fold reason: region mode guards around it (`&& !regionMode`).
-        codeReasons.delete("cached_m1_missing");
-        // Call-site fold-lane defaults: reason literals inside the
-        // systemRegion option object passed to the fold.
-        for (const { full } of ALL_ZONE_FILES) {
-            const text = readFileSync(full, "utf8");
-            if (!/systemRegion/.test(text)) continue;
-            for (const m of text.matchAll(
-                /systemRegion:[\s\S]{0,400}?reason[\s:\S]{0,120}?"([a-z_]+)"/g,
-            ))
+        // region-reachable fold arms in mustMaterialize (TS) AND
+        // mustMaterializePi + its piMaterializeMismatch mint sites (Pi —
+        // review F3: the Pi lane mints its own literals; a Pi-only rename
+        // must redden here), and the fold-lane default at the call sites.
+        // Scanned from the function bodies, not a fixed-width window around
+        // an identifier.
+        const collectReasons = (injectTextOverride?: string) => {
+            const codeReasons = new Set<string>();
+            const storeText = readFileSync(join(SRC_ROOT, STORE), "utf8");
+            for (const m of storeText.matchAll(/\[\s*"[a-zA-Z]+",\s*"([a-z_]+)"\s*\]/g))
                 codeReasons.add(m[1]);
-        }
+            for (const m of storeText.matchAll(/reason:\s*"([a-z_]+)"/g))
+                if (m[1] !== "none") codeReasons.add(m[1]);
+            const injectText =
+                injectTextOverride ??
+                readFileSync(join(SRC_ROOT, "hooks/magic-context/inject-compartments.ts"), "utf8");
+            const scanFoldBody = (
+                text: string,
+                marker: string,
+                opts: { mismatchMints: boolean },
+            ) => {
+                const mmStart = text.indexOf(marker);
+                expect(mmStart).toBeGreaterThan(-1);
+                const mmEndRel = text.slice(mmStart + 1).search(/^export (async )?function/m);
+                const body = text.slice(mmStart, mmStart + 1 + mmEndRel);
+                for (const m of body.matchAll(/reason:\s*"([a-z_]+)"/g)) codeReasons.add(m[1]);
+                if (opts.mismatchMints) {
+                    for (const m of body.matchAll(/piMaterializeMismatch\(\s*"([a-z_]+)"/g))
+                        codeReasons.add(m[1]);
+                }
+                // G5 blind classes:
+                // (1) template-literal composite reasons match on the STEM
+                //     before `:` or `(` (render_config:budget(...));
+                for (const m of body.matchAll(/reason:\s*`([a-z_]+)(?::|[(:])/g))
+                    codeReasons.add(m[1]);
+                // (2) variable-passed reasons: captured by name and resolved
+                //     through this explicit map — the producer's own return
+                //     literals are not regex-guaranteed reachable, so an
+                //     unmapped variable name fails the census and the mapping
+                //     is reviewed by hand (excluded with reason, the
+                //     cached_m1_missing discipline).
+                const VARIABLE_REASONS: Record<string, string> = {
+                    budgetShrinkReason: "render_config",
+                };
+                for (const m of body.matchAll(/reason:\s*([a-zA-Z][a-zA-Z0-9_]*)\s*[,}]/g)) {
+                    if (["null", "undefined", "true", "false"].includes(m[1])) continue;
+                    const stem = VARIABLE_REASONS[m[1]];
+                    expect(stem, `variable-passed reason ${m[1]} is not mapped`).toBeDefined();
+                    codeReasons.add(stem);
+                }
+            };
+            scanFoldBody(injectText, "export function mustMaterialize(", {
+                mismatchMints: false,
+            });
+            const piText = readFileSync(
+                join(SRC_ROOT, "..", "..", "pi-plugin", "src", "inject-compartments-pi.ts"),
+                "utf8",
+            );
+            scanFoldBody(piText, "export function mustMaterializePi(", {
+                mismatchMints: true,
+            });
+            // Head-lane-only fold reasons: region mode guards around them
+            // (`&& !regionMode`, both lanes).
+            codeReasons.delete("cached_m1_missing");
+            // Call-site fold-lane defaults: reason literals inside the
+            // systemRegion option object passed to the fold.
+            for (const { full } of ALL_ZONE_FILES) {
+                const text = readFileSync(full, "utf8");
+                if (!/systemRegion/.test(text)) continue;
+                for (const m of text.matchAll(
+                    /systemRegion:[\s\S]{0,400}?reason[\s:\S]{0,120}?"([a-z_]+)"/g,
+                ))
+                    codeReasons.add(m[1]);
+            }
+            return codeReasons;
+        };
+        const codeReasons = collectReasons();
         expect([...docReasons].sort()).toEqual([...codeReasons].sort());
+    });
+
+    it("control: a planted Pi-lane-only fold reason reddens the fence law", () => {
+        // F3 mechanism attack: the Pi parser half must actually see literals
+        // — a Pi-only rename/addition reddens, not silently passes. The
+        // plant mutates the parsed text in memory (production file
+        // untouched).
+        const docPath = join(
+            SRC_ROOT,
+            "..",
+            "..",
+            "..",
+            "docs",
+            "designs",
+            "frozen-system-region-residency.md",
+        );
+        const docReasons = new Set(
+            readFileSync(docPath, "utf8")
+                .match(/```rotation-reasons\n([^`]+)```/)![1]
+                .split("\n")
+                .map((l) => l.trim())
+                .filter(Boolean),
+        );
+        const piPath = join(SRC_ROOT, "..", "..", "pi-plugin", "src", "inject-compartments-pi.ts");
+        const piText = readFileSync(piPath, "utf8");
+        // Sanity: the steady state parses the Pi lane's real literals.
+        const planted = piText.replace(
+            "const hard = state.hardSignals ?? EMPTY_PI_HARD_SIGNALS;",
+            'return piMaterializeMismatch("pi_lane_only_fake", "planted", 0, 1);\n\tconst hard = state.hardSignals ?? EMPTY_PI_HARD_SIGNALS;',
+        );
+        expect(planted).not.toBe(piText);
+        // Re-run the collector against the mutated Pi text by pointing the
+        // reader at it: rebuild the scan locally with the same patterns
+        // (same +1 slice offset as the law).
+        const markerAt = planted.indexOf("export function mustMaterializePi(");
+        expect(markerAt).toBeGreaterThan(-1);
+        const endRel = planted.slice(markerAt + 1).search(/^export (async )?function/m);
+        const truncated = planted.slice(markerAt, markerAt + 1 + endRel);
+        const seen = new Set<string>();
+        for (const m of truncated.matchAll(/piMaterializeMismatch\(\s*"([a-z_]+)"/g))
+            seen.add(m[1]);
+        expect(seen.has("pi_lane_only_fake")).toBe(true);
+        expect(docReasons.has("pi_lane_only_fake")).toBe(false);
     });
 });
