@@ -3,7 +3,6 @@
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
 import {
-    mkdtempSync,
     readdirSync,
     readFileSync,
     rmSync,
@@ -12,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { isSystemRegionLane } from "../../config/system-region-lane";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
@@ -560,7 +560,7 @@ describe("system-region capability lane (flag deletion)", () => {
 // shape that hid the defect for 11 rounds.
 describe("system-region wiring: promotion comparator convergence (storm, Fix A)", () => {
     function docsDir(): string {
-        const dir = mkdtempSync(join(tmpdir(), "region-docs-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "region-docs-"));
         writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\nfrozen panel doc.\n");
         writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nmap.\n");
         return dir;

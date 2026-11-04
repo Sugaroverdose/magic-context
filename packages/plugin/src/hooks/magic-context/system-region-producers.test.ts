@@ -4,7 +4,6 @@ import { describe, expect, it } from "bun:test";
 import {
     existsSync,
     mkdirSync,
-    mkdtempSync,
     readdirSync,
     readFileSync,
     rmSync,
@@ -12,6 +11,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { join, relative } from "node:path";
 
 const SRC_ROOT = join(import.meta.dir, "..", "..");
@@ -597,7 +597,7 @@ describe("system-region L0: per-actor producer census", () => {
     });
 
     it("control: .tsx and dot-dir rogues redden the producer census walks (H4)", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-h4-producers-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-h4-producers-"));
         try {
             const rogue =
                 'import { executeSystemRegionRotation } from "@magic-context/core/features/magic-context/system-region";\nexport const r = (input: never) => executeSystemRegionRotation(input);\n';

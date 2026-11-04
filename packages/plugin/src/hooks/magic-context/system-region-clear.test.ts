@@ -4,7 +4,6 @@ import { Database as BunDatabase } from "bun:sqlite";
 import { describe, expect, it, mock } from "bun:test";
 import {
     mkdirSync,
-    mkdtempSync,
     readdirSync,
     readFileSync,
     rmSync,
@@ -12,6 +11,7 @@ import {
     writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
+import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { join, relative } from "node:path";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
@@ -520,7 +520,7 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
     // Deny-list (.git, node_modules, dist, .codegraph by NAME) replaces the
     // skip-all, and the extension set is the full TS module family.
     it("control: .tsx and in-zone dot-dir rogues redden the eraser census (H4)", () => {
-        const dir = mkdtempSync(join(tmpdir(), "mc-h4-plant-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-h4-plant-"));
         try {
             const sql = 'db.prepare("UPDATE session_meta SET cached_m0_bytes = NULL WHERE session_id = ?")';
             writeFileSync(
@@ -653,7 +653,7 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         // `const u = updateSessionMeta; u(db, s, { cachedM0Bytes: x })`,
         // invisible to the call-adjacency regex. Each plant must surface as
         // an unblessed holder name; removal regreens.
-        const dir = mkdtempSync(join(tmpdir(), "mc-g1-plant-"));
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-g1-plant-"));
         const plant = (name: string, body: string) => writeFileSync(join(dir, name), body);
         try {
             plant(
@@ -864,7 +864,7 @@ describe("system-region clear funnel: sole receipted eraser (L3/L7)", () => {
         expect(
             eraserZoneScan(tsMutated).issues.some((i) => i.includes("pi/") && i.includes("absent")),
         ).toBe(true);
-        const emptyDir = mkdtempSync(join(tmpdir(), "mc-g3-empty-"));
+        const emptyDir = createTestTempDirFromPath(join(tmpdir(), "mc-g3-empty-"));
         try {
             // A canonical zone whose dir is present-but-empty reddens with
             // the count, not the existence message (in-memory roots
