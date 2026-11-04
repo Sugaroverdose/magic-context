@@ -11,6 +11,7 @@ import {
     lkgContentDigest,
     lkgContentDigestFromFields,
     lkgContentFields,
+    lkgSlotRejection,
     noteEntry,
 } from "./lkg-slot";
 import { assertOpenAiCompatAdjacency } from "./openai-compat-adjacency";
@@ -384,18 +385,28 @@ export function buildLkgPrefix(
     return result.ok ? result.built : null;
 }
 
-export function captureLkgSlot(args: LkgCaptureInput): boolean {
+export type LkgCaptureOutcome =
+    | { captured: true }
+    | {
+          captured: false;
+          /** Why the capture was declined. `build` = the prefix was never
+           *  re-derived (no anchor / missing ids …); `store` = a built
+           *  candidate was refused by the slot store's fences. */
+          decline: { phase: "build" | "store"; reason: string };
+      };
+
+export function captureLkgSlotDetailed(args: LkgCaptureInput): LkgCaptureOutcome {
     const result = tryBuildLkgPrefix(args.input, args.output);
     if (!result.ok) {
         // The bust path treats `!captured` as grounds to drop the durable slot;
         // a build refusal that never reached the slot store must still say why,
         // or the refresh cycle destroys the row in silence.
         sessionLog(args.sessionId, `lkg_capture_declined reason=build_${result.reason}`);
-        return false;
+        return { captured: false, decline: { phase: "build", reason: result.reason } };
     }
     const built = result.built;
     const modelKeys = canonicalLkgModelKeys(args.modelKey, args.providerKey);
-    return captureSlot(args.sessionId, {
+    const slot: LkgSlot = {
         jsonPrefix: built.jsonPrefix,
         inputIdSeq: built.inputIdSeq,
         inputContentDigests: built.inputContentDigests,
@@ -403,7 +414,91 @@ export function captureLkgSlot(args: LkgCaptureInput): boolean {
         modelKey: modelKeys.modelKey,
         providerKey: modelKeys.providerKey,
         capturedAt: args.capturedAt ?? Date.now(),
-    });
+    };
+    const ok = captureSlot(args.sessionId, slot);
+    if (ok) return { captured: true };
+    // captureSlot logged the named decline; re-derive the same rejection for
+    // the caller's classification (pure function of the same inputs).
+    return {
+        captured: false,
+        decline: {
+            phase: "store",
+            reason: lkgSlotRejection(args.sessionId, slot) ?? "unspecified",
+        },
+    };
+}
+
+export function captureLkgSlot(args: LkgCaptureInput): boolean {
+    return captureLkgSlotDetailed(args).captured;
+}
+
+/**
+ * The declined-capture bust decision (storm chain B, §25.2). When a pass
+ * busted the served prefix and the refresh capture was declined, the old
+ * behavior dropped the durable slot unconditionally (`lkg_refresh_declined`)
+ * — one mid-loop fake bust then BOTH invalidated the durable row AND (via
+ * the mid-loop anchor refusal) blocked re-establishment, an L0 violation at
+ * the slot level. The property (both harness twins): a declined capture
+ * drops the row only on evidence that the served prefix actually diverged
+ * from it; if the wire still serializes to the row's prefix, the bust
+ * re-rendered nothing and the row corresponds to what was served — keep it
+ * and receipt `lkg_kept`. The replay gate is full (replayLkg validates
+ * model keys, anchor position, entry ids, digests, and seam structure), so
+ * a kept row can never be served where it does not match the entry it
+ * claims.
+ */
+export function lkgDeclinedCaptureBustAction(args: {
+    sessionId: string;
+    input: LkgEntryProjection[] | MessageLike[];
+    output: MessageLike[];
+    decline: { phase: "build" | "store"; reason: string };
+}): "keep" | "drop" {
+    const slot = getSlot(args.sessionId);
+    if (!slot) return "drop";
+    if (servedPrefixMatchesSlot(slot, args.input, args.output)) {
+        sessionLog(
+            args.sessionId,
+            `lkg_kept reason=no_reanchor phase=${args.decline.phase} detail=${args.decline.reason}`,
+        );
+        return "keep";
+    }
+    return "drop";
+}
+
+/**
+ * True when serializing the CURRENT wire with the row's own anchor rules
+ * reproduces the row's jsonPrefix byte-for-byte: the head re-rendered to
+ * identical bytes (the storm shape), so the row still corresponds to what
+ * is being served. Any identity mismatch (anchor gone, id sequence drift,
+ * unknown output message, changed content) reads as divergence — the row is
+ * older than the last legitimate boundary and the caller drops it.
+ */
+function servedPrefixMatchesSlot(
+    slot: LkgSlot,
+    input: LkgEntryProjection[] | MessageLike[],
+    output: MessageLike[],
+): boolean {
+    const projected = asEntryProjection(input);
+    const ids = projected.map((message) => message.id);
+    if (ids.some((id) => id === null)) return false;
+    const anchorIndex = ids.indexOf(slot.lastInputMessageId);
+    if (anchorIndex < 0) return false;
+    if (slot.inputIdSeq.length !== anchorIndex + 1) return false;
+    for (let index = 0; index < slot.inputIdSeq.length; index += 1) {
+        if (ids[index] !== slot.inputIdSeq[index]) return false;
+    }
+    const inputIndexById = new Map<string, number>(ids.map((id, index) => [id as string, index]));
+    const prefix: MessageLike[] = [];
+    for (const message of output) {
+        const postAnchor = outputMessageIsPostAnchor(message, inputIndexById, anchorIndex);
+        if (postAnchor === null) return false;
+        if (!postAnchor) prefix.push(message);
+    }
+    try {
+        return JSON.stringify(prefix) === slot.jsonPrefix;
+    } catch {
+        return false;
+    }
 }
 
 function entryIdsAreValid(slot: LkgSlot, entryIds: string[]): boolean {

@@ -570,9 +570,11 @@ export function getSlot(sessionId: string): LkgSlot | undefined {
 }
 
 export function dropSlot(sessionId: string, reason?: string): void {
-    // The destructive arm of the refresh cycle must leave a receipt: the bust
-    // path calls this with "lkg_refresh_declined" after a capture was refused,
-    // and the durable clear was invisible while the store lost its slices.
+    // The destructive arm of the refresh cycle must leave a receipt: the
+    // bust path calls this with "lkg_refresh_declined" when a declined
+    // capture left the served prefix diverged from the row (§25.2 — a
+    // no-op bust now keeps the row with an lkg_kept receipt instead), and
+    // the durable clear was invisible while the store lost its slices.
     sessionLog(sessionId, `lkg_slot_dropped reason=${reason ?? "unspecified"}`);
     const entry = lkgHeapHolder.entries.get(sessionId);
     if (entry) {

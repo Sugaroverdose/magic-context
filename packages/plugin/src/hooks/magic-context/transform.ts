@@ -117,7 +117,12 @@ import {
     selectHiddenMessagesAtCompactionSeam,
 } from "./inject-compartments";
 import { saveLkgSlotToDb } from "./lkg-persist";
-import { captureLkgSlot, createLkgEntryProjector, resolveLkgModelKeys } from "./lkg-replay";
+import {
+    captureLkgSlotDetailed,
+    createLkgEntryProjector,
+    lkgDeclinedCaptureBustAction,
+    resolveLkgModelKeys,
+} from "./lkg-replay";
 import { beginLkgPass, dropSlot, getInMemorySlot } from "./lkg-slot";
 import { onNoteTrigger } from "./note-nudger";
 import {
@@ -2964,13 +2969,14 @@ export function createTransform(deps: TransformDeps) {
                 ? `${modelForBudget.providerID}/${modelForBudget.modelID}`
                 : keys.modelKey;
             const providerKey = modelForBudget?.providerID ?? keys.providerKey;
-            const captured = captureLkgSlot({
+            const captureOutcome = captureLkgSlotDetailed({
                 sessionId,
                 input: lkgInput,
                 output: messages,
                 modelKey,
                 providerKey,
             });
+            const captured = captureOutcome.captured;
             if (captured) {
                 // Keep the durable snapshot in step with the TS-mode capture too:
                 // replay consumes the last successful capture of either mode, and
@@ -2984,8 +2990,17 @@ export function createTransform(deps: TransformDeps) {
                     );
                 }
             }
-            if (postTransformResult.bustedThisPass && !captured) {
-                dropSlot(sessionId, "lkg_refresh_declined");
+            if (postTransformResult.bustedThisPass && !captureOutcome.captured) {
+                if (
+                    lkgDeclinedCaptureBustAction({
+                        sessionId,
+                        input: lkgInput,
+                        output: messages,
+                        decline: captureOutcome.decline,
+                    }) === "drop"
+                ) {
+                    dropSlot(sessionId, "lkg_refresh_declined");
+                }
             }
         } else if (passOutcome.degradations.length > 0) {
             sessionLog(

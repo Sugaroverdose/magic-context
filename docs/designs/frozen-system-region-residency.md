@@ -1542,3 +1542,74 @@ record: an in-session read of system-region.ts returned a comment block
 re-reads docs") that does not exist in any committed version (verified via
 `git show` + grep before editing); all comment edits were made against
 source-verified text only (#2632).
+
+### 25.2 Fix B ruling: durable LKG row survives declined-capture busts (§25 chain B)
+
+**Adjudication question (from the dispatch).** Does any LKG consumer read
+the durable row unconditionally (serve without validating it corresponds
+to current derived state)? If yes — never keep stale rows; if no — keep on
+no-re-derivation refusals and drop only on divergence evidence.
+
+**Consumer census (every durable-row consumer, verified at source this
+session).**
+- `lkg-replay.ts:603 replayLkg` — the serving path: validates model keys
+  (:617-623), anchor position (`entry.anchorIndex === seq.length-1`,
+  :625-632), entry-id sequence equality to the captured prefix
+  (`entryIdsAreValid` :409-422), content digests (`entryContentIsValid`
+  :424-429, :633-636), prefix parse (:638-645), seam structure
+  (:648-656), Anthropic reasoning runs (:658-664). Every gate failure
+  dropSlots with a named reason. Consumers:
+  `plugin/messages-transform.ts:455` (v1 busy/failure replay),
+  `rust-mode-transform.ts:1998` and `:3857` (rust lane).
+- Comparison-only readers (never serve row bytes):
+  `v2/hooks/context.ts:1232,1237,1674` (entry stamps vs post-pass stamps),
+  `transform.ts` getInMemorySlot after successful capture (persist bridge),
+  `lkg-persist.ts` (hydration; stale durable bytes rejected by the same
+  fences, `lkg-slot.ts:532-533`), `rust-served-m0.ts:24` (head parse,
+  refusal on mismatch), `rust-mode-transform.ts:2079,2229,3838` (head
+  parse / prior-slot plan comparison).
+- Drop sites (real invalidation events, kept): `transform.ts:1180` model
+  change, `:1346` overflow-recovery arm, `messages-transform.ts:423`
+  reshape, `rust-mode-transform.ts:1990/4016/4040` reshape / rust-mode
+  pending-capture / rust capture failure, `recomp-orchestrator.ts:116`
+  recomp start, `hook.ts:866/878` session invalidation/deletion,
+  `hook-handlers.ts:402` model change, and every replayLkg gate drop.
+
+**Ruling: GATED.** No consumer serves the row without identity validation;
+replay is a failure-path fallback only (a healthy pass re-derives and
+re-captures). Adopted: the investigator's keep-on-no-re-derivation,
+generalized to a property (#2673) — **a declined capture drops the durable
+row only when the served prefix has actually diverged from it**
+(`lkgDeclinedCaptureBustAction`, lkg-replay.ts): the decision re-serializes
+the current wire under the row's own anchor rules and compares byte-for-byte
+against `slot.jsonPrefix`. Identical (the storm's fake bust: rotation
+re-rendered the same bytes) → keep + receipt
+`lkg_kept reason=no_reanchor phase=<build|store> detail=<reason>`; anchor
+gone, id-sequence drift, or changed content (a real rotation whose capture
+was declined) → drop (`lkg_refresh_declined` semantics preserved). Phase
+does not matter — build and store refusals are judged by the same served
+divergence test. Divergence evidence is exactly the condition under which
+arm (b) of the law requires removal, so boot can never serve bytes older
+than the last legitimate boundary: at boot a healthy re-derivation re-
+captures (anchor exists — the turn starts with a real user); replay only
+fires when production failed, which is the row's contract ("last accepted
+request").
+
+**Laws (red-first).** `lkg-storm-keep.test.ts` (4 laws): law (a) — three
+consecutive mid-loop `build_no_anchor` bust passes with an unanchorable
+active-assistant tail keep the row byte-identical to the last successful
+capture (jsonPrefix, inputIdSeq, digests, anchor, capturedAt) and emit
+three `lkg_kept` receipts with zero `lkg_slot_dropped` — RED at the seam
+(`Expected: "keep" Received: "drop"`), green after the fix; law (b) — a
+genuine head-content change with a declined capture drops; law (b2) — the
+anchor entry gone from the wire drops; store-phase decline with identical
+served prefix keeps (property is divergence, not phase).
+
+**Scope notes.** Rust lane (`rust-mode-transform.ts:4016`) keeps its
+existing pending-capture drop semantics: rust mode is TS-coordinated,
+experimental, and the region lane never runs there (the lane predicate
+excludes rust, memory #2704) — no storm surface. Pi's lane is structurally
+immune to this defect: its bust drop (pi-lkg.ts:729-733) fires only when
+the freshly computed candidate differs from the prior row (`unchanged`
+compares candidate bytes before dropping), so a no-op bust cannot trigger
+it; the field receipts were OpenCode/TS.
