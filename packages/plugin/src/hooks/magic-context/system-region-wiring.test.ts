@@ -2,7 +2,15 @@
 
 import { Database } from "bun:sqlite";
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import {
+    mkdtempSync,
+    readdirSync,
+    readFileSync,
+    rmSync,
+    statSync,
+    writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { isSystemRegionLane } from "../../config/system-region-lane";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
@@ -10,16 +18,21 @@ import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import {
     type RegionMarkers,
+    decideSystemRegionRotation,
     readSystemRegion,
     SYSTEM_REGION_SENTINEL,
     writeSystemRegion,
 } from "../../features/magic-context/system-region";
 import {
+    currentRegionMarkersForPromotion,
     hasCompleteCachedM0M1,
     injectM0M1,
     type M0M1State,
     mustMaterialize,
     prepareCachedM0M1Replay,
+    readCurrentM0SnapshotMarkers,
+    regionMarkersFromSnapshot,
+    snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
 import type { MessageLike } from "./tag-messages";
 import { regionRotationPromotion } from "./transform-postprocess-phase";
@@ -524,5 +537,180 @@ describe("system-region capability lane (flag deletion)", () => {
         }
         // Removed plants must not leave residue reddening the steady law.
         expect(censusOffenders()).toEqual([]);
+    });
+});
+
+// Storm defect (field-verified, §25): the promotion comparator compared the
+// captured side (real persisted docs hash, written by the fold at
+// materializeM0's docs.canonicalHash) against the current side produced by
+// readCurrentM0SnapshotMarkers — which LEGITIMATELY hardcodes
+// projectDocsHash: "" (head-lane placeholder: the HARD renderer replaces it
+// before persist). projectDocsHash is a DELTA_TRIGGER_FIELDS member, so on
+// a real projectDirectory the pair could never be equal: every
+// boundary-permission pass rotated with reason=project_docs_hash,
+// executed=true, byte-identical region, forever — and each fake bust drove
+// the LKG drop chain (chain B). The laws below compose currentMarkers
+// through the PRODUCTION reader exactly as the promotion call site does
+// (Fix A's shared helper), never a hand-shaped live({}) fixture — the
+// shape that hid the defect for 11 rounds.
+describe("system-region wiring: promotion comparator convergence (storm, Fix A)", () => {
+    function docsDir(): string {
+        const dir = mkdtempSync(join(tmpdir(), "region-docs-"));
+        writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\nfrozen panel doc.\n");
+        writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nmap.\n");
+        return dir;
+    }
+
+    function installedRegion(dir: string): { db: Database; state: M0M1State } {
+        const db = makeDb();
+        const messages: MessageLike[] = [
+            { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "hi" }] },
+        ];
+        injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state: freshState(db),
+            projectPath: PROJECT_PATH,
+            projectDirectory: dir,
+            messages,
+            isCacheBustingPass: true,
+            systemRegion: { enabled: true, reason: "hard_fold" },
+        } as never);
+        return { db, state: freshState(db) };
+    }
+
+    const foldDueArgsFor = (db: Database, state: M0M1State, dir: string) => ({
+        db,
+        sessionId: SESSION_ID,
+        state,
+        projectPath: PROJECT_PATH,
+        projectDirectory: dir,
+    });
+
+    it("a warm boundary pass with unchanged docs must NOT promote (production composition)", () => {
+        const dir = docsDir();
+        try {
+            const { db, state } = installedRegion(dir);
+            // Sanity: the fold persisted a REAL docs hash on the captured
+            // side (this is what made the placeholder pair unequal).
+            expect(state.cachedM0ProjectDocsHash).toBeTruthy();
+            const storedRegion = readSystemRegion(db, SESSION_ID);
+            expect(storedRegion).not.toBeNull();
+            const captured =
+                state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+            expect(captured).not.toBeNull();
+            // Exactly the promotion call-site composition (Fix A helper —
+            // the wiring calls the SAME function, pinned below).
+            const currentMarkers = currentRegionMarkersForPromotion(
+                foldDueArgsFor(db, state, dir),
+            );
+            const promotion = regionRotationPromotion({
+                systemRegionLane: true,
+                freezeM0M1: false,
+                foldDue: false,
+                boundaryPermission: true,
+                forceBand: false,
+                storedRegion,
+                capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+                currentMarkers,
+                historyBudgetTokens: 40000,
+            });
+            expect(promotion.promote).toBe(false);
+            expect(promotion.reason).toBeNull();
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("receipt honesty: unchanged docs leaves rotate=false for all four DELTA_TRIGGER fields", () => {
+        // The four fields the captured side can legitimately differ from a
+        // raw snapshot read on: docs included. With the production-composed
+        // current side, none of them may fire.
+        const dir = docsDir();
+        try {
+            const { db, state } = installedRegion(dir);
+            const captured =
+                state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+            expect(captured).not.toBeNull();
+            const current = currentRegionMarkersForPromotion(foldDueArgsFor(db, state, dir));
+            const capturedMarkers = regionMarkersFromSnapshot(captured!);
+            for (const field of ["projectDocsHash", "projectMemoryEpoch", "maxMemoryId", "maxMemoryMutationId"] as const) {
+                expect(current[field], `field ${field}`).toBe(capturedMarkers[field]);
+            }
+            const decision = decideSystemRegionRotation({
+                storedRegion: readSystemRegion(db, SESSION_ID),
+                capturedMarkers,
+                currentMarkers: current,
+                bustPermission: true,
+                forceBand: false,
+                pendingBytes: 0,
+                pendingBytesCap: 256 * 1024,
+            });
+            expect(decision.rotate).toBe(false);
+            expect(decision.reason).toBe("none");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("control: a docs edit DOES promote the rotation (the trigger keeps its bite)", () => {
+        // Anti-overcorrection: Fix A must not deaden the trigger — edit
+        // ARCHITECTURE.md on disk and the boundary pass must rotate with
+        // reason=project_docs_hash.
+        const dir = docsDir();
+        try {
+            const { db, state } = installedRegion(dir);
+            writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\nchanged doc.\n");
+            const captured = state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+            expect(captured).not.toBeNull();
+            const promotion = regionRotationPromotion({
+                systemRegionLane: true,
+                freezeM0M1: false,
+                foldDue: false,
+                boundaryPermission: true,
+                forceBand: false,
+                storedRegion: readSystemRegion(db, SESSION_ID),
+                capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+                currentMarkers: currentRegionMarkersForPromotion(foldDueArgsFor(db, state, dir)),
+                historyBudgetTokens: 40000,
+            });
+            expect(promotion.promote).toBe(true);
+            expect(promotion.reason).toBe("project_docs_hash");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("anti-vacuity: the promotion wiring composes currentMarkers only through the shared helper", () => {
+        // The live({}) fixture class hid the storm: a law may not hand-shape
+        // the current side. The wiring file must obtain currentMarkers from
+        // currentRegionMarkersForPromotion (the same export the laws above
+        // call), and never inline the placeholder read into the promotion
+        // composition.
+        const wiring = readFileSync(
+            join(SRC_PLUGIN, "hooks", "magic-context", "transform-postprocess-phase.ts"),
+            "utf8",
+        );
+        expect(wiring).toContain("currentRegionMarkersForPromotion(");
+        expect(
+            /currentMarkers:\s*regionMarkersFromSnapshot\(\s*readCurrentM0SnapshotMarkers/.test(
+                wiring,
+            ),
+        ).toBe(false);
+        // And the helper itself hydrates docs from the canonical single
+        // source — the fold-persist helper — not a reimplementation.
+        const inject = readFileSync(
+            join(SRC_PLUGIN, "hooks", "magic-context", "inject-compartments.ts"),
+            "utf8",
+        );
+        const helperStart = inject.indexOf("export function currentRegionMarkersForPromotion(");
+        expect(helperStart).toBeGreaterThan(-1);
+        const helper = inject.slice(
+            helperStart,
+            inject.indexOf("\nexport ", helperStart + 1),
+        );
+        expect(helper).toContain("readCurrentM0SnapshotMarkers(");
+        expect(helper).toContain("readProjectDocsForM0(");
+        expect(helper).not.toContain("createHash"); // no canonicalization reimplementation
     });
 });

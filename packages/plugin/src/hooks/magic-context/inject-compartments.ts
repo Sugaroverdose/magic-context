@@ -2507,6 +2507,34 @@ export function regionMarkersFromSnapshot(markers: M0SnapshotMarkers): RegionMar
     };
 }
 
+/**
+ * The promotion comparator's CURRENT side, production composition (storm
+ * fix, §25). readCurrentM0SnapshotMarkers legitimately hardcodes
+ * projectDocsHash: "" — a head-lane placeholder that materializeM0 replaces
+ * with the real docs.canonicalHash before persist. The captured side of
+ * the region manifest comparison is the PERSISTED (real) hash, so feeding
+ * the placeholder through the DELTA_TRIGGER_FIELDS comparison made the pair
+ * never-equal by construction: every boundary-permission pass rotated with
+ * reason=project_docs_hash on identical bytes. Hydrate the same field here
+ * through the SAME canonical helper the fold persist uses
+ * (readProjectDocsForM0 — fingerprint-cached, so this is one cached read
+ * per boundary pass), and never reimplement canonicalization. The
+ * head-lane placeholder and mustMaterialize's deliberate non-trigger stay
+ * exactly as they are.
+ */
+export function currentRegionMarkersForPromotion(
+    args: M0SnapshotMarkerReadArgs,
+): RegionMarkers {
+    const markers = readCurrentM0SnapshotMarkers(args);
+    return regionMarkersFromSnapshot({
+        ...markers,
+        projectDocsHash: readProjectDocsForM0(
+            args.projectDirectory ?? args.projectPath ?? "",
+            args.injectDocs,
+        ).canonicalHash,
+    });
+}
+
 export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     const projectPath = options.projectPath;
     const projectDirectory = options.projectDirectory ?? projectPath ?? "";

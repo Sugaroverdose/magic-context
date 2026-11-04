@@ -128,7 +128,7 @@ import {
     type PrefixTrimStatus,
     type PreparedCompartmentInjection,
     prepareCachedM0M1Replay,
-    readCurrentM0SnapshotMarkers,
+    currentRegionMarkersForPromotion,
     regionMarkersFromSnapshot,
     renderCompartmentInjection,
     snapshotMarkersFromCachedM0,
@@ -1947,9 +1947,11 @@ export async function runPostTransformPhase(
                 forceBand: emergencyDropEligible && boundaryPermission,
                 storedRegion,
                 capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
-                currentMarkers: regionMarkersFromSnapshot(
-                    readCurrentM0SnapshotMarkers(foldDueArgs),
-                ),
+                // Storm fix (§25): production-composed current side — the
+                // placeholder projectDocsHash of a raw snapshot read would
+                // never equal the persisted real hash and rotate forever.
+                // Laws share this exact helper (anti-vacuity, wiring law).
+                currentMarkers: currentRegionMarkersForPromotion(foldDueArgs),
                 historyBudgetTokens: args.m0M1?.historyBudgetTokens,
             });
             if (promotion.promote && promotion.reason) {
