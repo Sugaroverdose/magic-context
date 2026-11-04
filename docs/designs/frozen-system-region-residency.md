@@ -1681,3 +1681,60 @@ anywhere in the phase file or the Pi file) plus caller-site pins
 (`storedRegion = readSystemRegion(...)`, boundary arm-set variable, gated
 force-band conjunction). Pi: same quiescent big-region law through
 `piRegionRotationPromotion` → RED pre-fix, green post-fix.
+
+### 25.4 Round-3 closure record (H1–H4, r3 verdict pass-with-partials)
+
+All four residuals are census-strength closures; production code untouched
+by this group (Fix C above is the round's only behavior change). Each class
+was demonstrated by a plant that the pre-fix census shape passed green, and
+that reddens under the closed form; controls are committed with the laws.
+
+- **H1 — intra-blessed-file blindness**
+  (`system-region-clear.test.ts`, commit `c2f1b7731`). The G1 holder census
+  is file-granular: a blessed file's membership said nothing about its
+  internals. Closed with PER-FILE BEHAVIOR assertions: fold-lane files carry
+  blessed exact call-counts (1 OpenCode-1, 2 Pi — the two mutually
+  exclusive materializeM0Pi branches); barrels carry zero call sites and no
+  alias origin; every blessed dispatcher holder is scanned for
+  alias-bound `updateSessionMeta` calls with the contracted column key in
+  window. Controls plant each shape inside in-memory copies of the blessed
+  files and assert the pre-H1 regexes were blind (alias call has no
+  canonical paren; alias dispatcher call never matches the literal
+  `updateSessionMeta(` window).
+- **H2 — fold-body reason parser asymmetry**
+  (`system-region-producers.test.ts`, commit `58918bbb8`). All reason
+  positions (fold-body `reason:`, `piMaterializeMismatch` first args,
+  call-site `systemRegion:` windows) share one DENY-BY-DEFAULT classifier:
+  recognized forms are quoted literal, stem-leading template, boolean/null,
+  reviewed map entry, and decision-sourced expressions (`.reason` members,
+  non-call `*Reason` locals); anything else — call wrappers, ternaries,
+  bare-identifier relays — throws unmapped. Controls plant each blind form
+  and assert the pre-H2 arm regexes matched nothing.
+- **H3 — Pi refusal census zone hole**
+  (`packages/pi-plugin/src/system-region-pi-census.test.ts`, commit
+  `9739cea4e`). All three Pi censuses walked src/ only while the clear
+  file's own zone table classifies `pi-plugin/scripts` as DB-opening
+  production TS (#2665). The census now walks the shared Pi zone set
+  (src + scripts) with canonical-membership floors (dropped zone reddens by
+  name). Control plants a column reader and a raw writer under scripts/ —
+  outside src/, i.e. invisible to the pre-H3 walk — and a roots mutation.
+- **H4 — walk extension/dot-dir blindness** (commit `e5c3a4fb3`). The walks
+  skipped ALL dot-directories and filtered `.ts/.mjs/.cjs` (clear) or
+  `.ts`-only (producers, Pi census): `.tsx` sources exist in the tree today
+  (`src/tui`, `src/tui-compiled`), and the scripts tree carries `.cjs`
+  probes. All four walks take a named deny-list (`.git`, `node_modules`,
+  `dist`, `.codegraph`, plus `target` for the Rust lane) and accept the
+  full module family `.ts/.tsx/.mts/.cts/.mjs/.cjs` minus `*.test.ts`. The
+  producers census additionally joins the shared zone set (pi-scripts was
+  missing from its claimed production tree) with a per-zone floor law.
+  Controls plant `.tsx`/`.mts`/dot-dir rogues per walk and assert the
+  pre-H4 filter shape rejected each; the Rust dot-dir plant documents
+  inclusion (the Rust walk was already dot-dir-inclusive — regression
+  guard, not a red class).
+
+Property statement (#2673): a census's jurisdiction is the file set, so
+census laws are evaluated per FILE BEHAVIOR (what the file may contain and
+must contain exactly how often), per ZONE (every canonical root present and
+non-empty, named), and per WALK SHAPE (extension family + named deny-list),
+never per membership alone. Future closures check the property, not the
+list of shapes.
