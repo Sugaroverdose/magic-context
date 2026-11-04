@@ -1985,10 +1985,15 @@ export function mustMaterialize(args: {
     // cursor. max_mutation_id (structural compartment delete/merge/recomp) IS a
     // trigger because it changes the rendered m[0] baseline content.
     //
-    // NOTE: projectDocsHash is deliberately NOT a trigger. Project docs are part
-    // of m[0], but docs-only edits must not evict the cached prefix; materializeM0
-    // reads fresh docs whenever a natural HARD fold happens and stores that hash
-    // with the bytes it actually rendered.
+    // NOTE: projectDocsHash is deliberately NOT a trigger HERE. Project docs
+    // are part of m[0], but docs-only edits must not evict the cached
+    // prefix; materializeM0 reads fresh docs whenever a natural HARD fold
+    // happens and stores that hash with the bytes it actually rendered. On
+    // the region lane the docs hash IS a rotation trigger
+    // (DELTA_TRIGGER_FIELDS) — but only via the boundary-permission-gated
+    // promotion comparator, whose current side is the live canonical hash
+    // (currentRegionMarkersForPromotion, §25); it never originates a bust
+    // there either.
     if (args.state.cachedM0MaxMutationId !== current.maxMutationId) {
         return withToolSetHashComparison({ value: true, reason: "max_mutation_id" });
     }

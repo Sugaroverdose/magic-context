@@ -1451,9 +1451,11 @@ export function mustMaterializePi(
 	// maxMemoryId watermark, so they must not bust the m[0] cache. Memory
 	// mutations use cachedM0MaxMemoryMutationId as an m[1] reconcile cursor,
 	// not as a materialization trigger; keep it out of this trigger set.
-	// projectDocsHash is also NOT a trigger: docs-only edits ride along until a
-	// natural HARD fold, which reads fresh docs and persists the hash matching the
-	// bytes it rendered.
+	// projectDocsHash is also NOT a trigger HERE: docs-only edits ride along
+	// until a natural HARD fold, which reads fresh docs and persists the hash
+	// matching the bytes it rendered. On the region lane it IS a rotation
+	// trigger via the boundary-gated promotion comparator, whose current side
+	// is the live canonical hash (§25); there too it never originates a bust.
 	// session_facts is retired as a render source (facts = promoted memories),
 	// so its version is pinned to 0 and never triggers either.
 	return { value: false, reason: null };

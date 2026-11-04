@@ -1438,3 +1438,107 @@ stated so future closures check the property, not the list (#2673):
   dropped zone is never green. Applied to: `crates/*` (rust-parity) and
   the eraser census's TS_ROOTS + Rust/dashboard roots
   (system-region-clear.test.ts).
+
+## 25. Storm defect: promotion comparator never-converging (field-verified, 2026-11-04)
+
+**Question (field).** A v0.46-era session ran a tool-loop marathon in which
+the region column churned continuously: coordinator-verified receipts —
+perpetual rotations with `reason=project_docs_hash`, `executed=true`,
+identical 63,556-byte region bytes, `column == live hash` yet "stale"
+forever; every boundary-permission pass in the loop re-rotated. Chain B
+receipts from the same window: 140× `lkg_slot_dropped reason=lkg_refresh_declined`
+and 493× `lkg_capture_declined reason=build_no_anchor`. The provider cache
+stayed warm because the re-rendered bytes were identical — the cost was the
+fake-bust side effects, not re-providers.
+
+**Investigation.**
+- FPE involvement: REFUTED at source — `fpe.ts` is stateless (coordinator
+  adjudication; not re-litigated here).
+- Filesystem/mtime fingerprint churn: REFUTED — the docs fingerprint is a
+  pure cache key inside `readProjectDocsForM0`; the comparator's current
+  side never touches fs at all.
+- Root cause (chain A): the promotion comparator (`decideSystemRegionRotation`)
+  compares two structurally different sources. Captured side:
+  `snapshotMarkersFromCachedM0` → `cached_m0_project_docs_hash` — the REAL
+  persisted hash (materializeM0 hydrates it via `docs.canonicalHash` before
+  persist, inject-compartments.ts fold). Current side:
+  `regionMarkersFromSnapshot(readCurrentM0SnapshotMarkers(foldDueArgs))` —
+  and `readCurrentM0SnapshotMarkers` legitimately hardcodes
+  `projectDocsHash: ""` (head-lane placeholder; the HARD renderer replaces
+  it before persist). `projectDocsHash` is a `DELTA_TRIGGER_FIELDS` member
+  (system-region.ts), so the pair was never-equal by construction for any
+  project with docs: every boundary-permission pass promoted
+  `project_docs_hash`, executed a fold that rendered identical bytes, and
+  re-captured the same real hash — convergence impossible.
+- Chain B (slot churn): each promoted rotation set `bustsServedPrefix=true`
+  on a pass that was NOT a real bust. The LKG capture chain then required a
+  refresh, `findLkgAnchor` structurally refuses to anchor mid-tool-loop (an
+  active assistant requires a real user strictly after it,
+  lkg-replay.ts:256-285) → `build_no_anchor` decline → and
+  transform.ts's `bustedThisPass && !captured → dropSlot` invalidated the
+  durable row. One event (the fake bust) both invalidated the durable slot
+  AND blocked re-establishment — the L0 single-writer contract violated at
+  the slot level. Field follow-up (coordinator): the FIRST LEGITIMATE
+  rotation after restart (`reason=max_memory_id`, 04:00:11Z, priced bust
+  input=46,093/read=69,632) reproduced the same decline→drop chain — chain
+  B fires on every mid-loop bust, fake or legitimate (Fix B, §25.2).
+- Why the tests missed 11 rounds: `system-region-wiring.test.ts` drove the
+  promotion with a hand-shaped fixture (`live({})` = spread of the captured
+  object), so docs equality was manufactured, not read.
+
+**Field mitigation (do not confuse with the fix).** The installed ctxv16
+bundles were hotpatched (the `["projectDocsHash","project_docs_hash"]`
+entry deleted from `DELTA_TRIGGER_FIELDS` in the shipped dist only; registry
+`fc54046`, memory #2711). Post-restart receipts: zero `project_docs_hash`
+rotations, boots warm. That stops the symptom; it also deadens a legitimate
+trigger and cannot make the fixture-composition class impossible. The
+source-level mandate is unchanged.
+
+**Fix A (commits `f7a54b2ea`, `616f5cea6`).** The promotion comparator's
+current side is composed at ONE production helper,
+`currentRegionMarkersForPromotion` (inject-compartments.ts, next to
+`regionMarkersFromSnapshot`): `readCurrentM0SnapshotMarkers` + the SAME
+`readProjectDocsForM0(...).canonicalHash` the fold persist uses
+(fingerprint-cached; one cached read per boundary pass; no
+canonicalization reimplementation). The wiring
+(transform-postprocess-phase.ts promotion site) calls it; the head-lane
+placeholder and `mustMaterialize`'s deliberate non-trigger are untouched.
+Pi mirror: the promotion wrapper previously passed the PERSISTED
+`meta.cachedM0ProjectDocsHash` as the current-side override — captured ==
+current by construction, a DEAD trigger (docs edits entered the panel only
+when another trigger happened to rotate). The wrapper now omits the
+override, so the sanctioned live read (`readProjectDocsForPiM0` →
+`readProjectDocsCanonical`) supplies the field. Same comparator defect,
+opposite polarity; both lanes now converge.
+
+**Laws.** Red-first evidence: at baseline `c15ddeb48` a probe through the
+old wiring composition returned `{promote:true, reason:project_docs_hash}`
+with persisted hash `a3fc39d76a42704e…` (behavioral red of the convergence
+law); the Pi docs-edit law and the Pi anti-vacuity law both
+`(fail)` before the wrapper fix. Four TS laws
+(`system-region-wiring.test.ts` › promotion comparator convergence):
+convergence through production composition (warm boundary must NOT
+promote); receipt honesty (unchanged docs → rotate=false for all four
+DELTA_TRIGGER fields); control — a docs edit DOES promote with
+`reason=project_docs_hash` (Fix A must not deaden the trigger);
+anti-vacuity — the wiring may obtain `currentMarkers` only via the shared
+helper (the inline `regionMarkersFromSnapshot(readCurrentM0SnapshotMarkers(…))`
+composition is denied by text; the helper may not reimplement
+canonicalization), so a hand-shaped fixture can never cover the wiring
+class again. Three Pi laws (`system-region-pi-fold.test.ts`): docs-edit
+promotes (live current side, ride-only preserved), unchanged docs never
+promotes, and the wrapper may not pass the persisted hash into the
+current-side reader.
+
+**Comment honesty (same family).** Three stale claims corrected to the
+true statement (docs hash IS a rotation trigger on the region lane, gated
+on the boundary permission and composed from the live hash; it is not a
+trigger only of the `mustMaterialize` HARD fold): the `RegionMarkers`
+interface doc + `DELTA_TRIGGER_FIELDS` comment in system-region.ts, the
+mustMaterialize NOTE in inject-compartments.ts, and the Pi
+mustMaterializePi comment at inject-compartments-pi.ts:1454. Note for the
+record: an in-session read of system-region.ts returned a comment block
+("adjudicated field classes … absent by construction … fold lane never
+re-reads docs") that does not exist in any committed version (verified via
+`git show` + grep before editing); all comment edits were made against
+source-verified text only (#2632).

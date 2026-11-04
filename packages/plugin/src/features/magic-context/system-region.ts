@@ -228,9 +228,13 @@ export function clearSystemRegionsByProjectIdentity(
  * The marker set captured at the last rotation, mirroring the `cached_m0_*`
  * columns. Rotation eligibility is a pure comparison of the current store
  * markers against this snapshot; the comparison list is the content-trigger
- * half of the `mustMaterialize` set, and the deliberate non-triggers (compartment
- * sequence, profile version, memory watermark, docs hash) are absent by
+ * half of the `mustMaterialize` set; the deliberate non-triggers
+ * (compartment sequence, profile version, memory watermark) are absent by
  * construction — new history and new memories are deltas, not boundaries.
+ * The docs hash IS a compared member (DELTA_TRIGGER_FIELDS): its current
+ * side must carry the live canonical hash (§25); like every compared
+ * field, it never originates a bust — it rides the next boundary
+ * permission.
  */
 export interface RegionMarkers {
     projectMemoryEpoch: number;
