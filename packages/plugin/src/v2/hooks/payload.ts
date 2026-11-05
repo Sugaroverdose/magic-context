@@ -336,7 +336,13 @@ export function adaptPayload(draft: SessionContext, admittedIDs: ReadonlySet<str
                     (typeof message.info.id === "string"
                         ? originalsByID.get(message.info.id)
                         : undefined);
-                const id = message.info.syntheticHead ? HEAD_IDS[head++] : original?.id;
+                // The two synthetic context heads this pass builds carry the
+                // adapter-local head-id flag (HEAD_IDS vocabulary, census floor):
+                // a local narrowed read, outside the shared MessageInfo shape —
+                // the head carriage itself is retired from the production tree.
+                const id = (message.info as { syntheticHead?: boolean }).syntheticHead
+                    ? HEAD_IDS[head++]
+                    : original?.id;
                 const content: Part[] = [];
                 const following: V2Message[] = [];
                 for (const candidate of message.parts) {

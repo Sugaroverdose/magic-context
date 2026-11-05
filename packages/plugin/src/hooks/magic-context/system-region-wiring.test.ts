@@ -19,11 +19,11 @@ import {
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     currentRegionMarkersForPromotion,
-    hasCompleteCachedM0M1,
+    hasServableRegion,
     injectM0M1,
     type M0M1State,
     mustMaterialize,
-    prepareCachedM0M1Replay,
+    prepareRegionReplay,
     regionMarkersFromSnapshot,
     snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
@@ -61,7 +61,7 @@ function freshState(db: Database): M0M1State {
     return meta;
 }
 
-function foldOptions(db: Database, messages: MessageLike[], regionEnabled: boolean) {
+function foldOptions(db: Database, messages: MessageLike[]) {
     return {
         db,
         sessionId: SESSION_ID,
@@ -70,7 +70,7 @@ function foldOptions(db: Database, messages: MessageLike[], regionEnabled: boole
         projectDirectory: "",
         messages,
         isCacheBustingPass: true,
-        systemRegion: regionEnabled ? { enabled: true, reason: "hard_fold" } : undefined,
+        systemRegion: { enabled: true, reason: "hard_fold" },
     } as never;
 }
 
@@ -80,7 +80,7 @@ describe("system-region wiring: gate on collapses the head lane", () => {
         const messages: MessageLike[] = [
             { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "hi" }] },
         ];
-        const result = injectM0M1(foldOptions(db, messages, true));
+        const result = injectM0M1(foldOptions(db, messages));
         expect(result.prependedMessageCount).toBe(0);
         expect(messages.length).toBe(1);
         expect(messages[0].info.id).toBe("u1");
@@ -96,12 +96,12 @@ describe("system-region wiring: gate on collapses the head lane", () => {
 
     it("second gated pass replays: no fold, no head, m1 stays null, no new region bytes", () => {
         const db = makeDb();
-        injectM0M1(foldOptions(db, [], true));
+        injectM0M1(foldOptions(db, []));
         const before = row(db);
         const messages: MessageLike[] = [
             { info: { id: "u2", role: "user" }, parts: [{ type: "text", text: "next" }] },
         ];
-        const result = injectM0M1(foldOptions(db, messages, true));
+        const result = injectM0M1(foldOptions(db, messages));
         expect(result.prependedMessageCount).toBe(0);
         expect(result.m0RematerializedThisPass).toBe(false);
         expect(messages.length).toBe(1);
@@ -110,17 +110,22 @@ describe("system-region wiring: gate on collapses the head lane", () => {
         expect(after.cached_m1_bytes).toBeNull();
     });
 
-    it("inert capability lane (head): the head lane still prepends its two synthetic messages", () => {
+    it("headless carriage: even with the capability operand omitted, the fold installs a region and splices no heads", () => {
+        // The head lane is deleted (assembly-v2 Unit 1 Step 3): there is no
+        // invocation of injectM0M1 that prepends synthetic messages, even a
+        // caller that omits systemRegion entirely (posture: lane constant true,
+        // step 4). The fold falls back to the hard_fold reason.
         const db = makeDb();
         const messages: MessageLike[] = [
             { info: { id: "u3", role: "user" }, parts: [{ type: "text", text: "hi" }] },
         ];
-        const result = injectM0M1(foldOptions(db, messages, false));
-        expect(result.prependedMessageCount).toBe(2);
-        expect(messages.length).toBe(3);
-        expect(messages[0].info.role).toBe("user");
-        expect((messages[0].info as { syntheticHead?: boolean }).syntheticHead).toBe(true);
-        expect(Buffer.from(row(db).cached_m0_bytes!).toString("utf8")).not.toContain(
+        const options = foldOptions(db, messages) as { systemRegion?: unknown };
+        delete options.systemRegion;
+        const result = injectM0M1(options as never);
+        expect(result.prependedMessageCount).toBe(0);
+        expect(messages.length).toBe(1);
+        expect(messages[0].info.id).toBe("u3");
+        expect(Buffer.from(row(db).cached_m0_bytes!).toString("utf8")).toContain(
             SYSTEM_REGION_SENTINEL,
         );
     });
@@ -165,7 +170,9 @@ describe("system-region wiring: mustMaterialize arms in region mode", () => {
         expect(decision.reason).not.toBe("cached_m1_missing");
     });
 
-    it("without region mode the m1-missing arm keeps its bite (control)", () => {
+    it("the legacy regionMode=false reading behaves identically: no cached_m1_missing arm exists (control)", () => {
+        // Unit 1 Step 3 deleted the head-lane arm and its discrimination; a
+        // poison row folds on every reader, and a null m[1] is never a trigger.
         const db = makeDb();
         db.prepare(
             "UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?",
@@ -180,7 +187,19 @@ describe("system-region wiring: mustMaterialize arms in region mode", () => {
             projectDirectory: "",
         });
         expect(decision.value).toBe(true);
-        expect(decision.reason).toBe("cached_m1_missing");
+        expect(decision.reason).toBe("region_first_install");
+        const healthy = makeDb();
+        writeSystemRegion(healthy, SESSION_ID, "<project-memory>frozen</project-memory>");
+        const healthyState = freshState(healthy);
+        healthyState.cachedM1Bytes = null;
+        const none = mustMaterialize({
+            db: healthy,
+            sessionId: SESSION_ID,
+            state: healthyState,
+            projectPath: PROJECT_PATH,
+            projectDirectory: "",
+        });
+        expect(none.reason).not.toBe("cached_m1_missing");
     });
 });
 
@@ -307,95 +326,97 @@ describe("system-region wiring: rotation promotion (L3/L4)", () => {
 });
 
 describe("system-region wiring: replay plumbing is sentinel-aware", () => {
-    it("a sentinel row counts as a complete cached prefix and replays without heads", () => {
+    it("a sentinel row counts as a servable region and replays without heads", () => {
         const db = makeDb();
         writeSystemRegion(db, SESSION_ID, "<project-memory>frozen</project-memory>");
-        expect(hasCompleteCachedM0M1(db, SESSION_ID, true)).toBe(true);
-        const replay = prepareCachedM0M1Replay(db, SESSION_ID, true);
+        expect(hasServableRegion(db, SESSION_ID)).toBe(true);
+        const replay = prepareRegionReplay(db, SESSION_ID);
         expect(replay).toBeDefined();
         expect(replay!.preparedMessages.length).toBe(0);
     });
 
-    it("control: a raw m0 row with null m1 is not complete", () => {
+    it("control: a raw head row is never servable", () => {
         const db = makeDb();
         db.prepare(
             "UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?",
         ).run(Buffer.from("<session-history>head</session-history>", "utf8"), SESSION_ID);
-        expect(hasCompleteCachedM0M1(db, SESSION_ID)).toBe(false);
-        expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined();
+        expect(hasServableRegion(db, SESSION_ID)).toBe(false);
+        expect(prepareRegionReplay(db, SESSION_ID)).toBeUndefined();
     });
 });
 
-// Round-2 review C2c: a sentinel row must never be served as head text by a
-// lane that does not run the region. Head-lane readers treat it as absent.
-describe("system-region wiring: cross-lane reader discrimination", () => {
-    function seedSentinelRow(sessionId: string) {
+// Reader contract (#2637), headless era: the region reader refuses everything
+// it cannot serve. A legacy head row — any bytes without the sentinel — is
+// first_render (empty region), never served as region text; a sentinel-prefixed
+// row that fails decode (corrupt/forged) is refused too.
+describe("system-region wiring: reader discrimination over stored rows", () => {
+    function seedRow(sessionId: string, bytes: Uint8Array) {
         const db = new Database(":memory:");
         initializeDatabase(db);
         getOrCreateSessionMeta(db, sessionId);
         db.prepare(
             "UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = NULL WHERE session_id = ?",
-        ).run(encodeSystemRegionRowSafe("<project-memory>foreign</project-memory>"), sessionId);
+        ).run(bytes, sessionId);
         return db;
     }
-    function encodeSystemRegionRowSafe(text: string): Uint8Array {
-        return new TextEncoder().encode(`<!-- mc:system-region v1 -->\n${text}`);
-    }
 
-    it("head lane: a sentinel row is first_render, not a complete prefix", async () => {
-        const { mustMaterialize, prepareCachedM0M1Replay, hasCompleteCachedM0M1 } = await import(
+    it("a legacy head row is first_render and never servable", async () => {
+        const { mustMaterialize, prepareRegionReplay, hasServableRegion } = await import(
             "./inject-compartments"
         );
-        const db = seedSentinelRow("ses-c2-headlane");
-        const state = getOrCreateSessionMeta(db, "ses-c2-headlane");
+        const db = seedRow(
+            "ses-c2-headrow",
+            Buffer.from("<session-history>legacy</session-history>", "utf8"),
+        );
+        const state = getOrCreateSessionMeta(db, "ses-c2-headrow");
         expect(
             mustMaterialize({
                 db,
-                sessionId: "ses-c2-headlane",
+                sessionId: "ses-c2-headrow",
                 state,
                 projectPath: "/p",
                 projectDirectory: "",
-                systemRegionMode: false,
+                systemRegionMode: true,
             } as never).reason,
-        ).toBe("first_render");
-        expect(prepareCachedM0M1Replay(db, "ses-c2-headlane", false)).toBeUndefined();
-        expect(hasCompleteCachedM0M1(db, "ses-c2-headlane", false)).toBe(false);
+        ).toBe("region_first_install");
+        expect(prepareRegionReplay(db, "ses-c2-headrow")).toBeUndefined();
+        expect(hasServableRegion(db, "ses-c2-headrow")).toBe(false);
     });
 
-    it("control region lane: the same row is a complete served prefix", async () => {
-        const { prepareCachedM0M1Replay, hasCompleteCachedM0M1 } = await import(
-            "./inject-compartments"
+    it("a sentinel row is servable whole", async () => {
+        const { prepareRegionReplay, hasServableRegion } = await import("./inject-compartments");
+        const db = seedRow(
+            "ses-c2-regionrow",
+            Buffer.from(
+                `<!-- mc:system-region v1 -->\n<project-memory>foreign</project-memory>`,
+                "utf8",
+            ),
         );
-        const db = seedSentinelRow("ses-c2-regionlane");
-        expect(prepareCachedM0M1Replay(db, "ses-c2-regionlane", true)).toBeDefined();
-        expect(hasCompleteCachedM0M1(db, "ses-c2-regionlane", true)).toBe(true);
+        expect(prepareRegionReplay(db, "ses-c2-regionrow")).toBeDefined();
+        expect(hasServableRegion(db, "ses-c2-regionrow")).toBe(true);
     });
 });
 
-describe("prepareCachedM0M1Replay truth table (lint-refactor pin)", () => {
-    it("head rows need m1; region rows never read m1", () => {
+describe("prepareRegionReplay truth table (lint-refactor pin)", () => {
+    it("head rows are never served; region rows never read the m1 slot", () => {
         const db = makeDb();
-        expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined(); // no row
+        expect(prepareRegionReplay(db, SESSION_ID)).toBeUndefined(); // no row
         db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(
             Buffer.from("<session-history>head</session-history>", "utf8"),
             SESSION_ID,
         );
-        // Head m0, null m1: refused (no empty-head serve).
-        expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined();
+        // Legacy head m0 with a full m1 companion: still refused (head rows
+        // are not region bytes; the reader contract treats them as absent).
         db.prepare("UPDATE session_meta SET cached_m1_bytes = ? WHERE session_id = ?").run(
             Buffer.from("<session-history-since>d</session-history-since>", "utf8"),
             SESSION_ID,
         );
-        expect(prepareCachedM0M1Replay(db, SESSION_ID)?.injected).toBe(true);
-        // Region m0 with null m1 on the region lane: serves, m1 text never read.
+        expect(prepareRegionReplay(db, SESSION_ID)).toBeUndefined();
+        // Region row: serves, m1 text is the empty placeholder, never stored bytes.
         writeSystemRegion(db, SESSION_ID, "<project-memory>r</project-memory>");
-        const regionPass = prepareCachedM0M1Replay(db, SESSION_ID, true);
+        const regionPass = prepareRegionReplay(db, SESSION_ID);
         expect(regionPass?.injected).toBe(true);
-        // The region row owns the head text; the m1 slot must render as the
-        // empty placeholder text, never as stored bytes.
         expect(regionPass?.m1Text).toBe("");
-        // Region row off the region lane: refused.
-        expect(prepareCachedM0M1Replay(db, SESSION_ID)).toBeUndefined();
     });
 });
 
@@ -405,6 +426,12 @@ describe("prepareCachedM0M1Replay truth table (lint-refactor pin)", () => {
 // decider, computed once per handler boot from transformMode + compaction
 // (L0 spirit: one decider, threaded — no per-site re-derivation).
 describe("system-region capability lane (flag deletion)", () => {
+    // Unit 1 Step 4 (plan:20): the predicate is a pure constant. The rust and
+    // compaction-off rows retired here asked the lane to refuse service; the
+    // rust refusal moved upstream to the config-resolution funnel
+    // (transform-mode.ts named boot refusal) and compaction-off rides the
+    // region (binary-authority ruling). system-region-lane-law.test.ts pins
+    // the pure-constant structure; this table pins call-site stability.
     const TABLE: Array<{
         name: string;
         config: { transform_mode?: "ts" | "rust"; compaction?: { enabled?: boolean } | false };
@@ -416,17 +443,11 @@ describe("system-region capability lane (flag deletion)", () => {
             config: { transform_mode: "ts", compaction: { enabled: true } },
             want: true,
         },
-        { name: "rust transform mode", config: { transform_mode: "rust" }, want: false },
-        {
-            name: "rust + compaction on",
-            config: { transform_mode: "rust", compaction: { enabled: true } },
-            want: false,
-        },
-        { name: "compaction off (legacy false)", config: { compaction: false }, want: false },
+        { name: "compaction off (legacy false)", config: { compaction: false }, want: true },
         {
             name: "compaction off (object)",
             config: { compaction: { enabled: false } },
-            want: false,
+            want: true,
         },
     ];
     for (const row of TABLE) {

@@ -174,12 +174,8 @@ function preparedPrefix(boundary: string): InjectM0M1Result {
         decision: { value: false, reason: "cache_hit" },
         m0Bytes: Buffer.from("m0"),
         m1Text: "m1",
-        preparedMessages: [
-            {
-                info: { role: "user", sessionID: SESSION_ID },
-                parts: [{ type: "text", text: "summary prefix", synthetic: true }],
-            } as MessageLike,
-        ],
+        // Region-era replay carries no array-side heads.
+        preparedMessages: [],
         preparedTrimBoundaryId: boundary,
     };
 }
@@ -237,7 +233,7 @@ describe("absent-boundary prefix trim: append-only defer passes keep the priced 
         const window = (to: number) => liveWindow(range(5, to).filter((index) => index !== 12));
         const priced = window(30);
         expect(servePass(db, priced, boundary, true).prefixTrimStatus).toBe("refused");
-        expect(ids(priced)).toEqual([undefined, ...ids(window(30))]);
+        expect(ids(priced)).toEqual(ids(window(30)));
         insertRows([regularRow(31)]);
         const defer = window(31);
         expect(servePass(db, defer, boundary, false).prefixTrimStatus).toBe("refused");
@@ -269,7 +265,7 @@ describe("absent-boundary prefix trim: append-only defer passes keep the priced 
         ]);
         const priced = liveWindow(range(1, 30));
         expect(servePass(db, priced, "msg_gone", true).prefixTrimStatus).toBe("refused");
-        expect(ids(priced)).toEqual([undefined, ...ids(liveWindow(range(1, 30)))]);
+        expect(ids(priced)).toEqual(ids(liveWindow(range(1, 30))));
         insertRows([regularRow(31)]);
         const defer = liveWindow(range(1, 31));
         expect(servePass(db, defer, "msg_gone", false).prefixTrimStatus).toBe("refused");
@@ -326,7 +322,7 @@ describe("absent-boundary prefix trim: the log does not imply the host window st
             }).prefixTrimStatus;
 
             expect(status).toBe("boundary-precedes-window");
-            expect(ids(live)).toEqual([undefined, ...ids(liveWindow(range(15, 30)))]);
+            expect(ids(live)).toEqual(ids(liveWindow(range(15, 30))));
             expect(lines.filter((line) => line.includes("prefix trim:"))).toEqual([
                 `prefix trim: boundary ${idOf(12)} precedes the first remaining message ${idOf(15)}; rows between were cut with the summarized history or removed by reduction this pass; pass=priced; nothing to cut`,
             ]);
@@ -346,7 +342,7 @@ describe("absent-boundary prefix trim: host changes between a priced and a defer
         const window = () => liveWindow(range(5, 30).filter((index) => index !== 12));
         const priced = window();
         servePass(db, priced, boundary, true);
-        expect(ids(priced)).toEqual([undefined, ...ids(window())]);
+        expect(ids(priced)).toEqual(ids(window()));
 
         deleteRows([idOf(3)]);
         const defer = window();
@@ -393,7 +389,7 @@ describe("absent-boundary prefix trim: host changes between a priced and a defer
             liveRow("msg_new_user", "user", "the user's new prompt"),
         ];
         servePass(db, defer, boundary, false);
-        expect(ids(defer)).toEqual([undefined, ...ids(liveWindow(range(5, 8))), "msg_new_user"]);
+        expect(ids(defer)).toEqual([...ids(liveWindow(range(5, 8))), "msg_new_user"]);
     });
 
     // `resetPrefixTrimFallbackState` clears the same module-level maps a process
@@ -455,7 +451,7 @@ describe("absent-boundary prefix trim: OpenCode 1.18 filterCompacted reorder", (
         // tail it heads does not, so this is not a window that starts past the
         // boundary; nothing is cut either way.
         expect(servePass(db, reordered, boundary, true).prefixTrimStatus).toBe("refused");
-        expect(ids(reordered)).toEqual([undefined, ...before]);
+        expect(ids(reordered)).toEqual([...before]);
     });
 
     it("keeps the reordered window whole when the boundary sorts before the retained tail", () => {
@@ -492,7 +488,7 @@ describe("absent-boundary prefix trim: OpenCode 1.18 filterCompacted reorder", (
         expect(servePass(db, reordered, idOf(6), true).prefixTrimStatus).toBe(
             "boundary-precedes-window",
         );
-        expect(ids(reordered)).toEqual([undefined, ...before]);
+        expect(ids(reordered)).toEqual([...before]);
     });
 });
 
@@ -500,8 +496,7 @@ describe("absent-boundary prefix trim: source-order branch", () => {
     function sourceOrderFor(messages: readonly MessageLike[]): PrefixTrimSourceOrder {
         return {
             messageIds: messages.map((message) => message.info.id as string),
-            syntheticHeadCount: 0,
-            invalidReason: null,
+                invalidReason: null,
         };
     }
 
@@ -516,13 +511,13 @@ describe("absent-boundary prefix trim: source-order branch", () => {
         expect(servePass(db, deferFirst, boundary, false, deferFirstOrder).prefixTrimStatus).toBe(
             "refused",
         );
-        expect(ids(deferFirst)).toEqual([undefined, ...ids(window(30))]);
+        expect(ids(deferFirst)).toEqual(ids(window(30)));
 
         const priced = window(30);
         expect(servePass(db, priced, boundary, true, sourceOrderFor(priced)).prefixTrimStatus).toBe(
             "refused",
         );
-        expect(ids(priced)).toEqual([undefined, ...ids(window(30))]);
+        expect(ids(priced)).toEqual(ids(window(30)));
 
         insertRows([regularRow(31)]);
         const defer = window(31);

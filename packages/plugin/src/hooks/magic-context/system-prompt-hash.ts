@@ -410,17 +410,17 @@ export function createSystemPromptHashHandler(deps: {
             );
         }
 
-        // ── Step 1.5: m[0]/m[1]-resident adjuncts ──
+        // ── Step 1.5: region-resident adjuncts ──
         // Project docs, user profile, and key files intentionally do NOT
-        // enter the system prompt in cache architecture v2.0. Project docs
-        // and baseline user profile are materialized into m[0]; key files
-        // are the volatile resident at m[1]. Keep only guidance + sticky
-        // date in system so BP1 remains stable.
+        // enter the host's system prompt. They are carried by the frozen
+        // system region — materialized into the sentinel row and appended
+        // after the host bytes, outside the watched hash. Only guidance +
+        // sticky date live in the watched system text, so BP1 stays stable.
         const isCacheBusting = deps.systemPromptRefreshSessions.has(sessionId);
         // Some OpenCode 1 routes run messages.transform before this hook. An idle-expired
         // request is already a full provider-cache rebuild, even if an aborted
-        // attempt prepared its frozen head. Adopt this request's system identity
-        // with that head instead of scheduling another rewrite on its next step.
+        // attempt prepared its frozen region. Adopt this request's system identity
+        // with that region instead of scheduling another rewrite on its next step.
         // A scheduler execute alone is not proof: pressure passes can replay an
         // unchanged, still-warm prefix, so those retain the hash-change fold.
         const idleCacheExpired =

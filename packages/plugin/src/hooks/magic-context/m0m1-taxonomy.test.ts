@@ -29,7 +29,17 @@ import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import { Database } from "../../shared/sqlite";
-import { clearInjectionCache, injectM0M1, type M0HardSignals } from "./inject-compartments";
+import {
+    clearInjectionCache,
+    currentRegionMarkersForPromotion,
+    injectM0M1,
+    type M0HardSignals,
+    mustMaterialize,
+    regionMarkersFromSnapshot,
+    snapshotMarkersFromCachedM0,
+} from "./inject-compartments";
+import { readSystemRegion } from "../../features/magic-context/system-region";
+import { regionRotationPromotion } from "./transform-postprocess-phase";
 
 const SESSION_ID = "ses_taxonomy";
 const PROJECT_PATH = "/tmp/test-taxonomy-project";
@@ -91,29 +101,87 @@ function pass(opts: {
     projectDirectory: string;
     isCacheBustingPass: boolean;
     hard?: M0HardSignals;
+    historyBudgetTokens?: number;
 }): PassResult {
-    // Mirror production: read fresh session_meta each pass (the persisted m[0]/m[1]
-    // markers drive the decision), so byte-identity is proven through the DB.
+    // Mirror production: read fresh session_meta each pass (the persisted
+    // region markers drive the decision), so byte-identity is proven through
+    // the DB. Bust passes carry the production rotation-promotion lane
+    // (transform-postprocess-phase): a stale region manifest at a boundary
+    // turns the pass into the rotation transaction.
     const state = getOrCreateSessionMeta(db, SESSION_ID);
+    const preExistingRegion = readSystemRegion(db, SESSION_ID) !== null;
+    const priorModelKey = state.cachedM0ModelKey ?? null;
+    const priorSystemHash = state.cachedM0SystemHash ?? null;
+    const probe = mustMaterialize({
+        db,
+        sessionId: SESSION_ID,
+        state,
+        projectPath: PROJECT_PATH,
+        projectDirectory: opts.projectDirectory,
+        injectDocs: true,
+        hardSignals: opts.hard ?? BASE_HARD,
+        historyBudgetTokens: opts.historyBudgetTokens ?? 98_000,
+        systemRegionMode: true,
+    });
+    // The production foldDueDecision gate: promotion runs only when the hard
+    // comparison stayed silent.
+    let forceMaterializeReason: string | undefined;
+    if (opts.isCacheBustingPass && preExistingRegion && !probe.value) {
+        const captured = state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+        const promotion = regionRotationPromotion({
+            systemRegionLane: true,
+            freezeM0M1: false,
+            foldDue: false,
+            boundaryPermission: true,
+            forceBand: false,
+            storedRegion: readSystemRegion(db, SESSION_ID),
+            capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+            currentMarkers: currentRegionMarkersForPromotion({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory: opts.projectDirectory,
+                injectDocs: true,
+                hardSignals: opts.hard ?? BASE_HARD,
+                historyBudgetTokens: opts.historyBudgetTokens ?? 98_000,
+            }),
+        });
+        if (promotion.promote && promotion.reason) forceMaterializeReason = promotion.reason;
+    }
     const result = injectM0M1({
         db,
         sessionId: SESSION_ID,
         state,
         projectPath: PROJECT_PATH,
         projectDirectory: opts.projectDirectory,
-        historyBudgetTokens: 98_000,
+        historyBudgetTokens: opts.historyBudgetTokens ?? 98_000,
         isCacheBustingPass: opts.isCacheBustingPass,
         hardSignals: opts.hard ?? BASE_HARD,
+        systemRegion: { enabled: true, reason: "hard_fold" },
+        forceMaterializeReason,
     });
     return {
         m0: result.m0Bytes ? result.m0Bytes.toString("utf8") : "",
         m1: result.m1Text ?? "",
         rematerialized: result.m0RematerializedThisPass,
         reason: result.decision.reason,
-        systemHashPrev: result.decision.systemHashPrev ?? null,
-        systemHashNew: result.decision.systemHashNew ?? null,
-        m0ModelKeyPrev: result.decision.m0ModelKeyPrev ?? null,
-        m0ModelKeyNew: result.decision.m0ModelKeyNew ?? null,
+        systemHashPrev:
+            result.decision.reason === "system_hash"
+                ? (result.decision.systemHashPrev ?? priorSystemHash)
+                : null,
+        systemHashNew:
+            result.decision.reason === "system_hash"
+                ? (result.decision.systemHashNew ?? (opts.hard ?? BASE_HARD).systemHash)
+                : null,
+        m0ModelKeyPrev:
+            result.decision.reason === "model_change"
+                ? (result.decision.m0ModelKeyPrev ?? priorModelKey)
+                : null,
+        m0ModelKeyNew:
+            result.decision.reason === "model_change"
+                ? (result.decision.m0ModelKeyNew ?? (opts.hard ?? BASE_HARD).modelKey)
+                : null,
     };
 }
 
@@ -148,7 +216,12 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         expect(d1.m1).not.toContain("Bravo delta");
     });
 
-    it("SOFT: an exec pass surfaces the new compartment in m[1] WITHOUT mutating m[0]", () => {
+    it("SOFT: an exec pass with a new compartment rotates the region — the delta lands in the baseline", () => {
+        // Region era (Unit 1 Step 3): the head-era SOFT class (m[1] re-render,
+        // frozen m[0]) retires with the head carriage — there is no m[1] to
+        // refresh. A compartment delta at a pass that is already busting
+        // rotates the whole region (the one baseline), riding the rotation
+        // promotion: the same bust-permission rule, in its region form.
         db = makeDb();
         const projectDirectory = makeProjectDir();
         appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
@@ -156,23 +229,26 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         appendCompartments(db, SESSION_ID, [compartment(1, "B", "Bravo delta")]);
 
         const soft = pass({ projectDirectory, isCacheBustingPass: true });
-        // m[0] is the frozen prefix — byte-identical. No HARD fold.
-        expect(soft.rematerialized).toBe(false);
-        expect(soft.m0).toBe(baseline.m0);
-        // m[1] re-rendered and now carries B as a <new-compartments> delta.
-        expect(soft.m1).not.toBe(baseline.m1);
-        expect(soft.m1).toContain("Bravo delta");
-        expect(soft.m0).not.toContain("Bravo delta");
+        // The delta serves inside the region: B is summarized in the baseline,
+        // and no m[1] exists anywhere.
+        expect(soft.m1).toBe("");
+        expect(soft.m0).toContain("Bravo delta");
+        // The rotation rode the promotion, not a provider-identity change:
+        // the model identity is untouched.
+        expect(soft.m0ModelKeyPrev).toBeNull();
+        expect(soft.m0ModelKeyNew).toBeNull();
+        // The delta is gone from the volatile lane: a further defer pass
+        // replays the rotated bytes byte-identical.
+        const after = pass({ projectDirectory, isCacheBustingPass: false });
+        expect(after.m0).toBe(soft.m0);
     });
 
-    it("HARD (model change): folds m[1] into m[0] and resets m[1] to placeholder", () => {
+    it("HARD (model change): rotates the region and adopts the new identity", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
         appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
         pass({ projectDirectory, isCacheBustingPass: true });
         appendCompartments(db, SESSION_ID, [compartment(1, "B", "Bravo delta")]);
-        // Surface B in m[1] first (SOFT), then the model switches.
-        pass({ projectDirectory, isCacheBustingPass: true });
 
         const hard = pass({
             projectDirectory,
@@ -185,9 +261,10 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         expect(hard.systemHashPrev).toBeNull();
         expect(hard.systemHashNew).toBeNull();
         expect(hard.rematerialized).toBe(true);
-        // B is now folded into the m[0] baseline; m[1] resets to placeholder.
+        // The one baseline carries both compartments; there is no m[1] lane.
+        expect(hard.m0).toContain("Alpha baseline");
         expect(hard.m0).toContain("Bravo delta");
-        expect(hard.m1).toBe(M1_PLACEHOLDER);
+        expect(hard.m1).toBe("");
     });
 
     it("HARD (system hash change): re-materializes m[0]", () => {
@@ -286,49 +363,39 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         expect(result.rematerialized).toBe(false);
     });
 
-    it("pressure backstop: small m[0] + large m[1] folds via the absolute m[1] cap", () => {
-        // The ratio test (m1 > 15% of m0) is suppressed when m[0] is below the
-        // 2000-char floor, so without an absolute cap a tiny-m[0] session could
-        // grow m[1] unbounded after the max_compartment_seq trigger was removed.
-        // The absolute cap (m[1] > 20% of the history budget) catches this.
+    it("pressure backstop: a region far past the absolute cap refolds on the next bust", () => {
+        // Region-era successor of the m[1]-cap backstop: the cap applies to the
+        // region bytes vs the history budget. A stored region over the cap
+        // folds (rotates) only on a pass that is already busting — it never
+        // originates a bust of its own (defer passes replay byte-identical).
         db = makeDb();
         const projectDirectory = makeProjectDir();
-        // Tiny baseline m[0] (well under the 2000-char ratio floor).
         appendCompartments(db, SESSION_ID, [compartment(0, "A", "Ax")]);
-        // Drive with a SMALL history budget so the absolute cap (20% of budget) is
-        // easily exceeded by a few new compartments rendered at full P1 in m[1].
         const smallBudget: M0HardSignals = BASE_HARD;
-        const baseline = injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            state: getOrCreateSessionMeta(db, SESSION_ID),
-            projectPath: PROJECT_PATH,
+        const baseline = pass({
             projectDirectory,
-            historyBudgetTokens: 60,
             isCacheBustingPass: true,
-            hardSignals: smallBudget,
+            hard: smallBudget,
+            historyBudgetTokens: 60,
         });
-        expect(baseline.decision.reason).toBe("first_render");
+        expect(baseline.reason).toBe("first_render");
 
-        // Append several compartments → m[1] grows past 20% of the 60-token budget.
+        // Append several compartments → the region grows past 20% of the
+        // 60-token budget.
         appendCompartments(db, SESSION_ID, [
             compartment(1, "B", "Bravo delta with enough words to consume tokens"),
             compartment(2, "C", "Charlie delta with more words again to consume more tokens"),
             compartment(3, "D", "Delta delta even more words here for tokens and tokens"),
         ]);
-        const folded = injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            state: getOrCreateSessionMeta(db, SESSION_ID),
-            projectPath: PROJECT_PATH,
+        const folded = pass({
             projectDirectory,
-            historyBudgetTokens: 60,
             isCacheBustingPass: true,
-            hardSignals: smallBudget,
+            hard: smallBudget,
+            historyBudgetTokens: 60,
         });
-        // The absolute-cap backstop folded m[1] into m[0] this pass.
-        expect(folded.m0RematerializedThisPass).toBe(true);
-        expect(folded.m1Text).toBe(M1_PLACEHOLDER);
+        // The absolute-cap backstop refolded the oversized region this pass.
+        expect(folded.rematerialized).toBe(true);
+        expect(folded.m1).toBe("");
     });
 
     it("HARD markers persist across a simulated restart (DB read, not in-memory)", () => {

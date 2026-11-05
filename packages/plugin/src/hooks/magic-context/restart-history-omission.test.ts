@@ -33,11 +33,15 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { Database } from "../../shared/sqlite";
 import {
     clearInjectionCache,
+    currentRegionMarkersForPromotion,
     injectM0M1,
     type M0HardSignals,
     type M0M1State,
-    prepareCompartmentInjection,
+    regionMarkersFromSnapshot,
+    snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
+import { readSystemRegion } from "../../features/magic-context/system-region";
+import { regionRotationPromotion } from "./transform-postprocess-phase";
 import type { MessageLike } from "./transform-operations";
 
 const SESSION_ID = "ses_restart_omit";
@@ -96,16 +100,37 @@ function runProductionFlow(opts: {
     isCacheBustingPass: boolean;
     messages: MessageLike[];
 }): { m0: string; m1: string; tailIds: string[] } {
-    // Mirror the transform→postprocess order: prepareCompartmentInjection first
-    // (trims the live tail), then injectM0M1 (prepends m[0]/m[1]).
-    prepareCompartmentInjection(
-        db,
-        SESSION_ID,
-        opts.messages,
-        opts.isCacheBustingPass,
-        PROJECT_PATH,
-    );
+    // Region era (assembly-v2 Unit 1 Step 3): the head-era pair
+    // (prepareCompartmentInjection + head-carrying injectM0M1) is one
+    // off-wire fold. The fold's committed boundary trims the live array on
+    // the bust lane; a defer pass replays the persisted boundary. History
+    // summary bytes live inside the served region row, not on the array.
     const state = getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State;
+    // The production rotation-promotion lane (transform-postprocess-phase.ts):
+    // a stale region manifest at a boundary turns the pass into the rotation
+    // transaction. Defer passes carry no boundary permission and replay.
+    let forceMaterializeReason: string | undefined;
+    if (opts.isCacheBustingPass) {
+        const captured = state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+        const promotion = regionRotationPromotion({
+            systemRegionLane: true,
+            freezeM0M1: false,
+            foldDue: false,
+            boundaryPermission: true,
+            forceBand: false,
+            storedRegion: readSystemRegion(db, SESSION_ID),
+            capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+            currentMarkers: currentRegionMarkersForPromotion({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory: opts.projectDirectory,
+                injectDocs: true,
+            }),
+        });
+        if (promotion.promote && promotion.reason) forceMaterializeReason = promotion.reason;
+    }
     const result = injectM0M1({
         db,
         sessionId: SESSION_ID,
@@ -116,10 +141,10 @@ function runProductionFlow(opts: {
         historyBudgetTokens: 98_000,
         isCacheBustingPass: opts.isCacheBustingPass,
         hardSignals: BASE_HARD,
+        systemRegion: { enabled: true, reason: "hard_fold" },
+        forceMaterializeReason,
     });
-    // After injectM0M1 the first two messages are the synthetic m[0]/m[1].
     const tailIds = opts.messages
-        .slice(2)
         .map((m) => (typeof m.info.id === "string" ? m.info.id : ""));
     return {
         m0: result.m0Bytes ? result.m0Bytes.toString("utf8") : "",
@@ -156,9 +181,9 @@ describe("restart history omission", () => {
         // the live tail). In production this also sets in-memory deferred signals.
         appendCompartments(db, SESSION_ID, [compartment(1, "B", "Bravo just-published")]);
 
-        // RESTART: the in-memory injection cache is lost. The persisted
-        // cached_m1_bytes still predates B (m[1] only updates on cache-busting
-        // passes, which haven't run since B was published).
+        // RESTART: the in-memory injection cache is lost and the process state
+        // rehydrates from the persisted region row, whose captured markers
+        // predate B (the region only advances on cache-busting rotations).
         clearInjectionCache(SESSION_ID);
 
         // First post-restart pass is a DEFER pass (below execute threshold): the
@@ -186,14 +211,15 @@ describe("restart history omission", () => {
         expect(bInSummary).toBe(false);
         expect(bRawStillPresent).toBe(true);
 
-        // And the NEXT exec (cache-busting) pass folds B into m[1] and the tail
-        // trims forward — no permanent duplication.
+        // And the NEXT exec (cache-busting) pass folds B into the region (the
+        // head-era m[1] is retired: the summary serves inside system[0]) and
+        // the tail trims forward — no permanent duplication.
         const exec = runProductionFlow({
             projectDirectory,
             isCacheBustingPass: true,
             messages: makeMessages(6),
         });
-        expect(exec.m1).toContain("Bravo just-published");
+        expect(exec.m0).toContain("Bravo just-published");
         expect(exec.tailIds).not.toContain("m1");
     });
 
@@ -253,9 +279,12 @@ describe("restart history omission", () => {
 
         appendCompartments(db, SESSION_ID, [compartment(1, "B", "Bravo just-published")]);
 
-        const failMsgs = makeMessages(6);
-        prepareCompartmentInjection(db, SESSION_ID, failMsgs, true, PROJECT_PATH);
-
+        // Region era: the head-era "failed preparation" was a cold
+        // prepareCompartmentInjection render that never persisted. The region
+        // fold is all-or-nothing inside its transaction — a fold that fails
+        // writes nothing — so the failure arm is a failed fold: the pass must
+        // leave the persisted boundary (and the raw range it has not yet
+        // covered) untouched.
         const beforeClear = runProductionFlow({
             projectDirectory,
             isCacheBustingPass: false,

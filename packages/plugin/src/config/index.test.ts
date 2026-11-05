@@ -17,7 +17,7 @@ import { resolveConfigProfile } from "./profiles";
 import { getProtectedTokensTierOverrides } from "./project-security";
 import { REMOVED_AGENT_CONFIG_WARNING } from "./removed-agent-config";
 import { DEFAULT_LOCAL_EMBEDDING_MODEL } from "./schema/magic-context";
-import { RUST_COMPACTION_OFF_WARNING } from "./transform-mode";
+import { RUST_BOOT_REFUSAL_WARNING } from "./transform-mode";
 
 /**
  * Writes a magic-context.jsonc file inside a fresh temp XDG_CONFIG_HOME tree
@@ -271,8 +271,8 @@ describe("loadPluginConfig — graduated mural config", () => {
     });
 });
 
-describe("loadPluginConfig — transform mode resolution", () => {
-    it("downgrades rust when compaction is off and emits one boot warning", () => {
+describe("loadPluginConfig — transform mode resolution (Unit 1 boot refusal)", () => {
+    it("refuses rust when compaction is off with the named boot warning", () => {
         const result = loadWithUserConfig(
             JSON.stringify({
                 compaction: { enabled: false },
@@ -283,11 +283,11 @@ describe("loadPluginConfig — transform mode resolution", () => {
 
         expect(result.transform_mode).toBe("ts");
         expect(result.configWarnings?.filter((warning) => warning.includes("rust"))).toEqual([
-            `[config] ${RUST_COMPACTION_OFF_WARNING}`,
+            `[config] ${RUST_BOOT_REFUSAL_WARNING}`,
         ]);
     });
 
-    it("keeps rust when compaction is on", () => {
+    it("refuses rust even when compaction is on (no arm re-enables it)", () => {
         const result = loadWithUserConfig(
             JSON.stringify({
                 compaction: { enabled: true },
@@ -296,10 +296,8 @@ describe("loadPluginConfig — transform mode resolution", () => {
             }),
         );
 
-        expect(result.transform_mode).toBe("rust");
-        expect(result.configWarnings ?? []).not.toContain(
-            expect.stringContaining(RUST_COMPACTION_OFF_WARNING),
-        );
+        expect(result.transform_mode).toBe("ts");
+        expect(result.configWarnings ?? []).toContain(`[config] ${RUST_BOOT_REFUSAL_WARNING}`);
     });
 });
 
@@ -1268,19 +1266,18 @@ describe("transform_mode resolution", () => {
             JSON.stringify({ subc: { connection_file: "~/.local/share/cortexkit/subc.json" } }),
             JSON.stringify({ transform_mode: "rust" }),
         );
-        expect(withSubc.transform_mode).toBe("rust");
+        expect(withSubc.transform_mode).toBe("ts");
+        expect(withSubc.configWarnings?.join("\n")).toContain(RUST_BOOT_REFUSAL_WARNING);
 
         const withoutSubc = loadWithUserAndProjectConfig(
             JSON.stringify({}),
             JSON.stringify({ transform_mode: "rust" }),
         );
         expect(withoutSubc.transform_mode).toBe("ts");
-        expect(withoutSubc.configWarnings?.join("\n")).toContain(
-            "rust mode requires user-level subc configuration; running ts.",
-        );
+        expect(withoutSubc.configWarnings?.join("\n")).toContain(RUST_BOOT_REFUSAL_WARNING);
     });
 
-    it("passes the resolved rust mode to the plugin config without mutating project trust", () => {
+    it("refuses project rust mode without letting project config choose the socket", () => {
         const result = loadWithUserAndProjectConfig(
             JSON.stringify({
                 subc: { connection_file: "~/.local/share/cortexkit/subc.json" },
@@ -1291,7 +1288,7 @@ describe("transform_mode resolution", () => {
             }),
         );
 
-        expect(result.transform_mode).toBe("rust");
+        expect(result.transform_mode).toBe("ts");
         expect(result.subc?.connection_file).not.toContain("project-controlled.sock");
     });
 });

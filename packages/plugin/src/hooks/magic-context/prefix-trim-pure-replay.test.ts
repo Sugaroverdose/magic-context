@@ -87,12 +87,8 @@ function prepared(boundary: string | undefined): InjectM0M1Result {
         decision: { value: false, reason: "cache_hit" },
         m0Bytes: Buffer.from("m0"),
         m1Text: "m1",
-        preparedMessages: [
-            {
-                info: { role: "user", sessionID: SESSION_ID },
-                parts: [{ type: "text", text: "summary prefix", synthetic: true }],
-            } as MessageLike,
-        ],
+        // Region-era replay carries no array-side heads.
+        preparedMessages: [],
         preparedTrimBoundaryId: boundary,
     };
 }
@@ -122,7 +118,6 @@ function pass(
 function sourceOrderOf(messages: readonly MessageLike[]): PrefixTrimSourceOrder {
     return {
         messageIds: messages.map((message) => message.info.id as string),
-        syntheticHeadCount: 0,
         invalidReason: null,
     };
 }
@@ -167,13 +162,16 @@ describe("prefix trim shapes the absent-boundary fallback must not change", () =
     });
 });
 
-// Computed with inject-compartments.ts from master bd8b7d5fce (before the fallback).
+// Re-baselined at the assembly-v2 headless sever (Unit 1 Step 3): served
+// windows no longer carry the synthetic m[0]/m[1] heads. Shape invariants
+// (defer == priced replay, absent-status equality across passes) are
+// unchanged. Previous pin: master bd8b7d5fce (before the fallback).
 const PINNED: Record<string, string[]> = {
-    foundById: ["e240e7397f6f9ee3", "e240e7397f6f9ee3", "9d4ad8f05834550d"],
-    noBoundary: ["daa9121a6e3f22d2", "4799ab1110ffbdf5"],
-    absentNoStore: ["b46ecebebfe62beb", "b46ecebebfe62beb", "84e38817a370b5b2"],
-    sourceOrderFound: ["fde86711883560fc", "0ec71e798e4c1e9b"],
-    sourceOrderInvalid: ["ddbde1ceead49af4"],
+    foundById: ["2afa8cb95f7492f1", "2afa8cb95f7492f1", "b28768e7fe2feda8"],
+    noBoundary: ["570fda885f98f7ec", "6653aed9debe714e"],
+    absentNoStore: ["7fb6f3f9551aa047", "7fb6f3f9551aa047", "5023447b497496b4"],
+    sourceOrderFound: ["126e195f8e28670a", "7b16b67dedffa550"],
+    sourceOrderInvalid: ["e79521198bb5da67"],
 };
 
 it("keeps a partial end-boundary message and its uncovered blocks raw on direct and source-order trims", () => {
@@ -184,7 +182,7 @@ it("keeps a partial end-boundary message and its uncovered blocks raw on direct 
     ).run(SESSION_ID, idOf(1), idOf(2));
     for (const sourceOrder of [
         undefined,
-        { messageIds: [idOf(1), idOf(2), idOf(3)], syntheticHeadCount: 0, invalidReason: null },
+        { messageIds: [idOf(1), idOf(2), idOf(3)], invalidReason: null },
     ]) {
         const make = () => {
             const messages = liveWindow(1, 3);

@@ -1039,8 +1039,19 @@ Behavior after deletion: a TS + compaction-on install serves the region
 from the first pass after upgrade — legacy raw rows decode to NULL
 (R11 reader contract) → `region_first_install` fold per session, priced
 once, receipt named (the rationale stays: pre-existing-data transition,
-not ceremony). Rust/v2/Pi/compaction-off keep heads as the **sole
-implementation** on those lanes (capability branch, not a fallback).
+not ceremony). **Amendment (assembly-v2 Unit 1, owner ruling 2026-11-05,
+plan:20 + region-only migration Task 4 Step 2):** the lane predicate is a
+pure constant — every OpenCode 1/2 and Pi install serves the region,
+compaction-off included (binary-authority ruling: no head preservation,
+no gradual-migration carve-out; an off install re-renders on the same bust
+authority and cache-busts anyway, so the head-era path had no surviving
+consumer). The former "Rust/v2/Pi/compaction-off keep heads" sentence is
+dead. Rust never reaches the predicate as a serving mode: `transform_mode:
+"rust"` is a named boot refusal at the config-resolution funnel
+(config/transform-mode.ts) — the module composes its own panel heads, and
+serving region bytes beside them would double-serve from two baselines
+(#2704). The off-mode carve-outs that remain are the reclaim lanes (the
+window owner stays native), not serve authority.
 Census law (N1-hardened, round 10): no production file matches
 `.system_region` (property access) or `["system_region"]` / `['system_region']`
 (bracket access, any quote shape incl. backticks) across plugin/src,

@@ -26,8 +26,18 @@ import {
 } from "../../features/magic-context/compartment-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { readSystemRegion } from "../../features/magic-context/system-region";
 import { Database } from "../../shared/sqlite";
-import { clearInjectionCache, injectM0M1, type M0HardSignals } from "./inject-compartments";
+import {
+    clearInjectionCache,
+    currentRegionMarkersForPromotion,
+    injectM0M1,
+    type M0HardSignals,
+    type M0M1State,
+    regionMarkersFromSnapshot,
+    snapshotMarkersFromCachedM0,
+} from "./inject-compartments";
+import { regionRotationPromotion } from "./transform-postprocess-phase";
 
 const SESSION_ID = "ses_single_store_cache";
 const PROJECT_PATH = "/tmp/test-single-store-cache-project";
@@ -108,6 +118,33 @@ function sha256(text: string): string {
 
 function pass(projectDirectory: string, isCacheBustingPass: boolean) {
     const state = getOrCreateSessionMeta(db, SESSION_ID);
+    let forceMaterializeReason: string | undefined;
+    if (isCacheBustingPass) {
+        // Region era: a published-history advance rides the rotation promotion
+        // (the production composition, #2710/#2715/#2718) — the region successor
+        // of the head-era exec-pass m[1] refresh. A bust without a promotion
+        // reason is a plain replay.
+        const foldDueArgs = {
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            injectDocs: true,
+        };
+        const captured = state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+        const promotion = regionRotationPromotion({
+            systemRegionLane: true,
+            freezeM0M1: false,
+            foldDue: false,
+            boundaryPermission: true,
+            forceBand: false,
+            storedRegion: readSystemRegion(db, SESSION_ID),
+            capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+            currentMarkers: currentRegionMarkersForPromotion(foldDueArgs),
+        });
+        if (promotion.promote) forceMaterializeReason = promotion.reason;
+    }
     const result = injectM0M1({
         db,
         sessionId: SESSION_ID,
@@ -117,13 +154,16 @@ function pass(projectDirectory: string, isCacheBustingPass: boolean) {
         historyBudgetTokens: 98_000,
         isCacheBustingPass,
         hardSignals: BASE_HARD,
+        systemRegionLane: true,
+        forceMaterializeReason,
     });
-    const m0 = result.m0Bytes ? result.m0Bytes.toString("utf8") : "";
-    const m1 = result.m1Text ?? "";
+    // Region era: the served prefix is the frozen system region plus nothing
+    // else — the head carriage is retired, m[1] reconciles inside the region
+    // at the next rotation.
+    const region = readSystemRegion(db, SESSION_ID) ?? "";
     return {
-        m0,
-        m1,
-        prefix: sha256(`${m0}\u0000${m1}`),
+        region,
+        prefix: sha256(region),
         rematerialized: result.m0RematerializedThisPass,
     };
 }
@@ -154,9 +194,19 @@ describe("a fold written by the single-store module", () => {
         return dir;
     }
 
+    // Region era: the served prefix is the frozen region row. Capture it only
+    // after the first install pass — a first pass legitimately rotates (it
+    // installs), so the replay baseline is the state the row reaches after
+    // that pass, not the absent row before it.
+    function installedBaseline(projectDirectory: string): { region: string; prefix: string } {
+        pass(projectDirectory, true);
+        const region = readSystemRegion(db, SESSION_ID) ?? "";
+        return { region, prefix: sha256(region) };
+    }
+
     it("leaves the cached pair alone, so defer passes replay the served prefix byte-identically", () => {
         const projectDirectory = setup();
-        const baseline = pass(projectDirectory, true);
+        const baseline = installedBaseline(projectDirectory);
         const cacheBefore = sessionMetaCache();
 
         applyModuleVisibilityChunk(
@@ -172,12 +222,12 @@ describe("a fold written by the single-store module", () => {
         expect(d1.rematerialized).toBe(false);
         expect(d1.prefix).toBe(baseline.prefix);
         expect(d2.prefix).toBe(baseline.prefix);
-        expect(d1.m1).not.toContain("Bravo module fold");
+        expect(d1.region).not.toContain("Bravo module fold");
     });
 
     it("surfaces the fold's compartments in m[1] on the next busting pass, without touching m[0]", () => {
         const projectDirectory = setup();
-        const baseline = pass(projectDirectory, true);
+        const baseline = installedBaseline(projectDirectory);
 
         applyModuleVisibilityChunk(
             db,
@@ -187,8 +237,15 @@ describe("a fold written by the single-store module", () => {
         );
         pass(projectDirectory, false);
 
+        // Region era: the module publish reaches the wire on the next pass
+        // that holds the boundary permission — the rotation promotion folds it
+        // into the frozen region. A rotation rewrites the region by definition,
+        // so the head-era "without touching m[0]" leg has no successor; the
+        // publish-never-busts leg is the defer pair above.
         const busting = pass(projectDirectory, true);
-        expect(busting.m0).toBe(baseline.m0);
-        expect(busting.m1).toContain("Bravo module fold");
+        expect(busting.region).toContain("Bravo module fold");
+        expect(busting.region).not.toBe(baseline.region);
+        const stable = pass(projectDirectory, false);
+        expect(stable.region).toBe(busting.region);
     });
 });

@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { replaceAllCompartments } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory";
+import { readSystemRegion } from "../../features/magic-context/system-region";
 import {
     __resetProjectIdentityForTests,
     resolveProjectIdentity,
@@ -434,11 +435,15 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
 
         await transform({}, { messages });
 
-        // m[0]/m[1] prepended; the <project-memory> block is present even
-        // though compaction is off — the core issue-266 assertion.
-        expect(messages).toHaveLength(5);
-        expect(textOf(messages[0], 0)).toContain("<project-memory>");
-        expect(textOf(messages[0], 0)).toContain("Always use Bun");
+        // Region era (binary authority: compaction-off rides the region): the
+        // <project-memory> block is served from the frozen region row even
+        // though compaction is off — the core issue-266 assertion — and the
+        // message array carries no synthetic heads.
+        expect(messages).toHaveLength(3);
+        const region = readSystemRegion(openDatabase(), "ses-1");
+        expect(region).not.toBeNull();
+        expect(region!).toContain("<project-memory>");
+        expect(region!).toContain("Always use Bun");
     });
 
     it("with historical compartment rows: <project-memory> present, NO rendered <session-history>, NO raw-tail trim", async () => {
@@ -468,15 +473,14 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
 
         await transform({}, { messages });
 
-        const m0 = textOf(messages[0], 0);
-        expect(m0).toContain("<project-memory>");
+        const region = readSystemRegion(openDatabase(), "ses-1");
+        expect(region).not.toBeNull();
+        expect(region!).toContain("<project-memory>");
         // Compartment history preparation is BYPASSED: no decay render of the
-        // historical rows into m[0] (the empty session-history slot of the
-        // zero-compartment path is the stable m[0] skeleton; it carries no
-        // compartment content).
-        expect(m0).not.toContain("Ancient setup work");
-        expect(m0).not.toContain("completed setup");
-        expect(m0).toContain("<session-history></session-history>");
+        // historical rows into the region (the zero-compartment path renders
+        // no compartment content).
+        expect(region!).not.toContain("Ancient setup work");
+        expect(region!).not.toContain("completed setup");
         // No raw-tail trim / boundary splice: every input message survives.
         const ids = messages.map((message) => message.info.id);
         expect(ids).toContain("m-user-1");
@@ -504,8 +508,9 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
             const messages = makeMessages("ses-1");
             await transform({}, { messages });
 
-            // Additive-only shape: exactly the two injected head messages.
-            expect(messages).toHaveLength(5);
+            // Additive-only shape: region serves the knowledge surface, the
+            // array keeps exactly the input messages (no head carriage).
+            expect(messages).toHaveLength(3);
             const wire = allText(messages);
             // No §N§ prefixes anywhere on the wire.
             expect(wire).not.toMatch(/§\d+§/);
@@ -517,8 +522,8 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
             // No synthetic todowrite injection, no temporal overlays.
             expect(wire).not.toContain("todowrite");
             expect(wire).not.toMatch(/<!-- \+\d+m -->/);
-            // Memory still injected on every pass.
-            expect(textOf(messages[0], 0)).toContain("<project-memory>");
+            // Memory still served on every pass, from the region row.
+            expect(readSystemRegion(openDatabase(), "ses-1")).toContain("<project-memory>");
         }
 
         const db2 = openDatabase();
@@ -691,10 +696,13 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
         const messages = makeMessages("ses-sub");
         await transform({}, { messages });
 
-        // Subagents GAIN the knowledge surface in compaction-off mode...
-        expect(messages).toHaveLength(5);
-        expect(textOf(messages[0], 0)).toContain("<project-memory>");
-        expect(textOf(messages[0], 0)).toContain("Always use Bun");
+        // Subagents GAIN the knowledge surface in compaction-off mode — from
+        // the region row, with no head carriage on the array...
+        expect(messages).toHaveLength(3);
+        const region = readSystemRegion(openDatabase(), "ses-sub");
+        expect(region).not.toBeNull();
+        expect(region!).toContain("<project-memory>");
+        expect(region!).toContain("Always use Bun");
         // ...and lose every MC reclaim path: no drops, no prefixes.
         const wire = allText(messages);
         expect(wire).toContain("tool output body");
@@ -970,8 +978,8 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
 
         const dbAfter = openDatabase();
         expect(getOverflowState(dbAfter, "ses-1").needsEmergencyRecovery).toBe(false);
-        // The pass stayed additive: injection happened, nothing dropped.
-        expect(textOf(messages[0], 0)).toContain("<project-memory>");
+        // The pass stayed additive: the region served knowledge, nothing dropped.
+        expect(readSystemRegion(openDatabase(), "ses-1")).toContain("<project-memory>");
         expect(allText(messages)).toContain("tool output body");
     });
 });

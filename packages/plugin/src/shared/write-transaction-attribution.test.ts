@@ -13,8 +13,11 @@ const fencedSources: Array<{ path: string; sites: string[]; reporterCalls?: stri
         sites: ["smart_note_commit"],
     },
     {
+        // Region era: the head-lane soft-refresh writer died with the carriage
+        // (Unit 1 Step 3) — the boundary fold transaction is the only
+        // BEGIN IMMEDIATE writer here (single-writer law L0).
         path: "packages/plugin/src/hooks/magic-context/inject-compartments.ts",
-        sites: ["opencode_materialize_cache", "opencode_soft_refresh_cache"],
+        sites: ["opencode_materialize_cache"],
     },
     {
         path: "packages/plugin/src/features/magic-context/message-index.ts",

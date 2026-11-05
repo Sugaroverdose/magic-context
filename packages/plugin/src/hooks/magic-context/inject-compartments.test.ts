@@ -31,6 +31,12 @@ import {
     setProjectState,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import {
+    readSystemRegion,
+    SYSTEM_REGION_SENTINEL,
+    writeSystemRegion,
+} from "../../features/magic-context/system-region";
+import { RenderM1InvalidMarkersError } from "./region-render";
 import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -131,6 +137,14 @@ function createOpenCodeMessageTimes(rows: Array<{ id: string; timestamp: number 
 
 function readStateFromMeta(): ReturnType<typeof getOrCreateSessionMeta> {
     return getOrCreateSessionMeta(db, SESSION_ID);
+}
+
+// Region-era wire read: the panels + delta live in the stored region row;
+// the message array carries only host rows (headless carriage).
+function regionText(): string {
+    const text = readSystemRegion(db, SESSION_ID);
+    if (text === null) throw new Error("no servable region row");
+    return text;
 }
 
 function renderedText(message: MessageLike): string {
@@ -698,6 +712,7 @@ describe("user-profile baseline and delta rendering", () => {
                 state: readStateFromMeta(),
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }),
         ).toEqual({ value: false, reason: null });
         const delta = renderM1(
@@ -735,6 +750,7 @@ describe("user-profile baseline and delta rendering", () => {
                 state: readStateFromMeta(),
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }),
         ).toEqual({ value: false, reason: null });
 
@@ -751,6 +767,7 @@ describe("user-profile baseline and delta rendering", () => {
                 state: readStateFromMeta(),
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }),
         ).toMatchObject({ value: true, reason: "profile_render_epoch" });
         materializeM0(options);
@@ -761,6 +778,7 @@ describe("user-profile baseline and delta rendering", () => {
                 state: readStateFromMeta(),
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }),
         ).toEqual({ value: false, reason: null });
     });
@@ -771,10 +789,6 @@ describe("prepared prefix source-order trimming", () => {
         info: { id, role, sessionID: SESSION_ID },
         parts: [{ type: "text", text: id }],
     });
-    const syntheticHead = (): MessageLike => ({
-        info: { role: "user", sessionID: SESSION_ID },
-        parts: [{ type: "text", text: "old synthetic prefix", synthetic: true }],
-    });
     const preparedPrefix = (boundary: string) => ({
         injected: true,
         prependedMessageCount: 0,
@@ -783,25 +797,19 @@ describe("prepared prefix source-order trimming", () => {
         decision: { value: false, reason: "cache_hit" },
         m0Bytes: Buffer.from("m0"),
         m1Text: "m1",
-        preparedMessages: [
-            {
-                info: { role: "user", sessionID: SESSION_ID },
-                parts: [{ type: "text", text: "new prefix", synthetic: true }],
-            } as MessageLike,
-        ],
+        preparedMessages: [],
         preparedTrimBoundaryId: boundary,
     });
 
     it("trims surviving rows through a deleted assistant boundary without resurrecting it", () => {
         db = makeDb();
         const source = [
-            syntheticHead(),
             message("before", "user"),
             message("assistant-boundary", "assistant"),
             message("after", "user"),
         ];
         const evidence = capturePrefixTrimSourceOrder(source);
-        const live = [syntheticHead(), source[1]!, source[3]!];
+        const live = [source[0]!, source[2]!];
 
         const result = injectM0M1({
             db,
@@ -813,8 +821,7 @@ describe("prepared prefix source-order trimming", () => {
         });
 
         expect(result.prefixTrimStatus).toBe("applied");
-        expect(live.map((entry) => entry.info.id)).toEqual([undefined, "after"]);
-        expect(live[0]?.parts[0]).toMatchObject({ text: "new prefix", synthetic: true });
+        expect(live.map((entry) => entry.info.id)).toEqual(["after"]);
     });
 
     it("refuses a trim when the boundary is absent from the immutable source order", () => {
@@ -832,7 +839,7 @@ describe("prepared prefix source-order trimming", () => {
         });
 
         expect(result.prefixTrimStatus).toBe("refused");
-        expect(live.map((entry) => entry.info.id)).toEqual([undefined, "before", "after"]);
+        expect(live.map((entry) => entry.info.id)).toEqual(["before", "after"]);
     });
 
     // OpenCode 2 renders an instruction-update row as an id-less system message.
@@ -873,7 +880,6 @@ describe("prepared prefix source-order trimming", () => {
 
         expect(result.prefixTrimStatus).toBe("applied");
         expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
-            "new prefix",
             "instruction row",
             "after",
         ]);
@@ -905,7 +911,6 @@ describe("prepared prefix source-order trimming", () => {
 
         expect(result.prefixTrimStatus).toBe("applied");
         expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
-            "new prefix",
             "instruction row",
             "after",
         ]);
@@ -925,6 +930,34 @@ describe("prepared prefix source-order trimming", () => {
             }),
         );
 
+        expect(result.prefixTrimStatus).toBe("refused");
+        expect(live).toHaveLength(2);
+    });
+
+    // Headless carriage: Magic Context splices no synthetic heads, so an
+    // id-less row anywhere outside host-rendered system rows is a foreign
+    // row — the whole immutable source order is refused, not tolerated.
+    it("refuses the whole source order on a leading id-less synthetic-flagged foreign row", () => {
+        db = makeDb();
+        const source: MessageLike[] = [
+            {
+                info: { role: "user", sessionID: SESSION_ID },
+                parts: [{ type: "text", text: "stray head-shaped row", synthetic: true }],
+            },
+            message("before", "user"),
+            message("after", "assistant"),
+        ];
+        const evidence = capturePrefixTrimSourceOrder(source);
+        expect(evidence.invalidReason).toContain("has no stable id");
+        const live = structuredClone(source);
+        const result = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            messages: live,
+            preparedPrefix: preparedPrefix("after"),
+            prefixTrimSourceOrder: evidence,
+        });
         expect(result.prefixTrimStatus).toBe("refused");
         expect(live).toHaveLength(3);
     });
@@ -1176,10 +1209,11 @@ describe("m[0]/m[1] materialization", () => {
             isCacheBustingPass: false,
         });
 
-        expect(first.prependedMessageCount).toBe(2);
-        expect(second.prependedMessageCount).toBe(2);
+        expect(first.prependedMessageCount).toBe(0);
+        expect(second.prependedMessageCount).toBe(0);
         expect(second.m0Bytes).toEqual(first.m0Bytes);
         expect(second.m1Text).toBe(first.m1Text);
+        expect(second.m1Text).toBe("");
         expect(JSON.stringify(secondMessages)).toBe(JSON.stringify(firstMessages));
     });
 
@@ -1241,15 +1275,20 @@ describe("m[0]/m[1] materialization", () => {
             ...options,
             historyBudgetTokens: 16000,
             historyBudgetPolicyIdentity: "p0.15:percentage:40",
+            systemRegionMode: true,
         };
         expect(mustMaterialize(current).value).toBe(false);
         expect(state.cachedM0Bytes).toEqual(first.m0Bytes);
-        expect(mustMaterialize({ ...current, memoryInjectionBudgetTokens: 9000 }).reason).toBe(
-            "render_config:budget(m8000-h12000→m9000-hp0.15:percentage:40)",
-        );
-        expect(mustMaterialize({ ...current, muralEnabled: true }).reason).toBe(
-            "render_config:mural(false→true)",
-        );
+        expect(
+            mustMaterialize({
+                ...current,
+                memoryInjectionBudgetTokens: 9000,
+                systemRegionMode: true,
+            }).reason,
+        ).toBe("render_config:budget(m8000-h12000→m9000-hp0.15:percentage:40)");
+        expect(
+            mustMaterialize({ ...current, muralEnabled: true, systemRegionMode: true }).reason,
+        ).toBe("render_config:mural(false→true)");
         injectM0M1({
             ...current,
             hardSignals: { systemHash: "new-system", modelKey: "" },
@@ -1285,6 +1324,7 @@ describe("m[0]/m[1] materialization", () => {
             ...options,
             historyBudgetTokens: 16000,
             historyBudgetPolicyIdentity: "p0.15:percentage:40",
+            systemRegionMode: true,
         };
         for (let restart = 0; restart < 2; restart++) {
             clearInjectionCache(SESSION_ID);
@@ -1389,6 +1429,7 @@ describe("m[0]/m[1] materialization", () => {
             state: readStateFromMeta(),
             projectPath: PROJECT_PATH,
             projectDirectory: makeProjectDir(),
+            systemRegionMode: true,
         });
         expect(decision).toEqual({ value: true, reason: "first_render" });
     });
@@ -1411,6 +1452,7 @@ describe("m[0]/m[1] materialization", () => {
             state,
             projectPath: PROJECT_PATH,
             projectDirectory,
+            systemRegionMode: true,
         });
 
         expect(decision).toEqual({ value: false, reason: null });
@@ -1647,13 +1689,11 @@ describe("m[0]/m[1] materialization", () => {
             projectPath: PROJECT_PATH,
             projectDirectory,
         });
+        // Headless era: age only the upgrade identity — the region row stays
+        // servable, so the stale-epoch arm (not the install arm) decides.
         db.prepare(
-            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_upgrade_state = ? WHERE session_id = ?",
-        ).run(
-            Buffer.from("<session-history>legacy renderer bytes</session-history>"),
-            "ready",
-            SESSION_ID,
-        );
+            "UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?",
+        ).run("ready", SESSION_ID);
         const state = readStateFromMeta();
 
         expect(
@@ -1663,6 +1703,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }),
         ).toEqual({ value: true, reason: "compartment_render_epoch" });
 
@@ -1704,6 +1745,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }),
         ).toEqual({ value: false, reason: null });
     });
@@ -1747,13 +1789,16 @@ describe("m[0]/m[1] materialization", () => {
         });
         const oldMemory = memories.find((memory) => memory.id === neverVerified.id);
         if (!oldMemory) throw new Error("pre-epoch memory fixture missing");
+        // Headless era: the pre-epoch baseline is seeded AS a region row
+        // (the row the defer pass must replay byte-identical), with the old
+        // memory rendering (null memory epoch) inside it.
         const oldM0 = Buffer.from(
-            `<session-history></session-history>\n\n${renderMemoryBlockV2([oldMemory])}`,
+            `${SYSTEM_REGION_SENTINEL}<session-history></session-history>\n\n${renderMemoryBlockV2([oldMemory])}`,
         );
+        writeSystemRegion(db, SESSION_ID, oldM0.subarray(SYSTEM_REGION_SENTINEL.length).toString("utf8"));
         db.prepare(
-            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_upgrade_state = ? WHERE session_id = ?",
+            "UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?",
         ).run(
-            oldM0,
             encodeCachedM0UpgradeIdentity(
                 "ready",
                 COMPARTMENT_RENDER_EPOCH,
@@ -1782,7 +1827,7 @@ describe("m[0]/m[1] materialization", () => {
         });
 
         expect(defer.m0RematerializedThisPass).toBe(false);
-        expect(defer.m0Bytes).toEqual(oldM0);
+        expect(defer.m0Bytes?.toString("utf8")).toBe(oldM0.toString("utf8"));
         expect(state.cachedM0UpgradeState).not.toContain(MEMORY_RENDER_FORMAT_EPOCH);
 
         const hard = injectM0M1({
@@ -1834,10 +1879,18 @@ describe("m[0]/m[1] materialization", () => {
     it("mustMaterialize detects project_memory_epoch decreases after DB restore", () => {
         db = makeDb();
         setProjectState(db, PROJECT_PATH, { projectMemoryEpoch: 4 });
+        materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: readStateFromMeta(),
+            projectPath: PROJECT_PATH,
+            projectDirectory: makeProjectDir(),
+        });
+        setProjectState(db, PROJECT_PATH, { projectMemoryEpoch: 4 });
+        // A DB restore rewinds the epoch below the captured baseline: the
+        // cached-vs-current inequality must fold, whichever direction it moved.
         const state = {
             ...readStateFromMeta(),
-            cachedM0Bytes: Buffer.from("<session-history></session-history>"),
-            cachedM1Bytes: Buffer.from("<session-history-since></session-history-since>"),
             cachedM0ProjectMemoryEpoch: 5,
             cachedM0ProjectUserProfileVersion: 0,
             cachedM0MaxCompartmentSeq: 0,
@@ -1860,6 +1913,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory: makeProjectDir(),
+                systemRegionMode: true,
             }).reason,
         ).toBe("project_memory_epoch");
     });
@@ -1894,6 +1948,7 @@ describe("m[0]/m[1] materialization", () => {
             state,
             projectPath: PROJECT_PATH,
             projectDirectory,
+            systemRegionMode: true,
         });
 
         expect(decision.value).toBe(true);
@@ -1939,6 +1994,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }).value,
         ).toBe(false);
         const refreshed = injectM0M1({
@@ -1950,8 +2006,24 @@ describe("m[0]/m[1] materialization", () => {
             temporalAwareness: true,
             isCacheBustingPass: true,
         });
+        // Region era: the delta rides inside the region row — a bust pass
+        // through injectM0M1 must not re-fold on a new compartment alone
+        // (rotation promotion is the postprocess boundary's job, pinned in
+        // system-region-wiring.test.ts), and the rotation carries the title.
         expect(refreshed.m0RematerializedThisPass).toBe(false);
-        expect(refreshed.m1Text).toContain("## 1-1 · 2026-01-04 · New");
+        expect(regionText()).not.toContain("## 1-1 · 2026-01-04 · New");
+        const rotated = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            temporalAwareness: true,
+            isCacheBustingPass: true,
+            forceMaterializeReason: "explicit_flush",
+        });
+        expect(rotated.m0RematerializedThisPass).toBe(true);
+        expect(regionText()).toContain("## 1-1 · 2026-01-04 · New");
     });
 
     it("a compartment marked unresolved by a store-projection rebase still renders into m[0] and m[1]", () => {
@@ -2024,7 +2096,19 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
             isCacheBustingPass: true,
         });
-        expect(refreshed.m1Text).toContain("Later unresolved summary");
+        // Region era: the unresolved row enters the region only via rotation.
+        expect(refreshed.m0RematerializedThisPass).toBe(false);
+        const rotated = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+            forceMaterializeReason: "explicit_flush",
+        });
+        expect(rotated.m0RematerializedThisPass).toBe(true);
+        expect(regionText()).toContain("Later unresolved summary");
     });
 
     it("mustMaterialize does NOT materialize m[0] on a retrospective memory write", () => {
@@ -2056,6 +2140,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }).value,
         ).toBe(false);
     });
@@ -2075,24 +2160,20 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
         });
         const state = readStateFromMeta();
-        // First compartment for this session — sequence 0.
-        replaceAllCompartmentState(
-            db,
-            SESSION_ID,
-            [
-                {
-                    sequence: 0,
-                    startMessage: 1,
-                    endMessage: 1,
-                    startMessageId: "m1",
-                    endMessageId: "m1",
-                    title: "First",
-                    content: "First summary",
-                    p1: "First summary",
-                },
-            ],
-            [],
-        );
+        // First compartment for this session — sequence 0. The publish path
+        // appends (no funnel clear): a new compartment must not trigger HARD.
+        appendCompartments(db, SESSION_ID, [
+            {
+                sequence: 0,
+                startMessage: 1,
+                endMessage: 1,
+                startMessageId: "m1",
+                endMessageId: "m1",
+                title: "First",
+                content: "First summary",
+                p1: "First summary",
+            },
+        ]);
 
         expect(
             mustMaterialize({
@@ -2101,6 +2182,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }).value,
         ).toBe(false);
     });
@@ -2129,6 +2211,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }).reason,
         ).toBe("max_mutation_id");
     });
@@ -2155,6 +2238,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }),
         ).toEqual({ value: false, reason: null });
     });
@@ -2189,8 +2273,7 @@ describe("m[0]/m[1] materialization", () => {
             injectDocs: false,
             hardSignals,
         });
-        const firstM0 = renderedText(first[0]);
-        const firstM1 = renderedText(first[1]);
+        const firstM0 = regionText();
 
         expect(firstResult.m0RematerializedThisPass).toBe(true);
         expect(firstM0).not.toContain("<project-docs>");
@@ -2206,6 +2289,7 @@ describe("m[0]/m[1] materialization", () => {
                 projectDirectory,
                 injectDocs: false,
                 hardSignals,
+                systemRegionMode: true,
             }),
         ).toEqual({ value: false, reason: null });
 
@@ -2222,10 +2306,9 @@ describe("m[0]/m[1] materialization", () => {
         });
 
         expect(secondResult.m0RematerializedThisPass).toBe(false);
-        expect(renderedText(second[0])).toBe(firstM0);
-        expect(renderedText(second[1])).toBe(firstM1);
-        expect(renderedText(second[0])).not.toContain("FLAG_OFF_ARCH_DOCS");
-        expect(renderedText(second[0])).not.toContain("FLAG_OFF_STRUCTURE_DOCS");
+        expect(regionText()).toBe(firstM0);
+        expect(regionText()).not.toContain("FLAG_OFF_ARCH_DOCS");
+        expect(regionText()).not.toContain("FLAG_OFF_STRUCTURE_DOCS");
     });
 
     it("keeps SOFT bytes stable across a docs edit and adopts it on the next HARD fold", () => {
@@ -2251,7 +2334,7 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
             hardSignals: stableSignals,
         });
-        expect(renderedText(first[0])).toContain("Old architecture");
+        expect(regionText()).toContain("Old architecture");
         expect(__projectDocsHashTest.readCount()).toBe(1);
 
         const softBeforeEdit = structuredClone(input) as MessageLike[];
@@ -2282,7 +2365,7 @@ describe("m[0]/m[1] materialization", () => {
             createHash("sha256").update(JSON.stringify(messages)).digest("hex");
         expect(softResult.m0RematerializedThisPass).toBe(false);
         expect(digest(softAfterEdit)).toBe(digest(softBeforeEdit));
-        expect(renderedText(softAfterEdit[0])).toContain("Old architecture");
+        expect(regionText()).toContain("Old architecture");
         expect(__projectDocsHashTest.readCount()).toBe(1);
 
         const hard = structuredClone(input) as MessageLike[];
@@ -2298,10 +2381,9 @@ describe("m[0]/m[1] materialization", () => {
 
         expect(result.m0RematerializedThisPass).toBe(true);
         expect(result.decision.reason).toBe("system_hash");
-        expect(renderedText(hard[0])).toContain("Updated architecture");
-        expect(renderedText(hard[0])).toContain("Fresh docs folded on hard bust.");
-        expect(renderedText(hard[0])).not.toContain("Old architecture");
-        expect(digest(hard)).not.toBe(digest(softAfterEdit));
+        expect(regionText()).toContain("Updated architecture");
+        expect(regionText()).toContain("Fresh docs folded on hard bust.");
+        expect(regionText()).not.toContain("Old architecture");
         expect(__projectDocsHashTest.readCount()).toBe(2);
     });
 
@@ -2353,8 +2435,7 @@ describe("m[0]/m[1] materialization", () => {
             memoryInjectionBudgetTokens: budget,
             hardSignals: hardV1,
         });
-        const initialM0 = renderedText(first[0]);
-        const initialM1 = renderedText(first[1]);
+        const initialM0 = regionText();
         expect(initialM0).toContain("HIGH_PRIORITY_MEMORY");
         expect(initialM0).not.toContain("LOW_PRIORITY_MEMORY");
 
@@ -2368,6 +2449,7 @@ describe("m[0]/m[1] materialization", () => {
                 projectPath: PROJECT_PATH,
                 memoryInjectionBudgetTokens: budget,
                 hardSignals: hardV1,
+                systemRegionMode: true,
             }),
         ).toEqual({ value: false, reason: null });
 
@@ -2382,8 +2464,7 @@ describe("m[0]/m[1] materialization", () => {
             hardSignals: hardV1,
         });
         expect(soft.m0RematerializedThisPass).toBe(false);
-        expect(renderedText(second[0])).toBe(initialM0);
-        expect(renderedText(second[1])).toBe(initialM1);
+        expect(regionText()).toBe(initialM0);
 
         const third = [userMessage("m3", "natural hard bust")];
         const hard = injectM0M1({
@@ -2396,9 +2477,9 @@ describe("m[0]/m[1] materialization", () => {
             hardSignals: { ...hardV1, systemHash: "sys-v2" },
         });
         expect(hard.m0RematerializedThisPass).toBe(true);
-        expect(renderedText(third[0])).not.toContain("importance=");
-        expect(renderedText(third[0])).toContain("LOW_PRIORITY_MEMORY");
-        expect(renderedText(third[0])).not.toContain("HIGH_PRIORITY_MEMORY");
+        expect(regionText()).not.toContain("importance=");
+        expect(regionText()).toContain("LOW_PRIORITY_MEMORY");
+        expect(regionText()).not.toContain("HIGH_PRIORITY_MEMORY");
     });
 
     it("MANY classify writes do NOT cross the memoryUpdateCount>40 pressure-refold threshold", () => {
@@ -2484,6 +2565,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }).reason,
         ).not.toBe("session_facts_version");
     });
@@ -2511,9 +2593,13 @@ describe("m[0]/m[1] materialization", () => {
             .get(SESSION_ID) as Record<string, unknown>;
 
         expect(row.cached_m0_bytes).not.toBeNull();
-        expect(row.cached_m1_bytes).not.toBeNull();
-        expect(Buffer.from(row.cached_m0_bytes as Buffer).toString("utf8")).toBe(result.m0Text);
-        expect(Buffer.from(row.cached_m1_bytes as Buffer).toString("utf8")).toBe(result.m1Text);
+        // Region era: the row is the sentinel region (panels + delta jointly);
+        // the legacy m[1] slot stays NULL — the delta reconciles at rotation.
+        expect(row.cached_m1_bytes).toBeNull();
+        const storedRegion = Buffer.from(row.cached_m0_bytes as Buffer).toString("utf8");
+        expect(storedRegion.startsWith(SYSTEM_REGION_SENTINEL)).toBe(true);
+        expect(storedRegion).toContain(result.m0Text);
+        expect(storedRegion).toContain(result.m1Text);
         expect(row.cached_m0_project_memory_epoch).toBe(0);
         expect(row.cached_m0_project_user_profile_version).toBe(0);
         // Empty session: maxCompartmentSeq is the empty sentinel (-1), not 0, so
@@ -2750,7 +2836,8 @@ describe("m[0]/m[1] materialization", () => {
         expect(result.injected).toBe(true);
         expect(result.m0RematerializedThisPass).toBe(true);
         expect(state.cachedM0Bytes).toBeInstanceOf(Buffer);
-        expect(state.cachedM1Bytes).toBeInstanceOf(Buffer);
+        // Region era: no separate m[1] bytes.
+        expect(state.cachedM1Bytes).toBeNull();
         expect(state.cachedM0ProjectMemoryEpoch).toBe(0);
         // Empty session: maxCompartmentSeq is the empty sentinel (-1), not 0.
         expect(state.cachedM0MaxCompartmentSeq).toBe(-1);
@@ -2777,6 +2864,7 @@ describe("m[0]/m[1] materialization", () => {
                 state,
                 projectPath: PROJECT_PATH,
                 projectDirectory,
+                systemRegionMode: true,
             }).value,
         ).toBe(false);
     });
@@ -2814,7 +2902,7 @@ describe("m[0]/m[1] materialization", () => {
         });
 
         expect(result.injected).toBe(true);
-        const m0 = renderedText(messages[0]);
+        const m0 = regionText();
         expect(m0).not.toContain("<project-memory>");
         expect(m0).not.toContain("project memory must not leak when disabled");
         expect(m0).not.toContain("<user-profile>");
@@ -2837,9 +2925,8 @@ describe("m[0]/m[1] materialization", () => {
             memoryEnabled: false,
             isCacheBustingPass: true,
         });
-        const m1 = renderedText(refreshed[1]);
-        expect(m1).not.toContain("<new-user-profile>");
-        expect(m1).not.toContain("profile delta must not leak");
+        expect(regionText()).not.toContain("<new-user-profile>");
+        expect(regionText()).not.toContain("profile delta must not leak");
     });
 
     it("uses an immediate render-config HARD path for a memory-on to memory-off transition", () => {
@@ -2866,7 +2953,7 @@ describe("m[0]/m[1] materialization", () => {
             memoryEnabled: true,
             hardSignals: { systemHash: "memory-guidance-on", modelKey: "test/model" },
         });
-        expect(renderedText(on[0])).toContain("transition profile fact");
+        expect(regionText()).toContain("transition profile fact");
 
         const off = [userMessage("m2", "after")];
         const transition = injectM0M1({
@@ -2884,7 +2971,7 @@ describe("m[0]/m[1] materialization", () => {
         });
         expect(transition.decision.reason).toBe("render_config:memory_disabled");
         expect(transition.m0RematerializedThisPass).toBe(true);
-        expect(renderedText(off[0])).not.toContain("transition profile fact");
+        expect(regionText()).not.toContain("transition profile fact");
         const suppressedBytes = transition.m0Bytes?.toString("utf8");
 
         // When injection is deferred, replay the frozen suppressed m[0] unchanged instead of rendering it again.
@@ -2967,50 +3054,70 @@ describe("m[0]/m[1] materialization", () => {
             },
         });
 
-        // Must NOT throw, must still inject, and m[0] must carry the history
-        // wrapper (not be empty / missing).
+        // Must NOT throw, must still inject, and the non-persisted region
+        // must carry the history wrapper (not be empty / missing).
         expect(result.injected).toBe(true);
-        const m0 = renderedText(messages[0]);
+        const m0 = result.m0Bytes?.toString("utf8") ?? "";
+        expect(m0).toContain(SYSTEM_REGION_SENTINEL);
         expect(m0).toContain("<session-history>");
         // Fresh fallback is non-persisted: the durable cache stays null so the
         // next (uncontended) pass re-materializes and persists.
         expect(state.cachedM0Bytes).toBeInstanceOf(Buffer);
     });
 
-    it("injectM0M1 does not throw on contention when m[0] is cached but m[1] is missing (partial-cache state)", () => {
-        // Regression: the contention-reuse guard checked only cachedM0Bytes. A
-        // prior fresh-fallback pass sets in-memory cachedM0Bytes WITHOUT
-        // persisting cachedM1Bytes — so a subsequent contention pass entered the
-        // reuse branch, then replayCachedM1 threw RenderM1InvalidMarkersError
-        // (m[1] null) and propagated out, dropping injection entirely. The fix
-        // requires BOTH buffers to reuse; the partial state falls through to the
-        // fresh-render branch, which produces a complete m[0]/m[1] pair.
+    it("injectM0M1 refuses the wire on contention when the frozen bytes are not a servable region", () => {
+        // Region-era reader contract (#2637): head-era frozen bytes (or any
+        // row the region decoder refuses) must never ride the wire as a
+        // region. A contention pass that can only reuse undecodable bytes
+        // throws so the turn is refused/replayed, and the next uncontended
+        // pass installs the region.
         db = makeDb();
         const projectDirectory = makeProjectDir();
         const state = readStateFromMeta();
-        // Partial cache: m[0] present in memory, m[1] absent.
-        state.cachedM0Bytes = Buffer.from("<session-history>stale</session-history>", "utf8");
-        state.cachedM1Bytes = null;
-        const messages = [userMessage("m1", "hello")];
-
+        // Poison row: the durable row holds head-era bytes the region reader
+        // refuses. A bust pass must fold (region_first_install), rotate, and
+        // serve a real region — the poisoned bytes can never ride the wire.
+        db
+            .prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?")
+            .run(Buffer.from("<session-history>stale</session-history>", "utf8"), SESSION_ID);
         const result = injectM0M1({
             db,
             sessionId: SESSION_ID,
-            messages,
+            messages: [userMessage("m1", "hello")],
             state,
             projectPath: PROJECT_PATH,
             projectDirectory,
-            beforePhase3ForTest: () => {
-                queueM0Mutation(db, {
-                    sessionId: SESSION_ID,
-                    mutationType: "compartment_merge",
-                });
-            },
+            isCacheBustingPass: true,
         });
-
-        // Must NOT throw, and must still inject a complete history block.
-        expect(result.injected).toBe(true);
-        expect(renderedText(messages[0])).toContain("<session-history>");
+        expect(result.m0RematerializedThisPass).toBe(true);
+        expect(regionText()).toContain("<session-history>");
+        // Poison injected into the process-served bytes (a stale in-memory
+        // cache from before a store wipe, e.g. a sibling cleared the row): the
+        // fold contends, the reuse branch would freeze undecodable bytes, so
+        // the wire is refused instead — the turn is replayed, never served from
+        // bytes the region reader cannot decode.
+        const poisoned = readStateFromMeta();
+        poisoned.cachedM0Bytes = Buffer.from("<session-history>stale</session-history>", "utf8");
+        poisoned.snapshotMarkers = null;
+        poisoned.cachedM0ProjectMemoryEpoch = null;
+        expect(() =>
+            injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                messages: [userMessage("m3", "refuse")],
+                state: poisoned,
+                projectPath: PROJECT_PATH,
+                projectDirectory,
+                isCacheBustingPass: true,
+                forceMaterializeReason: "explicit_flush",
+                beforePhase3ForTest: () => {
+                    queueM0Mutation(db, {
+                        sessionId: SESSION_ID,
+                        mutationType: "compartment_merge",
+                    });
+                },
+            }),
+        ).toThrow(RenderM1InvalidMarkersError);
     });
 
     it("fresh-render contention fallback freezes materializedAt (stable across passes, not live Date.now())", () => {
@@ -3058,7 +3165,7 @@ describe("m[0]/m[1] materialization", () => {
             projectPath: PROJECT_PATH,
             projectDirectory,
         });
-        const firstM0 = renderedText(firstMessages[0]);
+        const firstM0 = regionText();
 
         const secondMessages = [userMessage("m2", "hello again")];
         const second = injectM0M1({
@@ -3071,7 +3178,7 @@ describe("m[0]/m[1] materialization", () => {
         });
 
         expect(second.m0RematerializedThisPass).toBe(false);
-        expect(renderedText(secondMessages[0])).toBe(firstM0);
+        expect(regionText()).toBe(firstM0);
     });
 
     it("project identity changes hard-materialize while legacy null adopts silently", () => {
@@ -3115,7 +3222,7 @@ describe("m[0]/m[1] materialization", () => {
         expect(changedDecision.m0RematerializedThisPass).toBe(true);
     });
 
-    it("SOFT /ctx-flush pass keeps m0 byte-identical, refreshes m1, and avoids first_render", () => {
+    it("SOFT /ctx-flush pass keeps the region byte-identical and avoids first_render", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
         const state = readStateFromMeta();
@@ -3135,11 +3242,9 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
             hardSignals: hardV1,
         });
-        const m0BeforeFlush =
-            baselineMessages[0].parts[0] &&
-            renderedText(baselineMessages[0]).match(
-                /<session-history>[\s\S]*?<\/session-history>/,
-            )?.[0];
+        const m0BeforeFlush = regionText().match(
+            /<session-history>[\s\S]*?<\/session-history>/,
+        )?.[0];
         expect(m0BeforeFlush).toBeTruthy();
 
         const flushMessages = [userMessage("m2", "after flush")];
@@ -3154,10 +3259,10 @@ describe("m[0]/m[1] materialization", () => {
         });
         expect(flushPass.decision.reason).not.toBe("first_render");
         expect(flushPass.m0RematerializedThisPass).toBe(false);
-        const m0AfterFlush = renderedText(flushMessages[0]).match(
-            /<session-history>[\s\S]*?<\/session-history>/,
-        )?.[0];
-        expect(m0AfterFlush).toBe(m0BeforeFlush);
+        // Region era: the bust pass replays the stored region byte-identical
+        // (there is no separate m[1] refresh; the delta rides rotations).
+        expect(regionText()).toContain(m0BeforeFlush);
+        const regionAfterFlush = regionText();
 
         const deferMessages = [userMessage("m3", "defer")];
         const deferPass = injectM0M1({
@@ -3169,7 +3274,7 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
         });
         expect(deferPass.m0RematerializedThisPass).toBe(false);
-        expect(renderedText(deferMessages[0])).toBe(renderedText(flushMessages[0]));
+        expect(regionText()).toBe(regionAfterFlush);
     });
 
     it("HARD fold binds memory expiry cutoff and materializedAt to one timestamp", () => {
@@ -3250,7 +3355,7 @@ describe("m[0]/m[1] materialization", () => {
             projectPath: PROJECT_PATH,
             projectDirectory,
         });
-        const firstM0 = renderedText(first[0]);
+        const firstM0 = regionText();
 
         // Defer pass: no new memories/compartments → m[1] is the placeholder.
         const second = [userMessage("m2", "hi again")];
@@ -3263,10 +3368,10 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
         });
 
-        // Must NOT refold: placeholder m[1] is the empty state, not delta.
+        // Must NOT refold: an empty delta is not accumulated growth.
         expect(result.m0RematerializedThisPass).toBe(false);
-        expect(renderedText(second[0])).toBe(firstM0);
-        expect(result.m1Text).toContain("no new content since last materialization");
+        expect(regionText()).toBe(firstM0);
+        expect(regionText()).toContain("no new content since last materialization");
     });
 
     it("keeps expiry-transition defer bytes pinned until the next cache-busting delta", async () => {
@@ -3348,7 +3453,9 @@ describe("m[0]/m[1] materialization", () => {
         const beforePin = pin(before);
         const afterPin = pin(after);
 
-        expect(beforePin).toBe("4eaba563c2a26f33c8e4087f199a0e31620b6e3d7adc8981b5c2d88a12fe10d4");
+        // Re-baselined at the headless sever (Unit 1 Step 3): the pin covers
+        // the stored region row (m1Text is ""), not head bytes.
+        expect(beforePin).toBe("cc5af6d2adb4c88937ab9ec026c3553e723e224d31b13bc5045ce8d99dad1599");
         expect(afterPin).toBe(beforePin);
         expect(after.m0RematerializedThisPass).toBe(false);
         expect(db.prepare("SELECT status FROM memories WHERE id = ?").get(expiring.id)).toEqual({
@@ -3365,8 +3472,23 @@ describe("m[0]/m[1] materialization", () => {
             isCacheBustingPass: true,
         });
         expect(bust.m0Bytes).toEqual(after.m0Bytes);
-        expect(bust.m1Text).toContain("<memory-updates>");
-        expect(bust.m1Text).toContain(`<removed id="${expiring.id}"/>`);
+        // The archive mutation reaches the wire through the rotation delta.
+        const rotated = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: [userMessage("m5", "rotate")],
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+            forceMaterializeReason: "explicit_flush",
+        });
+        expect(rotated.m0RematerializedThisPass).toBe(true);
+        // Region era: baseline and delta are captured at the same instant, so
+        // the archived memory is simply GONE from the region — the
+        // <memory-updates> delta existed to keep a stale head m[0] honest
+        // between folds; the region has no such skew by construction.
+        expect(regionText()).not.toContain("A TTL memory remains frozen in the cached baseline");
     });
 
     it("replays byte-identical m[1] on defer and surfaces additive memory on next cache-busting pass", () => {
@@ -3404,7 +3526,7 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
             isCacheBustingPass: true,
         });
-        const initialM1 = renderedText(first[1]);
+        const initialRegion = regionText();
 
         const m1MemoryId = insertMemory(db, {
             projectPath: PROJECT_PATH,
@@ -3433,12 +3555,15 @@ describe("m[0]/m[1] materialization", () => {
             isCacheBustingPass: false,
         });
 
-        expect(renderedText(deferOne[1])).toBe(initialM1);
-        expect(renderedText(deferTwo[1])).toBe(initialM1);
-        expect(initialM1).not.toContain("New additive memory");
+        expect(regionText()).toBe(initialRegion);
+        expect(regionText()).toBe(initialRegion);
+        expect(initialRegion).not.toContain("New additive memory");
 
+        // Region era: an additive memory is a DELTA marker change — it rides
+        // the rotation boundary (postprocess promotion, pinned in
+        // system-region-wiring.test.ts), not a plain pass through injectM0M1.
         const bust = [userMessage("m4", "bust")];
-        injectM0M1({
+        const bustPass = injectM0M1({
             db,
             sessionId: SESSION_ID,
             messages: bust,
@@ -3447,8 +3572,20 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
             isCacheBustingPass: true,
         });
-        expect(renderedText(bust[1])).toContain("<new-memories>");
-        expect(renderedText(bust[1])).toContain("New additive memory appears only after a bust.");
+        expect(bustPass.m0RematerializedThisPass).toBe(false);
+        expect(regionText()).not.toContain("New additive memory");
+        const rotated = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: [userMessage("m5", "rotate")],
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+            forceMaterializeReason: "explicit_flush",
+        });
+        expect(rotated.m0RematerializedThisPass).toBe(true);
+        expect(regionText()).toContain("New additive memory appears only after a bust.");
         expect(getVisibleMemoryIds(db, SESSION_ID)?.has(m1MemoryId)).toBe(true);
     });
 
@@ -3904,7 +4041,7 @@ describe("m[0]/m[1] materialization", () => {
         expect(reconciled.m1Text).not.toContain("<memory-updates>");
     });
 
-    it("renders memory mutation removals on cache-busting pass and replays them on defer", () => {
+    it("keeps an archived memory frozen in the region until rotation removes it", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
         replaceAllCompartmentState(
@@ -3938,6 +4075,7 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
             isCacheBustingPass: true,
         });
+        archiveMemory(db, memory.id);
         queueMemoryMutation(db, {
             projectPath: PROJECT_PATH,
             mutationType: "archive",
@@ -3955,22 +4093,32 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
             isCacheBustingPass: true,
         });
-        const m1 = renderedText(bust[1]);
-        expect(m1).toContain("<memory-updates>");
-        expect(m1).toContain(`These memories changed since the snapshot below — trust these:`);
-        expect(m1).toContain(`<removed id="${memory.id}"/>`);
-
-        const defer = [userMessage("m3", "defer")];
+        // Region era: the bust pass replays the frozen region (still carrying
+        // the archived memory — a pass that does not fold never mutates the
+        // wire), and the rotation removes it outright.
+        expect(regionText()).toContain("Baseline memory to remove from m0.");
         injectM0M1({
             db,
             sessionId: SESSION_ID,
-            messages: defer,
+            messages: [userMessage("m3", "defer")],
             state,
             projectPath: PROJECT_PATH,
             projectDirectory,
             isCacheBustingPass: false,
         });
-        expect(renderedText(defer[1])).toBe(m1);
+        expect(regionText()).toContain("Baseline memory to remove from m0.");
+        const rotated = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: [userMessage("m4", "rotate")],
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            isCacheBustingPass: true,
+            forceMaterializeReason: "explicit_flush",
+        });
+        expect(rotated.m0RematerializedThisPass).toBe(true);
+        expect(regionText()).not.toContain("Baseline memory to remove from m0.");
     });
 
     it("skips memory mutation deltas for memories trimmed out of m0", () => {
@@ -4012,8 +4160,25 @@ describe("m[0]/m[1] materialization", () => {
             isCacheBustingPass: true,
         });
 
-        expect(renderedText(bust[1])).not.toContain("<memory-updates>");
-        expect(renderedText(bust[1])).not.toContain("Updated but not resident.");
+        // Region era: a memory trimmed out of the baseline by budget never
+        // surfaces through a mutation row either — the region stays clean
+        // before and after a rotation.
+        expect(regionText()).not.toContain("<memory-updates>");
+        expect(regionText()).not.toContain("Updated but not resident.");
+        const rotated = injectM0M1({
+            db,
+            sessionId: SESSION_ID,
+            messages: [userMessage("m3", "rotate")],
+            state,
+            projectPath: PROJECT_PATH,
+            projectDirectory,
+            memoryInjectionBudgetTokens: 1,
+            isCacheBustingPass: true,
+            forceMaterializeReason: "explicit_flush",
+        });
+        expect(rotated.m0RematerializedThisPass).toBe(true);
+        expect(regionText()).not.toContain("<memory-updates>");
+        expect(regionText()).not.toContain("Updated but not resident.");
     });
 
     it("renders the recategorize category on <updated> in memory-updates", () => {
@@ -4107,127 +4272,18 @@ describe("m[0]/m[1] materialization", () => {
         });
 
         expect(result.m0RematerializedThisPass).toBe(true);
-        expect(renderedText(bust[0])).toContain("Reconciled content.");
-        expect(renderedText(bust[1])).not.toContain("<memory-updates>");
+        expect(regionText()).toContain("Reconciled content.");
+        expect(regionText()).not.toContain("<memory-updates>");
     });
 
-    it("soft m1 refresh CAS rolls back and replays a sibling cached m1 on marker mismatch", () => {
-        db = makeDb();
-        const projectDirectory = makeProjectDir();
-        const state = readStateFromMeta();
-        injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            messages: [userMessage("m1", "hello")],
-            state,
-            projectPath: PROJECT_PATH,
-            projectDirectory,
-            isCacheBustingPass: true,
-        });
-        db.prepare(
-            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_max_memory_id = ?, cached_m1_bytes = ? WHERE session_id = ?",
-        ).run(
-            Buffer.from(`<session-history>${"baseline ".repeat(300)}</session-history>`, "utf8"),
-            99,
-            Buffer.from("sibling cached m1", "utf8"),
-            SESSION_ID,
-        );
+    // The soft m[1]-refresh CAS trio (sibling-row CAS, byte-different m[0]
+    // rejection, docs-hash-only drift acceptance) was retired with the head
+    // carriage at the assembly-v2 Unit 1 Step 3 sever: there is no separate
+    // m[1] row to refresh — the region row is written whole by the rotation
+    // transaction (pinned in the system-region law family), and the
+    // docs-non-trigger claim survives in "mustMaterialize treats project docs
+    // hash changes as a SOFT defer input".
 
-        const bust = [userMessage("m2", "bust")];
-        const result = injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            messages: bust,
-            state,
-            projectPath: PROJECT_PATH,
-            projectDirectory,
-            isCacheBustingPass: true,
-        });
-
-        expect(result.m0RematerializedThisPass).toBe(false);
-        expect(result.m1Text).toBe("sibling cached m1");
-        expect(renderedText(bust[1])).toBe("sibling cached m1");
-        expect(state.cachedM0MaxMemoryId).toBe(99);
-    });
-
-    it("soft m1 refresh CAS rejects byte-different m[0] even when non-doc markers match", () => {
-        db = makeDb();
-        const projectDirectory = makeProjectDir();
-        const state = readStateFromMeta();
-        injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            messages: [userMessage("m1", "hello")],
-            state,
-            projectPath: PROJECT_PATH,
-            projectDirectory,
-            isCacheBustingPass: true,
-        });
-        const siblingM0 = Buffer.from(
-            `<session-history>${"byte mismatch ".repeat(300)}</session-history>`,
-            "utf8",
-        );
-        db.prepare(
-            "UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = ? WHERE session_id = ?",
-        ).run(siblingM0, Buffer.from("sibling cached m1 byte mismatch", "utf8"), SESSION_ID);
-
-        const bust = [userMessage("m2", "bust")];
-        const result = injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            messages: bust,
-            state,
-            projectPath: PROJECT_PATH,
-            projectDirectory,
-            isCacheBustingPass: true,
-        });
-
-        expect(result.m0RematerializedThisPass).toBe(false);
-        expect(result.m1Text).toBe("sibling cached m1 byte mismatch");
-        expect(renderedText(bust[0])).toBe(siblingM0.toString("utf8"));
-        expect(state.cachedM0Bytes?.toString("utf8")).toBe(siblingM0.toString("utf8"));
-    });
-
-    it("soft m1 refresh CAS accepts docs-hash-only marker drift when m[0] bytes match", () => {
-        db = makeDb();
-        const projectDirectory = makeProjectDir();
-        const state = readStateFromMeta();
-        const first = [userMessage("m1", "hello")];
-        injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            messages: first,
-            state,
-            projectPath: PROJECT_PATH,
-            projectDirectory,
-            isCacheBustingPass: true,
-        });
-        const baselineM0 = renderedText(first[0]);
-        insertMemory(db, {
-            projectPath: PROJECT_PATH,
-            category: "ARCHITECTURE",
-            content: "docs-hash-only CAS delta memory",
-        });
-        db.prepare(
-            "UPDATE session_meta SET cached_m0_project_docs_hash = ? WHERE session_id = ?",
-        ).run("docs-only-marker-drift", SESSION_ID);
-
-        const bust = [userMessage("m2", "bust")];
-        const result = injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            messages: bust,
-            state,
-            projectPath: PROJECT_PATH,
-            projectDirectory,
-            isCacheBustingPass: true,
-        });
-
-        expect(result.m0RematerializedThisPass).toBe(false);
-        expect(renderedText(bust[0])).toBe(baselineM0);
-        expect(result.m1Text).toContain("docs-hash-only CAS delta memory");
-        expect(renderedText(bust[1])).toContain("docs-hash-only CAS delta memory");
-    });
     it("records NULL for an unmaterialized tool-set baseline", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
@@ -4262,6 +4318,7 @@ describe("m[0]/m[1] materialization", () => {
                 projectPath: PROJECT_PATH,
                 projectDirectory,
                 hardSignals: { ...baselineSignals, toolSetHash: "tools-v2" },
+                systemRegionMode: true,
             }),
         ).toEqual({
             value: false,
@@ -4307,6 +4364,7 @@ describe("m[0]/m[1] materialization", () => {
                 projectPath: PROJECT_PATH,
                 projectDirectory,
                 hardSignals: { ...baselineSignals, toolSetHash: "tools-v2" },
+                systemRegionMode: true,
             }),
         ).toEqual({
             value: false,

@@ -1,9 +1,9 @@
 import { describe, expect, it } from "bun:test";
 
-import { RUST_COMPACTION_OFF_WARNING, resolveTransformMode } from "./transform-mode";
+import { RUST_BOOT_REFUSAL_WARNING, resolveTransformMode } from "./transform-mode";
 
 describe("resolveTransformMode", () => {
-    it("falls back to ts and warns when rust lacks user-level subc", () => {
+    it("refuses rust identically when it lacks user-level subc (args no longer decide)", () => {
         expect(
             resolveTransformMode({
                 configured: "rust",
@@ -12,18 +12,18 @@ describe("resolveTransformMode", () => {
             }),
         ).toEqual({
             mode: "ts",
-            warnings: ["rust mode requires user-level subc configuration; running ts."],
+            warnings: [RUST_BOOT_REFUSAL_WARNING],
         });
     });
 
-    it("keeps rust when trusted user-level subc is present", () => {
+    it("refuses rust even when trusted user-level subc is present (Unit 1 boot refusal)", () => {
         expect(
             resolveTransformMode({
                 configured: "rust",
                 userTierHasSubc: true,
                 compactionEnabled: true,
             }),
-        ).toEqual({ mode: "rust", warnings: [] });
+        ).toEqual({ mode: "ts", warnings: [RUST_BOOT_REFUSAL_WARNING] });
     });
 
     it("keeps ts without warnings when ts is configured", () => {
@@ -36,18 +36,18 @@ describe("resolveTransformMode", () => {
         ).toEqual({ mode: "ts", warnings: [] });
     });
 
-    it("keeps rust in the default compaction-on mode without a warning", () => {
+    it("refuses rust in the default compaction-on mode with the named warning", () => {
         const result = resolveTransformMode({
             configured: "rust",
             userTierHasSubc: true,
             compactionEnabled: true,
         });
 
-        expect(result.mode).toBe("rust");
-        expect(result.warnings).toEqual([]);
+        expect(result.mode).toBe("ts");
+        expect(result.warnings).toEqual([RUST_BOOT_REFUSAL_WARNING]);
     });
 
-    it("downgrades rust to ts with one warning when compaction is off", () => {
+    it("refuses rust identically when compaction is off (no compaction arm)", () => {
         expect(
             resolveTransformMode({
                 configured: "rust",
@@ -56,7 +56,7 @@ describe("resolveTransformMode", () => {
             }),
         ).toEqual({
             mode: "ts",
-            warnings: [RUST_COMPACTION_OFF_WARNING],
+            warnings: [RUST_BOOT_REFUSAL_WARNING],
         });
     });
 });

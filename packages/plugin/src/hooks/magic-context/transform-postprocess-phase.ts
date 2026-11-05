@@ -65,6 +65,7 @@ import {
 } from "../../features/magic-context/storage-tags";
 import {
     decideSystemRegionRotation,
+    decodeSystemRegionRow,
     type RegionMarkers,
     readSystemRegion,
 } from "../../features/magic-context/system-region";
@@ -116,7 +117,7 @@ import {
     clearInjectionCache,
     currentRegionMarkersForPromotion,
     getVisibleMemoryIds,
-    hasCompleteCachedM0M1,
+    hasServableRegion,
     hydrateCachedM0Mural,
     type InjectM0M1Result,
     injectM0M1,
@@ -128,7 +129,7 @@ import {
     type PrefixTrimSourceOrder,
     type PrefixTrimStatus,
     type PreparedCompartmentInjection,
-    prepareCachedM0M1Replay,
+    prepareRegionReplay,
     regionMarkersFromSnapshot,
     renderCompartmentInjection,
     snapshotMarkersFromCachedM0,
@@ -228,23 +229,6 @@ export type DeferredCompactionMarkerClearOutcome =
     | "cas-lost-newer-pending"
     | "cas-lost-already-cleared";
 
-export function isSyntheticHeadMessage(message: MessageLike): boolean {
-    // Structural shape only — an ID-less user message whose every part is
-    // marked synthetic. Persisted OpenCode rows always carry an id, so no
-    // persisted or foreign row can satisfy this regardless of its metadata;
-    // the shape is exactly what the TS lane's prependM0M1Messages and the
-    // Rust module's m0/m1 encode both produce. The TS lane additionally sets
-    // info.syntheticHead, but the Rust encode does not — requiring the flag
-    // here made the head walk stop at index 0 on rust-mode output and splice
-    // the compaction summary AHEAD of m0, failing the m0 wire invariant on
-    // every pass for sessions with persisted marker state.
-    if (message.info.id !== undefined) return false;
-    if (message.info.role !== "user") return false;
-    const parts = message.parts;
-    if (parts.length === 0) return false;
-    return parts.every((part) => (part as { synthetic?: boolean }).synthetic === true);
-}
-
 const TODO_HEAD_ANCHOR_ID = "__magic_context_todo_head__";
 
 interface SyntheticTodoInjectionResult {
@@ -258,11 +242,7 @@ function injectSyntheticTodoAtHead(
     sessionId: string,
     part: SyntheticTodoPart,
 ): SyntheticTodoInjectionResult {
-    let headEnd = 0;
-    while (headEnd < messages.length && isSyntheticHeadMessage(messages[headEnd])) {
-        headEnd += 1;
-    }
-    const existing = messages[headEnd];
+    const existing = messages[0];
     if (existing?.info.id === TODO_HEAD_ANCHOR_ID) {
         injectToolPartIntoAssistantById(messages, TODO_HEAD_ANCHOR_ID, part);
         return {
@@ -271,7 +251,7 @@ function injectSyntheticTodoAtHead(
             prependedMessageCount: 0,
         };
     }
-    messages.splice(headEnd, 0, {
+    messages.splice(0, 0, {
         info: {
             id: TODO_HEAD_ANCHOR_ID,
             role: "assistant",
@@ -1299,14 +1279,7 @@ export function reconcileMarkerRepresentation(
         parts: [{ type: "text", text: summaryText }],
     };
 
-    let retainedTailStart = 0;
-    while (
-        retainedTailStart < messages.length &&
-        isSyntheticHeadMessage(messages[retainedTailStart])
-    ) {
-        retainedTailStart += 1;
-    }
-    messages.splice(retainedTailStart, 0, summaryMessage);
+    messages.splice(0, 0, summaryMessage);
     return true;
 }
 
@@ -1914,12 +1887,19 @@ export async function runPostTransformPhase(
                   historyBudgetTokens: args.m0M1.historyBudgetTokens,
                   historyBudgetPolicyIdentity: args.m0M1.historyBudgetPolicyIdentity,
                   hardSignals: args.m0M1.hardSignals,
-                  systemRegionMode: args.systemRegionLane === true && !compactionOff,
+                  systemRegionMode: args.systemRegionLane === true,
               })
             : { value: false, reason: null };
     // Region rotation promotion: a named boundary with a stale region manifest
     // turns this pass's ordinary fold into the rotation transaction (same
     // transaction, one bust). Never originates a bust of its own.
+    // Compaction-off rides the region too (lane constant true, Unit 1 Step 4):
+    // the fold runs its zero-compartment path and the knowledge surface serves
+    // from the region row. The boundaryPermission set drops the execute arm
+    // (no scheduler in off mode) and gains fullFeatureMode===false — an off
+    // install pays a rotation only when a knowledge delta forces it, and the
+    // region bytes are never empty (knowledge panels + history skeleton
+    // always render).
     let regionRotationReason: string | null = null;
     if (args.systemRegionLane === true && m0M1EnabledForFold && !foldDueDecision.value) {
         const storedRegion = readSystemRegion(args.db, args.sessionId);
@@ -1931,7 +1911,8 @@ export async function runPostTransformPhase(
                 deferredMaterialize ||
                 args.historyRebuiltThisPass === true ||
                 (args.canConsumeDeferredLate === true &&
-                    args.deferredHistoryWasPendingAtPassStart === true);
+                    args.deferredHistoryWasPendingAtPassStart === true) ||
+                (!args.fullFeatureMode && compactionOff);
             const captured =
                 (args.sessionMeta as M0M1State).snapshotMarkers ??
                 snapshotMarkersFromCachedM0(args.sessionMeta as M0M1State);
@@ -1964,16 +1945,20 @@ export async function runPostTransformPhase(
         m0M1EnabledForFold &&
         !emergencyDropEligible &&
         !freezeM0M1;
-    const regionLaneActive = args.systemRegionLane === true;
+    // The bust lane replays with the committed baseline: a sibling publish
+    // that advanced the covered boundary while this pass was preflighting
+    // must move the window trim with it (the covered rows are summarized in
+    // the persisted region; the trim is bookkeeping, not region bytes).
+    // Defer passes keep the freeze-time value and replay byte-identical.
     const cachedPrefixBeforePreflight = shouldCaptureCachedPrefix
-        ? prepareCachedM0M1Replay(args.db, args.sessionId, regionLaneActive)
+        ? prepareRegionReplay(args.db, args.sessionId, true)
         : undefined;
     const completeCachedPrefixAvailable =
-        (args.sessionMeta.cachedM0Bytes != null && args.sessionMeta.cachedM1Bytes != null) ||
+        decodeSystemRegionRow(args.sessionMeta.cachedM0Bytes ?? null) !== null ||
         cachedPrefixBeforePreflight !== undefined ||
         (m0M1EnabledForFold &&
             !shouldCaptureCachedPrefix &&
-            hasCompleteCachedM0M1(args.db, args.sessionId, regionLaneActive));
+            hasServableRegion(args.db, args.sessionId));
     const firstRenderBust = m0M1EnabledForFold && !completeCachedPrefixAvailable;
     let foldExecutedThisPass = false;
     // The one bust permission an executed fold grants: true only when the fold
@@ -2933,7 +2918,7 @@ export async function runPostTransformPhase(
         // the replay contention-exhausted keeps this pass from counting as
         // consumed history, so deferred refreshes stay pending.
         if (freezeM0M1 && !preparedPrefix) {
-            preparedPrefix = prepareCachedM0M1Replay(args.db, args.sessionId, regionLaneActive);
+            preparedPrefix = prepareRegionReplay(args.db, args.sessionId);
         }
         const tInjectM0M1 = performance.now();
         try {
