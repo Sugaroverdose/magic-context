@@ -410,7 +410,15 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 		}
 	});
 
-	it("ledger: Pi ctx_reduce/ctx_expand are seed-shape until the Unit 7 mirror", () => {
+	// Unit 7 ruling C (coordinator dispatch 2026-11-05, v2-delta-census.md):
+	// Pi stays TAG-ERA ctx_reduce/ctx_expand — this is the FINAL disposition,
+	// not a pre-mirror placeholder. Pi ctx_expand has no `ctx_handles`
+	// parameter and no withdraw (the v2 handles contract from Unit 3 needs
+	// message-ordinal-mint / tool-call-registry / reduce-resolver / withdraw,
+	// none present in the Pi tree), so adopting the handles shape would leave
+	// THIS law claiming a contract Pi cannot serve. A future Pi ctx-reduce
+	// family port is a separate unit, not a retro-fit.
+	it("ledger: Pi ctx_reduce/ctx_expand are tag-era by Unit 7 ruling (final)", () => {
 		const db = createTestDb();
 		try {
 			const tools = captureRegisteredTools({ db });
