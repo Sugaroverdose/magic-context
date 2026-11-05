@@ -156,7 +156,7 @@ export async function runContextDump(sessionId: string): Promise<ContextDumpResu
 			ordinalFallbackCount: 0,
 			missingDroppedTags: [],
 			compartmentInjection,
-		})
+		}, sessionId)
 	} finally {
 		contextDb.close()
 	}

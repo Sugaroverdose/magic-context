@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
-import { isNeutralizedReasoningPart } from "./sentinel";
+import { deriveKey, renderDropToken } from "./fpe";
+import { isNeutralizedReasoningPart, TOOL_RELEASED_SENTINEL } from "./sentinel";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 import {
     createToolDropTarget,
@@ -18,6 +19,9 @@ function message(id: string, role: string, parts: unknown[]): MessageLike {
         parts,
     };
 }
+
+// Mirrors production: the drop target renders its token from the session key.
+const sessionKey = deriveKey("ses-1");
 
 function hasCall(messages: MessageLike[], callId: string): boolean {
     for (const msg of messages) {
@@ -70,6 +74,7 @@ describe("tool-drop-target", () => {
             buildIndex([row]),
             new ToolMutationBatch([row]),
             7,
+            sessionKey,
         );
         expect(target.hasAttachments()).toBe(true);
         expect(target.skeletonStripped()).toBe("truncated");
@@ -82,6 +87,7 @@ describe("tool-drop-target", () => {
             buildIndex([replay]),
             new ToolMutationBatch([replay]),
             7,
+            sessionKey,
         ).skeletonReal();
         expect((replay.parts[0] as typeof original).state.attachments).toEqual([attachment]);
     });
@@ -172,26 +178,26 @@ describe("tool-drop-target", () => {
     describe("createToolDropTarget", () => {
         describe("#given a complete invocation/result tool pair", () => {
             describe("#when dropping the call", () => {
-                it("#then it marks for removal, and finalize removes parts, prunes empty wrappers, and clears thinking", () => {
+                it("#then it renders the full released shape in place, keeps the pair, and clears thinking", () => {
+                    const invocation = { type: "tool-invocation", callID: "call-1" };
+                    const toolPart = {
+                        type: "tool",
+                        callID: "call-1",
+                        state: { output: buildOutput("tool") },
+                    };
+                    const wrapperToolUse = { type: "tool_use", id: "call-1" };
+                    const wrapperResult = {
+                        type: "tool_result",
+                        tool_use_id: "call-1",
+                        content: buildOutput("result"),
+                    };
                     const messages: MessageLike[] = [
-                        message("m-inv", "assistant", [
-                            { type: "tool-invocation", callID: "call-1" },
-                        ]),
-                        message("m-tool", "tool", [
-                            {
-                                type: "tool",
-                                callID: "call-1",
-                                state: { output: buildOutput("tool") },
-                            },
-                        ]),
+                        message("m-inv", "assistant", [invocation]),
+                        message("m-tool", "tool", [toolPart]),
                         message("m-wrapper", "assistant", [
                             { type: "step-start", snapshot: "snap-1" },
-                            { type: "tool_use", id: "call-1" },
-                            {
-                                type: "tool_result",
-                                tool_use_id: "call-1",
-                                content: buildOutput("result"),
-                            },
+                            wrapperToolUse,
+                            wrapperResult,
                             { type: "step-finish", reason: "tool-calls" },
                         ]),
                         message("m-keep", "assistant", [{ type: "text", text: "keep me" }]),
@@ -203,7 +209,14 @@ describe("tool-drop-target", () => {
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
 
-                    const target = createToolDropTarget("call-1", thinkingParts, index, batch, 1);
+                    const target = createToolDropTarget(
+                        "call-1",
+                        thinkingParts,
+                        index,
+                        batch,
+                        1,
+                        sessionKey,
+                    );
                     const result = target.drop();
 
                     expect(result).toBe("removed");
@@ -211,9 +224,49 @@ describe("tool-drop-target", () => {
 
                     batch.finalize();
 
-                    expect(hasCall(messages, "call-1")).toBe(false);
-                    expect(messages).toHaveLength(1);
-                    expect(messages[0]?.info.id).toBe("m-keep");
+                    // A released pair is never removed: every wrapper survives and
+                    // the call stays on the wire in its full released shape.
+                    expect(hasCall(messages, "call-1")).toBe(true);
+                    expect(messages).toHaveLength(4);
+
+                    const token = renderDropToken(1, sessionKey);
+                    // No input on the originals → the fallback carrier key.
+                    expect(messages[0]?.parts[0]).toEqual({
+                        type: "tool-invocation",
+                        callID: "call-1",
+                        args: { d: token },
+                    });
+                    expect(messages[1]?.parts[0]).toEqual({
+                        type: "tool",
+                        callID: "call-1",
+                        state: { output: "", attachments: [], input: { d: token } },
+                    });
+                    expect(messages[2]?.parts[1]).toEqual({
+                        type: "tool_use",
+                        id: "call-1",
+                        input: { d: token },
+                    });
+                    expect(messages[2]?.parts[2]).toEqual({
+                        type: "tool_result",
+                        tool_use_id: "call-1",
+                        content: "",
+                    });
+                    expect(messages[2]?.parts[0]).toEqual({
+                        type: "step-start",
+                        snapshot: "snap-1",
+                    });
+                    expect(messages[2]?.parts[3]).toEqual({
+                        type: "step-finish",
+                        reason: "tool-calls",
+                    });
+
+                    // The LIVE part objects the host may still execute from stay
+                    // byte-identical; the carrier rides the wire clone only.
+                    expect(invocation).not.toHaveProperty("args");
+                    expect(toolPart.state).toEqual({ output: "output-tool" });
+                    expect(wrapperToolUse).not.toHaveProperty("input");
+                    expect(wrapperResult.content).toBe("output-result");
+
                     // A drop takes the reasoning off the wire whole instead of writing "[cleared]" into it.
                     expect(thinkingParts[0]).toEqual({ type: "text", text: "" });
                     expect(isNeutralizedReasoningPart(thinkingParts[0])).toBe(true);
@@ -244,6 +297,7 @@ describe("tool-drop-target", () => {
                         index,
                         batch,
                         2,
+                        sessionKey,
                     );
                     const result = target.drop();
 
@@ -274,6 +328,7 @@ describe("tool-drop-target", () => {
                         index,
                         batch,
                         3,
+                        sessionKey,
                     );
                     const result = target.drop();
 
@@ -310,7 +365,14 @@ describe("tool-drop-target", () => {
                     ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-2", thinkingParts, index, batch, 4);
+                    const target = createToolDropTarget(
+                        "call-2",
+                        thinkingParts,
+                        index,
+                        batch,
+                        4,
+                        sessionKey,
+                    );
 
                     target.setContent("replacement-content");
 
@@ -321,7 +383,23 @@ describe("tool-drop-target", () => {
                     target.setContent("[dropped §2§]");
                     batch.finalize();
 
-                    expect(hasCall(messages, "call-2")).toBe(false);
+                    // Dropped-content removal is gone: the pair survives in the
+                    // full released shape with an empty result slot.
+                    expect(hasCall(messages, "call-2")).toBe(true);
+                    const token = renderDropToken(4, sessionKey);
+                    expect(messages[1]?.parts[0]).toEqual({
+                        type: "tool",
+                        callID: "call-2",
+                        state: { output: "", attachments: [], input: { d: token } },
+                    });
+                    expect(messages[2]?.parts[0]).toEqual({
+                        type: "tool_result",
+                        tool_use_id: "call-2",
+                        content: "",
+                    });
+                    // The live result parts keep their set content.
+                    expect(toolPart.state.output).toBe("replacement-content");
+                    expect(toolResultPart.content).toBe("replacement-content");
                     // A drop takes the reasoning off the wire whole instead of writing "[cleared]" into it.
                     expect(thinkingParts[0]).toEqual({ type: "text", text: "" });
                     expect(isNeutralizedReasoningPart(thinkingParts[0])).toBe(true);
@@ -344,7 +422,7 @@ describe("tool-drop-target", () => {
                     ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-1", [], index, batch, 5);
+                    const target = createToolDropTarget("call-1", [], index, batch, 5, sessionKey);
 
                     expect(target.drop()).toBe("removed");
                     expect(target.drop()).toBe("absent");
@@ -384,7 +462,14 @@ describe("tool-drop-target", () => {
                         ],
                     ]);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-last", [], index, batch, 9);
+                    const target = createToolDropTarget(
+                        "call-last",
+                        [],
+                        index,
+                        batch,
+                        9,
+                        sessionKey,
+                    );
 
                     expect(target.drop()).toBe("truncated");
                     batch.finalize();
@@ -393,14 +478,21 @@ describe("tool-drop-target", () => {
                         (part) => (part as { type?: string }).type === "tool",
                     ) as { callID: string; state: { output: string } } | undefined;
                     expect(kept?.callID).toBe("call-last");
-                    expect(kept?.state.output).toBe("[dropped \u00a79\u00a7]");
+                    expect(kept?.state.output).toBe(TOOL_RELEASED_SENTINEL);
+                    // The conversation-end skeleton keeps the call's REAL arguments.
+                    expect(kept?.state).toEqual({
+                        status: "completed",
+                        input: { command: "cat f" },
+                        output: "",
+                    });
+                    expect(toolPart.state.output).toBe("big");
                 });
             });
         });
 
         describe("#given a complete tool pair with structured input", () => {
             describe("#when truncate is called", () => {
-                it("#then it replaces small inputs while truncating result content", () => {
+                it("#then it replaces inputs with the token carrier while releasing result content", () => {
                     const toolResultPart = {
                         type: "tool_result",
                         tool_use_id: "call-3",
@@ -432,7 +524,14 @@ describe("tool-drop-target", () => {
                     ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-3", thinkingParts, index, batch, 7);
+                    const target = createToolDropTarget(
+                        "call-3",
+                        thinkingParts,
+                        index,
+                        batch,
+                        7,
+                        sessionKey,
+                    );
 
                     expect(target.truncate()).toBe("truncated");
 
@@ -441,16 +540,19 @@ describe("tool-drop-target", () => {
                     expect(hasCall(messages, "call-3")).toBe(true);
                     expect(messages).toHaveLength(3);
 
-                    // The wire copies now in the message array carry the sentinel...
+                    // The wire copies now in the message array carry the full
+                    // released shape: carrier args in the first string seat, empty result.
+                    const token = renderDropToken(7, sessionKey);
                     const wireToolPart = messages[1]?.parts[0] as {
                         state: Record<string, unknown>;
                     };
                     expect(wireToolPart.state).toEqual({
-                        input: { dropped: "[dropped \u00a77\u00a7]" },
-                        output: "[dropped \u00a77\u00a7]",
+                        input: { query: token },
+                        output: "",
+                        attachments: [],
                     });
                     const wireResultPart = messages[2]?.parts[0] as { content: string };
-                    expect(wireResultPart.content).toBe("[dropped \u00a77\u00a7]");
+                    expect(wireResultPart.content).toBe("");
 
                     // ...while the LIVE part objects OpenCode handed us stay
                     // byte-identical: the clamp swaps in a clone and never touches
@@ -477,8 +579,8 @@ describe("tool-drop-target", () => {
                     expect(isNeutralizedReasoningPart(thinkingParts[1])).toBe(true);
                 });
 
-                it("#then replaces reporter-shaped inputs with one non-executable marker", () => {
-                    const sentinel = "[dropped §431§]";
+                it("#then replaces reporter-shaped inputs with the token carrier in the first string seat", () => {
+                    const token = renderDropToken(431, sessionKey);
                     const cases = [
                         {
                             tool: "bash",
@@ -538,20 +640,27 @@ describe("tool-drop-target", () => {
                             buildIndex(messages),
                             new ToolMutationBatch(messages),
                             431,
+                            sessionKey,
                         );
 
                         expect(target.truncate()).toBe("truncated");
                         const wire = messages[0]?.parts[0] as {
                             state: { input: Record<string, unknown>; output: string };
                         };
-                        expect(wire.state.input).toEqual({ dropped: sentinel });
-                        expect(Object.keys(wire.state.input)).toEqual(["dropped"]);
-                        for (const key of testCase.realKeys) {
+                        // The carrier keeps the schema-shaped seat — the FIRST
+                        // string-valued key — and fills it with the token.
+                        const firstStringKey = testCase.realKeys[0]!;
+                        expect(wire.state.input).toEqual({ [firstStringKey]: token });
+                        expect(Object.keys(wire.state.input)).toEqual([firstStringKey]);
+                        expect(wire.state.output).toBe("");
+                        for (const key of testCase.realKeys.slice(1)) {
                             expect(wire.state.input).not.toHaveProperty(key);
                         }
                         const serialized = JSON.stringify(wire.state.input);
-                        expect(serialized).not.toContain("...[truncated]");
+                        expect(serialized).not.toContain("[truncated]");
                         expect(serialized).not.toContain(testCase.legacyFragment);
+                        // The live input keeps every real value for the host.
+                        expect(toolPart.state.input).toEqual(testCase.input);
                     }
                 });
 
@@ -581,18 +690,26 @@ describe("tool-drop-target", () => {
                     ];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-4", [], index, batch, 9);
+                    const target = createToolDropTarget("call-4", [], index, batch, 9, sessionKey);
 
                     expect(target.truncate()).toBe("truncated");
 
-                    // The wire copy now in the message array carries the clamp...
+                    // The wire copy now in the message array carries the full
+                    // released shape...
+                    const token = renderDropToken(9, sessionKey);
                     const wireToolPart = messages[1]?.parts[0] as {
                         state: Record<string, unknown>;
                     };
                     expect(wireToolPart.state).toEqual({
-                        input: { dropped: "[dropped \u00a79\u00a7]" },
-                        output: "[dropped \u00a79\u00a7]",
+                        input: { query: token },
+                        output: "",
+                        attachments: [],
                     });
+                    // The paired invocation's args become the same carrier.
+                    const wireInvocation = messages[0]?.parts[0] as {
+                        args: Record<string, unknown>;
+                    };
+                    expect(wireInvocation.args).toEqual({ query: token });
 
                     // ...while the LIVE part object stays byte-identical (long
                     // prompt intact) so a still-executing tool is never corrupted.
@@ -626,7 +743,14 @@ describe("tool-drop-target", () => {
                     const messages: MessageLike[] = [message("m-task", "assistant", [taskPart])];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-task", [], index, batch, 11);
+                    const target = createToolDropTarget(
+                        "call-task",
+                        [],
+                        index,
+                        batch,
+                        11,
+                        sessionKey,
+                    );
 
                     // Open arc (invocation with no completed result) is excluded
                     // from EVERY selector: canDrop, drop, truncate, editMarker.
@@ -661,18 +785,30 @@ describe("tool-drop-target", () => {
                     const messages: MessageLike[] = [message("m-bg", "assistant", [taskPart])];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-bg", [], index, batch, 12);
+                    const target = createToolDropTarget(
+                        "call-bg",
+                        [],
+                        index,
+                        batch,
+                        12,
+                        sessionKey,
+                    );
 
                     expect(target.canDrop()).toBe(true);
                     expect(target.truncate()).toBe("truncated");
 
-                    // The wire copy now in the array is clamped + sentinelled...
+                    // The wire copy now in the array carries the full released shape...
                     const wire = messages[0]?.parts[0] as {
-                        state: { input: Record<string, unknown>; output: string };
+                        state: {
+                            input: Record<string, unknown>;
+                            output: string;
+                            attachments: unknown[];
+                        };
                     };
                     expect(wire).not.toBe(taskPart);
-                    expect(wire.state.output).toBe("[dropped \u00a712\u00a7]");
-                    expect(wire.state.input).toEqual({ dropped: "[dropped §12§]" });
+                    expect(wire.state.output).toBe("");
+                    expect(wire.state.attachments).toEqual([]);
+                    expect(wire.state.input).toEqual({ prompt: renderDropToken(12, sessionKey) });
 
                     // ...but the LIVE object OpenCode still holds is byte-identical
                     // to before the reclaim pass — the long prompt is intact, so a
@@ -701,7 +837,14 @@ describe("tool-drop-target", () => {
                     const messages: MessageLike[] = [message("m-err", "assistant", [failedWrite])];
                     const index = buildIndex(messages);
                     const batch = new ToolMutationBatch(messages);
-                    const target = createToolDropTarget("call-err", [], index, batch, 13);
+                    const target = createToolDropTarget(
+                        "call-err",
+                        [],
+                        index,
+                        batch,
+                        13,
+                        sessionKey,
+                    );
 
                     // Errored arm is closed → eligible for every selector (this is
                     // the reclaim the old type-based gate also allowed; the new
@@ -709,13 +852,20 @@ describe("tool-drop-target", () => {
                     expect(target.canDrop()).toBe(true);
                     expect(target.truncate()).toBe("truncated");
 
-                    // Wire copy carries the clamp + sentinel...
+                    // Wire copy carries the full released shape...
                     const wire = messages[0]?.parts[0] as {
-                        state: { input: Record<string, unknown>; output: string };
+                        state: {
+                            input: Record<string, unknown>;
+                            output: string;
+                            attachments: unknown[];
+                        };
                     };
                     expect(wire).not.toBe(failedWrite);
-                    expect(wire.state.output).toBe("[dropped \u00a713\u00a7]");
-                    expect(wire.state.input).toEqual({ dropped: "[dropped §13§]" });
+                    expect(wire.state.output).toBe("");
+                    expect(wire.state.attachments).toEqual([]);
+                    expect(wire.state.input).toEqual({
+                        filePath: renderDropToken(13, sessionKey),
+                    });
 
                     // ...live object stays byte-identical: reclaimed via a clone,
                     // never by mutating the original part.
@@ -792,6 +942,7 @@ it("reclaim preview counts the retained skeleton without mutating the served par
         buildIndex(messages),
         new ToolMutationBatch(messages),
         12,
+        sessionKey,
     );
     const full = target.measureReclaim(false);
     const skeleton = target.measureReclaim(true);
@@ -800,4 +951,42 @@ it("reclaim preview counts the retained skeleton without mutating the served par
     expect(skeleton.afterTools).toBeGreaterThan(0);
     expect(skeleton.afterTools).toBeLessThan(skeleton.beforeTools);
     expect(JSON.stringify(messages)).toBe(bytes);
+});
+
+describe("released-result slot anti-imitation law", () => {
+    it("#then the skeleton releases the result slot to empty content, never imitable bytes", () => {
+        expect(TOOL_RELEASED_SENTINEL).toBe("");
+        const toolPart = {
+            type: "tool",
+            callID: "law-empty",
+            state: {
+                status: "completed",
+                input: { command: "ls -la" },
+                output: "x".repeat(500),
+            },
+        };
+        const messages: MessageLike[] = [
+            message("m-inv", "assistant", [{ type: "tool_use", id: "law-empty" }]),
+            message("m-res", "tool", [toolPart]),
+        ];
+        const batch = new ToolMutationBatch(messages);
+        const target = createToolDropTarget(
+            "law-empty",
+            [],
+            buildIndex(messages),
+            batch,
+            3,
+            sessionKey,
+        );
+        expect(target.drop()).toBe("truncated");
+        batch.finalize();
+        const kept = messages[1]?.parts.find(
+            (part) => (part as { type?: string }).type === "tool",
+        ) as { callID: string; state: { output: string; input: unknown } } | undefined;
+        expect(kept?.callID).toBe("law-empty");
+        expect(kept?.state.output).toBe("");
+        // Skeleton-real: arguments stay visible while the result slot carries no bytes.
+        expect(kept?.state.input).toEqual({ command: "ls -la" });
+        expect(JSON.stringify(messages)).not.toContain('"..."');
+    });
 });

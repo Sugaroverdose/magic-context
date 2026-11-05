@@ -73,11 +73,14 @@ export interface ModuleWorkspacePayload {
 
 export type ModuleDropMode =
     | "full"
+    | "erased"
     | "truncated"
     | "skeleton_real"
     | "skeleton_stripped"
     | "edit_marker"
-    | "edit_marker_stripped";
+    | "edit_marker_stripped"
+    | "message_empty"
+    | "message_filler";
 
 export interface ModuleDropSeed {
     block_id: string;

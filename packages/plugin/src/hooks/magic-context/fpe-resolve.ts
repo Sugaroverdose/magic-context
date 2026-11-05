@@ -2,6 +2,7 @@ import { openOpenCodeDb } from "../../features/magic-context/dreamer/open-openco
 import { refuseBudgetedToolCall } from "../../features/magic-context/dreamer/token-budget";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
+import { assertExecutableToolInput, type DroppedInputGuard } from "./dropped-input-guard";
 import { deriveKey, fpeGate, isFpeTokenCandidate } from "./fpe";
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -159,13 +160,22 @@ export function resolveReleasedToolInput(
 
 export interface FpeResolveDepsOption {
     fpeResolve?: FpeResolveDeps;
+    /**
+     * v2 composition (Unit 5): the dropped-input guard from
+     * dropped-input-guard.ts. The lineage left this unwired because its drop
+     * paths stopped minting the marker bytes the guard matches; v2 still
+     * mints them — the message-drop filler is the canonical
+     * `[dropped §N§]` (ARCHITECTURE invariant 2) — so a model echo of a
+     * placeholder in tool args must refuse BEFORE the resolver runs (the
+     * scan sees raw args; a resolved original is never scanned).
+     */
+    droppedInputGuard?: DroppedInputGuard;
 }
 
 /**
- * OpenCode `tool.execute.before`: dreamer token-budget gate + FPE resolution.
- * The dropped-input refusal regex is NOT wired on this branch — no drop path
- * renders the marker bytes it matched, so the scan would only cost per-call
- * time. Resolution restores the original input before the call executes.
+ * OpenCode `tool.execute.before`: dreamer token-budget gate + dropped-input
+ * guard + FPE resolution. Resolution restores the original input before the
+ * call executes.
  */
 export function createToolExecuteBeforeHook(options: FpeResolveDepsOption = {}) {
     return async (input: unknown, output: unknown): Promise<void> => {
@@ -181,6 +191,13 @@ export function createToolExecuteBeforeHook(options: FpeResolveDepsOption = {}) 
                 });
                 throw new Error(refusal.message);
             }
+        }
+        if (options.droppedInputGuard) {
+            assertExecutableToolInput(options.droppedInputGuard, {
+                sessionID: sessionId,
+                toolName: typeof call.tool === "string" ? call.tool : undefined,
+                input: args,
+            });
         }
         if (sessionId && args && options.fpeResolve) {
             // Resolver, not gate: a resolver defect must never block a tool

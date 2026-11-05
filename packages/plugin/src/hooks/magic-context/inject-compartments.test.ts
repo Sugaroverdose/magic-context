@@ -469,12 +469,14 @@ describe("prepareCompartmentInjection — empty compartments fallback", () => {
 
     // R11 recognition, Unit 4 (coordinator split item C): the head-merge
     // decision must treat every shape v2's OWN whole-message sentinel mints
-    // as an absent head. sentinel.ts makeSentinel (:203) writes text:"" and
-    // makeWholeMessageSentinel (:231) writes "[dropped]" on non-empty routes;
-    // merging the block onto either strands the head bytes with a "\n\n"
-    // seam (or a block-prefixed "" that reads as a real turn). The
-    // "[content omitted]" and "..." shapes are NOT included: they have no v2
-    // mint (Unit 5 FPE ruling re-owns any trigger — census addendum).
+    // as an absent head. sentinel.ts makeSentinel writes text:"" and
+    // makeWholeMessageSentinel writes "[dropped]" on non-empty routes
+    // (Unit 5 widened its empty route to station — same mint pair); merging
+    // the block onto either strands the head bytes with a "\n\n" seam (or a
+    // block-prefixed "" that reads as a real turn). The "[content omitted]"
+    // and "..." shapes are NOT included: Unit 5 ruled the message-part
+    // filler stays the canonical [dropped §N§] (invariant 2), so
+    // [content omitted] has no v2 mint at all — see the U4-M3 witness laws.
     it('prepends instead of merging onto an emptied head (sentinel text:"")', () => {
         db = makeDb();
         insertMemory(db, {

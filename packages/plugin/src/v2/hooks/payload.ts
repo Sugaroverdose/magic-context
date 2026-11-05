@@ -1,4 +1,5 @@
 import { isDroppedToolOutput } from "../../hooks/magic-context/ctx-reduce-nudge";
+import { TOOL_RELEASED_SENTINEL } from "../../hooks/magic-context/sentinel";
 import type { MessageLike } from "../../hooks/magic-context/tag-messages";
 import { log, sessionLog } from "../../shared/logger";
 import { hostMediaAsset } from "../fold/host-media";
@@ -131,7 +132,8 @@ function contentValueAttachments(value: Part[]): Part[] {
  * image kept next to its drop placeholder would still be billed.
  */
 function rebuildFileContent(value: Part[], output: string): Part {
-    if (isDroppedToolOutput(output)) return { type: "text", value: output };
+    if (output === TOOL_RELEASED_SENTINEL || isDroppedToolOutput(output))
+        return { type: "text", value: output };
     const rebuilt: Part[] = [];
     let placed = false;
     for (const item of value) {

@@ -68,6 +68,8 @@ import { clearToolPermissionDenied } from "./ctx-reduce-availability";
 import type { Channel1State } from "./ctx-reduce-nudge";
 import * as staleReduce from "./drop-stale-reduce-calls";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
+import { deriveKey, renderDropToken } from "./fpe";
+import { GOLDEN_FULL_DROP_OUTPUT } from "./fpe-wire-golden";
 import * as compartmentInjection from "./inject-compartments";
 import {
     capturePrefixTrimSourceOrder,
@@ -915,6 +917,7 @@ function makeMessageTarget(message: MessageLike): TagTarget {
 }
 
 function addToolTarget(args: {
+    sessionId: string;
     targets: Map<number, TagTarget>;
     index: ToolCallIndex;
     batch: ToolMutationBatch;
@@ -930,6 +933,7 @@ function addToolTarget(args: {
             args.index,
             args.batch,
             args.tagNumber,
+            deriveKey(args.sessionId),
         ),
     );
 }
@@ -3903,7 +3907,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(getChannel2NudgeState(db, sessionId)).toBe("");
     });
 
-    it("replays legacy marker skeletons on defer passes and converts them only on an executed HARD fold", async () => {
+    it("replays legacy truncated tags as the full shape on defer passes and converts their modes on an executed HARD fold", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-hardfold-legacy-skeleton";
@@ -3989,19 +3993,23 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             updateTagDropMode(db, sessionId, tag, "truncated");
         }
 
-        // Defer passes replay the marker byte-identically and never convert.
+        // The legacy marker render is dead: defer passes replay truncated tags
+        // as the full shape (carrier args + empty released slot) byte-identically.
+        const tokenOf = (tag: number) => renderDropToken(tag, deriveKey(sessionId));
         const deferA = await pass();
         const deferB = await pass();
         const legacyWire = tailOnly(deferA.messages);
         expect(deferA.result.materialized).toBe(false);
-        expect(legacyWire).toContain(`{"dropped":"[dropped §${small}§]"}`);
-        expect(legacyWire).toContain(`{"dropped":"[dropped §${large}§]"}`);
+        expect(legacyWire).toContain(`{"command":"${tokenOf(small)}"}`);
+        expect(legacyWire).toContain(`{"filePath":"${tokenOf(large)}"}`);
+        expect(legacyWire).toContain('"output":""');
         expect(tailOnly(deferB.messages)).toBe(legacyWire);
         expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === small)?.dropMode).toBe(
             "truncated",
         );
 
-        // The HARD fold converts: small keeps its real arguments, large is removed.
+        // The HARD fold converts the modes: small keeps its real arguments,
+        // large stays a full-shape carrier — the pair is never removed.
         const hardSignals = { ...BASE_HARD, modelKey: "anthropic/sonnet" };
         const hard = await pass(hardSignals);
         expect(hard.result.materialized).toBe(true);
@@ -4010,12 +4018,12 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(tags.find((t) => t.tagNumber === large)?.dropMode).toBe("full");
         const convertedWire = tailOnly(hard.messages);
         expect(convertedWire).not.toContain('"dropped":');
-        expect(convertedWire).not.toContain("call-large");
+        expect(convertedWire).toContain("call-large");
         const smallPart = hard.messages.find((m) => m.info.id === "m-small")?.parts[0] as {
             state: { input: unknown; output: string };
         };
         expect(smallPart.state.input).toEqual({ command: "ls -la" });
-        expect(smallPart.state.output).toBe(`[dropped §${small}§]`);
+        expect(smallPart.state.output).toBe("");
 
         // The following defer pass replays the converted bytes identically.
         const after = await pass(hardSignals);
@@ -5828,6 +5836,7 @@ describe("final message representation", () => {
         ]);
         const foldIndex = buildToolCallIndex(foldMessages);
         addToolTarget({
+            sessionId,
             targets: foldTargets,
             index: foldIndex,
             batch: foldBatch,
@@ -5836,6 +5845,7 @@ describe("final message representation", () => {
             thinking: thinkingParts(findMessage(foldMessages, "target")),
         });
         addToolTarget({
+            sessionId,
             targets: foldTargets,
             index: foldIndex,
             batch: foldBatch,
@@ -5864,14 +5874,16 @@ describe("final message representation", () => {
         expect(statuses.get(2)).toBe("dropped");
         expect(statuses.get(3)).toBe("active");
         const foldTarget = findMessage(foldMessages, "target");
-        expect(
-            foldTarget.parts.some(
-                (part) =>
-                    typeof part === "object" &&
-                    part !== null &&
-                    (part as { callID?: unknown }).callID === "call-old",
-            ),
-        ).toBe(false);
+        // The reclaimed call is no longer erased: it stays on the wire in the
+        // released shape (empty released slot, pinned as a golden fragment).
+        const foldOldCall = foldTarget.parts.find(
+            (part) =>
+                typeof part === "object" &&
+                part !== null &&
+                (part as { callID?: unknown }).callID === "call-old",
+        ) as { state: Record<string, unknown> } | undefined;
+        expect(foldOldCall).toBeDefined();
+        expect(JSON.stringify(foldOldCall?.state)).toContain(GOLDEN_FULL_DROP_OUTPUT);
         expect(foldTarget.parts).toContainEqual({
             type: "tool",
             callID: "call-survivor",
@@ -5886,6 +5898,7 @@ describe("final message representation", () => {
         ]);
         const deferIndex = buildToolCallIndex(deferMessages);
         addToolTarget({
+            sessionId,
             targets: deferTargets,
             index: deferIndex,
             batch: deferBatch,
@@ -5894,6 +5907,7 @@ describe("final message representation", () => {
             thinking: thinkingParts(findMessage(deferMessages, "target")),
         });
         addToolTarget({
+            sessionId,
             targets: deferTargets,
             index: deferIndex,
             batch: deferBatch,
@@ -5972,6 +5986,7 @@ describe("final message representation", () => {
             [1, makeMessageTarget(findMessage(foldMessages, "user"))],
         ]);
         addToolTarget({
+            sessionId,
             targets: foldTargets,
             index: buildToolCallIndex(foldMessages),
             batch: foldBatch,
@@ -5992,7 +6007,12 @@ describe("final message representation", () => {
             }),
         );
 
-        expect(foldMessages.some((message) => message.info.id === "drop-only")).toBe(false);
+        // The reclaimed predecessor is pruned never: it keeps the released
+        // skeleton in place (pinned as a golden fragment), and the run layout
+        // downstream stays stable.
+        const dropOnly = foldMessages.find((message) => message.info.id === "drop-only");
+        expect(dropOnly).toBeDefined();
+        expect(JSON.stringify(dropOnly?.parts)).toContain(GOLDEN_FULL_DROP_OUTPUT);
         expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 2)?.status).toBe(
             "dropped",
         );
@@ -6004,6 +6024,7 @@ describe("final message representation", () => {
             [1, makeMessageTarget(findMessage(deferMessages, "user"))],
         ]);
         addToolTarget({
+            sessionId,
             targets: deferTargets,
             index: buildToolCallIndex(deferMessages),
             batch: deferBatch,
@@ -6079,6 +6100,7 @@ describe("final message representation", () => {
         const foldBatch = new ToolMutationBatch(foldMessages);
         const foldTargets = new Map<number, TagTarget>();
         addToolTarget({
+            sessionId,
             targets: foldTargets,
             index: buildToolCallIndex(foldMessages),
             batch: foldBatch,
@@ -6098,7 +6120,12 @@ describe("final message representation", () => {
                 sessionMeta: getOrCreateSessionMeta(db, sessionId),
             }),
         );
-        expect(foldMessages.some((message) => message.info.id === "drop-only")).toBe(false);
+        // Stamp erasure: both halves of the call leave the wire. The empty
+        // host message still sits between the two assistant runs, so they
+        // never merge into one and no adjacency strip is triggered.
+        const dropOnly = foldMessages.find((message) => message.info.id === "drop-only");
+        expect(dropOnly).toBeDefined();
+        expect(JSON.stringify(dropOnly?.parts)).toBe("[]");
         expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
             "dropped",
         );
@@ -6107,6 +6134,7 @@ describe("final message representation", () => {
         const deferBatch = new ToolMutationBatch(deferMessages);
         const deferTargets = new Map<number, TagTarget>();
         addToolTarget({
+            sessionId,
             targets: deferTargets,
             index: buildToolCallIndex(deferMessages),
             batch: deferBatch,
@@ -6131,8 +6159,10 @@ describe("final message representation", () => {
 
         const foldWire = serializeAnthropicWirePrefix(foldMessages);
         expect(serializeAnthropicWirePrefix(deferMessages)).toBe(foldWire);
-        expect(foldWire).not.toContain("reasoning invalid after merge");
-        expect(foldWire).not.toContain("signature-invalid-after-merge");
+        // Run-leading reasoning stays: the released tool row kept the runs
+        // separated, so nothing merged them and no adjacency strip fires.
+        expect(foldWire).toContain("reasoning invalid after merge");
+        expect(foldWire).toContain("signature-invalid-after-merge");
 
         const beforeSecondFinalization = JSON.stringify(foldMessages);
         expect(finalizeMessageRepresentation(foldMessages, "anthropic")).toEqual({
@@ -8139,7 +8169,15 @@ describe("marker-drain reasoning representation", () => {
         applyFlushedStatuses(sessionId, db, second.targets);
         second.batch.finalize();
         stripStructuralNoise(deferred);
-        expect(deferred.some((m) => m.info.id === "predecessor")).toBe(false);
+        // The predecessor keeps its released tool skeleton, so it is no longer
+        // pruned from the served array.
+        const deferredPredecessor = deferred.find((m) => m.info.id === "predecessor");
+        expect(deferredPredecessor).toBeDefined();
+        expect(
+            (deferredPredecessor?.parts as Array<Record<string, any>>).some(
+                (part) => part.type === "tool" && part.state.output === "",
+            ),
+        ).toBe(true);
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, deferred, {
                 ...second,

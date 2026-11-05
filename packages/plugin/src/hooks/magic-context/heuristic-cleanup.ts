@@ -13,7 +13,7 @@ import {
 } from "../../features/magic-context/storage-meta-persisted";
 import type { TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared";
-import { applyNewToolDrop, hasSmallToolInput } from "./apply-operations";
+import { applyNewToolDrop, buildReplacementContent, hasSmallToolInput } from "./apply-operations";
 import { applyCavemanCleanup, type CavemanCleanupConfig } from "./caveman-cleanup";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
 import {
@@ -89,6 +89,8 @@ export function applyHeuristicCleanup(
          * for forwarding this only for primary sessions where caveman is enabled.
          */
         caveman?: CavemanCleanupConfig;
+        /** Route for the R11 message-drop shape decision (injection strip). */
+        providerID?: string;
     },
     preloadedTags?: TagEntry[],
 ): {
@@ -195,6 +197,8 @@ export function applyHeuristicCleanup(
                     const { result, mode } = applyNewToolDrop(target, {
                         inWindow: recent,
                         keepSkeleton: target?.requiresToolArcSkeleton === true,
+                        source: "sweeper",
+                        toolName: tag.toolName,
                     });
                     if (result === "removed" || result === "truncated") {
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
@@ -245,12 +249,22 @@ export function applyHeuristicCleanup(
 
                 if (strippedSource.trim().length === 0) {
                     const dropResult = target.drop?.() ?? "absent";
-                    const replacement = `[dropped §${tag.tagNumber}§]`;
+                    const replacement = buildReplacementContent(tag.tagNumber);
                     const didReplace =
                         dropResult === "absent" ? target.setContent(replacement) : false;
                     if (dropResult === "removed" || dropResult === "absent") {
                         replaceSourceContent(db, sessionId, tag.tagNumber, "");
                         updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
+                        if (didReplace) {
+                            // Freeze the shape actually served so the replay
+                            // in applyFlushedStatuses cannot re-decide it.
+                            updateTagDropMode(
+                                db,
+                                sessionId,
+                                tag.tagNumber,
+                                replacement === "" ? "message_empty" : "message_filler",
+                            );
+                        }
                         if (dropResult === "removed" || didReplace) {
                             droppedInjections++;
                             droppedTokenReductions.push(
@@ -333,10 +347,18 @@ export function applyHeuristicCleanup(
                     if (config.protectedTagNumbers.has(tag.tagNumber)) continue;
                     const target = targets.get(tag.tagNumber);
                     if (target?.canDrop?.() === false) continue;
-                    // Deduplication remains a full drop; only the emergency newest-window
-                    // arm preserves skeleton bytes. A call that cannot be removed keeps
-                    // its real arguments.
-                    const { result, mode } = applyNewToolDrop(target, { inWindow: false });
+                    // Deduplication is a system-originated drop, so it obeys
+                    // the same sweeper rule as every other automatic lane
+                    // (property enforced at the decision site): bash takes the
+                    // token carrier, every other tool keeps real arguments
+                    // with only the output gone. Only the emergency
+                    // newest-window arm can also keep the output. A call that
+                    // cannot be removed keeps its real arguments.
+                    const { result, mode } = applyNewToolDrop(target, {
+                        inWindow: false,
+                        source: "sweeper",
+                        toolName: tag.toolName,
+                    });
                     if (result === "incomplete") continue;
                     updateTagDropMode(db, sessionId, tag.tagNumber, mode);
                     updateTagStatus(db, sessionId, tag.tagNumber, "dropped");
@@ -344,7 +366,12 @@ export function applyHeuristicCleanup(
                         deduplicatedTools++;
                         droppedTokenReductions.push({
                             tagNumber: tag.tagNumber,
-                            mode: result === "removed" ? "full" : "truncated",
+                            mode:
+                                result === "truncated"
+                                    ? "truncated"
+                                    : mode === "full"
+                                      ? "full"
+                                      : "skeleton",
                         });
                     }
                 }

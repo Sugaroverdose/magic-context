@@ -49,32 +49,54 @@ import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
  */
 export const RECENT_TOOL_SKELETON_WINDOW = 20;
 
-// ONE canonical placeholder for every non-tool (message) drop, on every path,
-// every pass. It is a PURE function of tagId — it reads NO message content, role,
-// or window state. That is the whole point: any version that derived bytes from
-// the current (already-mutated) content re-derived a DIFFERENT placeholder across
-// passes (e.g. `[dropped §N§]` on one pass, `[truncated §N§]\n…` on the next),
-// which on a defer pass changes a tail message's bytes and busts the entire
-// prompt-cache prefix after it. This exact divergence caused repeated cache
-// catastrophes. The bytes here are byte-identical to heuristic-cleanup.ts's
-// `[dropped §${n}§]`, so the two drop paths can never disagree. (We deliberately
-// dropped the old user-text preview variant — a minor nicety that was the sole
-// source of the instability.)
-export function buildReplacementContent(tagId: number): string {
+// ONE canonical placeholder for every non-tool (message) drop that needs a
+// filler, on every path, every pass. It is a PURE function of tagId — it reads
+// NO message content, role, or window state. That is the whole point: any
+// version that derived bytes from the current (already-mutated) content
+// re-derived a DIFFERENT placeholder across passes (e.g. `[dropped §N§]` on
+// one pass, `[truncated §N§]\n…` on the next), which on a defer pass changes a
+// tail message's bytes and busts the entire prompt-cache prefix after it. This
+// exact divergence caused repeated cache catastrophes. The bytes here are
+// byte-identical to heuristic-cleanup.ts's `[dropped §${n}§]`, so the two drop
+// paths can never disagree. (We deliberately dropped the old user-text preview
+// variant — a minor nicety that was the sole source of the instability.)
+//
+// This lane mints ONLY the canonical placeholder. A whole-message drop here
+// stays non-empty so the placeholder-strip lane (strip-content.ts) still
+// recognises it by the `[dropped` prefix and records the removal for a
+// byte-identical replay — the recording is what makes the removal stable.
+// The provider-gated empty (`""`) is a STATION concern and lives in
+// `makeWholeMessageSentinel`, which is where a route that truly accepts empty
+// dropped content collapses the sentinel. Feeding `""` through this lane instead
+// would collide with that lane's own idempotency guard (`isSentinel`) and drop
+// the removal off the record.
+//
+// R11 (Unit 5): the frozen `drop_mode` on the tag is the whole answer on a
+// replay — the current route is never consulted (a mid-session route change
+// must not rewrite already-served bytes). A stored `message_empty` (a legacy
+// row) renders empty; every fresh drop freezes `message_filler` (placeholder).
+// The lineage's `[content omitted]` variant is not shipped (census addendum
+// Unit 5), consistent with ARCHITECTURE invariant 2.
+export function buildReplacementContent(tagId: number, frozen?: TagEntry["dropMode"]): string {
+    if (frozen) return frozen === "message_empty" ? "" : `[dropped \u00a7${tagId}\u00a7]`;
     return `[dropped \u00a7${tagId}\u00a7]`;
 }
+
 export interface NewToolDropOutcome {
     result: ToolDropResult;
     /** The drop mode to persist so every later pass replays the same bytes. */
-    mode: "skeleton_real" | "skeleton_stripped" | "full";
+    mode: "skeleton_real" | "skeleton_stripped" | "full" | "erased";
 }
 
 /**
  * Apply a NEW drop of a tool call under the real-or-absent rule and report
  * the mode to persist:
  *  1. inside the newest-call window with a small input: keep the call with its
- *     real arguments, output -> `[dropped §N§]` (`skeleton_real`);
- *  2. otherwise remove the call and its result (`full`);
+ *     real arguments, output -> "" (`skeleton_real`);
+ *  2. otherwise the source decides: a model stamp erases the call and its
+ *     result (`erased`); the sweeper takes the bash-only carrier (`full`),
+ *     and every other sweeper tool keeps real arguments with the output gone
+ *     (`skeleton_real` / `skeleton_stripped`);
  *  3. except when the call cannot be removed: its result ends the request
  *     (drop() then keeps it, see ToolMutationBatch.wouldStrandConversationEnd),
  *     the host adapter cannot remove it structurally, or the caller requires a
@@ -83,7 +105,17 @@ export interface NewToolDropOutcome {
  */
 export function applyNewToolDrop(
     target: TagTarget | undefined,
-    options: { inWindow: boolean; keepSkeleton?: boolean },
+    options: {
+        inWindow: boolean;
+        keepSkeleton?: boolean;
+        /** Who asked for this drop. `stamp` = the model's own ctx_reduce
+         * intent (erases the call); `sweeper` = the automatic reclaim
+         * (carrier only for bash, skeleton for everything else).
+         * Omitted = legacy shape decision (no source gate). */
+        source?: "stamp" | "sweeper";
+        /** Registry tool name of the target, required for the sweeper gate. */
+        toolName?: string | null;
+    },
 ): NewToolDropOutcome {
     if (!target) return { result: "absent", mode: "full" };
     if (
@@ -91,6 +123,34 @@ export function applyNewToolDrop(
         options.keepSkeleton === true ||
         target.cannotRemove?.() === true
     ) {
+        const strip = target.hasAttachments?.() === true;
+        return {
+            result: (strip ? target.skeletonStripped?.() : target.skeletonReal?.()) ?? "absent",
+            mode: strip ? "skeleton_stripped" : "skeleton_real",
+        };
+    }
+    if (options.source === "stamp") {
+        // The model asked for this one by handle: it is gone from the wire
+        // entirely. Only the structural guards (request end, arc pairing,
+        // adapter capability) can keep it, as a readable skeleton.
+        if (target.erase) {
+            const eraseResult = target.erase();
+            if (eraseResult === "removed") return { result: "removed", mode: "erased" };
+            if (eraseResult === "truncated") return { result: "truncated", mode: "skeleton_real" };
+            return { result: eraseResult, mode: "full" };
+        }
+        // Host adapter without an erase capability (Pi pre-port, test stubs):
+        // the stamp still means removal — take the structural drop, which is
+        // upstream's removal semantics for a model stamp.
+        const dropResult = target.drop?.() ?? "absent";
+        if (dropResult === "removed") return { result: "removed", mode: "full" };
+        if (dropResult === "truncated") return { result: "truncated", mode: "skeleton_real" };
+        return { result: dropResult, mode: "full" };
+    }
+    if (options.source === "sweeper" && options.toolName !== "bash") {
+        // Automatic reclaim keeps the carrier surface to bash alone; every
+        // other tool leaves real arguments on the wire and only its output
+        // goes, with no token to imitate.
         const strip = target.hasAttachments?.() === true;
         return {
             result: (strip ? target.skeletonStripped?.() : target.skeletonReal?.()) ?? "absent",
@@ -343,6 +403,11 @@ export function applyPendingOperations(
                     .sort((left, right) => right - left)
                     .slice(0, RECENT_TOOL_SKELETON_WINDOW),
             );
+            const toolNameById = new Map(
+                tags
+                    .filter((tag) => tag.type === "tool")
+                    .map((tag) => [tag.tagNumber, tag.toolName] as const),
+            );
 
             for (const { op: pendingOp, synthetic } of opsToApply) {
                 let operationMutated = false;
@@ -361,6 +426,22 @@ export function applyPendingOperations(
                 const target = targets.get(pendingOp.tagId);
                 const isToolTag = tagTypeById.get(pendingOp.tagId) === "tool";
 
+                if (
+                    pendingOp.operation === "auto_drop" &&
+                    isToolTag &&
+                    toolNameById.get(pendingOp.tagId)?.toLowerCase() === "ctx_reduce"
+                ) {
+                    // Receipt preservation for system-originated queues: the
+                    // compartment runner stamps whatever sits in an archived
+                    // stretch, including the model's own ctx_reduce receipts.
+                    // The aged strip cleans those with the right shape; an
+                    // auto_drop here would erase the model's release trail
+                    // under a claimed intent the model never expressed.
+                    reject("receipt_preserved");
+                    removePendingOp(db, sessionId, pendingOp.tagId);
+                    continue;
+                }
+
                 if (synthetic) {
                     // Synthetic two-pass reclaim must never persist a DB-only drop for
                     // a tag that is absent/incomplete on this pass's visible wire. It
@@ -378,6 +459,7 @@ export function applyPendingOperations(
                 }
 
                 let shouldPersistDrop = false;
+                let messageDropMode: TagEntry["dropMode"] | undefined;
                 if (isToolTag) {
                     if (editMarkerTagIds.has(pendingOp.tagId)) {
                         // Superseded edit/write: compress to a filePath-preserving
@@ -403,12 +485,16 @@ export function applyPendingOperations(
                         shouldPersistDrop = true;
                     } else {
                         // Real-or-absent: a small input inside the newest-call
-                        // window keeps its real arguments; everything else is
-                        // removed, except the call whose result ends the request
-                        // (drop() keeps it with real arguments). Persist the mode
-                        // applied so replays match this pass.
+                        // window keeps its real arguments; otherwise the source
+                        // decides (stamp erases, sweeper carriers bash only).
+                        // Persist the mode applied so replays match this pass.
                         const { result: dropResult, mode: appliedMode } = applyNewToolDrop(target, {
                             inWindow: skeletonWindow.has(pendingOp.tagId),
+                            source:
+                                synthetic || pendingOp.operation === "auto_drop"
+                                    ? "sweeper"
+                                    : "stamp",
+                            toolName: toolNameById.get(pendingOp.tagId),
                         });
                         if (
                             dropResult === "incomplete" ||
@@ -422,7 +508,10 @@ export function applyPendingOperations(
                             operationMutated = true;
                             onTagReduced?.({
                                 tagNumber: pendingOp.tagId,
-                                mode: appliedMode === "full" ? "full" : "truncated",
+                                mode:
+                                    appliedMode === "full" || appliedMode === "erased"
+                                        ? "full"
+                                        : "truncated",
                             });
                         } else {
                             reject(`drop_${dropResult}`);
@@ -431,7 +520,13 @@ export function applyPendingOperations(
                         shouldPersistDrop = true;
                     }
                 } else if (target) {
+                    // Whole-message drop: this lane mints the canonical
+                    // placeholder only (see buildReplacementContent). The
+                    // removal is recorded by the placeholder-strip lane for a
+                    // byte-identical replay; the provider-gated empty is a
+                    // station concern (makeWholeMessageSentinel), not here.
                     const replacement = buildReplacementContent(pendingOp.tagId);
+                    messageDropMode = replacement === "" ? "message_empty" : "message_filler";
                     const priorContent = target.getContent?.();
                     const changed = target.setContent(replacement);
                     if (changed) {
@@ -460,6 +555,11 @@ export function applyPendingOperations(
                     continue;
                 }
                 updateTagStatus(db, sessionId, pendingOp.tagId, "dropped");
+                if (messageDropMode) {
+                    // Freeze the render shape beside the status: every later
+                    // pass replays these bytes, whoever the route is.
+                    updateTagDropMode(db, sessionId, pendingOp.tagId, messageDropMode);
+                }
                 if (!synthetic) removePendingOp(db, sessionId, pendingOp.tagId);
                 if (operationMutated) diagnostics.mutated += 1;
                 else diagnostics.persistedWithoutMutation += 1;
@@ -531,6 +631,14 @@ export function applyFlushedStatuses(
                     if (result === "truncated") {
                         didMutateMessage = true;
                     }
+                } else if (tag.dropMode === "erased") {
+                    // Stamped calls leave the wire on every pass: the host store
+                    // keeps the real bytes, so the pair is removed again each time
+                    // it is rebuilt. Guards inside erase() match the apply pass.
+                    const eraseResult = target?.erase?.() ?? "absent";
+                    if (eraseResult === "removed" || eraseResult === "truncated") {
+                        didMutateMessage = true;
+                    }
                 } else if (tag.dropMode === "truncated") {
                     // Legacy marker skeleton: replayed byte-identically until a
                     // HARD fold converts it (convertLegacyToolSkeletons).
@@ -545,7 +653,12 @@ export function applyFlushedStatuses(
                     }
                 }
             } else if (target) {
-                const changed = target.setContent(buildReplacementContent(tag.tagNumber));
+                // Replay reads the frozen shape; pre-R11 rows carry the
+                // schema default and keep the canonical filler they were
+                // served with (invariant 2's single placeholder string).
+                const changed = target.setContent(
+                    buildReplacementContent(tag.tagNumber, tag.dropMode),
+                );
                 if (changed) didMutateMessage = true;
             }
         }
