@@ -328,8 +328,12 @@ export function decideSystemRegionRotation(
     if (args.forceBand) return { rotate: true, reason: "force_band" };
     // The pending-growth arm is deleted (§25.3): it received the absolute
     // stored-region size as if it were an un-folded delta, storming every
-    // large-region session on every boundary pass. Growth is measured by
-    // the DELTA_TRIGGER_FIELDS comparison above.
+    // large-region session on every boundary pass. Since Unit 2 the delta
+    // class is carried by the volatile segment (region-volatile.ts) and
+    // growth is a fold REQUEST queued onto the named boundary (Task 1
+    // Step 4b) — never a rotation decided here; DELTA_TRIGGER_FIELDS is
+    // empty by owner ruling, its loop above stays only as the extension
+    // point shape.
     return { rotate: false, reason: "none" };
 }
 

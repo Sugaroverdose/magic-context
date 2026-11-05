@@ -61,6 +61,15 @@ export interface ManifestWindow {
 export interface Manifest {
     schemaVersion: number;
     capturedAt: string;
+    /**
+     * Informational provenance only: the plugin-tree HEAD at capture run
+     * time. It is NOT a content authority — a corpus-replay capture re-stamps
+     * nothing and a production-path re-capture can legitimately stamp a
+     * commit older than the bytes it pins (the pre-Unit-2 corpus carried
+     * Task-2 delta-lift bytes under its 02cadd64f stamp). The authority is
+     * per-window: regionSha256 / m1Placeholder-era fields, pinned against
+     * the live renderers by Laws A and B (region-golden-parity).
+     */
     captureCommit: string;
     timezone: string;
     estimatorFingerprint: string;
