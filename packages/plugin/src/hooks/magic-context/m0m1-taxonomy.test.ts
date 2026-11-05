@@ -27,6 +27,7 @@ import {
 } from "../../features/magic-context/compartment-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { readSystemRegion } from "../../features/magic-context/system-region";
 import { resolveHistorianModel } from "../../shared/model-resolution";
 import { Database } from "../../shared/sqlite";
 import {
@@ -38,13 +39,10 @@ import {
     regionMarkersFromSnapshot,
     snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
-import { readSystemRegion } from "../../features/magic-context/system-region";
 import { regionRotationPromotion } from "./transform-postprocess-phase";
 
 const SESSION_ID = "ses_taxonomy";
 const PROJECT_PATH = "/tmp/test-taxonomy-project";
-const M1_PLACEHOLDER =
-    "<session-history-since>(no new content since last materialization)</session-history-since>";
 
 let db: Database;
 const tempDirs: string[] = [];
@@ -216,12 +214,14 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         expect(d1.m1).not.toContain("Bravo delta");
     });
 
-    it("SOFT: an exec pass with a new compartment rotates the region — the delta lands in the baseline", () => {
-        // Region era (Unit 1 Step 3): the head-era SOFT class (m[1] re-render,
-        // frozen m[0]) retires with the head carriage — there is no m[1] to
-        // refresh. A compartment delta at a pass that is already busting
-        // rotates the whole region (the one baseline), riding the rotation
-        // promotion: the same bust-permission rule, in its region form.
+    it("SOFT (Unit 2 Task 3): a compartment delta on a bust pass does NOT rotate — the volatile carrier holds it", () => {
+        // Region era, Unit 2: the DELTA_TRIGGER_FIELDS are emptied by owner
+        // ruling. The compartment delta never originates and never rides a
+        // rotation as a marker-comparison trigger: it is carried by the
+        // volatile segment (sighting laws in region-volatile.test.ts) and
+        // folds into the baseline only when a legitimate fold arrives — the
+        // deferred fold-request consumer (postprocess family) or a HARD
+        // signal. Here: the bust pass itself stays silent.
         db = makeDb();
         const projectDirectory = makeProjectDir();
         appendCompartments(db, SESSION_ID, [compartment(0, "A", "Alpha baseline")]);
@@ -229,18 +229,26 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         appendCompartments(db, SESSION_ID, [compartment(1, "B", "Bravo delta")]);
 
         const soft = pass({ projectDirectory, isCacheBustingPass: true });
-        // The delta serves inside the region: B is summarized in the baseline,
-        // and no m[1] exists anywhere.
+        // No rotation for a delta: the region bytes replay byte-identical and
+        // no m[1] exists anywhere (the delta lane is the volatile segment).
+        expect(soft.rematerialized).toBe(false);
         expect(soft.m1).toBe("");
-        expect(soft.m0).toContain("Bravo delta");
-        // The rotation rode the promotion, not a provider-identity change:
-        // the model identity is untouched.
-        expect(soft.m0ModelKeyPrev).toBeNull();
-        expect(soft.m0ModelKeyNew).toBeNull();
-        // The delta is gone from the volatile lane: a further defer pass
-        // replays the rotated bytes byte-identical.
+        expect(soft.m0).toBe(baseline.m0);
+        // The delta lands in the baseline at the next legitimate fold: the
+        // HARD model-change arm below proves the same absorb-on-fold path
+        // carries it.
+        const hard = pass({
+            projectDirectory,
+            isCacheBustingPass: true,
+            hard: { ...BASE_HARD, modelKey: "anthropic/sonnet" },
+        });
+        expect(hard.rematerialized).toBe(true);
+        expect(hard.m0).toContain("Alpha baseline");
+        expect(hard.m0).toContain("Bravo delta");
+        // The rotation rode a HARD signal, not the delta: model identity moves.
+        expect(hard.m0ModelKeyNew).toBe("anthropic/sonnet");
         const after = pass({ projectDirectory, isCacheBustingPass: false });
-        expect(after.m0).toBe(soft.m0);
+        expect(after.m0).toBe(hard.m0);
     });
 
     it("HARD (model change): rotates the region and adopts the new identity", () => {
@@ -363,11 +371,12 @@ describe("m[0]/m[1] materialization taxonomy", () => {
         expect(result.rematerialized).toBe(false);
     });
 
-    it("pressure backstop: a region far past the absolute cap refolds on the next bust", () => {
-        // Region-era successor of the m[1]-cap backstop: the cap applies to the
-        // region bytes vs the history budget. A stored region over the cap
-        // folds (rotates) only on a pass that is already busting — it never
-        // originates a bust of its own (defer passes replay byte-identical).
+    it("pressure backstop (Unit 2 Task 3): an oversized region never folds for size — the request lane owns growth", () => {
+        // §25.3 property: no size/pressure arm on the region fold decision —
+        // growth is the volatile segment's authority, which REQUESTS a fold
+        // (never re-renders region bytes on the requesting pass). On the
+        // head lane this was the m[1]-cap refold; the region era has no such
+        // arm. Both pass classes replay byte-identical.
         db = makeDb();
         const projectDirectory = makeProjectDir();
         appendCompartments(db, SESSION_ID, [compartment(0, "A", "Ax")]);
@@ -393,9 +402,20 @@ describe("m[0]/m[1] materialization taxonomy", () => {
             hard: smallBudget,
             historyBudgetTokens: 60,
         });
-        // The absolute-cap backstop refolded the oversized region this pass.
-        expect(folded.rematerialized).toBe(true);
+        // Task 3 (§25.3): there is NO size/pressure arm on the region — the
+        // oversized region replays byte-identical even on this bust pass.
+        // The growth authority moved to the volatile segment, which REQUESTS
+        // a fold (sighting + consumer laws in region-volatile.test.ts and
+        // the postprocess family); the region never folds for size.
+        expect(folded.rematerialized).toBe(false);
         expect(folded.m1).toBe("");
+        const replay = pass({
+            projectDirectory,
+            isCacheBustingPass: false,
+            hard: smallBudget,
+            historyBudgetTokens: 60,
+        });
+        expect(replay.m0).toBe(baseline.m0);
     });
 
     it("HARD markers persist across a simulated restart (DB read, not in-memory)", () => {

@@ -92,7 +92,11 @@ silently.
   `profile_version`, `project_docs_hash`) is demoted outright (Unit 2 Task 3):
   these changes ride the volatile segment (region-volatile.ts) and are absorbed
   on folds — they rotate the region on no pass, and the fence list above has no
-  entry for them (an attempted re-add reddens the per-field demotion laws). Every arm of the
+  entry for them (an attempted re-add reddens the per-field demotion laws). The
+  scheduled-delta replacement is `fold_request`: consuming a queued fold intent
+  (the volatile growth backstop's request, a historian publish, or the wrapup
+  operator rotation) promotes the fold — the queue is the schedule, consumption
+  on a pass that already holds the bust permission is the boundary (L0). Every arm of the
   decision requires the single per-pass bust permission (A3) — an anonymous bust, or a
   rotation claimed on a non-busting pass, is not type-expressible. Obsoletes: scattered
   bust guards. Tests: rotation rows assert the receipt names its reason and that no arm
@@ -317,6 +321,7 @@ throws).
 
 ```rotation-reasons
 hard_fold
+fold_request
 first_render
 missing_markers
 region_first_install

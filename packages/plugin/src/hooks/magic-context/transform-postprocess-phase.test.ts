@@ -4077,6 +4077,8 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             newer?: number;
             scheduler?: "defer" | "execute";
             budget?: number;
+            deferred?: Set<string>;
+            consumeDeferred?: boolean;
         },
     ) {
         const messages = advTail(sessionId, opts.newer ?? 0);
@@ -4096,6 +4098,8 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 schedulerDecision: opts.scheduler ?? "defer",
                 contextUsage: { percentage: 40, inputTokens: 4000 },
                 systemRegionLane: true,
+                deferredMaterializationSessions: opts.deferred ?? new Set(),
+                canConsumeDeferredLate: opts.consumeDeferred ?? false,
                 m0M1: {
                     projectPath: FOLD_PROJECT,
                     projectDirectory: FOLD_PROJECT,
@@ -4157,7 +4161,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         expect(advSha(deferAgain.messages)).toBe(advSha(defer.messages));
     });
 
-    it("ADV: a pressure refold (memoryUpdateCount > 40 on an execute pass) converts legacy markers", async () => {
+    it("ADV: a pressure fold request converts legacy markers when the consuming boundary rotates", async () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-adv-pressure";
@@ -4172,7 +4176,8 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             hardSignals: BASE_HARD,
         });
         const tags = advSeedLegacy(sessionId);
-        const d1 = await advPass(sessionId, { budget: 500 });
+        const deferred = new Set<string>();
+        const d1 = await advPass(sessionId, { budget: 500, deferred });
         const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
         for (let i = 0; i < 45; i++) {
             insertMemory(db, {
@@ -4182,10 +4187,28 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 importance: 50,
             });
         }
-        const d2 = await advPass(sessionId, { budget: 500 });
-        const exec = await advPass(sessionId, { scheduler: "execute", budget: 500 });
+        const d2 = await advPass(sessionId, { budget: 500, deferred });
+        // The >40-pending-updates arm is a REQUEST (Task 1 Step 4b): the bust
+        // pass schedules, it does not rotate or drain.
+        const request = await advPass(sessionId, {
+            scheduler: "execute",
+            budget: 500,
+            deferred,
+            consumeDeferred: true,
+        });
+        expect(request.result.materialized).toBe(false);
+        expect(deferred.has(sessionId)).toBe(true);
+        // The consuming boundary folds — the executed fold converts the
+        // legacy markers (real-or-absent rule).
+        const exec = await advPass(sessionId, {
+            scheduler: "execute",
+            budget: 500,
+            deferred,
+            consumeDeferred: true,
+        });
+        expect(exec.result.materialized).toBe(true);
         const modes = advModes(sessionId, tags);
-        const after = await advPass(sessionId, { newer: 1, budget: 500 });
+        const after = await advPass(sessionId, { newer: 1, budget: 500, deferred });
         const shared = after.messages.slice(0, exec.messages.length);
         console.log(
             "ADV_PRESSURE",
@@ -4685,6 +4708,8 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 scheduler?: "defer" | "execute";
                 budget?: number;
                 turn?: string;
+                deferred?: Set<string>;
+                consumeDeferred?: boolean;
             } = {},
         ) {
             const messages = tail(sessionId, opts.newer ?? 0);
@@ -4706,6 +4731,8 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     currentTurnId: opts.turn ?? null,
                     contextUsage: { percentage: 40, inputTokens: 4000 },
                     systemRegionLane: true,
+                    deferredMaterializationSessions: opts.deferred ?? new Set(),
+                    canConsumeDeferredLate: opts.consumeDeferred ?? false,
                     m0M1: {
                         projectPath: FOLD_PROJECT,
                         projectDirectory: FOLD_PROJECT,
@@ -4838,7 +4865,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             expect(hard.result.materializeReason).toBeNull();
         });
 
-        it("delta growth rotates the region on a boundary pass and the served bytes change", async () => {
+        it("delta growth requests a fold on the bust lane and the consuming pass rotates once", async () => {
             db = new Database(":memory:");
             initializeDatabase(db);
             const sessionId = "ses-identical-pressure";
@@ -4863,17 +4890,43 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     importance: 50,
                 });
             }
-            const defer = await pass(sessionId, { budget: 500 });
+            const deferred = new Set<string>();
+            const defer = await pass(sessionId, { budget: 500, deferred });
             const { readSystemRegion } = await import("../../features/magic-context/system-region");
             const regionBefore = readSystemRegion(db, sessionId);
             expect(defer.result.materialized).toBe(false);
-            const exec = await pass(sessionId, { scheduler: "execute", budget: 500 });
-            // The delta markers (max_memory_id) are the pressure signal; a
-            // boundary pass rotates the region once and the served bytes move.
-            expect(exec.result.materialized).toBe(true);
+            // The >40-pending-updates arm is a REQUEST lane (Task 1 Step 4b):
+            // the bust pass recomputes the volatile segment and queues the
+            // request; the region never rotates on the requesting pass.
+            const request = await pass(sessionId, {
+                scheduler: "execute",
+                budget: 500,
+                deferred,
+                consumeDeferred: true,
+            });
+            expect(request.result.materialized).toBe(false);
+            expect(deferred.has(sessionId)).toBe(true);
+            const regionAtRequest = readSystemRegion(db, sessionId);
+            expect(regionAtRequest).toBe(regionBefore);
+            // The consuming boundary rotates once and the fold absorbs the
+            // delta class into the panels (volatile emptied with the fold row).
+            const consume = await pass(sessionId, {
+                scheduler: "execute",
+                budget: 500,
+                deferred,
+                consumeDeferred: true,
+            });
+            expect(consume.result.materialized).toBe(true);
+            expect(deferred.has(sessionId)).toBe(false);
             const regionAfter = readSystemRegion(db, sessionId);
             expect(regionAfter).not.toBe(regionBefore);
-            expect(regionAfter).toContain("PRESSURE_MEMORY_44");
+            expect(regionAfter).toMatch(/PRESSURE_MEMORY_\d+/);
+            const meta = getOrCreateSessionMeta(db, sessionId);
+            expect(
+                meta.regionVolatileBytes
+                    ? Buffer.from(meta.regionVolatileBytes).toString("utf8")
+                    : "",
+            ).toBe("");
         });
 
         it("holds a queued ctx_reduce drop on an identical-bytes project_memory_epoch HARD; the served bytes stay identical", async () => {
@@ -4951,7 +5004,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             initializeDatabase(db);
             const sessionId = "ses-changed-epoch-drain";
             materializeBaseline(sessionId);
-            const defer = await pass(sessionId);
+            await pass(sessionId);
             const target = toolTag(sessionId, "c-mid", "m-mid");
             queuePendingOp(db, sessionId, target, "drop");
             const { insertMemory } = await import(
@@ -5278,11 +5331,13 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             return { defer, target };
         }
 
-        it("starvation: a held drop lands on the next execute pass that publishes m[1]; the defer after replays it", async () => {
+        it("starvation: a held drop lands on the next execute pass that recomputes the volatile segment; the defer after replays it", async () => {
             const sessionId = "ses-adv-starve-execute";
             const { defer, target } = await heldAfterIdenticalHard(sessionId);
-            // An additive memory surfaces through m[1] on the next execute pass,
-            // which is the published-history bust queued drops wait for.
+            // Region era (Unit 2 Task 3): the additive memory surfaces through
+            // the volatile segment on the next execute pass — the delta-class
+            // wire bust that queued drops wait for (head-era successor: the
+            // pass that published m[1]).
             const { insertMemory } = await import(
                 "../../features/magic-context/memory/storage-memory"
             );
@@ -8289,11 +8344,17 @@ describe("prefix preflight persistence pins", () => {
         );
         const messages = [makeToolMessage("tail")];
         try {
+            // Region era (Task 3 successor): a published compartment reaches the
+            // region through the fold REQUEST queue at its boundary — the head-
+            // era soft m[1] carrier is gone. The queued intent makes this
+            // execute pass the consuming boundary.
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     sessionMeta: state,
                     m0M1,
                     schedulerDecision: "execute",
+                    deferredMaterializationSessions: new Set([sessionId]),
+                    canConsumeDeferredLate: true,
                 }),
             );
             // Region era: the off-wire preflight fold persists the region row;
@@ -8517,7 +8578,6 @@ it("a competing persisted region cannot replace the previously served region byt
         } as MessageLike,
         makeToolMessage("old-tool"),
     ];
-    const expected = rawMessages();
     // The served window is the region boundary minus 1 (the boundary row is
     // the last row the region covers; the trim cuts through it).
     const expectedServed = rawMessages().slice(2);
@@ -8624,6 +8684,10 @@ it("contended partial cache replays persisted prefix until one uncontended drain
     padRecentToolSkeletonWindow(sessionId, 1);
     advanceToolReclaimWatermark(db, sessionId, 1);
     let contend = true;
+    // Region era (Task 3 successor): the publish that carries PUBLISHED_A into
+    // the region is a fold REQUEST — the historian-publish lane queues the
+    // session and the boundary consumes it. Aborted folds keep the intent.
+    const publishQueue = new Set<string>([sessionId]);
     const original = compartmentInjection.injectM0M1;
     const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation((options) =>
         original({
@@ -8654,6 +8718,8 @@ it("contended partial cache replays persisted prefix until one uncontended drain
                     schedulerDecision: "execute",
                     tags: getActiveTagsBySession(db, sessionId),
                     targets: new Map([[1, makeDropTarget(message)]]),
+                    deferredMaterializationSessions: publishQueue,
+                    canConsumeDeferredLate: true,
                 }),
             );
             spy.mockRestore();
@@ -10414,7 +10480,89 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
         expect(getOrCreateSessionMeta(db, sessionId).cachedM1Bytes).toBeNull();
     });
 
-    it("an execute boundary with a new memory rotates the region once, with receipts", async () => {
+    it("a queued fold intent lands on the next consuming pass: the deferred boundary forces the absorb fold", async () => {
+        // Fold REQUEST consumer (Task 1 Step 4b; the same queue carries the
+        // wrapup operator trigger, #2628): the queue is the schedule side of
+        // L0, consumption on a late-consumption-permitted pass is the named
+        // boundary. Without the forcing the intent is a dead-end (the DELTA
+        // arms that used to carry it are emptied by Task 3).
+        const sessionId = "ses-region-deferred-fold";
+        const db = await installedRegionDb(sessionId);
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "DEFERRED-ABSORB-NEW",
+        });
+        const deferred = new Set([sessionId]);
+        const logs: string[] = [];
+        const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs.push(values.join(" "));
+        });
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    schedulerDecision: "execute",
+                    schedulerDeferReason: null,
+                    systemRegionLane: true,
+                    canConsumeDeferredLate: true,
+                    deferredMaterializationSessions: deferred,
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
+        expect(readSystemRegion(db, sessionId)).toContain("DEFERRED-ABSORB-NEW");
+        expect(
+            logs.some((line) =>
+                line.includes("system-region rotation: reason=fold_request executed=true"),
+            ),
+        ).toBe(true);
+        // The intent was consumed exactly once and the absorbed segment cleared
+        // with the fold row (the fold owns the delta now).
+        expect(deferred.has(sessionId)).toBe(false);
+        const meta = getOrCreateSessionMeta(db, sessionId);
+        expect(
+            meta.regionVolatileBytes ? Buffer.from(meta.regionVolatileBytes).toString("utf8") : "",
+        ).toBe("");
+        // Control (anti-vacuity): the identical state with an EMPTY queue never
+        // folds — consumption, not the execute decision alone, is the boundary.
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "NO-INTENT-CONTROL",
+        });
+        const logs2: string[] = [];
+        const spy2 = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...values) => {
+            logs2.push(values.join(" "));
+        });
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    schedulerDecision: "execute",
+                    schedulerDeferReason: null,
+                    systemRegionLane: true,
+                    canConsumeDeferredLate: true,
+                    deferredMaterializationSessions: new Set(),
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy2.mockRestore();
+        }
+        expect(readSystemRegion(db, sessionId)).not.toContain("NO-INTENT-CONTROL");
+        expect(logs2.filter((line) => line.includes("system-region rotation:"))).toEqual([]);
+    });
+
+    it("an execute boundary consuming a queued fold request rotates the region once, with receipts", async () => {
+        // Unit 2 Task 3: an additive memory is not a rotation trigger — it
+        // rides the volatile segment. What rotates the region is the fold
+        // REQUEST reaching its named boundary: the queue (historian publish,
+        // wrapup, or the volatile growth backstop) plus a consuming pass.
         const sessionId = "ses-region-c3-promotion";
         const db = await installedRegionDb(sessionId);
         const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
@@ -10434,6 +10582,8 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
                     schedulerDecision: "execute",
                     schedulerDeferReason: null,
                     systemRegionLane: true,
+                    canConsumeDeferredLate: true,
+                    deferredMaterializationSessions: new Set([sessionId]),
                     m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
                 }),
             );
@@ -10442,12 +10592,12 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
         }
         expect(
             logs.some((line) =>
-                line.includes("system-region rotation promoted: reason=max_memory_id"),
+                line.includes("system-region rotation promoted: reason=fold_request"),
             ),
         ).toBe(true);
         expect(
             logs.some((line) =>
-                line.includes("system-region rotation: reason=max_memory_id executed=true"),
+                line.includes("system-region rotation: reason=fold_request executed=true"),
             ),
         ).toBe(true);
         expect(logs.filter((line) => line.includes("cached_m1_missing"))).toEqual([]);
@@ -10475,14 +10625,20 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
             logs.push(values.join(" "));
         });
         try {
-            // Force band, not execute: on an execute pass the pre-existing
-            // softRefreshOpportunity already prices the fold; the earned-bust
-            // loss showed up on boundary passes the scheduler deferred.
+            // Plain execute boundary + a queued fold request (Task 3: the
+            // delta rides the request lane). On an execute pass the
+            // pre-existing softRefreshOpportunity already prices the fold;
+            // the earned-bust loss showed up on boundary passes the scheduler
+            // deferred. The force band has its own rotation laws — the
+            // band arm's promote would outrank the request consumer here.
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, [], {
                     resolvedProviderID: "anthropic",
-                    contextUsage: { percentage: 88, inputTokens: 1_000 },
+                    schedulerDecision: "execute",
+                    schedulerDeferReason: null,
                     systemRegionLane: true,
+                    canConsumeDeferredLate: true,
+                    deferredMaterializationSessions: new Set([sessionId]),
                     m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
                 }),
             );
@@ -10493,7 +10649,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
         expect(foldLines).toHaveLength(1);
         // No contradictory pair on one pass: same cause, opposite verdicts.
         expect(foldLines[0]).not.toContain("reason=unknown executed=false");
-        expect(foldLines[0]).toContain("reason=max_memory_id");
+        expect(foldLines[0]).toContain("reason=fold_request");
         expect(foldLines[0]).toContain("executed=true");
         expect(foldLines[0]).toContain("bustsServedPrefix=true");
     });
@@ -10522,8 +10678,11 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
             await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, [], {
                     resolvedProviderID: "anthropic",
-                    contextUsage: { percentage: 88, inputTokens: 1_000 },
+                    schedulerDecision: "execute",
+                    schedulerDeferReason: null,
                     systemRegionLane: true,
+                    canConsumeDeferredLate: true,
+                    deferredMaterializationSessions: new Set([sessionId]),
                     m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
                 }),
             );
@@ -10531,7 +10690,7 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
             spy.mockRestore();
         }
         expect(calls.length).toBeGreaterThan(0);
-        const foldCalls = calls.filter((c) => c.reason.includes("max_memory_id"));
+        const foldCalls = calls.filter((c) => c.reason.includes("fold_request"));
         expect(foldCalls.length).toBe(1);
         expect(foldCalls[0].after.m1Bytes).toBeNull();
         expect(foldCalls[0].after.m0Bytes).not.toBeNull();
