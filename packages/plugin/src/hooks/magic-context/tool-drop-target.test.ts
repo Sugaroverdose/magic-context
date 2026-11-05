@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it, mock } from "bun:test";
 import { readFileSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
+import ts from "typescript";
 import { deriveKey, renderDropToken } from "./fpe";
 import { isNeutralizedReasoningPart, TOOL_RELEASED_SENTINEL } from "./sentinel";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
@@ -15,19 +16,24 @@ import {
     ToolMutationBatch,
 } from "./tool-drop-target";
 
-// ── Closure census for the volatile-segment lane (ruling 3, brace to the
-// belt below) ──────────────────────────────────────────────────────────────
+// ── Closure census for the volatile-segment lane (ruling 3) ────────────────
 // The volatile lane renders head bytes only; it must have no code path into a
 // message part-mutation primitive (it can never strip a protected block). The
-// four direct-text pins only guard region-volatile.ts's own bytes; a rogue can
-// reach a mutator by importing it (directly or through the transitive value
-// graph) with a name the text scan never listed. These helpers walk the real
-// transitive value-import closure from region-volatile.ts (within src/,
-// following re-export barrels; type-only edges are skipped — erased, cannot
-// execute) and fail closed on any value binding pulled out of a mutator module
-// that is not on the pure-read allowlist. The mutator modules' own internals
-// are never audited (they own the primitives by design); we audit only the
-// edges the volatile lane makes into them.
+// law is enforced over the real transitive static value-import closure from
+// region-volatile.ts, three ways:
+//   belt  — the six-name mutator deny list (the direct-text pins + module
+//           names); a renamed hazard is NOT caught here, it is caught by the
+//           closure-set pin — a closed vocabulary, not an enumerable hazard list;
+//   brace — fail-closed on any value binding pulled out of a mutator that is
+//           not on the pure-read allowlist, and fail-closed on any dynamic
+//           import()/require() token in a reached file not on the escape hatch;
+//   pin   — the EXACT reachable-file set, so a seventh mutator module entering
+//           the closure is a new-file violation even though no list names it.
+// Scanning uses the TypeScript parser, never a regex over raw source: comments,
+// string/template literals, and regex literals can neither fake an import nor
+// hide a real one. (A reviewer reded a regex walker with a fake static import
+// written inside a doc-comment; the AST never sees comments.) Type-only edges
+// are skipped — erased at emit, they cannot execute.
 const VOLATILE_MUTATOR_BASENAMES = new Set([
     "sentinel.ts",
     "tool-drop-target.ts",
@@ -43,47 +49,292 @@ const VOLATILE_MUTATOR_ALLOWLIST: Record<string, ReadonlySet<string>> = {
     "tool-drop-target.ts": new Set(["extractToolCallObservation"]),
 };
 
+// Fail-closed dynamic modality (arm b): any dynamic import()/require()/
+// createRequire token in a REACHED file is a violation UNLESS the file is on
+// this escape hatch, each entry carrying its justification. These are the only
+// four legitimate such sites in the closure (verified against the AST this
+// session); an escape-hatch entry may never name a mutator as its target — a
+// dynamic edge into a mutator reddens even from an allowlisted file.
+const VOLATILE_DYNAMIC_MODALITY_ESCAPE_HATCH: Record<string, string> = {
+    "hooks/magic-context/read-session-formatting.ts":
+        "createRequire + dynamic import of the optional installed tokenizer / encoding WASM packages (installedPaths.tokenizerPath/encodingPath); never a region mutator.",
+    "features/magic-context/storage-db.ts":
+        "lazy dynamic import() of two non-mutator local modules (read-session-chunk, message-time-backfill) to defer heavy load.",
+    "shared/sqlite.ts":
+        "dynamic import() selecting the node:sqlite vs bun:sqlite driver at runtime.",
+    "features/magic-context/memory/embedding-local.ts":
+        "dynamic import() of optional ONNX / @huggingface/transformers WASM deps (+ node:module via createRequire) for local embeddings.",
+};
+
+// Pin (arm c): the exact reachable non-mutator file set (relative to src/) from
+// a clean static value-import walk of region-volatile.ts. Any new reachable
+// file — including a seventh mutator module that no deny list names — reddens
+// until this set is intentionally updated.
+const VOLATILE_CLOSURE_SET = new Set([
+    "agents/language-directive.ts",
+    "agents/magic-context-prompt.ts",
+    "config/schema/agent-overrides.ts",
+    "config/schema/magic-context.ts",
+    "features/magic-context/compaction-marker.ts",
+    "features/magic-context/compartment-chunk-embedding.ts",
+    "features/magic-context/compartment-lease.ts",
+    "features/magic-context/compartment-storage.ts",
+    "features/magic-context/compression-depth-storage.ts",
+    "features/magic-context/context-store-uuid.ts",
+    "features/magic-context/dreamer/cron.ts",
+    "features/magic-context/fail-closed-block.ts",
+    "features/magic-context/git-commits/storage-git-commit-embeddings.ts",
+    "features/magic-context/git-commits/storage-git-commits.ts",
+    "features/magic-context/git-commits/sweep-coordinator.ts",
+    "features/magic-context/lkg-prefix-chunks.ts",
+    "features/magic-context/memory/constants.ts",
+    "features/magic-context/memory/cosine-similarity.ts",
+    "features/magic-context/memory/embedding-backfill.ts",
+    "features/magic-context/memory/embedding-cache.ts",
+    "features/magic-context/memory/embedding-failure.ts",
+    "features/magic-context/memory/embedding-identity.ts",
+    "features/magic-context/memory/embedding-local.ts",
+    "features/magic-context/memory/embedding-model-match.ts",
+    "features/magic-context/memory/embedding-openai.ts",
+    "features/magic-context/memory/embedding-ssrf.ts",
+    "features/magic-context/memory/embedding-synapse.ts",
+    "features/magic-context/memory/embedding-worker-client.ts",
+    "features/magic-context/memory/embedding.ts",
+    "features/magic-context/memory/index.ts",
+    "features/magic-context/memory/memory-selection.ts",
+    "features/magic-context/memory/normalize-hash.ts",
+    "features/magic-context/memory/project-identity-cache.ts",
+    "features/magic-context/memory/project-identity.ts",
+    "features/magic-context/memory/promotion.ts",
+    "features/magic-context/memory/storage-memory-embeddings.ts",
+    "features/magic-context/memory/storage-memory-fts.ts",
+    "features/magic-context/memory/storage-memory-verifications.ts",
+    "features/magic-context/memory/storage-memory.ts",
+    "features/magic-context/memory/transformers-remote-host.ts",
+    "features/magic-context/memory/types.ts",
+    "features/magic-context/memory/verification-paths.ts",
+    "features/magic-context/memory/visibility.ts",
+    "features/magic-context/merged-reasoning-decisions.ts",
+    "features/magic-context/message-fts-rowid-map.ts",
+    "features/magic-context/message-index.ts",
+    "features/magic-context/migration-v94-write-split.ts",
+    "features/magic-context/migration-worker-client.ts",
+    "features/magic-context/migrations.ts",
+    "features/magic-context/mural/mural-font.generated.ts",
+    "features/magic-context/mural/mural-selection.ts",
+    "features/magic-context/mural/render-mural.ts",
+    "features/magic-context/mural/render-trigger.ts",
+    "features/magic-context/mural/resolve-mural.ts",
+    "features/magic-context/mural/storage-mural-cues.ts",
+    "features/magic-context/mural/storage-mural.ts",
+    "features/magic-context/no-content-compartment.ts",
+    "features/magic-context/opencode2-relabel.ts",
+    "features/magic-context/pi-content-decisions.ts",
+    "features/magic-context/project-docs-hash.ts",
+    "features/magic-context/project-embedding-registry.ts",
+    "features/magic-context/project-identity.ts",
+    "features/magic-context/protection-window.ts",
+    "features/magic-context/reclaim-protection.ts",
+    "features/magic-context/recursive-text-splitter.ts",
+    "features/magic-context/resolve-subagent-fallback.ts",
+    "features/magic-context/session-activity.ts",
+    "features/magic-context/session-decision-calibration.ts",
+    "features/magic-context/session-project-storage.ts",
+    "features/magic-context/shadow-backfill-state.ts",
+    "features/magic-context/storage-clone.ts",
+    "features/magic-context/storage-compartment-history-version.ts",
+    "features/magic-context/storage-db.ts",
+    "features/magic-context/storage-embedding-measurements.ts",
+    "features/magic-context/storage-identity-rekey-map.ts",
+    "features/magic-context/storage-m0-mutation-log.ts",
+    "features/magic-context/storage-memory-mutation-log.ts",
+    "features/magic-context/storage-meta-persisted.ts",
+    "features/magic-context/storage-meta-session.ts",
+    "features/magic-context/storage-meta-shared.ts",
+    "features/magic-context/storage-meta.ts",
+    "features/magic-context/storage-native-replay.ts",
+    "features/magic-context/storage-notes.ts",
+    "features/magic-context/storage-ops.ts",
+    "features/magic-context/storage-primers.ts",
+    "features/magic-context/storage-project-state.ts",
+    "features/magic-context/storage-replay-document.ts",
+    "features/magic-context/storage-schema-helpers.ts",
+    "features/magic-context/storage-session-tables.ts",
+    "features/magic-context/storage-source.ts",
+    "features/magic-context/storage-subagent-invocations.ts",
+    "features/magic-context/storage-tags.ts",
+    "features/magic-context/storage-v22-backfill-failures.ts",
+    "features/magic-context/storage.ts",
+    "features/magic-context/system-region.ts",
+    "features/magic-context/tool-definition-tokens.ts",
+    "features/magic-context/tool-owner-backfill.ts",
+    "features/magic-context/user-memory/storage-user-memory.ts",
+    "features/magic-context/workspaces.ts",
+    "hooks/magic-context/compaction-marker-manager.ts",
+    "hooks/magic-context/compartment-parser.ts",
+    "hooks/magic-context/compartment-render-epoch.ts",
+    "hooks/magic-context/ctx-reduce-nudge.ts",
+    "hooks/magic-context/decay-curve.ts",
+    "hooks/magic-context/decay-render.ts",
+    "hooks/magic-context/decision-calibration.ts",
+    "hooks/magic-context/embed-session-state.ts",
+    "hooks/magic-context/emergency-drop.ts",
+    "hooks/magic-context/host-served-rows.ts",
+    "hooks/magic-context/image-token-estimate.ts",
+    "hooks/magic-context/inject-compartments.ts",
+    "hooks/magic-context/lkg-slot.ts",
+    "hooks/magic-context/read-session-chunk.ts",
+    "hooks/magic-context/read-session-db.ts",
+    "hooks/magic-context/read-session-formatting.ts",
+    "hooks/magic-context/read-session-raw.ts",
+    "hooks/magic-context/read-session-true-raw-tokens.ts",
+    "hooks/magic-context/region-render.ts",
+    "hooks/magic-context/region-volatile.ts",
+    "hooks/magic-context/system-injection-stripper.ts",
+    "hooks/magic-context/tag-content-primitives.ts",
+    "hooks/magic-context/tag-part-guards.ts",
+    "hooks/magic-context/tail-hygiene-walk.ts",
+    "hooks/magic-context/temporal-awareness.ts",
+    "hooks/magic-context/todo-view.ts",
+    "hooks/magic-context/tokenizer-calibration-seeds.json",
+    "hooks/magic-context/tokenizer-calibration.ts",
+    "hooks/magic-context/tool-sweep-policy.ts",
+    "hooks/magic-context/user-profile-render.ts",
+    "plugin/boot-quiet.ts",
+    "shared/background-batch-drain.ts",
+    "shared/bounded-session-map.ts",
+    "shared/commit-detection.ts",
+    "shared/context-limit-provenance.ts",
+    "shared/data-path.ts",
+    "shared/embedding-activity.ts",
+    "shared/error-message.ts",
+    "shared/escalation-bands.ts",
+    "shared/harness-provider-map.ts",
+    "shared/harness.ts",
+    "shared/historian-tool-defaults.json",
+    "shared/historian-tool-expansions.ts",
+    "shared/historian-tool-template.ts",
+    "shared/internal-initiator-marker.ts",
+    "shared/logger.ts",
+    "shared/models-dev-cache.ts",
+    "shared/off-thread-migration-clock.ts",
+    "shared/opencode-db-path.ts",
+    "shared/pi-executable.ts",
+    "shared/project-directory-key.ts",
+    "shared/prompt-surface.ts",
+    "shared/record-type-guard.ts",
+    "shared/redaction.ts",
+    "shared/rpc-utils.ts",
+    "shared/sqlite-helpers.ts",
+    "shared/sqlite.ts",
+    "shared/stable-json.ts",
+    "shared/stale-plugin-build.ts",
+    "shared/storage-permissions.ts",
+    "shared/system-directive.ts",
+    "shared/tag-owner-id.ts",
+    "shared/test-temp-dir.ts",
+    "shared/window-geometry.ts",
+    "shared/write-transaction-timing.ts",
+    "shared/xml-unescape.ts",
+    "v2/store-reader.ts",
+]);
+
 interface ImportEdge {
     names: string[];
     spec: string;
-    isType: boolean;
     kind: "named" | "namespace" | "default" | "star" | "sideeffect";
 }
 
-function importEdgesOf(text: string): ImportEdge[] {
-    const edges: ImportEdge[] = [];
-    let m: RegExpExecArray | null;
-    const namedRe =
-        /(import|export)\s+(type\s+)?\{([^}]*)\}\s*(?:as\s+\w+\s*)?from\s+["']([^"']+)["']/g;
-    while ((m = namedRe.exec(text))) {
-        const rawNames = m[3]
-            .split(",")
-            .map((s) => s.trim())
-            .filter(Boolean);
-        const valueNames = rawNames.filter((n) => !n.startsWith("type "));
-        edges.push({
-            names: valueNames,
-            spec: m[4],
-            isType: Boolean(m[2]) || rawNames.length === 0 || valueNames.length === 0,
-            kind: "named",
-        });
+const VOLATILE_AST_CACHE = new Map<string, ts.SourceFile>();
+function parseVolatileFile(fileName: string, text: string): ts.SourceFile {
+    const key = `${fileName} ${text}`;
+    let sf = VOLATILE_AST_CACHE.get(key);
+    if (!sf) {
+        sf = ts.createSourceFile(fileName, text, ts.ScriptTarget.Latest, true);
+        VOLATILE_AST_CACHE.set(key, sf);
     }
-    const nsRe = /(?:import|export)\s+\*\s+as\s+\w+\s+from\s+["']([^"']+)["']/g;
-    while ((m = nsRe.exec(text)))
-        edges.push({ names: ["*"], spec: m[1], isType: false, kind: "namespace" });
-    const starRe = /export\s+\*\s+(type\s+)?from\s+["']([^"']+)["']/g;
-    while ((m = starRe.exec(text)))
-        edges.push({ names: ["*"], spec: m[2], isType: Boolean(m[1]), kind: "star" });
-    const defRe = /import\s+([A-Za-z_$][\w$]*)\s*(?:,\s*\{[^}]*\})?\s*from\s+["']([^"']+)["']/g;
-    while ((m = defRe.exec(text)))
-        edges.push({ names: [m[1]], spec: m[2], isType: false, kind: "default" });
-    const sideRe = /^[ \t]*import\s+["']([^"']+)["']/gm;
-    while ((m = sideRe.exec(text)))
-        edges.push({ names: [], spec: m[1], isType: false, kind: "sideeffect" });
+    return sf;
+}
+
+// Static VALUE import/re-export edges only (type-only clauses/specifiers are
+// skipped — erased, cannot execute). Parsed from the AST, so nothing inside a
+// comment, string, or regex literal can masquerade as an import.
+function volatileImportEdges(text: string, fileName: string): ImportEdge[] {
+    const sf = parseVolatileFile(fileName, text);
+    const edges: ImportEdge[] = [];
+    const clause = (c: ts.ImportClause | undefined, spec: string): void => {
+        if (!c || c.isTypeOnly) return;
+        const nb = c.namedBindings;
+        if (nb && ts.isNamedImports(nb)) {
+            const vals = nb.elements.filter((e) => !e.isTypeOnly).map((e) => e.name.text);
+            if (vals.length) edges.push({ names: vals, spec, kind: "named" });
+        } else if (nb && ts.isNamespaceImport(nb)) {
+            edges.push({ names: ["*"], spec, kind: "namespace" });
+        } else {
+            edges.push({ names: [c.name ? c.name.text : "_default"], spec, kind: "default" });
+        }
+    };
+    const walk = (n: ts.Node): void => {
+        if (ts.isImportDeclaration(n) && ts.isStringLiteral(n.moduleSpecifier)) {
+            if (!n.importClause)
+                edges.push({ names: [], spec: n.moduleSpecifier.text, kind: "sideeffect" });
+            else clause(n.importClause, n.moduleSpecifier.text);
+        }
+        if (
+            ts.isExportDeclaration(n) &&
+            n.moduleSpecifier &&
+            ts.isStringLiteral(n.moduleSpecifier) &&
+            !n.isTypeOnly
+        ) {
+            if (!n.exportClause)
+                edges.push({ names: ["*"], spec: n.moduleSpecifier.text, kind: "star" });
+            else if (ts.isNamedExports(n.exportClause)) {
+                const vals = n.exportClause.elements
+                    .filter((e) => !e.isTypeOnly)
+                    .map((e) => e.name.text);
+                if (vals.length)
+                    edges.push({ names: vals, spec: n.moduleSpecifier.text, kind: "named" });
+            }
+        }
+        n.forEachChild(walk);
+    };
+    walk(sf);
     return edges;
 }
 
-function volatileSpecToFile(srcRoot: string, fromFile: string, spec: string): string | null {
+// Dynamic import()/require()/createRequire tokens, AST-detected. Returns the
+// call kind with its string-literal target ("<dynamic>" when non-literal).
+function volatileModalityTokens(text: string, fileName: string): string[] {
+    const sf = parseVolatileFile(fileName, text);
+    const toks: string[] = [];
+    const arg = (n: ts.CallExpression): string =>
+        n.arguments[0] && ts.isStringLiteral(n.arguments[0]) ? n.arguments[0].text : "<dynamic>";
+    const walk = (n: ts.Node): void => {
+        if (ts.isCallExpression(n)) {
+            if (n.expression.kind === ts.SyntaxKind.ImportKeyword) toks.push(`import(${arg(n)})`);
+            else {
+                const callee = n.expression.getText(sf);
+                if (
+                    callee === "require" ||
+                    callee.endsWith(".require") ||
+                    callee.endsWith("createRequire") ||
+                    callee.includes("createRequire")
+                )
+                    toks.push(`require(${arg(n)})`);
+            }
+        }
+        n.forEachChild(walk);
+    };
+    walk(sf);
+    return toks;
+}
+
+function volatileSpecToFile(
+    srcRoot: string,
+    fromFile: string,
+    spec: string,
+    patch: Map<string, string>,
+): string | null {
     if (!spec.startsWith(".")) return null;
     const base = resolve(fromFile, "..", spec);
     for (const c of [
@@ -93,6 +344,10 @@ function volatileSpecToFile(srcRoot: string, fromFile: string, spec: string): st
         join(base, "index.ts"),
         join(base, "index.tsx"),
     ]) {
+        if (patch.has(c)) {
+            if (c.startsWith(`${srcRoot}/`) && !c.endsWith(".test.ts")) return c;
+            continue;
+        }
         try {
             if (statSync(c).isFile() && c.startsWith(`${srcRoot}/`) && !c.endsWith(".test.ts")) {
                 return c;
@@ -104,35 +359,78 @@ function volatileSpecToFile(srcRoot: string, fromFile: string, spec: string): st
     return null;
 }
 
-function findVolatileMutationReach(
-    overrides?: Map<string, string>,
-    allowlistOverride?: Record<string, ReadonlySet<string>>,
-): string[] {
+function mutatorBasenameHit(target: string): string | null {
+    if (target === "<dynamic>" || !target.startsWith(".")) return null;
+    const tb = target.split("/").pop() ?? "";
+    if (VOLATILE_MUTATOR_BASENAMES.has(tb)) return tb;
+    if (VOLATILE_MUTATOR_BASENAMES.has(`${tb}.ts`)) return `${tb}.ts`;
+    return null;
+}
+
+interface VolatileCensus {
+    violations: string[];
+    reached: string[];
+}
+
+/**
+ * Walk the transitive static value-import closure from region-volatile.ts and
+ * return every violation of the volatile lane's reach-freedom contract: an
+ * unallowlisted value binding from a mutator, a dynamic import()/require()
+ * outside the escape hatch (or naming a mutator from inside it), or a reachable
+ * file set that differs from the pin. `overrides` is a virtual-patch map
+ * (absolute path → text): it rewrites an existing reached file's bytes and/or
+ * declares a brand-new reachable file (so a seventh-module plant is seen
+ * without a disk write). Never mutates anything on disk.
+ */
+function runVolatileCensus(
+    opts: {
+        overrides?: Map<string, string>;
+        mutatorAllowlist?: Record<string, ReadonlySet<string>>;
+        escapeHatch?: Record<string, string>;
+        closureSet?: ReadonlySet<string>;
+    } = {},
+): VolatileCensus {
     const srcRoot = resolve(import.meta.dirname, "..", "..");
     const start = join(srcRoot, "hooks", "magic-context", "region-volatile.ts");
-    const read = (p: string): string => overrides?.get(p) ?? readFileSync(p, "utf8");
-    const allowlist = allowlistOverride ?? VOLATILE_MUTATOR_ALLOWLIST;
+    const patch = opts.overrides ?? new Map<string, string>();
+    const read = (p: string): string => patch.get(p) ?? readFileSync(p, "utf8");
+    const allowlist = opts.mutatorAllowlist ?? VOLATILE_MUTATOR_ALLOWLIST;
+    const escapeHatch = opts.escapeHatch ?? VOLATILE_DYNAMIC_MODALITY_ESCAPE_HATCH;
+    const closureSet = opts.closureSet ?? VOLATILE_CLOSURE_SET;
     const rel = (p: string): string => p.slice(srcRoot.length + 1);
     const violations: string[] = [];
     const seen = new Set<string>([start]);
     const queue: string[] = [start];
     while (queue.length > 0) {
         const file = queue.shift() as string;
-        for (const edge of importEdgesOf(read(file))) {
-            if (edge.isType) continue;
-            const target = volatileSpecToFile(srcRoot, file, edge.spec);
+        const fileRel = rel(file);
+        const text = read(file);
+        // (arm b) fail-closed dynamic modality on every reached non-mutator file.
+        const hatched = fileRel in escapeHatch;
+        for (const tok of volatileModalityTokens(text, file)) {
+            const target = tok.slice(tok.indexOf("(") + 1, tok.lastIndexOf(")"));
+            const namesMutator = mutatorBasenameHit(target);
+            if (!hatched)
+                violations.push(
+                    `${fileRel} -[modality ${tok}]-> dynamic import/require not escape-hatched`,
+                );
+            else if (namesMutator)
+                violations.push(`${fileRel} -[modality ${tok}]-> escape hatch names a mutator`);
+        }
+        for (const edge of volatileImportEdges(text, file)) {
+            const target = volatileSpecToFile(srcRoot, file, edge.spec, patch);
             if (!target) continue;
-            const basename = target.slice(target.lastIndexOf("/") + 1);
-            if (VOLATILE_MUTATOR_BASENAMES.has(basename)) {
-                const allowed = allowlist[basename];
+            const basenameT = target.slice(target.lastIndexOf("/") + 1);
+            if (VOLATILE_MUTATOR_BASENAMES.has(basenameT)) {
+                const allowed = allowlist[basenameT];
                 if (edge.kind === "named") {
                     for (const name of edge.names) {
                         if (!allowed?.has(name)) {
-                            violations.push(`${rel(file)} -[named ${name}]-> ${basename}`);
+                            violations.push(`${fileRel} -[named ${name}]-> ${basenameT}`);
                         }
                     }
                 } else {
-                    violations.push(`${rel(file)} -[${edge.kind}]-> ${basename}`);
+                    violations.push(`${fileRel} -[${edge.kind}]-> ${basenameT}`);
                 }
                 continue; // never audit a mutator module's own internals
             }
@@ -142,7 +440,12 @@ function findVolatileMutationReach(
             }
         }
     }
-    return violations;
+    // (arm c) positive closure-set pin.
+    for (const p of seen)
+        if (!closureSet.has(rel(p))) violations.push(`new reachable file ${rel(p)}`);
+    for (const p of closureSet)
+        if (!seen.has(join(srcRoot, p))) violations.push(`missing reachable file ${p}`);
+    return { violations, reached: [...seen].map(rel).sort() };
 }
 
 function message(id: string, role: string, parts: unknown[]): MessageLike {
@@ -496,11 +799,10 @@ describe("tool-drop-target", () => {
                 expect(source).not.toMatch(/clearThinkingParts/);
                 expect(source).not.toMatch(/\bMessageLike\b/);
                 expect(source).not.toMatch(/\.parts\b/);
-                // BRACES: the real transitive value-import closure (not a string
-                // list) reaches no part-mutation export. A rogue cannot evade by
-                // importing a mutator under a name the belt never listed, or by
-                // smuggling one through a barrel two hops down the graph.
-                expect(findVolatileMutationReach()).toEqual([]);
+                // BRACES: the AST value-import closure reaches no unallowlisted
+                // mutator binding, pulls no dynamic import()/require() outside
+                // the escape hatch, and its reachable-file set equals the pin.
+                expect(runVolatileCensus().violations).toEqual([]);
             });
 
             it("the mutator allowlist names only real, still-present exports (fail-closed guard)", () => {
@@ -526,36 +828,108 @@ describe("tool-drop-target", () => {
                 }
             });
 
-            it("REDS under planted part-mutation reach (committed rogue-loop witness)", () => {
-                // #2780: a re-runnable witness, not a run-then-delete disclosure.
-                // Each rogue is a virtual patch (plant not shipped); the census
-                // must turn red and name the smuggled binding. The first is the
-                // reviewer's exact evade class (a direct makeSentinel import the
-                // four-string belt never listed); the others prove the walk is
-                // transitive and barrel-aware, not first-order-only.
+            it("the dynamic-modality escape hatch is real and never licenses a mutator target", () => {
+                // (arm b) Fail-closed means the hatch is the sole license for a
+                // dynamic token. A hatch entry that has become vestigial (no such
+                // token anymore) is dead weight that hides a future plant, and a
+                // hatch entry that could name a mutator defeats the whole gate —
+                // both are defects, so the hatch is audited, not just trusted.
+                expect(Object.keys(VOLATILE_DYNAMIC_MODALITY_ESCAPE_HATCH).length).toBeGreaterThan(
+                    0,
+                );
+                for (const [relPath, justification] of Object.entries(
+                    VOLATILE_DYNAMIC_MODALITY_ESCAPE_HATCH,
+                )) {
+                    expect(
+                        justification.length,
+                        `${relPath} hatch needs a justification`,
+                    ).toBeGreaterThan(20);
+                    // The hatch must cover a file that is really in the closure.
+                    expect(
+                        VOLATILE_CLOSURE_SET.has(relPath),
+                        `${relPath} is reachable (hatch is not vestigial on an unreachable file)`,
+                    ).toBe(true);
+                    const abs = join(resolve(import.meta.dirname, "..", ".."), relPath);
+                    const toks = volatileModalityTokens(readFileSync(abs, "utf8"), abs);
+                    // Not vestigial: the file really does carry a dynamic token.
+                    expect(
+                        toks.length,
+                        `${relPath} still uses dynamic import/require`,
+                    ).toBeGreaterThan(0);
+                    // And never a mutator: an escape-hatched dynamic edge may not
+                    // reach the part-mutation modules by literal specifier.
+                    for (const tok of toks) {
+                        const target = tok.slice(tok.indexOf("(") + 1, tok.lastIndexOf(")"));
+                        expect(
+                            mutatorBasenameHit(target),
+                            `${relPath} dynamic target ${target} must not be a mutator`,
+                        ).toBeNull();
+                    }
+                }
+            });
+
+            it("the reachable closure is exactly the pinned file set (arm c)", () => {
+                // A seventh mutator that no deny list names still enters here as a
+                // NEW reachable file, so the closed vocabulary — not the six-name
+                // enumeration — is the load-bearing brace. Any drift (a new file,
+                // or one that stopped being reachable) reddens until the pin is
+                // intentionally updated.
+                expect(runVolatileCensus().reached).toEqual([...VOLATILE_CLOSURE_SET].sort());
+            });
+
+            it("ignores a static import faked inside a comment (arm a, AST)", () => {
+                // The reviewer reded a regex walker by writing a fake static
+                // mutator import inside a doc-comment. The AST never sees
+                // comments, so the census must be blind to it — while the very
+                // same import written OUTSIDE a comment must redden. Paired so
+                // neither the ignore (false green) nor the catch (vacuous) can
+                // pass on its own.
+                const srcRoot = resolve(import.meta.dirname, "..", "..");
+                const dr = join(srcRoot, "hooks", "magic-context", "decay-render.ts");
+                const baseText = readFileSync(dr, "utf8");
+                const inComment = new Map([
+                    [dr, `${baseText}\n/* import { makeSentinel } from "./sentinel"; */\n`],
+                ]);
+                expect(
+                    runVolatileCensus({ overrides: inComment }).violations.join("\n"),
+                ).not.toContain("makeSentinel");
+                const realImport = new Map([
+                    [dr, `${baseText}\nimport { makeSentinel } from "./sentinel";\n`],
+                ]);
+                expect(
+                    runVolatileCensus({ overrides: realImport }).violations.join("\n"),
+                ).toContain("makeSentinel");
+            });
+
+            it("REDS under planted reach (committed rogue-loop witnesses)", () => {
+                // #2780: re-runnable witnesses, plants kept virtual (never on
+                // disk). One per reviewer-plant class; each asserts the hardened
+                // walker REDS with the planted needle.
                 const srcRoot = resolve(import.meta.dirname, "..", "..");
                 const rv = join(srcRoot, "hooks", "magic-context", "region-volatile.ts");
                 const dr = join(srcRoot, "hooks", "magic-context", "decay-render.ts");
-                // Discovery witness on the REAL tree (no injection): stripping the
-                // allowlist must surface the one genuine deep edge — the volatile
+                const rvText = readFileSync(rv, "utf8");
+                const drText = readFileSync(dr, "utf8");
+
+                // Discovery witness on the REAL tree: stripping the pure-read
+                // allowlist surfaces the one genuine deep edge — the volatile
                 // closure reaches read-session-chunk.ts (many hops down) and finds
                 // its extractToolCallObservation import of tool-drop-target. A
                 // 1-hop-only walk would never see it, so this proves transitivity.
-                const stripped = findVolatileMutationReach(undefined, {});
-                expect(stripped.join("\n")).toContain("read-session-chunk.ts");
-                expect(stripped.join("\n")).toContain("extractToolCallObservation");
+                const stripped = runVolatileCensus({ mutatorAllowlist: {} }).violations.join("\n");
+                expect(stripped).toContain("read-session-chunk.ts");
+                expect(stripped).toContain("extractToolCallObservation");
+
                 const rogues: Array<{
                     label: string;
                     overrides: Map<string, string>;
                     needle: string;
                 }> = [
+                    // mutator-reach belt (reviewer evades the four-string scan):
                     {
                         label: "direct mutator import (reviewer evade: makeSentinel)",
                         overrides: new Map([
-                            [
-                                rv,
-                                `${readFileSync(rv, "utf8")}\nimport { makeSentinel } from "./sentinel";\n`,
-                            ],
+                            [rv, `${rvText}\nimport { makeSentinel } from "./sentinel";\n`],
                         ]),
                         needle: "makeSentinel",
                     },
@@ -564,7 +938,7 @@ describe("tool-drop-target", () => {
                         overrides: new Map([
                             [
                                 dr,
-                                `${readFileSync(dr, "utf8")}\nimport { createToolDropTarget } from "./tool-drop-target";\n`,
+                                `${drText}\nimport { createToolDropTarget } from "./tool-drop-target";\n`,
                             ],
                         ]),
                         needle: "createToolDropTarget",
@@ -574,21 +948,52 @@ describe("tool-drop-target", () => {
                         overrides: new Map([
                             [
                                 dr,
-                                `${readFileSync(dr, "utf8")}\nexport { makeWholeMessageSentinel } from "./sentinel";\n`,
+                                `${drText}\nexport { makeWholeMessageSentinel } from "./sentinel";\n`,
                             ],
                         ]),
                         needle: "makeWholeMessageSentinel",
                     },
                     {
                         label: "side-effect import of a mutator module",
-                        overrides: new Map([
-                            [rv, `${readFileSync(rv, "utf8")}\nimport "./sentinel";\n`],
-                        ]),
+                        overrides: new Map([[rv, `${rvText}\nimport "./sentinel";\n`]]),
                         needle: "[sideeffect]-> sentinel.ts",
+                    },
+                    // (arm b) dynamic modality, fail-closed:
+                    {
+                        label: "dynamic import() of a mutator from the lane",
+                        overrides: new Map([
+                            [
+                                rv,
+                                `${rvText}\nasync function __r(){ return await import("./tool-drop-target"); }\n`,
+                            ],
+                        ]),
+                        needle: "modality import(./tool-drop-target)",
+                    },
+                    {
+                        label: "createRequire-style require into a mutator",
+                        overrides: new Map([
+                            [
+                                rv,
+                                `${rvText}\nconst __rr = createRequire(import.meta.url)("./sentinel");\n`,
+                            ],
+                        ]),
+                        needle: "modality require(./sentinel)",
+                    },
+                    // (arm c) closed vocabulary catches an unnamed mutator:
+                    {
+                        label: "seventh-module mutator, named by no deny list",
+                        overrides: new Map([
+                            [rv, `${rvText}\nimport { plunderParts } from "./part-plunger";\n`],
+                            [
+                                join(srcRoot, "hooks", "magic-context", "part-plunger.ts"),
+                                'export function plunderParts(): string {\n    return "";\n}\n',
+                            ],
+                        ]),
+                        needle: "new reachable file hooks/magic-context/part-plunger.ts",
                     },
                 ];
                 for (const rogue of rogues) {
-                    const violations = findVolatileMutationReach(rogue.overrides);
+                    const violations = runVolatileCensus({ overrides: rogue.overrides }).violations;
                     expect(violations, rogue.label).not.toEqual([]);
                     expect(violations.join("\n"), rogue.label).toContain(rogue.needle);
                 }

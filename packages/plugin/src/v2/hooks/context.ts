@@ -527,11 +527,16 @@ export interface V2ToolExecuteBeforeDraft {
 }
 
 /**
- * The v2 `execute.before` composition: dropped-input guard, then the FPE
- * released-input resolver — the same two stages the v1 production composition
- * (`createToolExecuteBeforeHook`, fpe-resolve.ts) runs, in the same order.
+ * The v2 `execute.before` composition carries two of the three stages the v1
+ * production composition (`createToolExecuteBeforeHook`, fpe-resolve.ts) runs,
+ * in the same order: (1) the dropped-input guard, then (2) the FPE released-input
+ * resolver. v1's third stage — the dreamer token-budget gate
+ * (`refuseBudgetedToolCall`, fpe-resolve.ts:186, ahead of the guard) — is
+ * deliberately ABSENT here: v2 budgets hidden children via the usage-poll and an
+ * emptied tool set, so no per-call budget gate is wired on the v2 twin.
  *
- * Ordering is guard-first: the guard scans the RAW args, so a model echo of a
+ * Ordering is guard-first (matching v1: guard at fpe-resolve.ts:195 precedes the
+ * resolver at :202): the guard scans the RAW args, so a model echo of a
  * `[dropped §N§]` message placeholder refuses and is never fed to the resolver
  * (a resolved original is never scanned). Only guard-accepted calls reach
  * resolution, where a re-emitted carrier is restored to its released input
