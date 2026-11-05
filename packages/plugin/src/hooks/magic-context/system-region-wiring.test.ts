@@ -387,7 +387,10 @@ describe("system-region wiring: reader discrimination over stored rows", () => {
         const { prepareRegionReplay, hasServableRegion } = await import("./inject-compartments");
         const db = seedRow(
             "ses-c2-regionrow",
-            Buffer.from(`<!-- mc:system-region v1 -->\n<project-memory>foreign</project-memory>`, "utf8"),
+            Buffer.from(
+                `<!-- mc:system-region v1 -->\n<project-memory>foreign</project-memory>`,
+                "utf8",
+            ),
         );
         expect(prepareRegionReplay(db, "ses-c2-regionrow")).toBeDefined();
         expect(hasServableRegion(db, "ses-c2-regionrow")).toBe(true);
@@ -423,6 +426,12 @@ describe("prepareRegionReplay truth table (lint-refactor pin)", () => {
 // decider, computed once per handler boot from transformMode + compaction
 // (L0 spirit: one decider, threaded — no per-site re-derivation).
 describe("system-region capability lane (flag deletion)", () => {
+    // Unit 1 Step 4 (plan:20): the predicate is a pure constant. The rust and
+    // compaction-off rows retired here asked the lane to refuse service; the
+    // rust refusal moved upstream to the config-resolution funnel
+    // (transform-mode.ts named boot refusal) and compaction-off rides the
+    // region (binary-authority ruling). system-region-lane-law.test.ts pins
+    // the pure-constant structure; this table pins call-site stability.
     const TABLE: Array<{
         name: string;
         config: { transform_mode?: "ts" | "rust"; compaction?: { enabled?: boolean } | false };
@@ -434,17 +443,11 @@ describe("system-region capability lane (flag deletion)", () => {
             config: { transform_mode: "ts", compaction: { enabled: true } },
             want: true,
         },
-        { name: "rust transform mode", config: { transform_mode: "rust" }, want: false },
-        {
-            name: "rust + compaction on",
-            config: { transform_mode: "rust", compaction: { enabled: true } },
-            want: false,
-        },
-        { name: "compaction off (legacy false)", config: { compaction: false }, want: false },
+        { name: "compaction off (legacy false)", config: { compaction: false }, want: true },
         {
             name: "compaction off (object)",
             config: { compaction: { enabled: false } },
-            want: false,
+            want: true,
         },
     ];
     for (const row of TABLE) {

@@ -6,29 +6,26 @@ export interface ResolveTransformModeArgs {
     compactionEnabled: boolean;
 }
 
-export const RUST_COMPACTION_OFF_WARNING =
-    "compaction-off mode does not support rust transform mode; using the TypeScript transform.";
-
-const RUST_REQUIRES_USER_SUBC_WARNING =
-    "rust mode requires user-level subc configuration; running ts.";
+/**
+ * Named boot refusal (assembly-v2 Unit 1, migration plan Task 4 Step 4,
+ * spec §21 amendment): `transform_mode: "rust"` is shelved — the frozen
+ * system-region lane serves unconditionally, and the Rust module composes its
+ * own panel heads, so an active rust mode would double-serve from two
+ * baselines (#2704). Every rust request resolves to `ts` with this warning;
+ * there is no configuration that re-enables it on this product line. The
+ * args stay in the signature so call sites and future revival keep their
+ * shape; the resolver reads none of them.
+ */
+export const RUST_BOOT_REFUSAL_WARNING =
+    "rust transform mode is refused at boot (frozen system-region lane; the Rust module is shelved) — running ts.";
 
 export function resolveTransformMode(args: ResolveTransformModeArgs): {
     mode: ResolvedTransformMode;
     warnings: string[];
 } {
-    if (args.configured === "rust" && !args.compactionEnabled) {
-        return {
-            mode: "ts",
-            warnings: [RUST_COMPACTION_OFF_WARNING],
-        };
-    }
-
-    if (args.configured === "rust" && !args.userTierHasSubc) {
-        return {
-            mode: "ts",
-            warnings: [RUST_REQUIRES_USER_SUBC_WARNING],
-        };
-    }
-
-    return { mode: args.configured, warnings: [] };
+    if (args.configured !== "rust") return { mode: "ts", warnings: [] };
+    return {
+        mode: "ts",
+        warnings: [RUST_BOOT_REFUSAL_WARNING],
+    };
 }

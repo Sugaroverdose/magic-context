@@ -2625,10 +2625,11 @@ export function createTransform(deps: TransformDeps) {
             schedulerDecision,
             schedulerDeferReason,
             fullFeatureMode,
-            // The frozen system-region lane is an install-time capability with
-            // one exception: compaction-off installs keep the head carriage by
-            // the host-managed-window contract (config/system-region-lane.ts).
-            systemRegionLane: deps.systemRegionLane === true && !compactionOff,
+            // The frozen system-region lane is an install-time capability and a
+            // pure constant (Unit 1 Step 4): compaction-off rides the region too
+            // (binary-authority ruling); the off-mode carve-outs that remain are
+            // the reclaim lanes (native owner), not serve authority.
+            systemRegionLane: deps.systemRegionLane === true,
             compactionOff,
             canRunCompartments,
             awaitedCompartmentRun,

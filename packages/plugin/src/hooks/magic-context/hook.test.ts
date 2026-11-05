@@ -1221,9 +1221,12 @@ it("the event hook flushes notices on session.idle, never on a terminal assistan
 // Round-2 review C2b: the region flag must never reach a lane that composes
 // its own heads — the Rust transform mode composes m[0] panel heads inside
 // the module, so appending the stored region there double-serves panels from
-// two baselines. The gate is v1-TS-only.
+// two baselines. Unit 1 Step 4 moved that exclusion upstream: the config-
+// resolution funnel turns transform_mode "rust" into a named boot refusal
+// (config/transform-mode.ts), so no config value ever reaches the handler or
+// the transform as rust. The boot thread is a pure constant here.
 describe("system-region capability lane (boot-resolved, no config key)", () => {
-    it("transform_mode rust keeps the region off on both the system handler and the transform", async () => {
+    it("every boot threads the region lane true, rust config included (refusal is upstream)", async () => {
         const { spyOn } = await import("bun:test");
         const spm = await import("./system-prompt-hash");
         const tf = await import("./transform");
@@ -1250,8 +1253,8 @@ describe("system-region capability lane (boot-resolved, no config key)", () => {
             createMagicContextHook(deps);
             expect(handlerOpts.length).toBeGreaterThan(0);
             expect(transformOpts.length).toBeGreaterThan(0);
-            expect(handlerOpts[0].systemRegionLane).toBe(false);
-            expect(transformOpts[0].systemRegionLane).toBe(false);
+            expect(handlerOpts[0].systemRegionLane).toBe(true);
+            expect(transformOpts[0].systemRegionLane).toBe(true);
 
             // Capability-by-default: an ordinary TS install boots the lane
             // with no config involvement (owner ruling: switch dead).
@@ -1260,13 +1263,15 @@ describe("system-region capability lane (boot-resolved, no config key)", () => {
             expect(handlerOpts.at(-1)?.systemRegionLane).toBe(true);
             expect(transformOpts.at(-1)?.systemRegionLane).toBe(true);
 
-            // Inert-CAPABILITY boot control: a compaction-off install boots
-            // the head lane (the region arm must be fully dead).
+            // Compaction-off rides the region (Unit 1 Step 4, binary-
+            // authority ruling): the boot thread is true for the off install
+            // too; the off carve-outs that remain are reclaim lanes, not
+            // serve authority.
             const depsOff = createMockDeps();
             depsOff.config = { ...depsOff.config, compaction: { enabled: false } };
             createMagicContextHook(depsOff);
-            expect(handlerOpts.at(-1)?.systemRegionLane).toBe(false);
-            expect(transformOpts.at(-1)?.systemRegionLane).toBe(false);
+            expect(handlerOpts.at(-1)?.systemRegionLane).toBe(true);
+            expect(transformOpts.at(-1)?.systemRegionLane).toBe(true);
         } finally {
             spyHandler.mockRestore();
             spyTransform.mockRestore();

@@ -1893,18 +1893,15 @@ export async function runPostTransformPhase(
     // Region rotation promotion: a named boundary with a stale region manifest
     // turns this pass's ordinary fold into the rotation transaction (same
     // transaction, one bust). Never originates a bust of its own.
-    // Compaction-off rides the region too: the fold runs its zero-compartment
-    // path and the knowledge surface serves from the region row. The
-    // boundaryPermission set drops the execute arm (no scheduler in off mode)
-    // and gains fullFeatureMode===false — an off install pays a rotation only
-    // when a knowledge delta forces it, and the region bytes are never empty
-    // (knowledge panels + history skeleton always render).
+    // Compaction-off rides the region too (lane constant true, Unit 1 Step 4):
+    // the fold runs its zero-compartment path and the knowledge surface serves
+    // from the region row. The boundaryPermission set drops the execute arm
+    // (no scheduler in off mode) and gains fullFeatureMode===false — an off
+    // install pays a rotation only when a knowledge delta forces it, and the
+    // region bytes are never empty (knowledge panels + history skeleton
+    // always render).
     let regionRotationReason: string | null = null;
-    if (
-        (args.systemRegionLane === true || compactionOff) &&
-        m0M1EnabledForFold &&
-        !foldDueDecision.value
-    ) {
+    if (args.systemRegionLane === true && m0M1EnabledForFold && !foldDueDecision.value) {
         const storedRegion = readSystemRegion(args.db, args.sessionId);
         if (storedRegion !== null) {
             const boundaryPermission =
