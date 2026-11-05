@@ -673,8 +673,9 @@ describe("compaction-off transform — additive-only proof (issue #266 S3)", () 
         const dbAfter = openDatabase();
         expect(getTagsBySession(dbAfter, "ses-1").length).toBeGreaterThan(0);
         expect(getCompactionModeRecord(dbAfter, "ses-1")).toBe("on");
-        // §N§ prefixes return with the flip (natural bust of the transition).
-        expect(allText(onMessages)).toMatch(/§\d+§/);
+        // ctx_reduce v1: the flip-back wire is prefix-free; the lazy-minted tag
+        // rows above are what the flip guarantees.
+        expect(allText(onMessages)).not.toMatch(/§\d+§/);
     });
 
     it("compaction-off SUBAGENT session receives additive m0/m1 memory and no mutating gates", async () => {
