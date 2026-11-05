@@ -245,6 +245,13 @@ describe("carriage deletion census: plugin test tree is re-expressed", () => {
         });
     }
 
+    it("M1_EMPTY_PLACEHOLDER: zero production references (export stays dead)", () => {
+        // The export died in Unit 2 Task 3; the test-tree census above
+        // cannot see a re-introduced DEFINITION (it scans .test.ts and
+        // excludes this file), so the production tree is scanned too.
+        expect(holders(scan(false), /\bM1_EMPTY_PLACEHOLDER\b/)).toEqual([]);
+    });
+
     it("syntheticHead fixtures survive only as adjudicated stray-host witnesses", () => {
         // Re-expression, not deletion: the tail-hygiene and prefix-trim laws
         // keep hand-shaped id-less synthetic rows as FOREIGN/stray defense
