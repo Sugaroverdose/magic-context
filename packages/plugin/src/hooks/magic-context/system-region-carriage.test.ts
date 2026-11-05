@@ -205,14 +205,16 @@ describe("carriage deletion census: production tree is headless", () => {
         expect(transform?.text).toMatch(/buildRegionMuralMessage/);
     });
 
-    it("the never-empty floor constants are consumed only by the region producer", () => {
-        // region-render owns the never-empty floors; the fold feeds the delta
-        // placeholder into the trio (materializeM0) — both are region-era.
-        const consumers = holders(production, /\bM0_EMPTY_BODY\b|\bM1_EMPTY_PLACEHOLDER\b/);
-        expect(consumers).toEqual([
-            "src/hooks/magic-context/inject-compartments.ts",
-            "src/hooks/magic-context/region-render.ts",
-        ]);
+    it("the never-empty floor constant is consumed only by the region producer", () => {
+        // Post-Unit-2 truth: renderRegionM0 owns the never-empty floor
+        // (M0_EMPTY_BODY). The delta side has no placeholder constant —
+        // M1_EMPTY_PLACEHOLDER died with the m[1] renderers (Unit 2 Task 3);
+        // an empty volatile segment is the empty string cleared with the
+        // fold row, and the live <session-history-since> wrapper is minted
+        // solely by region-volatile's render. The dead-symbol census below
+        // keeps the export itself from being smuggled back.
+        const consumers = holders(production, /\bM0_EMPTY_BODY\b/);
+        expect(consumers).toEqual(["src/hooks/magic-context/region-render.ts"]);
     });
 });
 
@@ -235,6 +237,8 @@ describe("carriage deletion census: plugin test tree is re-expressed", () => {
         "syntheticHeadCount",
         "isSyntheticHeadMessage",
         "isSyntheticPrefixHead",
+        // Unit 2 Task 3: the delta placeholder died with the m[1] renderers.
+        "M1_EMPTY_PLACEHOLDER",
     ]) {
         it(`${symbol}: zero test references`, () => {
             expect(holders(tests, new RegExp(`\\b${symbol}\\b`))).toEqual([]);

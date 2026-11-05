@@ -1,44 +1,30 @@
 import { Buffer } from "node:buffer";
-import { MEMORY_MURAL_BLOCK } from "../../agents/magic-context-prompt";
 import {
     buildCompartmentBlock,
     type Compartment,
     type CompartmentDateRanges,
-    escapeXmlAttr,
     escapeXmlContent,
     getCompartments,
-    getLastCompartmentEndMessageId,
     isPartialCompartmentEnd,
     type SessionFact,
 } from "../../features/magic-context/compartment-storage";
-import {
-    CATEGORY_PRIORITY,
-    V2_MEMORY_CATEGORIES,
-} from "../../features/magic-context/memory/constants";
-import { compareMemorySelectionPriority } from "../../features/magic-context/memory/memory-selection";
+import { CATEGORY_PRIORITY } from "../../features/magic-context/memory/constants";
 import {
     getMaxMemoryIdForProjects,
     getMemoriesByProject,
     getMemoriesByProjects,
 } from "../../features/magic-context/memory/storage-memory";
 import type { Memory } from "../../features/magic-context/memory/types";
-import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
-import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
-import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import {
     GLOBAL_USER_PROFILE_PROJECT_PATH,
     getMaxM0MutationId,
     getMaxMemoryMutationId,
     getMaxMemoryMutationIdForProjects,
-    getMemoryMutationsForRender,
-    getMemoryMutationsForRenderByProjects,
     getProjectState,
-    MEMORY_VISIBILITY_MUTATION_CATEGORY,
     persistCachedM0,
     readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
 import { writeRegionVolatile } from "../../features/magic-context/storage-meta-shared";
-import { renderRegionVolatile } from "./region-volatile";
 import {
     decodeSystemRegionRow,
     encodeSystemRegionRow,
@@ -48,17 +34,10 @@ import {
     readSystemRegion,
     sanitizeReceiptOperand,
 } from "../../features/magic-context/system-region";
-import {
-    getActiveUserMemories,
-    type UserMemory,
-} from "../../features/magic-context/user-memory/storage-user-memory";
+import type { UserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import {
     computeWorkspaceEpochFingerprint,
-    expandWorkspaceIdentitySetWithAliases,
-    resolveStoredPathWorkspaceIdentity,
     resolveWorkspaceIdentitySet,
-    resolveWorkspaceShareCategories,
-    sourceNameForMemory,
     type WorkspaceIdentitySet,
 } from "../../features/magic-context/workspaces";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
@@ -80,12 +59,11 @@ import {
     renderedBudgetShrinkReason,
     renderedBudgetSnapshot,
 } from "./compartment-render-epoch";
-import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
-import { historyLocalBudget } from "./decision-calibration";
 import { isHostRenderedSystemMessage } from "./host-served-rows";
 import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
+import { renderRegionVolatile } from "./region-volatile";
 import type { MessageLike } from "./tag-messages";
 import { formatDate } from "./temporal-awareness";
 
@@ -110,49 +88,25 @@ import type {
     M0M1State,
     M0SnapshotMarkers,
     MaterializeDecision,
-    MemoryRenderOptions,
     PrefixTrimSourceOrder,
     PrefixTrimStatus,
-    TrimMemoriesResultV2,
     WorkspaceRenderContext,
 } from "./region-render";
 // Moved to region-render.ts (Step 2 severance): re-imported by the remaining
 // head-lane/apply code; re-exported so existing consumers keep their import paths.
 import {
     cachedStatement,
-    createMemoryBlockAccounting,
     DEFAULT_HISTORY_BUDGET_TOKENS,
     DEFAULT_MEMORY_BUDGET_TOKENS,
-    DEFAULT_USER_PROFILE_BUDGET_TOKENS,
     getGlobalUserProfileVersion,
-    historySliceTokens,
     lastCompartmentBoundaryId,
-    M0_EMPTY_BODY,
-    MAX_FORCED_MEMORIES_PER_DELTA,
-    memoryCanonicalIdentity,
-    memoryRenderOrder,
     newestCompartmentEndId,
-    nullableString,
     RenderM1InvalidMarkersError,
     readM0Compartments,
-    readNewCompartments,
-    renderM0,
     renderMemoryBlockV2,
-    renderMemoryLineV2,
-    renderMemoryUpdatesBlock,
     renderRegionM0,
-    renderSessionHistoryWithDecay,
-    renderUserProfileBlock,
-    resolveMuralForM0,
     resolveWorkspaceRenderContext,
-    rowToM0Compartment,
     safeGetActiveUserMemories,
-    sourceNamesForMemories,
-    stripMemoryMuralBlock,
-    trimMemoriesToBudgetV2,
-    trimUserMemoriesToBudget,
-    trimWorkspaceMemoriesToBudgetV2,
-    withCompartmentDates,
 } from "./region-render";
 
 export type {
@@ -183,8 +137,6 @@ export {
     trimUserMemoriesToBudget,
     trimWorkspaceMemoriesToBudgetV2,
 } from "./region-render";
-
-import { renderUserProfileContent, USER_PROFILE_DESCRIPTION } from "./user-profile-render";
 
 export interface PreparedCompartmentInjection {
     block: string;
@@ -2003,18 +1955,20 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         // this fold re-renders the fresh one). The accounting is re-derived
         // from the two renders: panel ids ∪ volatile ids (ctx_search's
         // hide-already-visible filter reads session_meta.memory_block_ids).
-        const volatileRender = renderRegionVolatile(options, {
-            maxMemoryId: snapshotMarkers.maxMemoryId,
-            maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
-            maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
-            projectUserProfileVersion: snapshotMarkers.projectUserProfileVersion,
-            projectDocsHash: snapshotMarkers.projectDocsHash,
-            materializedAt: snapshotMarkers.materializedAt,
-            renderedMemoryIds,
-        }, docs);
-        const visibleMemoryIds = [
-            ...new Set([...renderedMemoryIds, ...volatileRender.memoryIds]),
-        ];
+        const volatileRender = renderRegionVolatile(
+            options,
+            {
+                maxMemoryId: snapshotMarkers.maxMemoryId,
+                maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
+                maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
+                projectUserProfileVersion: snapshotMarkers.projectUserProfileVersion,
+                projectDocsHash: snapshotMarkers.projectDocsHash,
+                materializedAt: snapshotMarkers.materializedAt,
+                renderedMemoryIds,
+            },
+            docs,
+        );
+        const visibleMemoryIds = [...new Set([...renderedMemoryIds, ...volatileRender.memoryIds])];
 
         const foldMarkers = regionMarkersFromSnapshot(snapshotMarkers);
         const persistFoldRow = (m0Payload: Buffer, m1Payload: Buffer | null) => {
@@ -2051,9 +2005,9 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         {
             // The boundary assembles the four panels once and installs the
             // sentinel region row atomically with the marker capture. The
-            // never-empty floor is the panels' own: renderRegionM0 guarantees a
-            // non-empty body (M0_EMPTY_BODY), so the delta-side placeholder
-            // that used to be concatenated here is no longer needed.
+            // never-empty floor is the panels' own (renderRegionM0), and the
+            // delta side has no placeholder of its own since Unit 2 — the
+            // volatile segment is simply empty (cleared with the fold row).
             const regionText = m0Text;
             let installedBlob: Buffer | null = null;
             const rotated = executeSystemRegionRotation(

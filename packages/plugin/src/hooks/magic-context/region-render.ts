@@ -10,54 +10,28 @@
 import { Buffer } from "node:buffer";
 import { MEMORY_MURAL_BLOCK } from "../../agents/magic-context-prompt";
 import {
-    buildCompartmentBlock,
     type Compartment,
-    type CompartmentDateRanges,
     escapeXmlAttr,
     escapeXmlContent,
-    getCompartments,
-    getLastCompartmentEndMessageId,
-    isPartialCompartmentEnd,
     type SessionFact,
 } from "../../features/magic-context/compartment-storage";
-import {
-    CATEGORY_PRIORITY,
-    V2_MEMORY_CATEGORIES,
-} from "../../features/magic-context/memory/constants";
+import { V2_MEMORY_CATEGORIES } from "../../features/magic-context/memory/constants";
 import { compareMemorySelectionPriority } from "../../features/magic-context/memory/memory-selection";
-import {
-    getMaxMemoryIdForProjects,
-    getMemoriesByProject,
-    getMemoriesByProjects,
-} from "../../features/magic-context/memory/storage-memory";
 import type { Memory } from "../../features/magic-context/memory/types";
 import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
-import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import {
     GLOBAL_USER_PROFILE_PROJECT_PATH,
-    getMaxM0MutationId,
-    getMaxMemoryMutationId,
-    getMaxMemoryMutationIdForProjects,
     getMemoryMutationsForRender,
     getMemoryMutationsForRenderByProjects,
     getProjectState,
     MEMORY_VISIBILITY_MUTATION_CATEGORY,
-    readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
-import {
-    executeSystemRegionRotation,
-    isSystemRegionBytes,
-    type RegionMarkers,
-    readSystemRegion,
-    sanitizeReceiptOperand,
-} from "../../features/magic-context/system-region";
 import {
     getActiveUserMemories,
     type UserMemory,
 } from "../../features/magic-context/user-memory/storage-user-memory";
 import {
-    computeWorkspaceEpochFingerprint,
     expandWorkspaceIdentitySetWithAliases,
     resolveStoredPathWorkspaceIdentity,
     resolveWorkspaceIdentitySet,
@@ -65,29 +39,10 @@ import {
     sourceNameForMemory,
     type WorkspaceIdentitySet,
 } from "../../features/magic-context/workspaces";
-import { BoundedSessionMap } from "../../shared/bounded-session-map";
-import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
-import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
-import {
-    MARKER_SUMMARY_TEXT,
-    reconcileForkOrphanedCompactionMarkers,
-} from "./compaction-marker-manager";
-import {
-    COMPARTMENT_RENDER_EPOCH,
-    decodeCachedM0UpgradeIdentity,
-    encodeCachedM0UpgradeIdentity,
-    MEMORY_RENDER_FORMAT_EPOCH,
-    PROFILE_RENDER_EPOCH,
-    renderBudgetIdentityChanged,
-    renderedBudgetShrinkReason,
-    renderedBudgetSnapshot,
-} from "./compartment-render-epoch";
-import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
+import { extractM0Block, renderDecayedCompartments } from "./decay-render";
 import { historyLocalBudget } from "./decision-calibration";
-import { isHostRenderedSystemMessage } from "./host-served-rows";
-import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -321,9 +276,6 @@ export const DEFAULT_USER_PROFILE_BUDGET_TOKENS = 4_000;
 export const MAX_FORCED_MEMORIES_PER_DELTA = 10;
 
 export const M0_EMPTY_BODY = "<session-history></session-history>";
-
-export const M1_EMPTY_PLACEHOLDER =
-    "<session-history-since>(no new content since last materialization)</session-history-since>";
 
 export interface WorkspaceRenderContext {
     identities: string[];
