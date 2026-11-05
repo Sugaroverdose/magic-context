@@ -232,9 +232,12 @@ describe("consecutive dropped input refusals", () => {
 
 // Unit 4 dead-arm census (coordinator split item D, #2780 committed-rogue
 // form): the pre-upgrade recognition arms stay dead in the production file.
-// The witness loop re-injects each arm's source text into an in-memory clone
-// and requires the detector to fire — a detector that cannot see its own
-// target is not a census.
+// The census laws match the arm texts against the production source string
+// directly — that is the bite: a re-added arm reddens its law on the real
+// tree. The witness loop verifies each law's needle by re-injecting the arm
+// text into an in-memory clone of the source and requiring the same
+// containment check to fire — it proves the needle can observe the arm
+// (a needle matching nothing is not a census), not a separate detector run.
 describe("dropped-input-guard dead-arm census", () => {
     const source = readFileSync(new URL("./dropped-input-guard.ts", import.meta.url), "utf8");
 

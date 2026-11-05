@@ -517,6 +517,54 @@ describe("prepareCompartmentInjection — empty compartments fallback", () => {
         const filler = messages[1]?.parts[0] as { text: string } | undefined;
         expect(filler?.text).toBe("[dropped]");
     });
+
+    // U4-M3 witnesses (merge-review): non-recognition of the forbidden
+    // shapes is load-bearing, not incidental. Planting `|[content omitted]|\.\.\.`
+    // into isDroppedPlaceholder reddens both laws — the prepend path moves
+    // the original row to messages[1] behind a synthetic head, breaking the
+    // single-row shape and the joined-tail ordering. The "no synthetic head
+    // prepended" reading is implemented as: exactly one row survives and its
+    // part carries no synthetic flag (the discriminator the reviewer's
+    // ordering note does not need an alternation law for — a single
+    // anchored full-match regex is order-invariant).
+    for (const forbidden of ["[content omitted]", "..."] as const) {
+        it(`merges onto a ${forbidden} head — the shape stays unrecognised (die-unless-U5-restores-mint)`, () => {
+            db = makeDb();
+            insertMemory(db, {
+                projectPath: PROJECT_PATH,
+                category: "USER_DIRECTIVES",
+                content: "directive merge-head",
+            });
+            const messages: MessageLike[] = [userMessage("m1", forbidden)];
+            const prepared = prepareCompartmentInjection(
+                db,
+                SESSION_ID,
+                messages,
+                true,
+                PROJECT_PATH,
+            );
+            expect(prepared).not.toBeNull();
+            if (!prepared) return;
+
+            renderCompartmentInjection(SESSION_ID, messages, prepared);
+
+            // Merge path: the original row stays as the single head, its part
+            // is NOT a synthetic prepend, and the block joins ahead of the
+            // original bytes with the exact "\n\n" seam preserved.
+            expect(messages.length).toBe(1);
+            const part = messages[0].parts[0] as {
+                type: string;
+                text: string;
+                synthetic?: boolean;
+            };
+            expect(part.synthetic).toBeUndefined();
+            expect(part.text).toMatch(
+                new RegExp(
+                    `^<session-history>[\\s\\S]*\\n\\n${forbidden.replace(/[[\].]/g, "\\$&")}$`,
+                ),
+            );
+        });
+    }
 });
 
 describe("prepareCompartmentInjection — cross-database cache isolation", () => {
