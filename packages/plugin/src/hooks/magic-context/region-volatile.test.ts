@@ -19,10 +19,11 @@
  */
 
 import { afterEach, describe, expect, it } from "bun:test";
-import { rmSync } from "node:fs";
+import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
+import { unifiedSearch } from "../../features/magic-context/search";
 import {
     closeDatabase,
     GLOBAL_USER_PROFILE_PROJECT_PATH,
@@ -35,12 +36,16 @@ import {
     readRegionVolatile,
     writeRegionVolatile,
 } from "../../features/magic-context/storage-meta-shared";
-import { encodeSystemRegionRow } from "../../features/magic-context/system-region";
+import {
+    decodeSystemRegionRow,
+    encodeSystemRegionRow,
+} from "../../features/magic-context/system-region";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
     clearCtxReduceAvailability,
     resolveCtxReduceAvailabilityFromMessages,
 } from "./ctx-reduce-availability";
+import { getVisibleMemoryIds, materializeM0 } from "./inject-compartments";
 import {
     buildRenderOptions,
     loadManifest,
@@ -49,14 +54,15 @@ import {
 } from "./region-golden-harness";
 import { getGlobalUserProfileVersion } from "./region-render";
 import {
+    evaluateRegionVolatileBackstop,
     type RegionVolatileWatermark,
     recomputeRegionVolatileSegment,
     renderRegionVolatile,
     serveRegionVolatile,
 } from "./region-volatile";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
-import { getVisibleMemoryIds, materializeM0 } from "./inject-compartments";
-import { unifiedSearch } from "../../features/magic-context/search";
+
+const SRC_PLUGIN = join(import.meta.dir, "..", "..");
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -256,7 +262,7 @@ describe("region-volatile: render contract", () => {
 describe("region-volatile: store and serve (replay-only)", () => {
     it("serveRegionVolatile decodes stored bytes verbatim — a live mutation after capture does not move the serve", () => {
         const { seeded, window } = freshSeed();
-        const meta = getOrCreateSessionMeta(seeded.db, window.sessionId);
+        getOrCreateSessionMeta(seeded.db, window.sessionId);
         const installedAt = 1_700_000_000_000;
         seeded.db
             .prepare("UPDATE session_meta SET cached_m0_materialized_at = ? WHERE session_id = ?")
@@ -468,5 +474,145 @@ describe("region-volatile: memory_block accounting feeds the ctx_search hide-fil
             .map((result) => result.memoryId);
         expect(ids).toContain(hiddenMemory.id);
         expect(ids).not.toContain(deltaMemory.id);
+    });
+});
+
+describe("region-volatile: growth backstop REQUESTS a fold, never rotates (Task 1 Step 4b)", () => {
+    it("threshold table: head-era arms ported (update-count > 40, ratio past 15% with a 500-token floor, absolute cap past 20% of budget)", () => {
+        const small = "x".repeat(400); // < 500 tokens floor
+        const big = "x ".repeat(4000); // comfortably past any ratio/cap here
+        // Quiescent: no request.
+        expect(
+            evaluateRegionVolatileBackstop({
+                regionText: big,
+                volatileText: "x ".repeat(100),
+                memoryUpdateCount: 3,
+                historyBudgetTokens: 40000,
+            }),
+        ).toEqual({ request: false, reason: null });
+        // Arm 1: supersede-delta drift is size-independent.
+        expect(
+            evaluateRegionVolatileBackstop({
+                regionText: big,
+                volatileText: "x ".repeat(100),
+                memoryUpdateCount: 41,
+                historyBudgetTokens: 40000,
+            }),
+        ).toEqual({ request: true, reason: "volatile_update_count" });
+        // Arm 2: volatile past 15% of the region body (region past the floor).
+        expect(
+            evaluateRegionVolatileBackstop({
+                regionText: big,
+                volatileText: "x ".repeat(2000),
+                memoryUpdateCount: 0,
+                historyBudgetTokens: 4_000_000,
+            }),
+        ).toEqual({ request: true, reason: "volatile_drift_ratio" });
+        // Small-region floor: the ratio arm stays suppressed below 500 tokens…
+        expect(
+            evaluateRegionVolatileBackstop({
+                regionText: small,
+                volatileText: "x ".repeat(100),
+                memoryUpdateCount: 0,
+                historyBudgetTokens: 4_000_000,
+            }),
+        ).toEqual({ request: false, reason: null });
+        // …but the absolute cap (20% of the history budget) still bites.
+        expect(
+            evaluateRegionVolatileBackstop({
+                regionText: small,
+                volatileText: big,
+                memoryUpdateCount: 0,
+                historyBudgetTokens: 200,
+            }),
+        ).toEqual({ request: true, reason: "volatile_absolute_cap" });
+    });
+
+    it("an oversized freshly recomputed segment fires the fold REQUEST on the bust lane with zero region mutation", () => {
+        const { seeded, window } = freshSeed();
+        const db = seeded.db;
+        materializeM0({
+            db,
+            sessionId: window.sessionId,
+            state: getOrCreateSessionMeta(db, window.sessionId),
+            projectPath: window.identity,
+            projectDirectory: seeded.docsDir,
+            injectDocs: true,
+            memoryInjectionBudgetTokens: 4000,
+            historyBudgetTokens: 30000,
+            isCacheBustingPass: true,
+            systemRegion: { enabled: true, reason: "first_render" },
+        } as never);
+        const meta = getOrCreateSessionMeta(db, window.sessionId);
+        const regionBefore = decodeSystemRegionRow(meta.cachedM0Bytes ?? null);
+        const materializedAtBefore = meta.cachedM0MaterializedAt;
+        expect(regionBefore).not.toBeNull();
+        // Push the delta past the absolute cap: budget 200 tokens -> cap 40.
+        insertMemory(db, {
+            projectPath: window.identity,
+            category: "CONSTRAINTS",
+            content: `VolatileBackstopToken ${"large fact content ".repeat(30)}`,
+            sourceType: "historian",
+        });
+        const requests: string[] = [];
+        const rendered = recomputeRegionVolatileSegment({
+            db,
+            sessionId: window.sessionId,
+            meta: getOrCreateSessionMeta(db, window.sessionId),
+            options: {
+                ...buildRenderOptions(window, seeded),
+                historyBudgetTokens: 200,
+            },
+            onFoldRequest: (reason) => requests.push(reason),
+        });
+        expect(rendered).not.toBeNull();
+        expect(rendered!.text).toContain("VolatileBackstopToken");
+        // The request is a signal, not an action: it rode the recompute lane.
+        expect(requests).toEqual(["volatile_absolute_cap"]);
+        // Restart path: an unchanged-but-still-oversized segment re-sights the
+        // request (the in-memory queue is gone after a restart).
+        recomputeRegionVolatileSegment({
+            db,
+            sessionId: window.sessionId,
+            meta: getOrCreateSessionMeta(db, window.sessionId),
+            options: {
+                ...buildRenderOptions(window, seeded),
+                historyBudgetTokens: 200,
+            },
+            onFoldRequest: (reason) => requests.push(reason),
+        });
+        expect(requests).toEqual(["volatile_absolute_cap", "volatile_absolute_cap"]);
+        // Zero rotations, zero region byte changes on the requesting pass.
+        const after = getOrCreateSessionMeta(db, window.sessionId);
+        expect(decodeSystemRegionRow(after.cachedM0Bytes ?? null)).toBe(regionBefore);
+        expect(after.cachedM0MaterializedAt).toBe(materializedAtBefore);
+    });
+
+    it("anti-vacuity: the bust-lane call site passes a request callback that only schedules (deferred set + receipt), never rotates", () => {
+        const phase = readFileSync(
+            join(SRC_PLUGIN, "hooks", "magic-context", "transform-postprocess-phase.ts"),
+            "utf8",
+        );
+        const blockStart = phase.indexOf("recomputeRegionVolatileSegment({");
+        expect(blockStart).toBeGreaterThan(-1);
+        const block = phase.slice(blockStart, phase.indexOf("} catch", blockStart));
+        expect(block).toContain("onFoldRequest:");
+        expect(block).toContain("deferredMaterializationSessions.add(args.sessionId)");
+        expect(block).toContain("region-volatile fold requested reason=");
+        // The request lane never writes region bytes or invokes rotation.
+        expect(block).not.toMatch(/writeSystemRegion|executeSystemRegionRotation/);
+        // Anti-vacuity (#2718): every evaluator input at the production call
+        // — inside the recompute — is store/options-sourced, none hand-shaped.
+        const carrier = readFileSync(
+            join(SRC_PLUGIN, "hooks", "magic-context", "region-volatile.ts"),
+            "utf8",
+        );
+        const callStart = carrier.indexOf("evaluateRegionVolatileBackstop({");
+        expect(callStart).toBeGreaterThan(-1);
+        const call = carrier.slice(callStart, callStart + 420);
+        expect(call).toContain("regionText: decodeSystemRegionRow(meta.cachedM0Bytes");
+        expect(call).toContain("volatileText: rendered.text");
+        expect(call).toContain("memoryUpdateCount: rendered.memoryUpdateCount");
+        expect(call).toContain("historyBudgetTokens: args.options.historyBudgetTokens");
     });
 });

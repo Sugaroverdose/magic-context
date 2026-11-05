@@ -1721,7 +1721,9 @@ export function finalizeMessageRepresentation(
  * boundary it always declines, and a missing region is installed by
  * mustMaterialize, not here. There is no size/pressure arm: growth is
  * measured by the marker comparison, never by the absolute region size —
- * the deleted pending_growth class (§25.3).
+ * the deleted pending_growth class (§25.3). The volatile segment's growth
+ * backstop REQUESTS a fold through the deferred-materialization queue
+ * (Task 1 Step 4b); the scheduler still owns when the fold rides.
  */
 export function regionRotationPromotion(input: {
     systemRegionLane: boolean;
@@ -2205,6 +2207,16 @@ export async function runPostTransformPhase(
                     hardSignals: args.m0M1.hardSignals,
                     muralEnabled: args.m0M1.muralEnabled,
                     compactionOff,
+                },
+                onFoldRequest: (reason) => {
+                    // Growth backstop (Task 1 Step 4b): the oversized segment
+                    // REQUESTS a fold — it schedules onto the deferred
+                    // materialization queue and the scheduler decides when the
+                    // fold rides. This pass performs zero region mutation;
+                    // consumption grants the boundary permission on a later
+                    // pass (deferredMaterialize), never here.
+                    args.deferredMaterializationSessions.add(args.sessionId);
+                    sessionLog(args.sessionId, `region-volatile fold requested reason=${reason}`);
                 },
             });
         } catch (error) {

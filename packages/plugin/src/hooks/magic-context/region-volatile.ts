@@ -26,7 +26,8 @@ import { decodeSystemRegionRow } from "../../features/magic-context/system-regio
 import type { SessionMeta } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import type { Database } from "../../shared/sqlite";
-import { renderCompartmentAtTier } from "./decay-render";
+import { DEFAULT_HISTORY_BUDGET_TOKENS, renderCompartmentAtTier } from "./decay-render";
+import { estimateTokens } from "./read-session-formatting";
 import {
     DEFAULT_MEMORY_BUDGET_TOKENS,
     DEFAULT_USER_PROFILE_BUDGET_TOKENS,
@@ -227,8 +228,7 @@ function renderDocsDeltaBlock(
     docsOverride?: { renderedBlock: string; canonicalHash: string },
 ): string {
     if (!options.projectDirectory || options.injectDocs === false) return "";
-    const canonical =
-        docsOverride ?? readProjectDocsCanonical(options.projectDirectory);
+    const canonical = docsOverride ?? readProjectDocsCanonical(options.projectDirectory);
     if (!canonical.renderedBlock) return "";
     if (canonical.canonicalHash === watermark.projectDocsHash) return "";
     return canonical.renderedBlock;
@@ -266,6 +266,49 @@ export function serveRegionVolatile(meta: SessionMeta): string | null {
     return decodeRegionVolatileBytes(meta.regionVolatileBytes);
 }
 
+/**
+ * Growth backstop (Task 1 Step 4b, head-era port): when the delta carrier has
+ * grown past a head-era-verified threshold it REQUESTS a fold from the
+ * scheduler — it never re-renders the region itself and never holds a bust
+ * authority of its own. Three independent arms (any one requests), ports of
+ * the retired pressure-refold contract (inject-compartments history-era
+ * constants): supersede-delta drift (size-independent), volatile/region size
+ * ratio with a small-region floor, and an absolute token cap measured against
+ * the history budget. Token counts on both sides of the ratio (NOT chars):
+ * XML-heavy and non-Latin content diverges sharply.
+ */
+const VOLATILE_UPDATE_COUNT_CAP = 40;
+const VOLATILE_DRIFT_RATIO = 0.15;
+const REGION_DRIFT_RATIO_FLOOR_TOKENS = 500;
+const VOLATILE_ABSOLUTE_CAP_RATIO = 0.2;
+
+export function evaluateRegionVolatileBackstop(args: {
+    regionText: string | null;
+    volatileText: string;
+    memoryUpdateCount: number;
+    historyBudgetTokens: number | undefined;
+}): { request: boolean; reason: string | null } {
+    if (args.volatileText === "") return { request: false, reason: null };
+    if (args.memoryUpdateCount > VOLATILE_UPDATE_COUNT_CAP) {
+        return { request: true, reason: "volatile_update_count" };
+    }
+    const volatileTokens = estimateTokens(args.volatileText);
+    const budget = args.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS;
+    if (volatileTokens > budget * VOLATILE_ABSOLUTE_CAP_RATIO) {
+        return { request: true, reason: "volatile_absolute_cap" };
+    }
+    if (args.regionText !== null) {
+        const regionTokens = estimateTokens(args.regionText);
+        if (
+            regionTokens >= REGION_DRIFT_RATIO_FLOOR_TOKENS &&
+            volatileTokens > regionTokens * VOLATILE_DRIFT_RATIO
+        ) {
+            return { request: true, reason: "volatile_drift_ratio" };
+        }
+    }
+    return { request: false, reason: null };
+}
+
 function readMemoryBlockIds(db: Database, sessionId: string): number[] {
     const row = db
         .prepare("SELECT memory_block_ids FROM session_meta WHERE session_id = ?")
@@ -292,6 +335,10 @@ export function recomputeRegionVolatileSegment(args: {
     sessionId: string;
     meta: SessionMeta;
     options: M0M1RenderOptions;
+    /** Growth-backstop fold REQUEST sink (Task 1 Step 4b): fired with the arm
+     *  reason when the recomputed segment passes a threshold. The scheduler
+     *  consumes the request on a later boundary pass; this pass only signals. */
+    onFoldRequest?: (reason: string) => void;
 }): RegionVolatileRender | null {
     const { db, sessionId, meta } = args;
     if (meta.cachedM0MaterializedAt === null) return null;
@@ -306,6 +353,18 @@ export function recomputeRegionVolatileSegment(args: {
         renderedMemoryIds: readMemoryBlockIds(db, sessionId),
     };
     const rendered = renderRegionVolatile(args.options, watermark);
+    // Growth backstop: the request fires on every bust-lane recompute where
+    // the rendered (wire-truth) segment passes a threshold — including the
+    // unchanged case, so a restart that cleared the in-memory request queue
+    // re-sights the oversized segment on the next bust pass. Signal only:
+    // nothing here touches region bytes or the rotation machinery.
+    const backstop = evaluateRegionVolatileBackstop({
+        regionText: decodeSystemRegionRow(meta.cachedM0Bytes ?? null),
+        volatileText: rendered.text,
+        memoryUpdateCount: rendered.memoryUpdateCount,
+        historyBudgetTokens: args.options.historyBudgetTokens,
+    });
+    if (backstop.request && backstop.reason) args.onFoldRequest?.(backstop.reason);
     const stored = decodeRegionVolatileBytes(meta.regionVolatileBytes);
     if (rendered.text === (stored ?? "")) return null;
     writeRegionVolatile(db, sessionId, rendered.text, meta.cachedM0MaterializedAt);

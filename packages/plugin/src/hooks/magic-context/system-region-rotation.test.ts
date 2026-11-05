@@ -136,27 +136,27 @@ describe("system-region rotation decision: content triggers", () => {
     });
 });
 
-describe("system-region rotation decision: m[1]-delta fields are bust-gated triggers", () => {
-    // Region mode has no m[1] surface: the head-lane m[1]-delta fields are the
-    // fields whose change re-rendered m[1] on every bust pass. They must
-    // rotate the region on a pass that already holds the bust permission —
-    // otherwise new memories/compartments/profile/docs never surface — and
-    // must never originate a bust of their own (the mustMaterialize
-    // non-trigger semantics transfer to the gating, not to exclusion).
+describe("system-region rotation decision: delta-class fields never rotate (Task 3 demotion)", () => {
+    // Owner ruling (region-only Task 3): the delta-class fields surface on the
+    // volatile segment and are absorbed on folds; they rotate the region on
+    // NO pass, boundary-permitted or not — the only bust deciders are the
+    // window manager and the harness. Fence anchor: re-adding a
+    // DELTA_TRIGGER_FIELDS entry reddens these laws (unit) and the
+    // production-composition demotion laws (system-region-wiring.test.ts).
     it.each([
         ["new compartment sequence", { maxCompartmentSeq: 8 }, "max_compartment_seq"],
         ["profile version", { profileVersion: 5 }, "profile_version"],
         ["maxMemoryId watermark", { maxMemoryId: 13 }, "max_memory_id"],
         ["project-docs hash", { projectDocsHash: "hash-b" }, "project_docs_hash"],
-    ] as const)("%s rotates only with the bust permission", (_label, patch, reason) => {
+    ] as const)("%s never rotates, with or without the bust permission", (_label, patch) => {
         expect(
             decideSystemRegionRotation({
                 ...stored("r"),
                 capturedMarkers: BASE,
                 currentMarkers: { ...BASE, ...patch },
                 bustPermission: false,
-            }).rotate,
-        ).toBe(false);
+            }),
+        ).toEqual({ rotate: false, reason: "none" });
         expect(
             decideSystemRegionRotation({
                 ...stored("r"),
@@ -164,7 +164,7 @@ describe("system-region rotation decision: m[1]-delta fields are bust-gated trig
                 currentMarkers: { ...BASE, ...patch },
                 bustPermission: true,
             }),
-        ).toEqual({ rotate: true, reason });
+        ).toEqual({ rotate: false, reason: "none" });
     });
 
     it("no rotation when markers are identical", () => {

@@ -1695,11 +1695,10 @@ export function mustMaterialize(args: {
     // are part of m[0], but docs-only edits must not evict the cached
     // prefix; materializeM0 reads fresh docs whenever a natural HARD fold
     // happens and stores that hash with the bytes it actually rendered. On
-    // the region lane the docs hash IS a rotation trigger
-    // (DELTA_TRIGGER_FIELDS) — but only via the boundary-permission-gated
-    // promotion comparator, whose current side is the live canonical hash
-    // (currentRegionMarkersForPromotion, §25); it never originates a bust
-    // there either.
+    // the region lane the docs hash is not a trigger either (Unit 2 Task 3):
+    // the docs delta rides the volatile segment and the panel converges at
+    // the next legitimate fold (DELTA_TRIGGER_FIELDS is empty; the demotion
+    // laws fence a re-add).
     if (args.state.cachedM0MaxMutationId !== current.maxMutationId) {
         return withToolSetHashComparison({ value: true, reason: "max_mutation_id" });
     }

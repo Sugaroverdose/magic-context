@@ -28,6 +28,7 @@ import {
 } from "../../features/magic-context/system-region";
 import { Database } from "../../shared/sqlite";
 import { materializeM0 } from "./inject-compartments";
+import { recomputeRegionVolatileSegment } from "./region-volatile";
 
 const SESSION_ID = "ses_region_fold";
 const PROJECT_PATH = "/tmp/test-region-fold";
@@ -137,9 +138,7 @@ describe("system-region fold: materialization boundary installs the region", () 
         );
         expect(stored.cached_m1_bytes).toBeNull();
         expect(readSystemRegion(db, SESSION_ID)).toBe(result.m0Text);
-        expect(
-            lines.filter((line) => line.includes("system-region rotation:")).length,
-        ).toBe(1);
+        expect(lines.filter((line) => line.includes("system-region rotation:")).length).toBe(1);
     });
 
     it("R11 boot law: a legacy raw row is never served, and the next gated fold replaces it with the region", () => {
@@ -387,5 +386,102 @@ describe("system-region receipts: store-derived operands cannot wedge the fold l
         expect(renderedBudgetShrinkReason("m 1000-h60000", "m900-h60000")).toBeNull();
         expect(renderedBudgetShrinkReason(`m${"9".repeat(400)}-h1`, "m900-h60000")).toBeNull();
         expect(renderedBudgetShrinkReason("garbage", "m900-h60000")).toBeNull();
+    });
+});
+
+describe("system-region fold: absorb-on-fold (Unit 2 Task 3 convergence)", () => {
+    const rotationReceipts = () =>
+        lines.filter((line) => line.includes("system-region rotation: reason="));
+
+    function fold(db: Database) {
+        return materializeM0({
+            db,
+            sessionId: SESSION_ID,
+            state: getOrCreateSessionMeta(db, SESSION_ID),
+            projectPath: PROJECT_PATH,
+            projectDirectory: "",
+            systemRegion: { enabled: true, reason: "hard_fold" },
+        } as never);
+    }
+
+    function volatileText(db: Database): string {
+        const row = db
+            .prepare("SELECT region_volatile_bytes FROM session_meta WHERE session_id = ?")
+            .get(SESSION_ID) as { region_volatile_bytes: Uint8Array | null };
+        return row?.region_volatile_bytes
+            ? Buffer.from(row.region_volatile_bytes).toString("utf8")
+            : "";
+    }
+
+    it("a fold with pending deltas absorbs them: region carries the delta, volatile returns to empty, rotations equal the control run", () => {
+        const db = makeDb();
+        seedPanels(db);
+        const control = makeDb();
+        seedPanels(control);
+
+        // Treatment: install fold, delta-class memory, bust-lane recompute,
+        // natural fold.
+        fold(db);
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "AbsorbOnFoldToken must end up inside the region",
+        });
+        recomputeRegionVolatileSegment({
+            db,
+            sessionId: SESSION_ID,
+            meta: getOrCreateSessionMeta(db, SESSION_ID),
+            options: {
+                db,
+                sessionId: SESSION_ID,
+                state: getOrCreateSessionMeta(db, SESSION_ID) as never,
+                projectPath: PROJECT_PATH,
+                projectDirectory: "",
+                isCacheBustingPass: true,
+            } as never,
+        });
+        expect(volatileText(db)).toContain("AbsorbOnFoldToken");
+        lines.length = 0;
+        fold(db);
+        expect(readSystemRegion(db, SESSION_ID)).toContain("AbsorbOnFoldToken");
+        expect(volatileText(db)).toBe("");
+        const treatmentRotations = rotationReceipts();
+
+        // Control: the identical fold sequence without the delta write. The
+        // delta added zero rotations — the fold count is the fold's own.
+        fold(control);
+        lines.length = 0;
+        fold(control);
+        const controlRotations = rotationReceipts();
+        expect(treatmentRotations.length).toBe(controlRotations.length);
+        expect(controlRotations.length).toBeGreaterThan(0);
+    });
+
+    it("a quiescent delta never rotates between folds: the recompute lane prints rotation receipts for nothing", () => {
+        const db = makeDb();
+        seedPanels(db);
+        fold(db);
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "QuiescentDeltaToken rides the segment only",
+        });
+        lines.length = 0;
+        recomputeRegionVolatileSegment({
+            db,
+            sessionId: SESSION_ID,
+            meta: getOrCreateSessionMeta(db, SESSION_ID),
+            options: {
+                db,
+                sessionId: SESSION_ID,
+                state: getOrCreateSessionMeta(db, SESSION_ID) as never,
+                projectPath: PROJECT_PATH,
+                projectDirectory: "",
+                isCacheBustingPass: true,
+            } as never,
+        });
+        expect(rotationReceipts()).toEqual([]);
+        expect(volatileText(db)).toContain("QuiescentDeltaToken");
+        expect(readSystemRegion(db, SESSION_ID)).not.toContain("QuiescentDeltaToken");
     });
 });

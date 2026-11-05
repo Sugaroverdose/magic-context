@@ -616,6 +616,8 @@ describe("system-region L0: per-actor producer census", () => {
         // an identifier. Parser and controls share one implementation
         // (collectReasons, hoisted for G2).
         const codeReasons = collectReasons();
+        for (const r of codeReasons) if (!docReasons.has(r)) console.log("EXTRA", r);
+        for (const r of docReasons) if (!codeReasons.has(r)) console.log("MISSING", r);
         expect([...docReasons].sort()).toEqual([...codeReasons].sort());
     });
 

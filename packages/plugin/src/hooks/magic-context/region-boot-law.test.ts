@@ -40,6 +40,7 @@ import { join } from "node:path";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { computeHardCacheExpired, createScheduler } from "../../features/magic-context/scheduler";
 import {
+    bumpProjectMemoryEpoch,
     closeDatabase,
     getOrCreateSessionMeta,
     openDatabase,
@@ -300,14 +301,25 @@ describe("region boot law: cold boot is a replay, not a fold", () => {
                 reason: null,
             });
 
-            // Control (comparator bite, warm): the same production
-            // composition on a boundary pass with an edited docs file MUST
-            // promote — the quiescent decline above is marker equality,
-            // not a deadened comparator.
+            // Docs edits never promote (Task 3 demotion): with the boundary
+            // permission and an edited docs file the composition stays
+            // silent — the panel converges at the next legitimate fold.
             writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\nchanged doc.\n");
             expect(bootPromotion(bootDb, dir, true)).toEqual({
+                promote: false,
+                reason: null,
+            });
+            // Control (comparator bite, warm): the same production
+            // composition on a boundary pass with a genuine content trigger
+            // MUST promote — the quiescent decline above is marker equality,
+            // not a deadened comparator. (Unit 2 Task 3: the docs hash was
+            // the original bite operand; it is demoted to the volatile
+            // carrier, so the bite control uses the dashboard epoch — a
+            // surviving compared member.)
+            bumpProjectMemoryEpoch(bootDb, PROJECT_PATH);
+            expect(bootPromotion(bootDb, dir, true)).toEqual({
                 promote: true,
-                reason: "project_docs_hash",
+                reason: "project_memory_epoch",
             });
             // Control (boot-gate bite): the same stale manifest never
             // promotes without boundary permission — the ride-only gate
@@ -567,9 +579,9 @@ describe("region four-panel-only contract (Unit 2 Step 2)", () => {
             expect(rendered!.text).toContain("<session-history-since>");
             // The segment is stored, and serving it requires the watermark to
             // name the region row it was rendered against.
-            expect(
-                serveRegionVolatile(getOrCreateSessionMeta(db, SESSION_ID)),
-            ).toContain("post fold delta memory");
+            expect(serveRegionVolatile(getOrCreateSessionMeta(db, SESSION_ID))).toContain(
+                "post fold delta memory",
+            );
             const served = await pass(handler.handler, SESSION_ID, "Base host prompt");
             expect(served).toContain("post fold delta memory");
             // The region bytes did not move: the delta never re-enters them.
