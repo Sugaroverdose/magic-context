@@ -15,6 +15,7 @@ import {
 import * as loggerModule from "@magic-context/core/shared/logger";
 import {
 	clearPiChannel1State,
+	currentReclaimHints,
 	getPiChannel1Baseline,
 	maybeChannel1ReminderForToolResult,
 	maybeDeliverChannel2Pi,
@@ -236,7 +237,12 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			toolName: "bash",
 			content: [{ type: "text", text: "some bash output" }],
 		});
-		expect(block?.text).toContain("oldest reclaimable: §123§ read.");
+		// ctx_reduce v1: the shared builder renders the reclaimable row only
+		// when the hint carries a copyable call id. The Pi seed lane mints no
+		// call ids, so the row stays gated off even with baseline hints; the
+		// Pi registry wiring is Unit 7 scope (ledger in the Unit 3 report).
+		expect(block?.text).toContain("spent tool outputs");
+		expect(block?.text).not.toContain("oldest reclaimable");
 		clearPiChannel1State(SESSION);
 	});
 
@@ -284,11 +290,15 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			content: [{ type: "text", text: "some bash output" }],
 		});
 
-		expect(block?.text).toContain(
-			"oldest reclaimable: §4§ bash · §5§ bash · §6§ aft_search · §7§ read.",
-		);
-		expect(block?.text).not.toContain("§1§ work");
-		expect(block?.text).not.toContain("§2§ board");
+		// ctx_reduce v1: the rendered row is gated on copyable call ids (Pi
+		// seed lane: none — Unit 7), so the selection itself is asserted at
+		// the row level against the production selector that built the
+		// baseline: control-plane (1 work, 2 board) and tiny (3, 40 tokens)
+		// are skipped, order preserved.
+		expect(block?.text).not.toContain("oldest reclaimable");
+		expect(
+			getOldestActiveUnprotectedToolTags(db, SESSION).map((t) => t.tagNumber),
+		).toEqual([4, 5, 6, 7]);
 		clearPiChannel1State(SESSION);
 	});
 
@@ -790,7 +800,8 @@ describe("maybeDeliverChannel2Pi", () => {
 		expect(capturedContent).toContain(
 			"Your next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~75k tokens)). Then continue your task.",
 		);
-		expect(capturedContent).toContain("oldest reclaimable");
+		// ctx_reduce v1: handle row gated without copyable call ids (Pi seed).
+		expect(capturedContent).not.toContain("oldest reclaimable");
 		expect(getChannel2NudgeState(db, SESSION)).toBe("delivered");
 	});
 
@@ -1123,9 +1134,16 @@ for (const channel of [1, 2]) {
 					sessionId,
 				);
 			}
-			expect(text).toContain("§3§ read");
-			expect(text).not.toContain("§1§");
-			expect(text).not.toContain("§2§");
+			// ctx_reduce v1: the wire row is gated on copyable call ids (Pi
+			// seed: none — Unit 7), so the exclusion is asserted against the
+			// production filter the delivery lanes actually call.
+			expect(text).not.toContain("oldest reclaimable");
+			const remaining = currentReclaimHints(db, sessionId, [
+				{ tagNumber: 1, toolName: "read" },
+				{ tagNumber: 2, toolName: "read" },
+				{ tagNumber: 3, toolName: "read" },
+			]).map((tag) => tag.tagNumber);
+			expect(remaining).toEqual([3]);
 		} finally {
 			clearPiChannel1State(sessionId);
 			db.close();

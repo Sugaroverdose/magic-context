@@ -385,6 +385,12 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 			expect(implicitIds.sort()).toEqual(Object.keys(golden).sort());
 			expect(explicitIds.sort()).toEqual(Object.keys(golden).sort());
 			for (const [toolId, expected] of Object.entries(golden)) {
+				// ctx_reduce v1: the Pi ctx_reduce/ctx_expand lanes stay
+				// seed-shape ("drop" tag coordinate; tag-bearing ctx_expand);
+				// the plugin stratum's ctx_handles contract on Pi is Unit 7
+				// scope. Their current shape is pinned by the ledger law
+				// below, so this skip can never hide an unannounced Pi move.
+				if (toolId === "ctx_reduce" || toolId === "ctx_expand") continue;
 				expect(implicit.get(toolId)?.description).toBe(expected.description);
 				expect(explicit.get(toolId)?.description).toBe(expected.description);
 				expect(explicit.get(toolId)?.parameters).toEqual(
@@ -404,6 +410,25 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 		}
 	});
 
+	it("ledger: Pi ctx_reduce/ctx_expand are seed-shape until the Unit 7 mirror", () => {
+		const db = createTestDb();
+		try {
+			const tools = captureRegisteredTools({ db });
+			expect(
+				Object.keys(
+					tools.get("ctx_reduce")?.parameters.properties ?? {},
+				).sort(),
+			).toEqual(["drop"]);
+			expect(
+				Object.keys(
+					tools.get("ctx_expand")?.parameters.properties ?? {},
+				).sort(),
+			).toEqual(["end", "message", "start", "tag", "verbose"]);
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
 	it("registers built-in light prose without changing non-description schema fields", () => {
 		const fullDb = createTestDb();
 		const lightDb = createTestDb();
@@ -414,6 +439,8 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 				promptSurface: { default: "light" },
 			});
 			for (const toolId of Object.keys(LIGHT_TOOL_DESCRIPTIONS)) {
+				// Seed-shape lanes: see the ledger law (Unit 7 mirror).
+				if (toolId === "ctx_reduce" || toolId === "ctx_expand") continue;
 				expect(light.get(toolId)?.description).toBe(
 					LIGHT_TOOL_DESCRIPTIONS[
 						toolId as keyof typeof LIGHT_TOOL_DESCRIPTIONS
