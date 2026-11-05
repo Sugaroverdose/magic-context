@@ -45,7 +45,7 @@ Magic Context rewrites the message array and system prompt the host is about to 
 
 The transform runs in TypeScript by default. With `transform_mode: "rust"` (experimental; OpenCode 1 only, and only when subc is configured at user level; otherwise it falls back to TypeScript), the TypeScript layer becomes a coordinator: it syncs state to the module, sends each pass over subc, and serves the module's output. If the module fails, it replays the last known good output for the session (`lkg-slot.ts`, `lkg-replay.ts`) so the cached prefix survives the fault, and refuses the turn rather than send an unmanaged prompt when it cannot.
 
-<!-- mc:protected START — hand-authored cache-stability core. The dreamer's maintain-docs task MUST NOT edit, reword, reorder, trim, or drop anything between mc:protected START and mc:protected END; carry it forward byte-for-byte on any rewrite. Only a human edits this region, deliberately. -->
+<!-- mc:protected START — hand-authored cache-stability core. The dreamer's maintain-docs task MUST NOT edit, reword, reorder, trim, or drop anything between mc:protected START and mc:protected END; carry it forward byte-for-byte on any rewrite. Edits are deliberate and traceable: owner edits directly, or an agent edits only on an explicit owner ruling recorded in the commit (2026-11-05: owner opened this region to agent edits under that condition). -->
 
 ## Transform pass mechanics
 
