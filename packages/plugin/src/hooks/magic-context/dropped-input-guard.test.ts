@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { describe, expect, it } from "bun:test";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 import {
     containsDroppedInputPlaceholder,
@@ -13,10 +14,20 @@ import {
 
 const blockedInputs: Array<[string, unknown]> = [
     ["tagged drop sentinel", { command: "[dropped §431§]" }],
-    ["legacy five-character truncation", { command: "which...[truncated]" }],
-    ["legacy array summary", { files: "[3 items]" }],
-    ["legacy object summary", { metadata: "[object]" }],
     ["new dropped marker object", { dropped: "[dropped §431§]" }],
+];
+
+// Unit 4 (coordinator split item D): the three legacy arms — five-character
+// "...[truncated]" copies, "[3 items]", "[object]" — died with the pre-upgrade
+// session class. v2 is clean-room: no v2 code path mints those shapes into
+// model-copyable transcript bytes (the same sentinel string in
+// module-state-sync's edit-marker SEED payload is internal canonical JSON,
+// never a rendered part; pi's "…[truncated]" uses a Unicode ellipsis and
+// stderr bytes), so recognizing them only refuses legitimate content.
+const notBlockedInputs: Array<[string, unknown]> = [
+    ["five-character truncation copy (no v2 minter)", { command: "which...[truncated]" }],
+    ["array-summary-shaped string (no v2 minter)", { files: "[3 items]" }],
+    ["object-summary-shaped string (no v2 minter)", { metadata: "[object]" }],
 ];
 
 const bashSchema = {
@@ -36,10 +47,16 @@ describe("dropped input execution guard", () => {
         });
     }
 
+    for (const [label, input] of notBlockedInputs) {
+        it(`executes a ${label}`, () => {
+            expect(containsDroppedInputPlaceholder(input)).toBe(false);
+        });
+    }
+
     it("walks nested input without mistaking explanatory prose for a placeholder", () => {
         expect(
             containsDroppedInputPlaceholder({ nested: [{ value: "abcde...[truncated]" }] }),
-        ).toBe(true);
+        ).toBe(false);
         expect(
             containsDroppedInputPlaceholder({
                 content: "The log used ...[truncated] before the final retry.",
@@ -57,10 +74,13 @@ describe("dropped input execution guard", () => {
     it("rejects through the OpenCode tool.execute.before hook", async () => {
         const hook = createDroppedInputToolExecuteBeforeHook();
 
+        // Canonical-shape probe: the legacy "...[truncated]" probe died with
+        // the arm (Unit 4 item D); the refusal routing under test is the
+        // same path for the one recognized placeholder shape.
         await expect(
             hook(
                 { tool: "write", sessionID: "ses-431", callID: "call-431" },
-                { args: { filePath: "/tmp/...[truncated]", content: "payload" } },
+                { args: { filePath: "[dropped §431§]", content: "payload" } },
             ),
         ).rejects.toThrow("placeholder Magic Context shows");
     });
@@ -207,5 +227,41 @@ describe("consecutive dropped input refusals", () => {
             { args: { command: "ls" } },
         );
         expect(await refusal()).not.toContain("in a row");
+    });
+});
+
+// Unit 4 dead-arm census (coordinator split item D, #2780 committed-rogue
+// form): the pre-upgrade recognition arms stay dead in the production file.
+// The census laws match the arm texts against the production source string
+// directly — that is the bite: a re-added arm reddens its law on the real
+// tree. The witness loop verifies each law's needle by re-injecting the arm
+// text into an in-memory clone of the source and requiring the same
+// containment check to fire — it proves the needle can observe the arm
+// (a needle matching nothing is not a census), not a separate detector run.
+describe("dropped-input-guard dead-arm census", () => {
+    const source = readFileSync(new URL("./dropped-input-guard.ts", import.meta.url), "utf8");
+
+    const deadArms: Array<[string, string, string]> = [
+        [
+            "five-character truncation matcher",
+            "\\[truncated\\]$/",
+            "const LEGACY = /^[\\s\\S]{0,5}\\.\\.\\.\\[truncated\\]$/;",
+        ],
+        ["object-summary arm", '=== "[object]"', 'value === "[object]" ||'],
+        ["array-summary arm", "\\d+ items\\]", "/^\\[\\d+ items\\]$/.test(value) ||"],
+    ];
+
+    for (const [label, needle, rogue] of deadArms) {
+        it(`keeps the ${label} out of the production source`, () => {
+            expect(source.includes(needle)).toBe(false);
+        });
+        it(`the detector fires when the ${label} is planted back`, () => {
+            const clone = `${source}\n// rogue witness\n${rogue}\n`;
+            expect(clone.includes(needle)).toBe(true);
+        });
+    }
+
+    it("the canonical tagged-placeholder matcher survives", () => {
+        expect(source.includes('startsWith("[dropped \u00a7")')).toBe(true);
     });
 });
