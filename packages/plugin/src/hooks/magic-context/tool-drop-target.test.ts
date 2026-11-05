@@ -320,9 +320,11 @@ describe("tool-drop-target", () => {
                 ["erase", (t: ReturnType<typeof createToolDropTarget>) => t.erase()],
             ] as const) {
                 it(`leaves the protected block byte-identical while clearing ordinary reasoning (${name})`, () => {
-                    const { messages, index, batch, protectedBlock } = completePair();
+                    const { index, batch, protectedBlock } = completePair();
                     const before = JSON.stringify(protectedBlock);
-                    const ordinary: ThinkingLikePart[] = [{ type: "thinking", thinking: "private" }];
+                    const ordinary: ThinkingLikePart[] = [
+                        { type: "thinking", thinking: "private" },
+                    ];
                     const thinkingParts = [...ordinary, protectedBlock] as ThinkingLikePart[];
                     const target = createToolDropTarget(
                         "call-1",
