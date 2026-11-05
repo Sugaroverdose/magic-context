@@ -8705,6 +8705,11 @@ it("contended partial cache replays persisted prefix until one uncontended drain
             contend = pass < 2;
             const state = getOrCreateSessionMeta(db, sessionId);
             if (contend) state.cachedM1Bytes = null;
+            const beforeMeta = getOrCreateSessionMeta(db, sessionId);
+            const b64c = (b: Uint8Array | null) => (b ? Buffer.from(b).toString("base64") : "");
+            const beforeRegionB64 = b64c(beforeMeta.cachedM0Bytes ?? null);
+            const beforeSegmentB64 = b64c(beforeMeta.regionVolatileBytes ?? null);
+            const beforeWatermark = beforeMeta.regionVolatileWatermark;
             const message = makeToolMessage("old-tool");
             const messages = [message];
             const logs: string[] = [];
@@ -8734,6 +8739,15 @@ it("contended partial cache replays persisted prefix until one uncontended drain
                 expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
                     "active",
                 );
+                // A3-1: the volatile segment is a wire byte too. A pending
+                // delta (PUBLISHED_A is volatile-carriage content) on a
+                // retry-exhausted pass must leave BOTH columns unchanged —
+                // region bytes and segment bytes move only in the boundary
+                // transaction, never on an aborted fold.
+                const afterContend = getOrCreateSessionMeta(db, sessionId);
+                expect(b64c(afterContend.cachedM0Bytes ?? null)).toBe(beforeRegionB64);
+                expect(b64c(afterContend.regionVolatileBytes ?? null)).toBe(beforeSegmentB64);
+                expect(afterContend.regionVolatileWatermark).toBe(beforeWatermark);
             } else {
                 expect(readSystemRegion(db, sessionId)).toContain("PUBLISHED_A");
                 expect(result.droppedTokens).toBeGreaterThan(0);
