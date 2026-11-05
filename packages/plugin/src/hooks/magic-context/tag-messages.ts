@@ -15,6 +15,7 @@ import { makeToolCompositeKey, type Tagger } from "../../features/magic-context/
 import { textMentionsRecentCommit } from "../../shared/commit-detection";
 import { isRecord } from "../../shared/record-type-guard";
 import { isReduceToolPart } from "./drop-stale-reduce-calls";
+import { deriveKey } from "./fpe";
 import {
     estimateImageTokensFromDataUrl,
     estimateToolAttachmentImageTokens,
@@ -283,6 +284,10 @@ export type TagTarget = {
      */
     textPrefix?: string;
     drop?: () => ToolDropResult;
+    /** Erase (stamp-only shape): both halves leave the wire entirely.
+     * Structural guards match drop(); a call that cannot be removed falls
+     * back to the real-argument skeleton. (`drop_mode = 'erased'`) */
+    erase?: () => ToolDropResult;
     /** Legacy skeleton: arguments replaced by the `{"dropped": …}` marker.
      * Replay-only, for `drop_mode = 'truncated'` tags not yet converted. */
     truncate?: () => ToolDropResult;
@@ -1099,7 +1104,14 @@ export function tagMessages(
         const thinkingParts = toolThinkingByCallId.get(compositeKey) ?? [];
         targets.set(
             tagId,
-            createToolDropTarget(compositeKey, thinkingParts, toolCallIndex, batch, tagId),
+            createToolDropTarget(
+                compositeKey,
+                thinkingParts,
+                toolCallIndex,
+                batch,
+                tagId,
+                deriveKey(sessionId),
+            ),
         );
     }
 

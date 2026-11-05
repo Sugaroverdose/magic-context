@@ -74,7 +74,7 @@ import {
     resolveHistorianContextLimit,
     resolveKnownHistorianContextLimit,
 } from "./derive-budgets";
-import { createDroppedInputToolExecuteBeforeHook } from "./dropped-input-guard";
+import { createDroppedInputGuard } from "./dropped-input-guard";
 import {
     type EmbedHistoryDeps,
     pauseEmbedHistoryDrain,
@@ -95,6 +95,7 @@ import {
     resolveModelKey,
 } from "./event-resolvers";
 import { formatEmbedStatusText } from "./format-embed-status";
+import { createToolExecuteBeforeHook, lookupReleasedToolInput } from "./fpe-resolve";
 import { clearInjectionCache } from "./inject-compartments";
 import { createDbLkgPersistence } from "./lkg-persist";
 import { dropSlot, registerLkgPersistence } from "./lkg-slot";
@@ -1191,7 +1192,13 @@ export function createMagicContextHook(deps: MagicContextDeps) {
             }
         },
         "command.execute.before": createCommandExecuteBeforeHook(commandHandler),
-        "tool.execute.before": createDroppedInputToolExecuteBeforeHook(),
+        "tool.execute.before": createToolExecuteBeforeHook({
+            fpeResolve: {
+                lookupOriginal: (sessionId, tagNumber) =>
+                    lookupReleasedToolInput(db, sessionId, tagNumber),
+            },
+            droppedInputGuard: createDroppedInputGuard(),
+        }),
         "tool.execute.after": createToolExecuteAfterHook({
             db,
             channel1StateBySession,

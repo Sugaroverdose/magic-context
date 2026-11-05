@@ -837,17 +837,23 @@ function toTagEntry(row: TagRow): TagEntry {
         type,
         status,
         dropMode:
-            row.drop_mode === "truncated"
-                ? "truncated"
-                : row.drop_mode === "skeleton_real"
-                  ? "skeleton_real"
-                  : row.drop_mode === "skeleton_stripped"
-                    ? "skeleton_stripped"
-                    : row.drop_mode === "edit_marker"
-                      ? "edit_marker"
-                      : row.drop_mode === "edit_marker_stripped"
-                        ? "edit_marker_stripped"
-                        : "full",
+            row.drop_mode === "erased"
+                ? "erased"
+                : row.drop_mode === "message_empty"
+                  ? "message_empty"
+                  : row.drop_mode === "message_filler"
+                    ? "message_filler"
+                    : row.drop_mode === "truncated"
+                      ? "truncated"
+                      : row.drop_mode === "skeleton_real"
+                        ? "skeleton_real"
+                        : row.drop_mode === "skeleton_stripped"
+                          ? "skeleton_stripped"
+                          : row.drop_mode === "edit_marker"
+                            ? "edit_marker"
+                            : row.drop_mode === "edit_marker_stripped"
+                              ? "edit_marker_stripped"
+                              : "full",
         toolName: row.tool_name ?? null,
         inputByteSize: row.input_byte_size ?? 0,
         byteSize: row.byte_size,

@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { closeDatabase, openDatabase } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { deriveKey, renderDropToken } from "./fpe";
 import { type MessageLike, tagMessages } from "./transform-operations";
 
 const tempDirs: string[] = [];
@@ -33,7 +34,7 @@ function useTempDataHome(prefix: string): void {
 }
 
 describe("tool input preservation", () => {
-    it("removes dropped tool call atomically", () => {
+    it("releases the dropped tool call atomically in the full shape", () => {
         useTempDataHome("context-tool-input-preserve-drop-");
         const db = openDatabase();
         const tagger = createTagger();
@@ -71,6 +72,20 @@ describe("tool input preservation", () => {
         const dropResult = targets.get(toolTagId!)?.drop?.();
         expect(dropResult).toBe("removed");
         batch.finalize();
-        expect(messages.map((message) => message.info.id)).toEqual(["m-next"]);
+        // The pair is never removed: every message survives in the full shape.
+        expect(messages.map((message) => message.info.id)).toEqual([
+            "m-assistant",
+            "m-tool",
+            "m-next",
+        ]);
+        const token = renderDropToken(toolTagId!, deriveKey("ses-1"));
+        const invocation = messages[0]?.parts[0] as Record<string, unknown>;
+        expect(invocation.args).toEqual({ d: token });
+        const toolPart = messages[1]?.parts[0] as { state: Record<string, unknown> };
+        expect(toolPart.state).toEqual({
+            output: "",
+            attachments: [],
+            input: { path: token },
+        });
     });
 });

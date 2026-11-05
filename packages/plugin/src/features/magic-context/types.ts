@@ -4,28 +4,42 @@ export interface TagEntry {
     type: "message" | "tool" | "file";
     status: "active" | "dropped" | "compacted";
     /**
-     * How a dropped tool tag is rendered on every replay pass (frozen at drop
+     * How a dropped tag is rendered on every replay pass (frozen at drop
      * time, re-derived deterministically from the original wire part each pass):
-     *  - "full": the whole tool call is removed from the transcript.
+     *  - "full": the RELEASED shape — the pair keeps its block structure, the
+     *    arguments become an FPE token carrier in the copy-source seat and the
+     *    result slot is empty (TOOL_RELEASED_SENTINEL). A model copying this
+     *    call re-emits the token; the tool.execute.before resolver runs the
+     *    original input. Deterministic in tag id + session key.
+     *  - "erased": the pair leaves the wire (a model stamp's removal intent;
+     *    the host store keeps the real bytes, so each pass removes again).
      *  - "skeleton_real": keep the tool_use call with its REAL arguments,
-     *    output -> [dropped N]. Used for small inputs dropped inside the
-     *    newest-call window and for the call whose result ends the request.
-     *  - "truncated": legacy skeleton; keep the tool_use call, output ->
-     *    [dropped N], arguments replaced by the `{"dropped": …}` marker. No
-     *    longer written by new drops; existing tags replay it until a HARD fold
-     *    converts them to "skeleton_real" or "full".
+     *    output -> "". Used for small inputs dropped inside the newest-call
+     *    window and for the call whose result ends the request.
+     *  - "truncated": legacy skeleton; new drops never persist it, and replay
+     *    normalizes it to the "full" released shape.
      *  - "edit_marker": like "truncated" but for an edit/write superseded by a
      *    later edit to the same file; keep the filePath verbatim and a short
      *    region-hint prefix of the diff, so the agent still sees WHICH file and
      *    region it edited. Only produced when the smart_drops config is on.
+     *  - "message_empty" / "message_filler": message-drop render shape,
+     *    frozen at apply — "" on routes measured to accept empty dropped
+     *    content (role-gated), the canonical `[dropped §N§]` placeholder
+     *    elsewhere. Only message tags carry these; replay never re-decides.
+     *    (Adjudicated against ARCHITECTURE invariant 2: the filler keeps the
+     *    single canonical placeholder string; the lineage's constant filler
+     *    variant is not shipped — census addendum Unit 5.)
      */
     dropMode:
         | "full"
+        | "erased"
         | "truncated"
         | "skeleton_real"
         | "skeleton_stripped"
         | "edit_marker"
-        | "edit_marker_stripped";
+        | "edit_marker_stripped"
+        | "message_empty"
+        | "message_filler";
     toolName: string | null;
     inputByteSize: number;
     byteSize: number;

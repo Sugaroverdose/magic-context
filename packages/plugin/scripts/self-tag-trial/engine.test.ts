@@ -42,13 +42,21 @@ describe("self-tag trial real tagging", () => {
             expect(bad.malformed).toBe(true); expect(bad.misplaced).toBe(true); expect(bad.byteIdentity).toBe(false);
         } finally { t.close(); }
     });
-    test("queued reduction materializes a real placeholder in a recent tool skeleton", async () => {
+    test("queued reduction releases a recent tool skeleton to an empty slot", async () => {
         const t = new engine.Trial("drop-test", "A", "control");
         try {
             t.user("fixture"); await t.accept({ texts: [], calls: [{ id: "read", name: "read", input: {} }] });
             for (let n = 0; n < 10; n++) { t.user(`turn ${n}`); await t.accept({ texts: ["seven"], calls: [] }); }
             await t.accept({ texts: [], calls: [{ id: "reduce", name: "ctx_reduce", input: { drop: "2" } }] });
-            expect(JSON.stringify(await t.pass())).toContain("[dropped §2§]");
+            // R11 (Unit 5): a released tool skeleton is the empty slot
+            // (TOOL_RELEASED_SENTINEL = ""), NOT the message-drop placeholder —
+            // [dropped §N§] is the whole-MESSAGE lane only. The pair survives
+            // (a tool pair is never removed from the wire); the imitable tool
+            // bytes leave, the tag prefix stays (v2 retains tag prefixes — the
+            // lineage's tag-prefix-free "output":"" is not the v2 wire).
+            const wire = JSON.stringify(await t.pass());
+            expect(wire).toContain('"output":"§2§ "');
+            expect(wire).not.toContain("fixture.txt:");
         } finally { t.close(); }
     });
 });

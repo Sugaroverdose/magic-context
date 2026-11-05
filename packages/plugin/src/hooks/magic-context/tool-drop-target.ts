@@ -1,9 +1,9 @@
 import { isRecord } from "../../shared/record-type-guard";
 import { toolPartHasUserAnswer } from "../../shared/user-answer";
-import { droppedInputMarker } from "./dropped-input-guard";
 import { applyEditMarkerToInput } from "./edit-marker";
 import { estimateMessageTokens } from "./final-wire-token-estimate";
-import { neutralizeDroppedReasoningPart } from "./sentinel";
+import { renderDropToken } from "./fpe";
+import { neutralizeDroppedReasoningPart, TOOL_RELEASED_SENTINEL } from "./sentinel";
 import { stripTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 import { toolInputStringBytes } from "./tool-input-size";
@@ -127,13 +127,13 @@ function servedPart(occurrence: IndexedOccurrence): unknown {
 
 /**
  * Real-argument skeleton: keep the call exactly as the host gave it and
- * replace only the output with the canonical `[dropped §N§]`. Nothing is ever
+ * replace only the output with the released sentinel. Nothing is ever
  * written into the argument position, so a model copying this call from its
  * history copies real, executable arguments.
  */
-function skeletonRealToolPart(part: unknown, tagId: number, stripAttachments = false): void {
+function skeletonRealToolPart(part: unknown, stripAttachments = false): void {
     if (!isRecord(part)) return;
-    const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+    const sentinel = TOOL_RELEASED_SENTINEL;
     if (part.type === "tool" && isRecord(part.state)) {
         part.state.output = sentinel;
         if (stripAttachments) part.state.attachments = [];
@@ -153,53 +153,61 @@ function readToolPartRawInput(part: unknown): unknown {
     return undefined;
 }
 
-function truncateToolPart(part: unknown, tagId: number): void {
+/**
+ * Carrier object for the `full` shape: the token fills ONE string-valued field
+ * of the original input (the seat models actually copy on re-use), keeping the
+ * args a schema-shaped object so a copied `full` call survives the provider
+ * schema decode and reaches the `.before` hook for resolution.
+ */
+export function carrierInput(raw: unknown, token: string): Record<string, unknown> {
+    if (isRecord(raw)) {
+        for (const [k, v] of Object.entries(raw)) {
+            if (typeof v === "string") return { [k]: token };
+        }
+    }
+    return { d: token };
+}
+
+/**
+ * `full` shape: the deep-cut tier. Same block structure as `skeleton_stripped`
+ * (result block present with `...`, attachments gone) but the arguments are
+ * replaced by the FPE token in the copy-source seat — a model copying this
+ * call re-emits the token, and the `.before` hook resolves it back to the
+ * original input. Deterministic: the token is a pure function of tag id +
+ * session key, so drop-time and replay-time render byte-identically.
+ */
+function fullToolPart(part: unknown, tagId: number, sessionKey: bigint): void {
     if (!isRecord(part)) return;
-
-    // Legacy `truncated` render, kept only so sessions that already serve it
-    // replay the same bytes until a HARD fold converts them (see
-    // convertLegacyToolSkeletons). New drops never use it. The marker is
-    // derived only from the durable tag, so it replays byte-identically.
-    const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
-
-    // OpenCode format: { type: "tool", state: { input: {...}, output: "..." } }
     if (part.type === "tool" && isRecord(part.state)) {
-        const state = part.state;
-        state.output = sentinel;
-
-        state.input = droppedInputMarker(tagId);
-
+        part.state.output = TOOL_RELEASED_SENTINEL;
+        part.state.attachments = [];
+        part.state.input = carrierInput(part.state.input, renderDropToken(tagId, sessionKey));
         return;
     }
-
-    // Anthropic format: { type: "tool_result", content: "..." }
     if (part.type === "tool_result") {
-        part.content = sentinel;
+        part.content = TOOL_RELEASED_SENTINEL;
         return;
     }
-
-    // OpenCode invocation format: { type: "tool-invocation", args: {...} }
+    const token = renderDropToken(tagId, sessionKey);
     if (part.type === "tool-invocation") {
-        part.args = droppedInputMarker(tagId);
+        part.args = carrierInput(part.args, token);
         return;
     }
-
-    // Anthropic invocation format: { type: "tool_use", input: {...} }
     if (part.type === "tool_use") {
-        part.input = droppedInputMarker(tagId);
+        part.input = carrierInput(part.input, token);
     }
 }
 
 /**
- * Edit-marker variant of `truncateToolPart` for a superseded edit/write: keep
- * the tool_use call, output → `[dropped §N§]`, but preserve `filePath` verbatim
+ * Edit-marker variant for a superseded edit/write: keep
+ * the tool_use call, output → the released sentinel, but preserve `filePath` verbatim
  * and clamp the diff to a region hint (instead of replacing every argument).
  * A SEPARATE path from `truncateToolPart`: it must never alter the existing
  * skeleton bytes. Deterministic + idempotent (see edit-marker.ts).
  */
-function editMarkerToolPart(part: unknown, tagId: number, stripAttachments = false): void {
+function editMarkerToolPart(part: unknown, stripAttachments = false): void {
     if (!isRecord(part)) return;
-    const sentinel = `[dropped \u00a7${tagId}\u00a7]`;
+    const sentinel = TOOL_RELEASED_SENTINEL;
 
     if (part.type === "tool" && isRecord(part.state)) {
         part.state.output = sentinel;
@@ -458,9 +466,11 @@ export function createToolDropTarget(
     index: ToolCallIndex,
     batch: ToolMutationBatch,
     tagId: number,
+    sessionKey: bigint,
 ): {
     setContent: (content: string) => boolean;
     drop: () => ToolDropResult;
+    erase: () => ToolDropResult;
     truncate: () => ToolDropResult;
     skeletonReal: () => ToolDropResult;
     editMarker: () => ToolDropResult;
@@ -498,8 +508,30 @@ export function createToolDropTarget(
         // turns follow.
         if (batch.wouldStrandConversationEnd(entry.occurrences)) return skeletonReal();
 
+        // `full` shape, not erasure: the pair keeps its block structure with
+        // the token in the argument seat. A tool pair is never removed from
+        // the wire; its terminal states are a released shape or passing the
+        // m[0] boundary. Persisted mode stays `full`, so replays re-render
+        // these bytes (the token recomputes identically from tag id + key).
         for (const occurrence of entry.occurrences) {
-            batch.markForRemoval(occurrence);
+            clampCloneInPlace(occurrence, (part) => fullToolPart(part, tagId, sessionKey));
+        }
+        clearThinkingParts(thinkingParts);
+        index.delete(compositeKey);
+        return "removed";
+    };
+
+    const erase = (): ToolDropResult => {
+        const entry = index.get(compositeKey);
+        if (!entry || entry.occurrences.length === 0) return "absent";
+        if (!entry.hasResult) return "incomplete";
+        // Same structural guard as drop(): a call whose removal would end the
+        // request on an assistant turn keeps its real arguments + placeholder.
+        if (batch.wouldStrandConversationEnd(entry.occurrences)) return skeletonReal();
+        for (const occurrence of entry.occurrences) {
+            const served = (occurrence.served ?? occurrence.part) as never;
+            const at = occurrence.message.parts.indexOf(served);
+            if (at >= 0) occurrence.message.parts.splice(at, 1);
         }
         clearThinkingParts(thinkingParts);
         index.delete(compositeKey);
@@ -512,10 +544,11 @@ export function createToolDropTarget(
         if (!entry.hasResult) return "incomplete";
 
         for (const occurrence of entry.occurrences) {
-            // Drop result bytes and replace invocation arguments with a
-            // non-executable marker. Rewrite a CLONE so the live part object
-            // OpenCode may still execute from stays byte-identical.
-            clampCloneInPlace(occurrence, (part) => truncateToolPart(part, tagId));
+            // Legacy `truncated` tags normalize to the `full` shape on replay:
+            // the readable `[dropped N]` marker render is gone from this
+            // build. Rewrite a CLONE so the live part object OpenCode may
+            // still execute from stays byte-identical.
+            clampCloneInPlace(occurrence, (part) => fullToolPart(part, tagId, sessionKey));
         }
         clearThinkingParts(thinkingParts);
         return "truncated";
@@ -529,7 +562,7 @@ export function createToolDropTarget(
         for (const occurrence of entry.occurrences) {
             // Invocation-only parts keep their real arguments untouched; a
             // clone still replaces any earlier clamp from this pass.
-            clampCloneInPlace(occurrence, (part) => skeletonRealToolPart(part, tagId));
+            clampCloneInPlace(occurrence, (part) => skeletonRealToolPart(part));
         }
         clearThinkingParts(thinkingParts);
         return "truncated";
@@ -540,7 +573,7 @@ export function createToolDropTarget(
         if (!entry || entry.occurrences.length === 0) return "absent";
         if (!entry.hasResult) return "incomplete";
         for (const occurrence of entry.occurrences) {
-            clampCloneInPlace(occurrence, (part) => skeletonRealToolPart(part, tagId, true));
+            clampCloneInPlace(occurrence, (part) => skeletonRealToolPart(part, true));
         }
         clearThinkingParts(thinkingParts);
         return "truncated";
@@ -575,9 +608,7 @@ export function createToolDropTarget(
         for (const occurrence of entry.occurrences) {
             // Same mutation-safety guarantee as truncate(): clamp a clone, never
             // the live part object.
-            clampCloneInPlace(occurrence, (part) =>
-                editMarkerToolPart(part, tagId, stripAttachments),
-            );
+            clampCloneInPlace(occurrence, (part) => editMarkerToolPart(part, stripAttachments));
         }
         clearThinkingParts(thinkingParts);
         return "truncated";
@@ -594,7 +625,7 @@ export function createToolDropTarget(
                 } as MessageLike);
             const before = count(parts);
             const retained = skeleton ? structuredClone(parts) : [];
-            for (const part of retained) skeletonRealToolPart(part, tagId);
+            for (const part of retained) skeletonRealToolPart(part);
             const after = count(retained);
             // Several calls can share one thinking block; credit only tool I/O here to avoid reclaiming it twice.
             return {
@@ -625,6 +656,7 @@ export function createToolDropTarget(
             return changed;
         },
         drop,
+        erase,
         truncate,
         skeletonReal,
         skeletonStripped,

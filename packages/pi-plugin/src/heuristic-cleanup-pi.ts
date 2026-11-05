@@ -439,6 +439,8 @@ export function applyPiHeuristicCleanup(
 					const { result, mode } = applyNewToolDrop(target, {
 						inWindow: recent,
 						keepSkeleton: target?.requiresToolArcSkeleton === true,
+						source: "sweeper",
+						toolName: tag.toolName,
 					});
 					if (result === "removed" || result === "truncated") {
 						// Persist the mode applied (including drop() keeping the

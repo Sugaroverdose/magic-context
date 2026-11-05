@@ -20,6 +20,20 @@ import { isRecord } from "../../shared/record-type-guard";
 export const WHOLE_MESSAGE_PLACEHOLDER_TEXT = "[dropped]";
 
 /**
+ * Canonical released-tool-result content on every tool skeleton path.
+ * Empty: the result block stays present (protocol pairing + template
+ * integrity) but carries no bytes, because any imitable constant there
+ * leaks into model output as a habit (host-DB census 2026-10-30: 160
+ * assistant text parts of exactly `...` over 5 days, 159 of them in one
+ * session — once the habit is learned it is consistent, and old tool
+ * slots are style fuel the model copies without reading).
+ * Old tool slots are style fuel, never content — so the slot must be
+ * uninhabitable, not merely unremarkable. Empty is the shape Anthropic
+ * routes already accepted for whole-message sentinels.
+ */
+export const TOOL_RELEASED_SENTINEL = "";
+
+/**
  * Decide whether empty-text sentinels are safe for the provider's wire path.
  *
  * The gate is deliberately canonical-Anthropic only. OpenCode filters empty
@@ -36,6 +50,41 @@ export const WHOLE_MESSAGE_PLACEHOLDER_TEXT = "[dropped]";
  */
 export function modelAcceptsEmptyContent(providerID?: string): boolean {
     return providerID === "anthropic";
+}
+
+/**
+ * Decide whether a DROPPED message (user text, or a whole-message sentinel)
+ * may be served as the empty string on this route.
+ *
+ * Wider than `modelAcceptsEmptyContent`: that predicate is about the
+ * Anthropic AI-SDK adapter actively filtering empty text parts off the wire
+ * (its hidden-seam and part-drop machinery depends on that behavior). This
+ * one only asks whether an empty string survives the route's validator.
+ * Measured 2026-10-31: the station route returned HTTP 200 for an empty
+ * user message, an empty assistant message, and consecutive user messages;
+ * the strict validators (Kimi `must not be empty`) reject those shapes, so
+ * unknown providers stay on the bracketed fillers.
+ */
+export function routeAcceptsEmptyDroppedContent(providerID?: string): boolean {
+    return providerID === "anthropic" || providerID === "station";
+}
+
+/**
+ * Role-aware refinement of `routeAcceptsEmptyDroppedContent` for whole
+ * MESSAGE drops. The anthropic adapter does not merely accept empty text —
+ * its AI-SDK normalization filters such parts off the wire, so an emptied
+ * USER message disappears with its turn anchor (the hazard
+ * `stripDroppedPlaceholderMessages` guards by never neutralizing user
+ * rows). Only assistant-role rows may be emptied there. The station route
+ * transmits the bytes as given (HTTP 200 probed for empty user content,
+ * 2026-10-31), so every role is safe.
+ */
+export function routeAcceptsEmptyDroppedMessage(
+    providerID: string | undefined,
+    role: string,
+): boolean {
+    if (!routeAcceptsEmptyDroppedContent(providerID)) return false;
+    return providerID !== "anthropic" || role === "assistant";
 }
 
 /**
@@ -228,7 +277,7 @@ export function makeWholeMessageSentinel(
 ): { type: "text"; text: string } & Record<string, unknown> {
     return {
         type: "text",
-        text: modelAcceptsEmptyContent(providerID) ? "" : WHOLE_MESSAGE_PLACEHOLDER_TEXT,
+        text: routeAcceptsEmptyDroppedContent(providerID) ? "" : WHOLE_MESSAGE_PLACEHOLDER_TEXT,
     };
 }
 

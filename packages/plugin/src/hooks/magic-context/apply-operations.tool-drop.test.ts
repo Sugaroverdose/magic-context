@@ -17,6 +17,7 @@ import {
 } from "../../features/magic-context/storage";
 import { createTagger } from "../../features/magic-context/tagger";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import { deriveKey, renderDropToken } from "./fpe";
 import {
     applyFlushedStatuses,
     applyPendingOperations,
@@ -62,6 +63,9 @@ function padSkeletonWindow(
     }
 }
 
+// Every fixture message carries sessionID "ses-1".
+const sessionKey = deriveKey("ses-1");
+
 function hasCall(messages: MessageLike[], callId: string): boolean {
     for (const message of messages) {
         for (const part of message.parts) {
@@ -86,18 +90,25 @@ function hasCall(messages: MessageLike[], callId: string): boolean {
 }
 
 describe("apply operations for tool drops", () => {
-    it("drops complete tool call slices and clears pending op", () => {
+    it("releases complete tool call slices in the full shape and clears pending op", () => {
         useTempDataHome("context-tool-drop-complete-");
         const db = openDatabase();
         const tagger = createTagger();
         const messages: MessageLike[] = [
             {
                 info: { id: "m-assistant", role: "assistant", sessionID: "ses-1" },
-                parts: [{ type: "tool-invocation", callID: "call-1" }],
+                parts: [{ type: "tool-invocation", callID: "call-1", toolName: "bash" }],
             },
             {
                 info: { id: "m-tool", role: "tool", sessionID: "ses-1" },
-                parts: [{ type: "tool", callID: "call-1", state: { output: "result" } }],
+                parts: [
+                    {
+                        type: "tool",
+                        callID: "call-1",
+                        toolName: "bash",
+                        state: { output: "result" },
+                    },
+                ],
             },
             // A later prompt, so this call does not end the conversation (drop()
             // keeps that one as a skeleton instead of removing it).
@@ -111,21 +122,36 @@ describe("apply operations for tool drops", () => {
         const toolTagId = tagger.getToolTag("ses-1", "call-1", "m-assistant");
         expect(toolTagId).toBeDefined();
         // Push the real tag out of the newest-20 skeleton window so this test
-        // exercises the FULL-removal path (deep-history drop).
+        // exercises the FULL shape path (deep-history drop).
         padSkeletonWindow(db, toolTagId!);
 
-        queuePendingOp(db, "ses-1", toolTagId!, "drop");
-        const didMutate = applyPendingOperations("ses-1", db, targets, new Set());
+        // Sweeper source: the `full` carrier is the automatic shape; model
+        // stamps erase instead (see apply-operations.source-modes.test.ts).
+        const didMutate = applyPendingOperations(
+            "ses-1",
+            db,
+            targets,
+            new Set(),
+            undefined,
+            undefined,
+            [{ id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 }],
+        );
         batch.finalize();
 
         expect(didMutate).toBe(true);
-        expect(hasCall(messages, "call-1")).toBe(false);
+        // Structural removal is gone: the pair survives in the full shape.
+        expect(hasCall(messages, "call-1")).toBe(true);
+        const token = renderDropToken(toolTagId!, sessionKey);
+        const invocation = messages[0]?.parts[0] as Record<string, unknown>;
+        expect(invocation.args).toEqual({ d: token });
+        const toolPart = messages[1]?.parts[0] as { state: Record<string, unknown> };
+        expect(toolPart.state).toEqual({ output: "", attachments: [], input: { d: token } });
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("full");
     });
 
-    it("keeps a skeleton (canonical [dropped §N§] output) for drops within the recent tool window", () => {
+    it("keeps a skeleton (canonical `...` output) for drops within the recent tool window", () => {
         useTempDataHome("context-tool-drop-skeleton-");
         const db = openDatabase();
         const tagger = createTagger();
@@ -156,7 +182,10 @@ describe("apply operations for tool drops", () => {
         const toolPart = messages
             .flatMap((m) => m.parts)
             .find((p: any) => p.callID === "call-1" && p.type === "tool") as any;
-        expect(toolPart.state.output).toBe(`[dropped \u00a7${toolTagId}\u00a7]`);
+        expect(toolPart.state.output).toBe("");
+        // skeleton_real never writes the argument seat: the invocation keeps its
+        // (empty) real args untouched.
+        expect((messages[0]?.parts[0] as Record<string, unknown>).args).toBeUndefined();
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", toolTagId!)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("skeleton_real");
@@ -250,7 +279,7 @@ describe("apply operations for tool drops", () => {
             state: { input: Record<string, unknown>; output: string };
         };
         expect(wire).not.toBe(taskPart);
-        expect(wire.state.output).toBe(`[dropped \u00a7${toolTagId}\u00a7]`);
+        expect(wire.state.output).toBe("");
         expect(wire.state.input).toEqual({ prompt: longPrompt, subagent_type: "mason" });
 
         // ...but the LIVE object OpenCode still holds is byte-identical (the long
@@ -311,7 +340,7 @@ describe("apply operations for tool drops", () => {
         // filePath preserved verbatim; diff clamped; output → canonical sentinel.
         expect(editPart.state.input.filePath).toBe("/Users/me/proj/spec.md");
         expect(editPart.state.input.oldString.endsWith("...[truncated]")).toBe(true);
-        expect(editPart.state.output).toBe(`[dropped \u00a7${tagId}\u00a7]`);
+        expect(editPart.state.output).toBe("");
 
         // Snapshot the frozen bytes, then replay via applyFlushedStatuses (the
         // defer-pass path) on a FRESHLY re-tagged copy of the ORIGINAL message:
@@ -411,6 +440,8 @@ describe("apply operations for tool drops", () => {
         expect(didMutate).toBe(false);
         expect(getPendingOps(db, "ses-1")).toHaveLength(1);
         expect(getTagById(db, "ses-1", messageTagId!)?.status).toBe("active");
+        // v2 keeps the §N§ tag prefix on un-dropped text (assembly-side strip
+        // is not this branch's behavior).
         expect(messages[4]?.parts).toEqual([{ type: "text", text: "§5§ five" }]);
     });
 
@@ -459,7 +490,11 @@ describe("apply operations for tool drops", () => {
         expect(didMutate).toBe(true);
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", messageTagId!)?.status).toBe("dropped");
-        expect(messages[2]?.parts).toEqual([{ type: "text", text: "[dropped §3§]" }]);
+        // v2 keeps the canonical `[dropped §N§]` filler (invariant 2), not the
+        // lineage's numeral-evicted constant — census Unit 5 disposition.
+        expect(messages[2]?.parts).toEqual([
+            { type: "text", text: `[dropped \u00a7${messageTagId}§]` },
+        ]);
     });
 
     it("treats missing tool call as absent and finalizes pending drop", () => {
@@ -509,13 +544,18 @@ describe("apply operations for tool drops", () => {
 
         expect(didMutate).toBe(true);
         expect(hasCall(messages, "call-2")).toBe(true);
+        // The legacy `truncated` render is dead: a persisted truncated tag
+        // replays as the full shape (carrier args + `...`).
+        const token = renderDropToken(toolTagId!, sessionKey);
         const toolPart = messages
             .flatMap((m) => m.parts)
             .find((p: any) => p.callID === "call-2" && p.type === "tool") as any;
-        expect(toolPart.state.output).toBe(`[dropped \u00a7${toolTagId}\u00a7]`);
+        expect(toolPart.state).toEqual({ output: "", attachments: [], input: { d: token } });
+        const invocation = messages[0]?.parts[0] as Record<string, unknown>;
+        expect(invocation.args).toEqual({ d: token });
     });
 
-    it("fully removes tool parts when drop mode is full", () => {
+    it("replays drop mode full as the carrier shape and keeps the pair", () => {
         useTempDataHome("context-tool-drop-flushed-full-");
         const db = openDatabase();
         const tagger = createTagger();
@@ -559,7 +599,18 @@ describe("apply operations for tool drops", () => {
         batch.finalize();
 
         expect(didMutate).toBe(true);
-        expect(hasCall(messages, "call-3")).toBe(false);
+        // `full` no longer removes: args carry the token in the first string
+        // seat ("filePath"), the result is `...`, attachments are gone.
+        expect(hasCall(messages, "call-3")).toBe(true);
+        const token = renderDropToken(toolTagId!, sessionKey);
+        const pair = messages[1]?.parts as Array<Record<string, any>>;
+        expect(pair[0]?.args).toEqual({ filePath: token });
+        expect(pair[1]?.state).toEqual({
+            input: { filePath: token },
+            output: "",
+            attachments: [],
+        });
+        expect(getTagById(db, "ses-1", toolTagId!)?.dropMode).toBe("full");
     });
 
     it("preserves step markers when dropping a tool from a mixed assistant message", () => {
@@ -576,7 +627,12 @@ describe("apply operations for tool drops", () => {
                 parts: [
                     { type: "step-start", snapshot: "snap-1" },
                     { type: "text", text: "keep this explanation" },
-                    { type: "tool", callID: "call-3", state: { output: "result" } },
+                    {
+                        type: "tool",
+                        callID: "call-3",
+                        toolName: "bash",
+                        state: { output: "result" },
+                    },
                     { type: "step-finish", reason: "tool-calls" },
                 ],
             },
@@ -593,21 +649,35 @@ describe("apply operations for tool drops", () => {
         expect(toolTagId).toBeDefined();
         padSkeletonWindow(db, toolTagId!);
 
-        queuePendingOp(db, "ses-1", toolTagId!, "drop");
-        const didMutate = applyPendingOperations("ses-1", db, targets, new Set());
+        // Sweeper source: full carrier shape (stamps erase; source-modes test).
+        const didMutate = applyPendingOperations(
+            "ses-1",
+            db,
+            targets,
+            new Set(),
+            undefined,
+            undefined,
+            [{ id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 }],
+        );
         batch.finalize();
 
         expect(didMutate).toBe(true);
-        expect(hasCall(messages, "call-3")).toBe(false);
+        // The pair is never removed, so the mixed wrapper keeps every part,
+        // including the released tool skeleton.
+        expect(hasCall(messages, "call-3")).toBe(true);
         expect(messages).toHaveLength(3);
         expect(messages[1]?.parts.map((part) => (part as { type?: string }).type)).toEqual([
             "step-start",
             "text",
+            "tool",
             "step-finish",
         ]);
+        const token = renderDropToken(toolTagId!, sessionKey);
+        const toolPart = messages[1]?.parts[2] as { state: Record<string, unknown> };
+        expect(toolPart.state).toEqual({ output: "", attachments: [], input: { d: token } });
     });
 
-    it("prunes tool-only step wrapper messages after dropping the tool", () => {
+    it("keeps tool-only step wrapper messages alive on the released skeleton after dropping the tool", () => {
         useTempDataHome("context-tool-drop-empty-step-wrapper-");
         const db = openDatabase();
         const tagger = createTagger();
@@ -620,7 +690,12 @@ describe("apply operations for tool drops", () => {
                 info: { id: "m-assistant", role: "assistant", sessionID: "ses-1" },
                 parts: [
                     { type: "step-start", snapshot: "snap-1" },
-                    { type: "tool", callID: "call-4", state: { output: "result" } },
+                    {
+                        type: "tool",
+                        callID: "call-4",
+                        toolName: "bash",
+                        state: { output: "result" },
+                    },
                     { type: "step-finish", reason: "tool-calls" },
                 ],
             },
@@ -637,13 +712,31 @@ describe("apply operations for tool drops", () => {
         expect(toolTagId).toBeDefined();
         padSkeletonWindow(db, toolTagId!);
 
-        queuePendingOp(db, "ses-1", toolTagId!, "drop");
-        const didMutate = applyPendingOperations("ses-1", db, targets, new Set());
+        // Sweeper source: full carrier shape (stamps erase; source-modes test).
+        const didMutate = applyPendingOperations(
+            "ses-1",
+            db,
+            targets,
+            new Set(),
+            undefined,
+            undefined,
+            [{ id: 0, sessionId: "ses-1", tagId: toolTagId!, operation: "drop", queuedAt: 0 }],
+        );
         batch.finalize();
 
         expect(didMutate).toBe(true);
-        expect(hasCall(messages, "call-4")).toBe(false);
-        expect(messages.map((message) => message.info.id)).toEqual(["m-user", "m-next"]);
+        // The wrapper's only content part was the tool; since the pair now
+        // survives (never removed), the assistant message stays with its
+        // released skeleton instead of being pruned as empty.
+        expect(hasCall(messages, "call-4")).toBe(true);
+        expect(messages.map((message) => message.info.id)).toEqual([
+            "m-user",
+            "m-assistant",
+            "m-next",
+        ]);
+        const token = renderDropToken(toolTagId!, sessionKey);
+        const toolPart = messages[1]?.parts[1] as { state: Record<string, unknown> };
+        expect(toolPart.state).toEqual({ output: "", attachments: [], input: { d: token } });
     });
 
     it("clears stale drop ops for compacted tags", () => {
@@ -677,8 +770,8 @@ describe("apply operations for tool drops", () => {
         expect(messages[1]?.parts).toEqual([{ type: "text", text: "§2§ reduce me later" }]);
     });
 
-    describe("role-aware message drops (canonical [dropped §N§])", () => {
-        it("drops a user message to the canonical [dropped §N§] placeholder when queued", () => {
+    describe("role-aware message drops (canonical constant placeholder)", () => {
+        it("drops a user message to the canonical constant placeholder when queued", () => {
             useTempDataHome("context-user-msg-drop-pending-");
             const db = openDatabase();
             const tagger = createTagger();
@@ -705,9 +798,10 @@ describe("apply operations for tool drops", () => {
             expect(getTagById(db, "ses-1", userMsgTagId!)?.status).toBe("dropped");
 
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            // ONE canonical placeholder — byte-identical regardless of role/content
-            // so it can never flip across passes and bust the prompt cache.
-            expect(text).toBe(`[dropped §${userMsgTagId}§]`);
+            // ONE canonical placeholder per tag, pure function of tag id (v2
+            // keeps the numeral: ARCHITECTURE invariant 2; the lineage's
+            // `[content omitted]` numeral-eviction is not shipped — census U5).
+            expect(text).toBe(`[dropped \u00a7${userMsgTagId}§]`);
         });
 
         it("preserves user message shell when flushed dropped status is re-applied", () => {
@@ -739,12 +833,12 @@ describe("apply operations for tool drops", () => {
 
             expect(didMutate).toBe(true);
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            // Flushed-status replay produces the SAME canonical placeholder as the
-            // execute-pass drop — byte-identical, no flip across passes.
-            expect(text).toBe(`[dropped §${userMsgTagId}§]`);
+            // Flushed-status replay produces the SAME placeholder bytes as the
+            // execute-pass drop — pure function of tag id, no flip across passes.
+            expect(text).toBe(`[dropped \u00a7${userMsgTagId}§]`);
         });
 
-        it("keeps using [dropped §N§] full drop for assistant messages (no regression)", () => {
+        it("keeps the full drop as the constant placeholder for assistant messages (no regression)", () => {
             useTempDataHome("context-assistant-msg-drop-unchanged-");
             const db = openDatabase();
             const tagger = createTagger();
@@ -768,11 +862,11 @@ describe("apply operations for tool drops", () => {
 
             expect(didMutate).toBe(true);
             expect(messages[1]?.parts).toEqual([
-                { type: "text", text: `[dropped §${asstMsgTagId}§]` },
+                { type: "text", text: `[dropped \u00a7${asstMsgTagId}§]` },
             ]);
         });
 
-        it("a short user message also drops to the canonical [dropped §N§]", () => {
+        it("a short user message also drops to the canonical constant placeholder", () => {
             useTempDataHome("context-user-msg-short-");
             const db = openDatabase();
             const tagger = createTagger();
@@ -794,7 +888,7 @@ describe("apply operations for tool drops", () => {
             applyPendingOperations("ses-1", db, targets, new Set());
 
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            expect(text).toBe(`[dropped §${userMsgTagId}§]`);
+            expect(text).toBe(`[dropped \u00a7${userMsgTagId}§]`);
         });
     });
 });

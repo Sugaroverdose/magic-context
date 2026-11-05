@@ -614,6 +614,11 @@ describe("three-set cache-busting refactor (Oracle review 2026-04-26)", () => {
             const foldMessages = sourceMessages();
             await transform({}, { messages: foldMessages });
             const foldWire = serializeProviderWire(foldMessages, providerID);
+            // Whole-message drops mint the canonical placeholder on every
+            // route, so the placeholder-strip lane recognises and removes them
+            // uniformly (recording the removal for a byte-identical replay).
+            // The provider-gated empty is a station concern (sentinel
+            // makeWholeMessageSentinel), not this lane.
             expect(foldMessages.some((message) => message.info.id === "hidden-assistant-a")).toBe(
                 false,
             );

@@ -6,7 +6,8 @@ const ESTIMATED_CHARACTERS_PER_TOKEN = 3.5;
 export type DroppedTokenReduction =
     | {
           tagNumber: number;
-          mode: "full" | "truncated" | "edit_marker";
+          /** `skeleton` = automatic non-bash reclaim: output gone, arguments stay. */
+          mode: "full" | "truncated" | "edit_marker" | "skeleton";
       }
     | {
           tagNumber: number;
@@ -81,7 +82,7 @@ export function estimateDroppedTokensFromTagReductions(
 
     const structuralByTag = new Map<
         number,
-        Extract<DroppedTokenReduction, { mode: "full" | "truncated" | "edit_marker" }>
+        Extract<DroppedTokenReduction, { mode: "full" | "truncated" | "edit_marker" | "skeleton" }>
     >();
     const partialCharactersByTag = new Map<number, number>();
     for (const reduction of reductions) {

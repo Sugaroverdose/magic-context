@@ -11,6 +11,7 @@ import {
 } from "../../features/magic-context/storage";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import { applyFlushedStatuses, applyPendingOperations } from "./apply-operations";
+import { deriveKey } from "./fpe";
 import { applyHeuristicCleanup } from "./heuristic-cleanup";
 import { buildSupersessionReclaimOps } from "./supersession-reclaim";
 import type { MessageLike, TagTarget } from "./tag-messages";
@@ -65,7 +66,17 @@ function add(tag: number, name: string, answer = false, repetitions = 1000) {
     const index: ToolCallIndex = new Map([
         [callID, { hasResult: true, occurrences: [{ message, part, kind: "result" }] }],
     ]);
-    targets.set(tag, createToolDropTarget(callID, [], index, new ToolMutationBatch(messages), tag));
+    targets.set(
+        tag,
+        createToolDropTarget(
+            callID,
+            [],
+            index,
+            new ToolMutationBatch(messages),
+            tag,
+            deriveKey(session),
+        ),
+    );
     insertTag(db, session, callID, "tool", part.state.output.length, tag, 0, name, 0, null, null, {
         tokenCount: repetitions,
         inputTokenCount: 0,
@@ -120,7 +131,7 @@ describe("user-answer automatic protection", () => {
         queuePendingOp(db, session, 1, "drop");
         expect(applyPendingOperations(session, db, targets, new Set())).toBe(true);
         expect(getTagsBySession(db, session)[0].status).toBe("dropped");
-        expect(JSON.stringify(messages)).toContain("[dropped §1§]");
+        expect(JSON.stringify(messages)).toContain('"output":""');
     });
 
     it("previously dropped answers remain dropped on defer replay", () => {
@@ -130,7 +141,8 @@ describe("user-answer automatic protection", () => {
         ).run(session);
         expect(targets.get(1)?.canDrop?.()).toBe(false);
         expect(applyFlushedStatuses(session, db, targets)).toBe(true);
-        expect(JSON.stringify(messages)).toContain("[dropped §1§]");
+        // skeleton_real replays `...` with the real (empty) args intact.
+        expect(JSON.stringify(messages)).toContain('"output":""');
     });
 
     it("dedup preserves host-marked answers on duplicate-safe tools", () => {
