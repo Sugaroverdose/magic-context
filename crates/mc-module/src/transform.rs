@@ -12598,15 +12598,12 @@ fn approx_thousands(tokens: i64) -> String {
 }
 
 fn format_reclaimable_hint(hint: &[(i64, String)]) -> String {
-    if hint.is_empty() {
-        return String::new();
-    }
-    let rendered = hint
-        .iter()
-        .map(|(tag, name)| format!("§{tag}§ {name}"))
-        .collect::<Vec<_>>()
-        .join(" · ");
-    format!("\noldest reclaimable: {rendered}.")
+    // ctx_reduce v1: numeric tag handles are retired from the model-facing
+    // surface. The module has no view of wire call ids, so it has nothing
+    // copyable to offer; the count sentence above still lands. The TS side
+    // renders the same line only when copyable call ids are present.
+    let _ = hint;
+    String::new()
 }
 
 // --- output splice: [m0, m1] ++ tail(by coverage_ordinal) ---

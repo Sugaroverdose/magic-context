@@ -1528,7 +1528,7 @@ function readQueuedTagNumbers(
     for (const row of rows) {
         if (typeof row.tagNumber !== "number") continue;
         any.add(row.tagNumber);
-        if (row.operation === "drop") drop.add(row.tagNumber);
+        if (row.operation === "drop" || row.operation === "auto_drop") drop.add(row.tagNumber);
     }
     return { any, drop };
 }

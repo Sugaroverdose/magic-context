@@ -229,7 +229,9 @@ function estimateProjectedPostDropPercentage(
 
     // 1. Pending user-queued drops (from ctx_reduce) — include both text and reasoning bytes
     //    because dropping a message tag also clears its associated reasoning parts
-    const pendingDrops = getPendingOps(db, sessionId).filter((op) => op.operation === "drop");
+    const pendingDrops = getPendingOps(db, sessionId).filter(
+        (op) => op.operation === "drop" || op.operation === "auto_drop",
+    );
     const pendingDropTagIds = new Set(pendingDrops.map((op) => op.tagId));
     if (pendingDrops.length > 0) {
         droppableBytes += activeTags

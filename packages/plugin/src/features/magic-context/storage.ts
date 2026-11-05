@@ -246,6 +246,7 @@ export {
     getPendingOpsCount,
     queuePendingOp,
     removePendingOp,
+    removePendingOpById,
 } from "./storage-ops";
 export * from "./storage-primers";
 export {

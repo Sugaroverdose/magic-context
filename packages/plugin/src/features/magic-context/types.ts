@@ -62,7 +62,13 @@ export interface PendingOp {
     id: number;
     sessionId: string;
     tagId: number;
-    operation: "drop";
+    /**
+     * Queue provenance — the queue has no author column, so this value is the
+     * only record of who asked: "drop" = model stamp (ctx_reduce tool lanes;
+     * apply erases), "auto_drop" = compartment runner (a system actor; apply
+     * uses sweeper shapes and preserves ctx_reduce receipts).
+     */
+    operation: "drop" | "auto_drop";
     queuedAt: number;
 }
 
