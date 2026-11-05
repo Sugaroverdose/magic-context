@@ -203,6 +203,19 @@ describe("L3 control/no-collateral", () => {
         ]);
         expect(chunk).toBe("[1] A: TC: run tests now");
     });
+
+    // Invariant 1's fold-set boundary, witnessed against production rather than
+    // left to the "JS \s excludes ZWSP" language guarantee: the fold class is
+    // exactly JS \s (U+FEFF BOM and U+00A0 NBSP fold) unioned with U+0085 NEL,
+    // and U+200B (ZWSP, not a JS \s member) must survive unfolded. This is the
+    // enumeration the skipped Rust twin (boundary.rs is_splice_fold_whitespace)
+    // must reproduce; the shared vectors pin the fold-in direction, this law
+    // pins the fold-OUT boundary on the TS lane.
+    it("the fold set is JS-\\s ∪ U+0085: ZWSP survives, FEFF/NEL/NBSP fold", () => {
+        expect(sanitizeSpliceText("a\u200b\u00a0\u200bb")).toBe("a\u200b \u200bb");
+        expect(sanitizeSpliceText("a\u0085b")).toBe("a b");
+        expect(sanitizeSpliceText("a\u{feff}b")).toBe("a b");
+    });
 });
 
 describe("W7-enumerated envelope-breakout", () => {
