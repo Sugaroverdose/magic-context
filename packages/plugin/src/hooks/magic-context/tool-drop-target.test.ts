@@ -1,7 +1,8 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
+import { join, resolve } from "node:path";
 import { deriveKey, renderDropToken } from "./fpe";
 import { isNeutralizedReasoningPart, TOOL_RELEASED_SENTINEL } from "./sentinel";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
@@ -13,6 +14,136 @@ import {
     type ToolCallIndex,
     ToolMutationBatch,
 } from "./tool-drop-target";
+
+// ── Closure census for the volatile-segment lane (ruling 3, brace to the
+// belt below) ──────────────────────────────────────────────────────────────
+// The volatile lane renders head bytes only; it must have no code path into a
+// message part-mutation primitive (it can never strip a protected block). The
+// four direct-text pins only guard region-volatile.ts's own bytes; a rogue can
+// reach a mutator by importing it (directly or through the transitive value
+// graph) with a name the text scan never listed. These helpers walk the real
+// transitive value-import closure from region-volatile.ts (within src/,
+// following re-export barrels; type-only edges are skipped — erased, cannot
+// execute) and fail closed on any value binding pulled out of a mutator module
+// that is not on the pure-read allowlist. The mutator modules' own internals
+// are never audited (they own the primitives by design); we audit only the
+// edges the volatile lane makes into them.
+const VOLATILE_MUTATOR_BASENAMES = new Set([
+    "sentinel.ts",
+    "tool-drop-target.ts",
+    "tag-messages.ts",
+    "apply-operations.ts",
+    "heuristic-cleanup.ts",
+    "strip-content.ts",
+]);
+// The only non-mutating exports the volatile closure may pull from a mutator
+// module. Fail-closed: a mutator, a mint, or a renamed one reaching the lane
+// is not on this list and reddens.
+const VOLATILE_MUTATOR_ALLOWLIST: Record<string, ReadonlySet<string>> = {
+    "tool-drop-target.ts": new Set(["extractToolCallObservation"]),
+};
+
+interface ImportEdge {
+    names: string[];
+    spec: string;
+    isType: boolean;
+    kind: "named" | "namespace" | "default" | "star" | "sideeffect";
+}
+
+function importEdgesOf(text: string): ImportEdge[] {
+    const edges: ImportEdge[] = [];
+    let m: RegExpExecArray | null;
+    const namedRe =
+        /(import|export)\s+(type\s+)?\{([^}]*)\}\s*(?:as\s+\w+\s*)?from\s+["']([^"']+)["']/g;
+    while ((m = namedRe.exec(text))) {
+        const rawNames = m[3]
+            .split(",")
+            .map((s) => s.trim())
+            .filter(Boolean);
+        const valueNames = rawNames.filter((n) => !n.startsWith("type "));
+        edges.push({
+            names: valueNames,
+            spec: m[4],
+            isType: Boolean(m[2]) || rawNames.length === 0 || valueNames.length === 0,
+            kind: "named",
+        });
+    }
+    const nsRe = /(?:import|export)\s+\*\s+as\s+\w+\s+from\s+["']([^"']+)["']/g;
+    while ((m = nsRe.exec(text)))
+        edges.push({ names: ["*"], spec: m[1], isType: false, kind: "namespace" });
+    const starRe = /export\s+\*\s+(type\s+)?from\s+["']([^"']+)["']/g;
+    while ((m = starRe.exec(text)))
+        edges.push({ names: ["*"], spec: m[2], isType: Boolean(m[1]), kind: "star" });
+    const defRe = /import\s+([A-Za-z_$][\w$]*)\s*(?:,\s*\{[^}]*\})?\s*from\s+["']([^"']+)["']/g;
+    while ((m = defRe.exec(text)))
+        edges.push({ names: [m[1]], spec: m[2], isType: false, kind: "default" });
+    const sideRe = /^[ \t]*import\s+["']([^"']+)["']/gm;
+    while ((m = sideRe.exec(text)))
+        edges.push({ names: [], spec: m[1], isType: false, kind: "sideeffect" });
+    return edges;
+}
+
+function volatileSpecToFile(srcRoot: string, fromFile: string, spec: string): string | null {
+    if (!spec.startsWith(".")) return null;
+    const base = resolve(fromFile, "..", spec);
+    for (const c of [
+        base,
+        `${base}.ts`,
+        `${base}.tsx`,
+        join(base, "index.ts"),
+        join(base, "index.tsx"),
+    ]) {
+        try {
+            if (statSync(c).isFile() && c.startsWith(`${srcRoot}/`) && !c.endsWith(".test.ts")) {
+                return c;
+            }
+        } catch {
+            // not a file at this candidate path — try the next
+        }
+    }
+    return null;
+}
+
+function findVolatileMutationReach(
+    overrides?: Map<string, string>,
+    allowlistOverride?: Record<string, ReadonlySet<string>>,
+): string[] {
+    const srcRoot = resolve(import.meta.dirname, "..", "..");
+    const start = join(srcRoot, "hooks", "magic-context", "region-volatile.ts");
+    const read = (p: string): string => overrides?.get(p) ?? readFileSync(p, "utf8");
+    const allowlist = allowlistOverride ?? VOLATILE_MUTATOR_ALLOWLIST;
+    const rel = (p: string): string => p.slice(srcRoot.length + 1);
+    const violations: string[] = [];
+    const seen = new Set<string>([start]);
+    const queue: string[] = [start];
+    while (queue.length > 0) {
+        const file = queue.shift() as string;
+        for (const edge of importEdgesOf(read(file))) {
+            if (edge.isType) continue;
+            const target = volatileSpecToFile(srcRoot, file, edge.spec);
+            if (!target) continue;
+            const basename = target.slice(target.lastIndexOf("/") + 1);
+            if (VOLATILE_MUTATOR_BASENAMES.has(basename)) {
+                const allowed = allowlist[basename];
+                if (edge.kind === "named") {
+                    for (const name of edge.names) {
+                        if (!allowed?.has(name)) {
+                            violations.push(`${rel(file)} -[named ${name}]-> ${basename}`);
+                        }
+                    }
+                } else {
+                    violations.push(`${rel(file)} -[${edge.kind}]-> ${basename}`);
+                }
+                continue; // never audit a mutator module's own internals
+            }
+            if (!seen.has(target)) {
+                seen.add(target);
+                queue.push(target);
+            }
+        }
+    }
+    return violations;
+}
 
 function message(id: string, role: string, parts: unknown[]): MessageLike {
     return {
@@ -354,8 +485,9 @@ describe("tool-drop-target", () => {
                 // protected thinking block. This lane renders only head bytes
                 // from memory/compartment/docs state — it takes no message
                 // array at all — so its reach-freedom is a structural property.
-                // Pin it as a falsifiable guard: importing or calling any
-                // reasoning-neutralize / part-mutation primitive here reddens.
+                //
+                // BELT: the volatile file's own bytes never name a part-mutation
+                // primitive or reach a message array.
                 const source = readFileSync(
                     new URL("./region-volatile.ts", import.meta.url),
                     "utf8",
@@ -364,6 +496,102 @@ describe("tool-drop-target", () => {
                 expect(source).not.toMatch(/clearThinkingParts/);
                 expect(source).not.toMatch(/\bMessageLike\b/);
                 expect(source).not.toMatch(/\.parts\b/);
+                // BRACES: the real transitive value-import closure (not a string
+                // list) reaches no part-mutation export. A rogue cannot evade by
+                // importing a mutator under a name the belt never listed, or by
+                // smuggling one through a barrel two hops down the graph.
+                expect(findVolatileMutationReach()).toEqual([]);
+            });
+
+            it("the mutator allowlist names only real, still-present exports (fail-closed guard)", () => {
+                // The allowlist is the one thing that keeps the clean tree green.
+                // If a pure read is renamed away, its allowlist entry goes stale
+                // and this reddens — forcing re-audit rather than silently
+                // widening what the volatile lane may pull from a mutator module.
+                for (const [basename, names] of Object.entries(VOLATILE_MUTATOR_ALLOWLIST)) {
+                    // Every allowlisted mutator is a sibling of this census.
+                    const found = join(import.meta.dirname, basename);
+                    expect(statSync(found).isFile(), `mutator module ${basename} exists`).toBe(
+                        true,
+                    );
+                    const text = readFileSync(found, "utf8");
+                    for (const name of names) {
+                        const declared =
+                            new RegExp(
+                                `export\\s+(?:async\\s+)?(?:function|const|class)\\s+${name}\\b`,
+                            ).test(text) ||
+                            new RegExp(`export\\s*\\{[^}]*\\b${name}\\b`).test(text);
+                        expect(declared, `${basename} still exports ${name}`).toBe(true);
+                    }
+                }
+            });
+
+            it("REDS under planted part-mutation reach (committed rogue-loop witness)", () => {
+                // #2780: a re-runnable witness, not a run-then-delete disclosure.
+                // Each rogue is a virtual patch (plant not shipped); the census
+                // must turn red and name the smuggled binding. The first is the
+                // reviewer's exact evade class (a direct makeSentinel import the
+                // four-string belt never listed); the others prove the walk is
+                // transitive and barrel-aware, not first-order-only.
+                const srcRoot = resolve(import.meta.dirname, "..", "..");
+                const rv = join(srcRoot, "hooks", "magic-context", "region-volatile.ts");
+                const dr = join(srcRoot, "hooks", "magic-context", "decay-render.ts");
+                // Discovery witness on the REAL tree (no injection): stripping the
+                // allowlist must surface the one genuine deep edge — the volatile
+                // closure reaches read-session-chunk.ts (many hops down) and finds
+                // its extractToolCallObservation import of tool-drop-target. A
+                // 1-hop-only walk would never see it, so this proves transitivity.
+                const stripped = findVolatileMutationReach(undefined, {});
+                expect(stripped.join("\n")).toContain("read-session-chunk.ts");
+                expect(stripped.join("\n")).toContain("extractToolCallObservation");
+                const rogues: Array<{
+                    label: string;
+                    overrides: Map<string, string>;
+                    needle: string;
+                }> = [
+                    {
+                        label: "direct mutator import (reviewer evade: makeSentinel)",
+                        overrides: new Map([
+                            [
+                                rv,
+                                `${readFileSync(rv, "utf8")}\nimport { makeSentinel } from "./sentinel";\n`,
+                            ],
+                        ]),
+                        needle: "makeSentinel",
+                    },
+                    {
+                        label: "transitive mutator import through a reachable renderer",
+                        overrides: new Map([
+                            [
+                                dr,
+                                `${readFileSync(dr, "utf8")}\nimport { createToolDropTarget } from "./tool-drop-target";\n`,
+                            ],
+                        ]),
+                        needle: "createToolDropTarget",
+                    },
+                    {
+                        label: "barrel re-export of a whole-message sentinel mint",
+                        overrides: new Map([
+                            [
+                                dr,
+                                `${readFileSync(dr, "utf8")}\nexport { makeWholeMessageSentinel } from "./sentinel";\n`,
+                            ],
+                        ]),
+                        needle: "makeWholeMessageSentinel",
+                    },
+                    {
+                        label: "side-effect import of a mutator module",
+                        overrides: new Map([
+                            [rv, `${readFileSync(rv, "utf8")}\nimport "./sentinel";\n`],
+                        ]),
+                        needle: "[sideeffect]-> sentinel.ts",
+                    },
+                ];
+                for (const rogue of rogues) {
+                    const violations = findVolatileMutationReach(rogue.overrides);
+                    expect(violations, rogue.label).not.toEqual([]);
+                    expect(violations.join("\n"), rogue.label).toContain(rogue.needle);
+                }
             });
         });
 
