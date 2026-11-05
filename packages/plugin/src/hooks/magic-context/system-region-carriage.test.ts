@@ -8,7 +8,8 @@
  * live in the sentinel region row and serve inside system[0]
  * (system-prompt-hash.ts). The synthetic-head carriage — prependM0M1Messages,
  * the m[1] replay/soft-refresh pair, the head-completeness readers, the
- * syntheticHead flags/walks, the mural PNG file part — is DELETED. This law
+ * syntheticHead flags/walks, the head-side mural file-part mint — is DELETED.
+ * This law
  * is the census that keeps it dead: for every deletion class it walks the
  * plugin production tree (packages/plugin/src + packages/plugin/scripts,
  * design §25.4 walk shape, #2720 named deny-list) and demands zero holders,
@@ -20,12 +21,17 @@
  *   `message.info.syntheticHead` on host-supplied rows. Out-of-contract
  *   (adapter-side foreign-row bookkeeping); it must not redden the census and
  *   must stay the ONLY production reader of the flag.
- * - Mural: the text block renders INSIDE the region panels (region-render,
- *   golden-pinned); the PNG file part died with the carriage it rode
- *   (named ruling — region serving is system[0]-text-only, the lane never
- *   served the image). The co-persisted identity columns
- *   (cached_m0_mural_data_url/_hash) stay: they are rotation markers
- *   (#2626 no-new-persistence, #2618 prefer existing columns).
+ * - Mural (plan Unit 1 ruling, "joins carriage"): the text block renders
+ *   INSIDE the region panels (region-render, golden-pinned); the PNG rides
+ *   beside the region as a synthetic image message — minted at
+ *   region-render.ts buildRegionMuralMessage and emitted at the transform
+ *   tail (transform.ts "Mural carriage group") while a servable region
+ *   exists. What died with the head carriage is the OLD mint site inside
+ *   inject-compartments (muralImage / file-part walk), not the image itself.
+ *   The co-persisted identity columns (cached_m0_mural_data_url/_hash) stay:
+ *   they are the rotation markers the tail carriage reads — a pure function
+ *   of them per rotation (#2626 no-new-persistence, #2618 prefer existing
+ *   columns).
  * - Pi keeps its own head machinery in packages/pi-plugin (its carriage
  *   deletion is the Stage P2 twin, tracked in PARITY.md); this census is
  *   plugin-package scoped by design.
@@ -169,10 +175,12 @@ describe("carriage deletion census: production tree is headless", () => {
         expect(callers.length).toBeGreaterThan(0);
     });
 
-    it("mural PNG carriage is dead; region-panel mural text and identity columns survive", () => {
-        // Named ruling (spec §11 disposition): the PNG file part died with the
-        // head carriage; the mural text block renders inside the region
-        // panels; the persisted columns stay as rotation markers.
+    it("the head-side mural mint is dead; region text, identity columns, and the tail sidecar survive", () => {
+        // Plan Unit 1 ruling ("joins carriage"): the mural legend renders
+        // inside the region bytes; the PNG rides beside the region as a
+        // synthetic message minted by buildRegionMuralMessage (region-render)
+        // and emitted by the transform tail. What stays dead is the HEAD-side
+        // mint: no muralImage/file-part machinery in inject-compartments.
         // Scoped to the carriage file: an unrelated diagnostics script may
         // construct image-part fixtures freely (cereb-full-sync-probe.ts).
         const inject = production.find(
@@ -189,6 +197,12 @@ describe("carriage deletion census: production tree is headless", () => {
             (r) => r.rel === "src/hooks/magic-context/region-render.ts",
         );
         expect(regionRender?.text).toMatch(/resolveMuralForM0/);
+        // Record-truth half: the shipped carriage must stay where the header
+        // says it is — the mint in region-render, the emit in the transform.
+        expect(regionRender?.text).toMatch(/export function buildRegionMuralMessage/);
+        expect(regionRender?.text).toMatch(/image\/png/);
+        const transform = production.find((r) => r.rel === "src/hooks/magic-context/transform.ts");
+        expect(transform?.text).toMatch(/buildRegionMuralMessage/);
     });
 
     it("the never-empty floor constants are consumed only by the region producer", () => {

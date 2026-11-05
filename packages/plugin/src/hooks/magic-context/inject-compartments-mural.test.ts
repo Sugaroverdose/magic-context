@@ -11,6 +11,7 @@ import { runMigrations } from "../../features/magic-context/migrations";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { readSystemRegion } from "../../features/magic-context/system-region";
+import { createTagger } from "../../features/magic-context/tagger";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
@@ -27,6 +28,7 @@ import {
     stripMemoryMuralBlock,
 } from "./inject-compartments";
 import type { MessageLike } from "./tag-messages";
+import { createTransform } from "./transform";
 import { regionRotationPromotion } from "./transform-postprocess-phase";
 
 const SESSION_ID = "ses_mural_inject";
@@ -612,5 +614,117 @@ describe("m[0] mural image fold (on-demand render → wire)", () => {
         } finally {
             closeQuietly(db);
         }
+    });
+});
+
+/**
+ * Production-composition laws for the mural carriage (#2710 class): these
+ * drive the real createTransform tail, so any edit to the gate at
+ * transform.ts (mural carriage group) reddens the shipped behavior, not a
+ * mirror. The carriageImage helper above exists for the fold-side laws; it
+ * copies the gate shape and can desync — these two cannot.
+ */
+describe("mural carriage at the production transform tail", () => {
+    async function tailCarriageUrl(compactionOff: boolean): Promise<string | undefined> {
+        const db = makeDb();
+        try {
+            // The production mural source: cue-pool memories under the
+            // identity this transform resolves (memoryConfig.enabled →
+            // resolveProjectIdentityForSession(cwd)); the fold's
+            // resolveMuralForM0 → resolveMuralWire renders deterministically
+            // from them. The vision probe is a catalog lookup, not part of
+            // the gate under test — pinned true for a deterministic run.
+            const { resolveProjectIdentityForSession } = await import(
+                "../../features/magic-context/memory/project-identity"
+            );
+            const { insertMemory } = await import(
+                "../../features/magic-context/memory/storage-memory"
+            );
+            const identity = resolveProjectIdentityForSession(process.cwd(), undefined);
+            expect(identity).toBeTruthy();
+            const { setMuralCue, computeCueContentHash } = await import(
+                "../../features/magic-context/mural/storage-mural-cues"
+            );
+            for (let i = 0; i < 3; i++) {
+                const content = `Tail law architecture fact ${i}: ${"pins the deterministic mural cue pool; ".repeat(60)}`;
+                const memory = insertMemory(db, {
+                    projectPath: identity as string,
+                    category: "ARCHITECTURE",
+                    content,
+                });
+                setMuralCue(
+                    db,
+                    identity as string,
+                    memory.id,
+                    `Tail law fact ${i}: ordered control flow, Unicode α preserved.`,
+                    computeCueContentHash(content),
+                );
+            }
+            const modelsCache = await import("../../shared/models-dev-cache");
+            const visionSpy = (await import("bun:test"))
+                .spyOn(modelsCache, "modelSupportsVision")
+                .mockImplementation(() => true);
+            const transform = createTransform({
+                tagger: createTagger(),
+                scheduler: { shouldExecute: () => false },
+                contextUsageMap: new Map(),
+                db,
+                historyRefreshSessions: new Set<string>(),
+                deferredHistoryRefreshSessions: new Set<string>(),
+                pendingMaterializationSessions: new Set(),
+                lastHeuristicsTurnId: new Map(),
+                clearReasoningAge: 1000,
+                protectedTokens: 0,
+                historianRunnable: false,
+                systemRegionLane: true,
+                compactionOff,
+                muralEnabled: true,
+                memoryConfig: { enabled: true, injectionBudgetTokens: 120 },
+                liveModelBySession: new Map([
+                    [SESSION_ID, { providerID: "anthropic", modelID: "claude-opus-5" }],
+                ]),
+            } as never);
+            // Pass 1 prices the fold (first_render); pass 2 is the steady
+            // defer replay — the carriage must ride beside the replayed region.
+            let out: MessageLike[] | undefined;
+            try {
+                for (let pass = 0; pass < 2; pass++) {
+                    const output = {
+                        messages: [
+                            {
+                                info: { id: "tail-user", role: "user", sessionID: SESSION_ID },
+                                parts: [{ type: "text", text: "hello" }],
+                            },
+                        ],
+                    } as never;
+                    await transform({}, output);
+                    out = (output as { messages: unknown[] }).messages as MessageLike[];
+                }
+            } finally {
+                visionSpy.mockRestore();
+            }
+            expect(readSystemRegion(db, SESSION_ID)).toContain("<memory-mural>");
+            // The carriage is the persisted column verbatim — the gate's own
+            // invariant (pure function of the rotation markers).
+            const persisted = getOrCreateSessionMeta(db, SESSION_ID).cachedM0MuralDataUrl;
+            expect(persisted).toBeTruthy();
+            const emitted = imageUrl(out ?? []);
+            expect(emitted).toBe(persisted);
+            return emitted;
+        } finally {
+            closeQuietly(db);
+        }
+    }
+
+    it("the transform tail emits the PNG beside the servable region (compaction-on)", async () => {
+        expect(await tailCarriageUrl(false)).toStartWith("data:image/png;base64,");
+    });
+
+    it("the transform tail emits the PNG for a compaction-off install too (no stranded legend)", async () => {
+        // Owner ruling (assembly-v2, binary authority): compaction-off rides
+        // the region with no serve carve-out. The legend ships inside the
+        // region bytes for an off install regardless of this gate, so an
+        // off-mode gate that skips the image strands legend-without-image.
+        expect(await tailCarriageUrl(true)).toStartWith("data:image/png;base64,");
     });
 });

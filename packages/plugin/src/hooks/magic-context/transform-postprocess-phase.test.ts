@@ -60,6 +60,7 @@ import { createTagger } from "../../features/magic-context/tagger";
 import * as loggerModule from "../../shared/logger";
 import { Database } from "../../shared/sqlite";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
+import * as applyOperations from "./apply-operations";
 import * as autoSearchRunner from "./auto-search-runner";
 import { MARKER_SUMMARY_TEXT } from "./compaction-marker-manager";
 import { registerActiveCompartmentRun } from "./compartment-runner";
@@ -4863,9 +4864,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 });
             }
             const defer = await pass(sessionId, { budget: 500 });
-            const { readSystemRegion } = await import(
-                "../../features/magic-context/system-region"
-            );
+            const { readSystemRegion } = await import("../../features/magic-context/system-region");
             const regionBefore = readSystemRegion(db, sessionId);
             expect(defer.result.materialized).toBe(false);
             const exec = await pass(sessionId, { scheduler: "execute", budget: 500 });
@@ -5387,7 +5386,10 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     // folds once to install a region — a genuine content bust.
                     db.prepare(
                         "UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
-                    ).run(Buffer.from("<session-history>head</session-history>", "utf8"), sessionId);
+                    ).run(
+                        Buffer.from("<session-history>head</session-history>", "utf8"),
+                        sessionId,
+                    );
                     return undefined;
                 },
             },
@@ -8277,9 +8279,7 @@ describe("prefix preflight persistence pins", () => {
         ]);
         let persistedPreflight: string | null = null;
         const original = compartmentInjection.injectM0M1;
-        const { readSystemRegion } = await import(
-            "../../features/magic-context/system-region"
-        );
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
         const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation(
             (options) => {
                 const result = original(options);
@@ -8658,9 +8658,7 @@ it("contended partial cache replays persisted prefix until one uncontended drain
             );
             spy.mockRestore();
             void logs;
-            const { readSystemRegion } = await import(
-                "../../features/magic-context/system-region"
-            );
+            const { readSystemRegion } = await import("../../features/magic-context/system-region");
             if (contend) {
                 // Contended rotation: the persisted region row (never containing
                 // the mid-fold delta) is replayed and the queue lane is held.
@@ -10498,6 +10496,45 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
         expect(foldLines[0]).toContain("reason=max_memory_id");
         expect(foldLines[0]).toContain("executed=true");
         expect(foldLines[0]).toContain("bustsServedPrefix=true");
+    });
+
+    it("A4: the region fold hands the bust predicate m1Bytes:null — no phantom m[1] operand", async () => {
+        // The receipt family so far covers the outcome via the log line. This
+        // pins the operand itself: the region era persists no synthetic m[1],
+        // so what left the fold transaction must carry m1Bytes null — the
+        // predicate compares the wire, not the pre-render placeholder.
+        const sessionId = "ses-region-a4-m1null";
+        const db = await installedRegionDb(sessionId);
+        const { insertMemory } = await import("../../features/magic-context/memory/storage-memory");
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "CONSTRAINTS",
+            content: "A4-M1NULL-NEW",
+        });
+        const calls: Array<{ reason: string; after: { m0Bytes: unknown; m1Bytes: unknown } }> = [];
+        const spy = spyOn(applyOperations, "foldBustsServedPrefix").mockImplementation(
+            (reason, _before, after) => {
+                calls.push({ reason: reason ?? "", after: after as never });
+                return true;
+            },
+        );
+        try {
+            await runPostTransformPhase(
+                basePostTransformArgs(db, sessionId, [], {
+                    resolvedProviderID: "anthropic",
+                    contextUsage: { percentage: 88, inputTokens: 1_000 },
+                    systemRegionLane: true,
+                    m0M1: { projectPath: PROJECT_PATH, projectDirectory: "" },
+                }),
+            );
+        } finally {
+            spy.mockRestore();
+        }
+        expect(calls.length).toBeGreaterThan(0);
+        const foldCalls = calls.filter((c) => c.reason.includes("max_memory_id"));
+        expect(foldCalls.length).toBe(1);
+        expect(foldCalls[0].after.m1Bytes).toBeNull();
+        expect(foldCalls[0].after.m0Bytes).not.toBeNull();
     });
 
     it("A4: a warm non-boundary region pass prints no fold-decision line at all", async () => {

@@ -3204,12 +3204,14 @@ export function createTransform(deps: TransformDeps) {
         // Mural carriage (census "Mural carriage group"): the frozen region
         // carries the <memory-mural> legend; the PNG rides beside it as a
         // synthetic image message, emitted only while a servable region
-        // exists so the legend and the image always travel together. The part
-        // is a pure function of the persisted mural columns — replay-identical
-        // per rotation, never re-derived from mutated content.
+        // exists so the legend and the image always travel together. No
+        // compaction-off carve-out: the legend ships inside the region bytes
+        // for an off install too (owner ruling — compaction-off rides the
+        // region), so the image must ride as well or the legend strands. The
+        // part is a pure function of the persisted mural columns —
+        // replay-identical per rotation, never re-derived from mutated content.
         if (
             deps.systemRegionLane === true &&
-            !compactionOff &&
             hasServableRegion(db, sessionId) &&
             muralCarriageWanted(sessionMeta)
         ) {

@@ -14,7 +14,7 @@
  * composition (regionRotationPromotion + currentRegionMarkersForPromotion
  * per #2710/#2715: markers come only from the production readers, the
  * scheduler decision only from the production scheduler), mustMaterialize
- * with the transform.ts:2446 boot hardSignals shape, and the
+ * with the transform.ts:2437-2465 boot hardSignals shape, and the
  * system-prompt serve handler on the system-region-serve.test.ts:93-125
  * fresh-handler + reopened-temp-store pattern — not the full
  * runPostTransformPhase pass. Pass-level boot wiring (the usage-unknown
@@ -32,11 +32,11 @@
  *     a post-fold response + idle expiry re-arms the fold (control).
  */
 
-import { describe, expect, it, afterEach } from "bun:test";
+import type { Database } from "bun:sqlite";
+import { afterEach, describe, expect, it } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Database } from "bun:sqlite";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { computeHardCacheExpired, createScheduler } from "../../features/magic-context/scheduler";
 import {
@@ -142,11 +142,16 @@ function rowWitness(db: Database): {
         .get(SESSION_ID) as never;
 }
 
-// The boot hardSignals shape mirrored from transform.ts:2446-2454:
+// The boot hardSignals shape mirrored from transform.ts:2437-2465
+// (HARD-bust signal construction + const m0HardSignals):
 // systemHash from the persisted watched hash, modelKey from the resolved
 // model, cacheExpired from the production clock against the persisted
 // lastResponseTime. No hand-shaped signals.
-function bootHardSignals(state: { systemPromptHash: string; lastResponseTime: number; cacheTtl: string }) {
+function bootHardSignals(state: {
+    systemPromptHash: string;
+    lastResponseTime: number;
+    cacheTtl: string;
+}) {
     return {
         systemHash: state.systemPromptHash,
         modelKey: MODEL_KEY,
