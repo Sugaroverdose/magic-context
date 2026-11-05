@@ -150,6 +150,7 @@ import {
     selectReasoningRemovals,
     settleDroppedReasoningParts,
 } from "./reasoning-removal";
+import { recomputeRegionVolatileSegment } from "./region-volatile";
 import {
     isNeutralizedReasoningPart,
     modelAcceptsEmptyContent,
@@ -2163,6 +2164,55 @@ export async function runPostTransformPhase(
                 rideSignals.publishedHistory ||
                 (deferredMaterialize && prefixPreflightFailed)));
     const shouldApplyPendingOps = publishedWorkDrainAllowed;
+    // Unit 2 Task 1: the volatile delta segment recomputes only on a pass
+    // that already holds the bust permission; every other pass serves the
+    // stored bytes verbatim (the serve site is a pure decode). Compaction-off
+    // rides too — the volatile segment is the delta carrier for that lane
+    // (assembly-v2 ruling: region treatment, no carve-out), so this gate
+    // deliberately does not reuse the !compactionOff reclaim predicate. When
+    // the fold executed this pass, persistCachedM0 already absorbed the
+    // segment in the fold transaction — no recompute.
+    const volatileRecomputeAllowed =
+        args.schedulerDecision === "execute" ||
+        rideSignals.hardFold ||
+        rideSignals.force ||
+        isExplicitFlush ||
+        rideSignals.publishedHistory ||
+        forceMaterialization;
+    if (
+        args.systemRegionLane === true &&
+        volatileRecomputeAllowed &&
+        !foldExecutedThisPass &&
+        args.m0M1
+    ) {
+        try {
+            recomputeRegionVolatileSegment({
+                db: args.db,
+                sessionId: args.sessionId,
+                meta: args.sessionMeta,
+                options: {
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    state: args.sessionMeta as M0M1State,
+                    projectPath: args.m0M1.projectPath,
+                    projectDirectory: args.m0M1.projectDirectory,
+                    injectDocs: args.m0M1.injectDocs,
+                    memoryEnabled: args.m0M1.memoryEnabled,
+                    memoryInjectionBudgetTokens: args.m0M1.memoryInjectionBudgetTokens,
+                    historyBudgetTokens: args.m0M1.historyBudgetTokens,
+                    temporalAwareness: args.m0M1.temporalAwareness,
+                    isCacheBustingPass: true,
+                    hardSignals: args.m0M1.hardSignals,
+                    muralEnabled: args.m0M1.muralEnabled,
+                    compactionOff,
+                },
+            });
+        } catch (error) {
+            // The segment is additive carriage: a failed recompute leaves the
+            // previously stored bytes served — never fail the pass for it.
+            sessionLog(args.sessionId, "region-volatile recompute failed (ignored):", error);
+        }
+    }
     const shouldRunHeuristics =
         !compactionOff &&
         systemReclaimAllowed &&

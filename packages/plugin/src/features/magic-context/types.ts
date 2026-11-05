@@ -117,6 +117,13 @@ export interface SessionMeta {
     cachedM0ModelKey: string | null;
     /** Pi-only HARD marker: project identity captured in the cached m[0] baseline. */
     cachedM0ProjectIdentity: string | null;
+    /**
+     * Unit 2 volatile delta segment (region-only migration Task 1): bytes
+     * served after the region at the tail of system[0], rendered against the
+     * region row named by `cachedM0MaterializedAt`. null = nothing pending.
+     */
+    regionVolatileBytes: Buffer | null;
+    regionVolatileWatermark: number;
     lastObservedModelKey: string | null;
     lastUsageContextLimit: number;
     priorBoundaryOrdinal: number;

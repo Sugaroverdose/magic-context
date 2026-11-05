@@ -450,6 +450,79 @@ describe("system-region L0: per-actor producer census", () => {
         expect(offenders).toEqual([]);
     });
 
+    it("the volatile segment columns have only named SQL writers and readers (Unit 2 L0)", () => {
+        // L0 single-writer law for the Task-1 carriage: the two region_volatile
+        // columns are written ONLY by the sanctioned accessors in
+        // storage-meta-shared.ts (writeRegionVolatile + the fold-row absorb in
+        // persistCachedM0) and read as raw SQL only by the serve decode in
+        // region-volatile.ts. A wire-affecting write outside these named
+        // actors fails here, not in production.
+        const ALLOWED: ReadonlyMap<string, string> = new Map([
+            ["features/magic-context/storage-db.ts", "fresh DDL + ensureColumn (schema)"],
+            ["features/magic-context/migrations.ts", "migration v95 (schema)"],
+            [
+                "features/magic-context/storage-meta-shared.ts",
+                "sole writer: writeRegionVolatile + fold-row absorb in persistCachedM0 + row mapping",
+            ],
+            [
+                "features/magic-context/storage-meta-session.ts",
+                "typed projection + column-safe fallback selects (read surface only)",
+            ],
+            [
+                "hooks/magic-context/region-volatile.ts",
+                "read-only serve decode (SELECT region_volatile_bytes) + codec",
+            ],
+        ]);
+        const offenders: string[] = [];
+        let walkedVolatileZone = 0;
+        for (const { rel, full } of zoneFiles()) {
+            if (rel.endsWith(".test.ts")) continue;
+            const text = readFileSync(full, "utf8");
+            if (!/region_volatile_bytes|region_volatile_watermark/.test(text)) continue;
+            walkedVolatileZone += 1;
+            if (!ALLOWED.has(rel)) offenders.push(rel);
+        }
+        // Zone-membership floor (#2714): the schema pair alone guarantees the
+        // walk saw the columns; a dropped zone would fail here, not silently.
+        expect(walkedVolatileZone).toBeGreaterThanOrEqual(3);
+        expect(offenders).toEqual([]);
+
+        // Entry-point closure (#2713 holder-set form): the sanctioned write
+        // entries may only be invoked from their named production holders.
+        const writers = filesUsing(/\bwriteRegionVolatile\s*\(/);
+        expect(writers).toEqual([
+            "features/magic-context/storage-meta-shared.ts",
+            "hooks/magic-context/region-volatile.ts",
+        ]);
+        const recomputers = filesUsing(/\brecomputeRegionVolatileSegment\s*\(/);
+        // Definition (region-volatile.ts) + the ONLY production call site: the
+        // bust lane in the postprocess phase. Any other caller reddens.
+        expect(recomputers).toEqual([
+            "hooks/magic-context/region-volatile.ts",
+            "hooks/magic-context/transform-postprocess-phase.ts",
+        ]);
+    });
+
+    it("the serve site appends volatile only behind a served region and never hashes it (Unit 2 L0)", () => {
+        // Property: decodeRegionVolatileBytes has exactly two production
+        // readers — the codec owner (region-volatile.ts) and the Step 2.5b
+        // append site (system-prompt-hash.ts) — and the append site's hashed
+        // surface stays hostContent-only (the hash call must not see the
+        // volatile text; it is minted from output.system AFTER appends only
+        // for the host slice, pinned by the Step 3 hash of hostContent).
+        const readers = filesUsing(/\bdecodeRegionVolatileBytes\b/);
+        expect(readers).toEqual([
+            "hooks/magic-context/region-volatile.ts",
+            "hooks/magic-context/system-prompt-hash.ts",
+        ]);
+        const hashSite = readFileSync(
+            join(SRC_ROOT, "hooks/magic-context/system-prompt-hash.ts"),
+            "utf8",
+        );
+        expect(hashSite).toContain("promptSurfaceHashMaterial(hostContent");
+        expect(hashSite).not.toMatch(/update\(.*regionVolatile/);
+    });
+
     it("no region rotation reason mints from a raw store-read string (J1)", () => {
         // Property: every \${...} interpolation inside a reason template on
         // the rotation mint surface is either sanitizeReceiptOperand(...) or

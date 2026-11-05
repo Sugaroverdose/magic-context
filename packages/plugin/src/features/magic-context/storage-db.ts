@@ -156,7 +156,7 @@ export function __resetSchemaFenceStateForTests(): void {
     lastUnconfirmedMigrationHolders = null;
 }
 
-export const LATEST_SUPPORTED_VERSION = 94;
+export const LATEST_SUPPORTED_VERSION = 95;
 
 /**
  * Every runtime backend receives the same finite wait before the first schema
@@ -1898,6 +1898,8 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
       cached_m0_model_key TEXT,
        cached_m0_project_identity TEXT,
        cached_m0_last_baseline_end_message_id TEXT,
+      region_volatile_bytes BLOB,
+      region_volatile_watermark INTEGER NOT NULL DEFAULT 0,
        thinking_binding_recovery_target TEXT NOT NULL DEFAULT '',
        upgrade_reminded_at INTEGER,
        pi_stable_id_scheme INTEGER
@@ -2399,6 +2401,12 @@ CREATE INDEX IF NOT EXISTS idx_dream_queue_pending ON dream_queue(started_at, en
     ensureColumn(db, "session_meta", "cached_m0_tool_set_hash", "TEXT");
     ensureColumn(db, "session_meta", "cached_m0_model_key", "TEXT");
     ensureColumn(db, "session_meta", "cached_m0_project_identity", "TEXT");
+    // Unit 2 volatile segment (region-only migration Task 1): the delta-class
+    // carriage served after the region bytes. Sole writers: the fold row via
+    // persistCachedM0 (absorb) and the bust-lane recompute accessor — pinned
+    // by the L0 producer census.
+    ensureColumn(db, "session_meta", "region_volatile_bytes", "BLOB");
+    ensureColumn(db, "session_meta", "region_volatile_watermark", "INTEGER NOT NULL DEFAULT 0");
     // Pi-only: frozen baseline boundary (end_message_id) captured at
     // materialization so Pi trims against the snapshot boundary that produced
     // m[0], not a live-recomputed one a concurrent recomp could have moved.

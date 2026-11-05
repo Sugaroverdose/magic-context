@@ -3203,6 +3203,24 @@ export const MIGRATIONS: Migration[] = [
             splitReplayDecisions(db);
         },
     },
+    {
+        version: 95,
+        description: "volatile delta segment columns beside the frozen system region",
+        up(db: Database): void {
+            // Region-only migration Task 1: delta-class content (memory updates,
+            // post-capture compartments, overflow memories, profile/docs deltas)
+            // rides a per-session volatile segment served after the region
+            // bytes; the watermark names the region row (materializedAt) the
+            // bytes were rendered against so a stale segment is never served.
+            ensureColumn(db, "session_meta", "region_volatile_bytes", "BLOB");
+            ensureColumn(
+                db,
+                "session_meta",
+                "region_volatile_watermark",
+                "INTEGER NOT NULL DEFAULT 0",
+            );
+        },
+    },
 ];
 
 /**
