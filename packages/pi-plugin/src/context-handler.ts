@@ -252,7 +252,6 @@ import {
 import { readPiHistorianTail } from "./historian-tail-pi";
 import {
 	clearM0M1PiCache,
-	clearPiInjectionTokenCountCache,
 	createPiM0M1PassSnapshot,
 	injectM0M1Pi,
 	mustMaterializePi,
@@ -260,7 +259,6 @@ import {
 	type PiM0M1PassSnapshot,
 	type PiM0M1State,
 	piRegionRotationPromotion,
-	prepareCachedM0M1PiReplay,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import {
@@ -2785,7 +2783,6 @@ export function registerPiContextHandler(
 					clearPiCompactionOffInMemoryState(sessionId);
 				}
 				if (compactionTransition.invalidatedBaseline) {
-					clearPiInjectionTokenCountCache(sessionId);
 					sessionMetaForUsage.cachedM0Bytes = null;
 					sessionMetaForUsage.cachedM1Bytes = null;
 					piM0M1PassSnapshot = options.injection
@@ -3416,7 +3413,12 @@ export function registerPiContextHandler(
 				readBranchEntries: resolvePiReadBranchEntries(ctx),
 				isSubagent: sessionMeta.isSubagent,
 				compactionOff: options.compactionOff === true,
-				systemRegionLane: options.systemRegionLane === true,
+				// The frozen-system-region capability is constant-true (the
+				// shared predicate has no false branch, pinned by
+				// system-region-lane-law.test.ts); index.ts always threads the
+				// boot resolution, so an omitted flag (tests falling back to
+				// baseOptions) defaults to the production value.
+				systemRegionLane: options.systemRegionLane ?? true,
 				injectionPassSnapshot: piM0M1PassSnapshot,
 			});
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
@@ -5279,6 +5281,9 @@ async function runCompactionOffPipeline(
 ): Promise<RunPipelineResult> {
 	let injectionResult: PiInjectionResult | null = null;
 	if (args.injection) {
+		// Unit 7 carry-forward A (owner's binary ruling: no carve-out —
+		// compaction-off rides the region lane like every other row; sessions
+		// re-render once onto the region serve).
 		injectionResult = injectM0M1Pi(
 			{
 				sessionId: args.sessionId,
@@ -5295,8 +5300,8 @@ async function runCompactionOffPipeline(
 			args.db,
 			args.messages as Parameters<typeof injectM0M1Pi>[2],
 			args.entryIds,
-			false,
 			args.injectionPassSnapshot,
+			{ systemRegion: { enabled: true, reason: "" } },
 		);
 	}
 	return {
@@ -5547,9 +5552,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						args.injection.historyBudgetPolicyIdentity,
 					hardSignals: piHardSignals,
 					muralEnabled: args.injection.muralEnabled === true,
-					freezePrefixForPass: true,
-					allowFreshContentionFallback:
-						args.forceMaterialization === true || emergencyDropEligible,
 				}
 			: undefined;
 	const systemRegionLane = args.systemRegionLane === true;
@@ -5610,17 +5612,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let publishedM1RefreshedThisPass = false;
 	let prefixPreflightContended = false;
 	const softRefreshOpportunity = args.schedulerDecision === "execute";
-	const cachedPrefixBeforePreflight =
-		piM0State &&
-		!systemRegionLane &&
-		(foldDueDecision.value || softRefreshOpportunity) &&
-		!emergencyDropEligible
-			? prepareCachedM0M1PiReplay(
-					piM0State,
-					args.db,
-					injectionPassSnapshot?.cachedRow,
-				)
-			: undefined;
 	let preFoldInjectionResult: PiInjectionResult | null = null;
 	const persistedM0BeforeFold =
 		injectionPassSnapshot?.sessionMeta ?? args.sessionMeta;
@@ -5643,7 +5634,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				[],
 				undefined,
-				softRefreshOpportunity,
 				injectionPassSnapshot,
 				{
 					systemRegion: systemRegionLane
@@ -5716,7 +5706,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				);
 			}
 		} catch (error) {
-			piM0State.preparedPrefix = cachedPrefixBeforePreflight;
 			prefixPreflightContended = true;
 			sessionLog(
 				args.sessionId,
@@ -6983,14 +6972,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				args.messages as Parameters<typeof injectM0M1Pi>[2],
 				args.entryIds,
-				// recomputeM1ThisPass: recompute m[1] (vs byte-identical replay) on any
-				// cache-busting pass — history refresh (new compartment published),
-				// deferred history refresh, OR executed work (drops/heuristics). A
-				// history-refresh-only pass has executedWorkThisPass=false but MUST
-				// re-render m[1] so the new compartment surfaces; gating on work alone
-				// (the prior behavior, masked by the now-removed cache clear) would
-				// replay stale m[1]. Mirrors OpenCode's isCacheBustingPass gate.
-				isCacheBustingPass,
 				injectionPassSnapshot,
 				{
 					// Region lane (§23 D8): no synthetic heads — the injection only
@@ -7984,7 +7965,6 @@ export function clearContextHandlerSession(sessionId: string): void {
 	piTagToolTokenCacheBySession.delete(sessionId);
 	piTextIdentitySourceCacheBySession.delete(sessionId);
 	piBranchProjectionBySession.delete(sessionId);
-	clearPiInjectionTokenCountCache(sessionId);
 	clearPiChannel1State(sessionId);
 	lastHeuristicsTurnIdBySession.delete(sessionId);
 	routinePressureAppliedBySession.delete(sessionId);

@@ -752,10 +752,7 @@ describe("Pi region lane: heads come off the wire (D8, L5)", () => {
 		const db = createTestDb();
 		const dir = createTestTempDirFromPath("/tmp/pi-region-novheads-");
 		try {
-			const state = {
-				...piState("ses-pi-region-noheads", dir),
-				freezePrefixForPass: true,
-			};
+			const state = piState("ses-pi-region-noheads", dir);
 			seedStore(db, state);
 			materializeM0Pi(state, db, undefined, {
 				enabled: true,
@@ -778,7 +775,6 @@ describe("Pi region lane: heads come off the wire (D8, L5)", () => {
 				db,
 				messages as never,
 				entryIds,
-				false,
 				snapshot,
 				{
 					systemRegion: { enabled: true, reason: "hard_fold" },
@@ -799,10 +795,10 @@ describe("Pi region lane: heads come off the wire (D8, L5)", () => {
 			// zero heads (system[2] never exists on this lane).
 			expect(result.syntheticLeadingCount).toBe(1);
 			expect(messages[0].role).toBe("system");
-			// L6 support: no array-side prefix exists to freeze.
-			expect(
-				(state as { preparedPrefix?: unknown }).preparedPrefix,
-			).toBeUndefined();
+			// L6 support: no array-side prefix exists to freeze — the
+			// preparedPrefix carriage was DELETED in Unit 7 (carry-forward A);
+			// the state no longer carries the field at all.
+			expect("preparedPrefix" in state).toBe(false);
 			expect(result.injected).toBe(true);
 		} finally {
 			closeQuietly(db);

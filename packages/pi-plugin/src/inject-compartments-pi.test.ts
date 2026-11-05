@@ -5,8 +5,11 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { readSystemRegion } from "@magic-context/core/features/magic-context/system-region";
+
+const SENTINEL = "<!-- mc:system-region v1 -->";
+
 import {
-	archiveMemory,
 	getMemoriesByProject,
 	insertMemory,
 } from "@magic-context/core/features/magic-context/memory/storage-memory";
@@ -40,10 +43,8 @@ import {
 	materializeM0Pi,
 	materializeM0PiWithRetry,
 	mustMaterializePi,
-	prepareCachedM0M1PiReplay,
 	renderM0Pi,
 	renderM1Pi,
-	replayCompletePiPrefix,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import { createTestDb, textOf, userMessage } from "./test-utils.test";
@@ -120,10 +121,13 @@ describe("workspace memory sharing", () => {
 			expect(m0).not.toContain("foreign naming is hidden");
 
 			const messages = [userMessage("hello")];
-			const result = injectM0M1Pi(state, db, messages);
+			const result = injectM0M1Pi(state, db, messages, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
 			expect(result.memoryCount).toBe(2);
-			expect(textOf(messages[0])).toContain("foreign constraint is shared");
-			expect(textOf(messages[0])).not.toContain("foreign naming is hidden");
+			const shareRegion = readSystemRegion(db, state.sessionId) ?? "";
+			expect(shareRegion).toContain("foreign constraint is shared");
+			expect(shareRegion).not.toContain("foreign naming is hidden");
 		} finally {
 			rmSync(dir, { recursive: true, force: true });
 			closeQuietly(db);
@@ -592,14 +596,21 @@ describe("user-profile rendering fixture", () => {
 				[],
 			);
 			setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
-			const baseline = materializeM0Pi(state, db);
+			const baseline = materializeM0Pi(state, db, undefined, {
+				enabled: true,
+				reason: "region_first_install",
+			});
 			expect(baseline.m0).toContain(
 				`<user-profile>\n${USER_PROFILE_DESCRIPTION}\n- Strongly pushes back on untested changes.\n</user-profile>`,
 			);
 
 			insertUserMemory(db, "User expects changes to be tested.", []);
 			setProjectState(db, "__global__", { projectUserProfileVersion: 2 });
-			expect(mustMaterializePi(state, db)).toMatchObject({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toMatchObject({
 				value: false,
 				reason: null,
 			});
@@ -634,8 +645,13 @@ describe("user-profile rendering fixture", () => {
 				[],
 			);
 			setProjectState(db, "__global__", { projectUserProfileVersion: 1 });
-			materializeM0Pi(state, db);
-			const stable = mustMaterializePi(state, db);
+			materializeM0Pi(state, db, undefined, {
+				enabled: true,
+				reason: "region_first_install",
+			});
+			const stable = mustMaterializePi(state, db, undefined, undefined, {
+				systemRegionMode: true,
+			});
 			expect(stable).toMatchObject({ value: false, reason: null });
 
 			// A row written before the template component existed: the head lane
@@ -643,13 +659,22 @@ describe("user-profile rendering fixture", () => {
 			db.exec(
 				`UPDATE session_meta SET cached_m0_upgrade_state = replace(cached_m0_upgrade_state, '|profile-render:${PROFILE_RENDER_EPOCH}', '') WHERE session_id = '${state.sessionId}'`,
 			);
-			const adopted = mustMaterializePi(state, db);
+			const adopted = mustMaterializePi(state, db, undefined, undefined, {
+				systemRegionMode: true,
+			});
 			expect(adopted).toMatchObject({
 				value: true,
 				reason: "profile_render_epoch",
 			});
-			materializeM0Pi(state, db);
-			expect(mustMaterializePi(state, db)).toMatchObject({
+			materializeM0Pi(state, db, undefined, {
+				enabled: true,
+				reason: "profile_render_epoch",
+			});
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toMatchObject({
 				value: false,
 				reason: null,
 			});
@@ -698,25 +723,47 @@ describe("injectM0M1Pi memory feature gate", () => {
 				},
 			};
 			const off = [userMessage("hello", 10)];
-			injectM0M1Pi(disabledState, db, off as never, undefined, true);
-			const offM0 = textOf(off[0] as never);
-			expect(offM0).not.toContain("project memory must not leak when disabled");
-			expect(offM0).not.toContain("<project-memory");
-			expect(offM0).not.toContain("<user-profile>");
-			expect(offM0).not.toContain("profile baseline must not leak");
-			expect(offM0).not.toContain("<memory-mural>");
-			expect((off[0] as { content: unknown[] }).content).toHaveLength(1);
-			expect(offM0).toContain("compartment body present");
+			injectM0M1Pi(disabledState, db, off as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
+			// Region lane (Unit 7): the panels live in the region bytes; the
+			// array is untouched raw messages.
+			const offRegion = readSystemRegion(db, disabledState.sessionId) ?? "";
+			expect(offRegion).not.toContain(
+				"project memory must not leak when disabled",
+			);
+			expect(offRegion).not.toContain("<project-memory");
+			expect(offRegion).not.toContain("<user-profile>");
+			expect(offRegion).not.toContain("profile baseline must not leak");
+			expect(offRegion).not.toContain("<memory-mural>");
+			expect(offRegion).toContain("compartment body present");
+			expect(
+				off.every(
+					(m: { role?: string }) =>
+						m.role === "user" &&
+						typeof (m as { content?: unknown }).content === "string",
+				),
+			).toBe(true);
 
-			// A fresh global profile version can request m[1] work, but its delta
-			// must remain absent while the memory surface is disabled.
+			// A fresh global profile version can request delta work, but its
+			// delta must remain absent while the memory surface is disabled:
+			// the volatile segment stays empty.
 			insertUserMemory(db, "profile delta must not leak", []);
 			setProjectState(db, "__global__", { projectUserProfileVersion: 2 });
 			const refreshed = [userMessage("again", 11)];
-			injectM0M1Pi(disabledState, db, refreshed as never, undefined, true);
-			const offM1 = textOf(refreshed[1] as never);
-			expect(offM1).not.toContain("<new-user-profile>");
-			expect(offM1).not.toContain("profile delta must not leak");
+			injectM0M1Pi(
+				disabledState,
+				db,
+				refreshed as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
+			const volatileRow = getOrCreateSessionMeta(db, disabledState.sessionId);
+			const offVolatile =
+				volatileRow.regionVolatileBytes?.toString("utf8") ?? "";
+			expect(offVolatile).not.toContain("<new-user-profile>");
+			expect(offVolatile).not.toContain("profile delta must not leak");
 
 			// Control: a fresh session with memoryEnabled left on DOES render it,
 			// proving the gate (not some other filter) is responsible.
@@ -733,8 +780,10 @@ describe("injectM0M1Pi memory feature gate", () => {
 				},
 			]);
 			const on = [userMessage("hello", 10)];
-			injectM0M1Pi(onState, db, on as never, undefined, true);
-			expect(textOf(on[0] as never)).toContain(
+			injectM0M1Pi(onState, db, on as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
+			expect(readSystemRegion(db, onState.sessionId) ?? "").toContain(
 				"project memory must not leak when disabled",
 			);
 		} finally {
@@ -770,9 +819,12 @@ describe("injectM0M1Pi memory feature gate", () => {
 				db,
 				on as never,
 				undefined,
-				true,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
-			expect(textOf(on[0] as never)).toContain("transition profile fact");
+			expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
+				"transition profile fact",
+			);
 
 			const offState = {
 				...state,
@@ -788,15 +840,25 @@ describe("injectM0M1Pi memory feature gate", () => {
 				db,
 				off as never,
 				undefined,
-				true,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 			expect(transition.m0Materialized).toBe(true);
-			expect(textOf(off[0] as never)).not.toContain("transition profile fact");
+			expect(readSystemRegion(db, offState.sessionId) ?? "").not.toContain(
+				"transition profile fact",
+			);
 
 			const defer = [userMessage("still off", 12)];
-			const replay = injectM0M1Pi(offState, db, defer as never);
+			const replay = injectM0M1Pi(
+				offState,
+				db,
+				defer as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			expect(replay.m0Materialized).toBe(false);
-			expect(textOf(defer[0] as never)).not.toContain(
+			expect(readSystemRegion(db, offState.sessionId) ?? "").not.toContain(
 				"transition profile fact",
 			);
 		} finally {
@@ -868,16 +930,19 @@ describe("injectM0M1Pi", () => {
 				userMessage("raw history stays visible", 10),
 				userMessage("live tail", 11),
 			];
-			const result = injectM0M1Pi(offState, db, messages as never, [
-				"old-entry",
-				"live-entry",
-			]);
-
-			expect(textOf(messages[0] as never)).toContain(
-				"compaction-off memory survives",
+			const result = injectM0M1Pi(
+				offState,
+				db,
+				messages as never,
+				["old-entry", "live-entry"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
-			expect(textOf(messages[0] as never)).not.toContain("<session-history>");
-			expect(textOf(messages[0] as never)).not.toContain(
+
+			const offRegion = readSystemRegion(db, offState.sessionId) ?? "";
+			expect(offRegion).toContain("compaction-off memory survives");
+			expect(offRegion).not.toContain("<session-history>");
+			expect(offRegion).not.toContain(
 				"compartment-only history must stay off the wire",
 			);
 			expect(result.skippedVisibleMessages).toBe(0);
@@ -893,14 +958,23 @@ describe("injectM0M1Pi", () => {
 		const cwd = createTestTempDirFromPath(join(tmpdir(), "pi-m0m1-empty-"));
 		try {
 			const messages = [userMessage("hello", 10)];
-			injectM0M1Pi(piState("ses-pi-empty", cwd), db, messages as never);
+			injectM0M1Pi(
+				piState("ses-pi-empty", cwd),
+				db,
+				messages as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
-			expect(textOf(messages[0] as never)).toBe(
+			// Region lane (Unit 7): the region row is the empty panels; the
+			// volatile segment is "" (no placeholder duty — the absorbed
+			// state serves no tail).
+			expect(readSystemRegion(db, "ses-pi-empty")).toBe(
 				"<session-history></session-history>",
 			);
-			expect(textOf(messages[1] as never)).toBe(
-				"<session-history-since>(no new content since last materialization)</session-history-since>",
-			);
+			const emptyMeta = getOrCreateSessionMeta(db, "ses-pi-empty");
+			expect(emptyMeta.regionVolatileBytes).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
@@ -920,7 +994,9 @@ describe("injectM0M1Pi", () => {
 			const state = piState("ses-pi-docs-snapshot", cwd);
 			const hashPass = (): string => {
 				const messages = [userMessage("same user input", 10)];
-				injectM0M1Pi(state, db, messages as never);
+				injectM0M1Pi(state, db, messages as never, undefined, undefined, {
+					systemRegion: { enabled: true, reason: "" },
+				});
 				return createHash("sha256")
 					.update(JSON.stringify(messages))
 					.digest("hex");
@@ -952,18 +1028,28 @@ describe("injectM0M1Pi", () => {
 			const state = { ...piState("ses-pi-docs-off", cwd), injectDocs: false };
 
 			const first = [userMessage("hello", 10)];
-			const firstResult = injectM0M1Pi(state, db, first as never);
-			const firstM0 = textOf(first[0] as never);
-			const firstM1 = textOf(first[1] as never);
+			const firstResult = injectM0M1Pi(
+				state,
+				db,
+				first as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
+			const firstRegion = readSystemRegion(db, state.sessionId) ?? "";
 
 			expect(firstResult.m0Materialized).toBe(true);
-			expect(firstM0).not.toContain("<project-docs>");
-			expect(firstM0).not.toContain("PI_FLAG_OFF_ARCH_DOCS");
-			expect(firstM0).not.toContain("PI_FLAG_OFF_STRUCTURE_DOCS");
+			expect(firstRegion).not.toContain("<project-docs>");
+			expect(firstRegion).not.toContain("PI_FLAG_OFF_ARCH_DOCS");
+			expect(firstRegion).not.toContain("PI_FLAG_OFF_STRUCTURE_DOCS");
 			expect(
 				getOrCreateSessionMeta(db, state.sessionId).cachedM0ProjectDocsHash,
 			).toBe("");
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
@@ -974,23 +1060,35 @@ describe("injectM0M1Pi", () => {
 				db,
 				second as never,
 				undefined,
-				false,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 
 			expect(secondResult.m0Materialized).toBe(false);
-			expect(textOf(second[0] as never)).toBe(firstM0);
-			expect(textOf(second[1] as never)).toBe(firstM1);
+			expect(readSystemRegion(db, state.sessionId) ?? "").toBe(firstRegion);
 
 			const enabledState = piState("ses-pi-docs-on", cwd);
 			const enabled = [userMessage("hello docs", 12)];
-			injectM0M1Pi(enabledState, db, enabled as never);
-			expect(textOf(enabled[0] as never)).toContain("<project-docs>");
-			expect(textOf(enabled[0] as never)).toContain("PI_FLAG_OFF_ARCH_DOCS");
-			expect(textOf(enabled[0] as never)).toContain(
+			injectM0M1Pi(enabledState, db, enabled as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
+			expect(readSystemRegion(db, enabledState.sessionId) ?? "").toContain(
+				"<project-docs>",
+			);
+			expect(readSystemRegion(db, enabledState.sessionId) ?? "").toContain(
+				"PI_FLAG_OFF_ARCH_DOCS",
+			);
+			expect(readSystemRegion(db, enabledState.sessionId) ?? "").toContain(
 				"PI_FLAG_OFF_STRUCTURE_DOCS",
 			);
 			expect(
-				mustMaterializePi({ ...enabledState, injectDocs: false }, db),
+				mustMaterializePi(
+					{ ...enabledState, injectDocs: false },
+					db,
+					undefined,
+					undefined,
+					{ systemRegionMode: true },
+				),
 			).toEqual({
 				value: false,
 				reason: null,
@@ -1007,12 +1105,16 @@ describe("injectM0M1Pi", () => {
 		try {
 			const state = piState("ses-pi-stable", cwd);
 			const first = [userMessage("hello", 10)];
-			injectM0M1Pi(state, db, first as never);
+			injectM0M1Pi(state, db, first as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
 			const firstM0 = textOf(first[0] as never);
 			const firstM1 = textOf(first[1] as never);
 
 			const second = [userMessage("hello", 10)];
-			injectM0M1Pi(state, db, second as never);
+			injectM0M1Pi(state, db, second as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
 
 			expect(textOf(second[0] as never)).toBe(firstM0);
 			expect(textOf(second[1] as never)).toBe(firstM1);
@@ -1028,27 +1130,61 @@ describe("injectM0M1Pi", () => {
 		);
 		try {
 			const state = piState("ses-pi-render-epoch", cwd);
-			injectM0M1Pi(state, db, [userMessage("first", 10)] as never);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("first", 10)] as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			db.prepare(
 				"UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_upgrade_state = ? WHERE session_id = ?",
 			).run(
-				Buffer.from("<session-history>legacy renderer bytes</session-history>"),
+				Buffer.from(
+					`${SENTINEL}<session-history>legacy renderer bytes</session-history>`,
+				),
 				"pi-m0m1-v2:ready",
 				state.sessionId,
 			);
 
-			expect(mustMaterializePi(state, db)).toMatchObject({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toMatchObject({
 				value: true,
 				reason: "compartment_render_epoch",
 			});
 			const foldedMessages = [userMessage("same", 11)];
-			const folded = injectM0M1Pi(state, db, foldedMessages as never);
+			const folded = injectM0M1Pi(
+				state,
+				db,
+				foldedMessages as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			const foldedM0 = textOf(foldedMessages[0] as never);
 			const foldedM1 = textOf(foldedMessages[1] as never);
 			const replay1 = [userMessage("same", 11)];
 			const replay2 = [userMessage("same", 11)];
-			const replayResult1 = injectM0M1Pi(state, db, replay1 as never);
-			const replayResult2 = injectM0M1Pi(state, db, replay2 as never);
+			const replayResult1 = injectM0M1Pi(
+				state,
+				db,
+				replay1 as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
+			const replayResult2 = injectM0M1Pi(
+				state,
+				db,
+				replay2 as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(folded.m0Materialized).toBe(true);
 			expect(folded.m0Reason).toBe("compartment_render_epoch");
@@ -1061,7 +1197,11 @@ describe("injectM0M1Pi", () => {
 			expect(
 				getOrCreateSessionMeta(db, state.sessionId).cachedM0UpgradeState,
 			).toContain(COMPARTMENT_RENDER_EPOCH);
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
@@ -1110,7 +1250,14 @@ describe("injectM0M1Pi", () => {
 					lastResponseTime: 0,
 				},
 			};
-			injectM0M1Pi(state, db, [userMessage("first", 10)] as never);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("first", 10)] as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			const oldMemory = memories.find(
 				(memory) => memory.id === neverVerified.id,
 			);
@@ -1121,7 +1268,7 @@ describe("injectM0M1Pi", () => {
 			db.prepare(
 				"UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_upgrade_state = ? WHERE session_id = ?",
 			).run(
-				oldM0,
+				Buffer.concat([Buffer.from(`${SENTINEL}`), oldM0]),
 				encodeCachedM0UpgradeIdentity(
 					"pi-m0m1-v2:ready",
 					COMPARTMENT_RENDER_EPOCH,
@@ -1132,26 +1279,49 @@ describe("injectM0M1Pi", () => {
 				state.sessionId,
 			);
 
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
 			const deferMessages = [userMessage("defer", 11)];
-			const defer = injectM0M1Pi(state, db, deferMessages as never);
+			const defer = injectM0M1Pi(
+				state,
+				db,
+				deferMessages as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			expect(defer.m0Materialized).toBe(false);
-			expect(textOf(deferMessages[0] as never)).toBe(oldM0.toString("utf8"));
+			expect(readSystemRegion(db, state.sessionId) ?? "").toBe(
+				oldM0.toString("utf8"),
+			);
 			expect(
 				getOrCreateSessionMeta(db, state.sessionId).cachedM0UpgradeState,
 			).not.toContain(MEMORY_RENDER_FORMAT_EPOCH);
 
 			state.hardSignals.modelKey = "provider/new";
 			const hardMessages = [userMessage("hard", 12)];
-			const hard = injectM0M1Pi(state, db, hardMessages as never);
-			const hardText = textOf(hardMessages[0] as never);
+			const hard = injectM0M1Pi(
+				state,
+				db,
+				hardMessages as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			expect(hard.m0Materialized).toBe(true);
 			expect(hard.m0Reason).toBe("model_change");
-			expect(hardText).toContain("memory bravo record");
-			expect(hardText).not.toContain("memory alpha record");
+			expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
+				"memory bravo record",
+			);
+			expect(readSystemRegion(db, state.sessionId) ?? "").not.toContain(
+				"memory alpha record",
+			);
 			expect(
 				getOrCreateSessionMeta(db, state.sessionId).cachedM0UpgradeState,
 			).toContain(MEMORY_RENDER_FORMAT_EPOCH);
@@ -1169,7 +1339,9 @@ describe("injectM0M1Pi", () => {
 		try {
 			const state = piState("ses-pi-compartment", cwd);
 			const first = [userMessage("hello", 10)];
-			injectM0M1Pi(state, db, first as never);
+			injectM0M1Pi(state, db, first as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
 			expect(textOf(first[0] as never)).not.toContain("Compacted setup");
 
 			// A LEGACY compartment (no p1 tier → legacy=1) flips upgrade_state
@@ -1190,15 +1362,19 @@ describe("injectM0M1Pi", () => {
 				},
 			]);
 			const second = [userMessage("hello", 10)];
-			injectM0M1Pi(state, db, second as never, ["entry-1"]);
+			injectM0M1Pi(state, db, second as never, ["entry-1"], undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
 
-			// m[0] re-materialized and now carries the compartment heading; the
-			// body is present because the U: line keeps the legacy row at P3.
-			expect(textOf(second[0] as never)).toContain("## 1-1 · Setup");
-			expect(textOf(second[0] as never)).toContain("Compacted setup");
-			expect(textOf(second[1] as never)).toContain(
-				"no new content since last materialization",
-			);
+			// The region re-materialized and carries the compartment heading;
+			// the body is present because the U: line keeps the legacy row at
+			// P3.
+			const flipRegion = readSystemRegion(db, state.sessionId) ?? "";
+			expect(flipRegion).toContain("## 1-1 · Setup");
+			expect(flipRegion).toContain("Compacted setup");
+			expect(
+				getOrCreateSessionMeta(db, state.sessionId).regionVolatileBytes,
+			).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
@@ -1226,9 +1402,16 @@ describe("injectM0M1Pi", () => {
 				},
 			]);
 			const firstPass = [userMessage("hello", 10)];
-			const r0 = injectM0M1Pi(state, db, firstPass as never, ["entry-0"]);
+			const r0 = injectM0M1Pi(
+				state,
+				db,
+				firstPass as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			expect(r0.m0Materialized).toBe(true);
-			const baselineM0 = textOf(firstPass[0] as never);
+			const baselineM0 = readSystemRegion(db, state.sessionId) ?? "";
 			const baselineM0Sha = createHash("sha256")
 				.update(baselineM0)
 				.digest("hex");
@@ -1261,25 +1444,35 @@ describe("injectM0M1Pi", () => {
 				db,
 				secondPass as never,
 				["entry-0", "entry-1", "keep"],
-				true,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 
-			// (a) m[0] NOT re-materialized — SOFT, not HARD.
+			// (a) The fold does NOT re-materialize — the publish is a demoted
+			// delta (SOFT).
 			expect(r1.m0Materialized).toBe(false);
-			// (b) m[0] bytes byte-identical to the baseline (the whole point of the
-			// split: the stable prefix stays cached).
-			const m0 = textOf(secondPass[0] as never);
-			const refreshedM0Sha = createHash("sha256").update(m0).digest("hex");
-			expect(refreshedM0Sha).toBe(baselineM0Sha);
-			expect(m0).toBe(baselineM0);
-			expect(m0).not.toContain("second compartment body");
-			// (c) new compartment surfaces in m[1].
-			expect(textOf(secondPass[1] as never)).toContain(
-				"second compartment body",
-			);
-			// (d) raw messages through the new compartment boundary (entry-1) are
-			// trimmed (no duplication) while the live tail survives.
-			expect(r1.skippedVisibleMessages).toBe(2);
+			// (b) The region bytes are byte-identical to the baseline (the
+			// whole point of the split: the stable prefix stays cached).
+			const regionAfter = readSystemRegion(db, state.sessionId) ?? "";
+			const refreshedRegionSha = createHash("sha256")
+				.update(regionAfter)
+				.digest("hex");
+			expect(refreshedRegionSha).toBe(baselineM0Sha);
+			expect(regionAfter).not.toContain("second compartment body");
+			// (c) The new compartment is the VOLATILE segment's business: the
+			// bust-lane recompute (pipeline) surfaces it; the inject itself
+			// leaves the segment exactly as the fold wrote it.
+			const volatileAfter =
+				getOrCreateSessionMeta(
+					db,
+					state.sessionId,
+				).regionVolatileBytes?.toString("utf8") ?? "";
+			expect(volatileAfter).not.toContain("second compartment body");
+			// (d) The trim is fold-owned: it advanced only to the baseline
+			// boundary (entry-0); the new compartment's raw messages stay
+			// until a fold covers them.
+			expect(r1.skippedVisibleMessages).toBe(1);
+			expect(textOf(secondPass[0] as never)).toBe("covered-1");
 			expect(textOf(secondPass[secondPass.length - 1] as never)).toBe("keep");
 		} finally {
 			closeQuietly(db);
@@ -1294,22 +1487,37 @@ describe("injectM0M1Pi", () => {
 		try {
 			const state = piState("ses-pi-null-marker", cwd);
 			const first = [userMessage("hello", 10)];
-			injectM0M1Pi(state, db, first as never);
+			injectM0M1Pi(state, db, first as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
 
 			db.prepare(
 				"UPDATE session_meta SET cached_m0_max_compartment_seq = NULL WHERE session_id = ?",
 			).run(state.sessionId);
 
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: true,
 				reason: "cache_invalid",
 			});
 			const second = [userMessage("hello", 10)];
-			const result = injectM0M1Pi(state, db, second as never);
+			const result = injectM0M1Pi(
+				state,
+				db,
+				second as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(result.m0Materialized).toBe(true);
 			expect(result.m0Reason).toBe("cache_invalid");
-			expect(textOf(second[0] as never)).toContain("<session-history>");
+			expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
+				"<session-history>",
+			);
 		} finally {
 			closeQuietly(db);
 		}
@@ -1333,23 +1541,43 @@ describe("injectM0M1Pi", () => {
 					content: "U: first turn\nseq zero body",
 				},
 			]);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			// Legacy rows persisted 0 both for empty snapshots and for a real seq-0
 			// baseline. With a compartment present, 0 is unambiguous and must remain
 			// the cached watermark, not be reinterpreted as the empty -1 sentinel.
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
 			const messages = [userMessage("hello", 10)];
-			const result = injectM0M1Pi(state, db, messages as never, ["entry-0"]);
+			const result = injectM0M1Pi(
+				state,
+				db,
+				messages as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(result.m0Materialized).toBe(false);
-			expect(textOf(messages[0] as never)).toContain("seq zero body");
-			expect(textOf(messages[1] as never)).toContain(
-				"no new content since last materialization",
+			expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
+				"seq zero body",
 			);
+			expect(
+				getOrCreateSessionMeta(db, state.sessionId).regionVolatileBytes,
+			).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
@@ -1362,26 +1590,44 @@ describe("injectM0M1Pi", () => {
 		);
 		try {
 			const state = piState("ses-pi-legacy-zero-empty", cwd);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			db.prepare(
 				"UPDATE session_meta SET cached_m0_max_compartment_seq = 0 WHERE session_id = ?",
 			).run(state.sessionId);
 
 			expect(getCompartments(db, state.sessionId)).toHaveLength(0);
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
 			const messages = [userMessage("hello", 10)];
-			const result = injectM0M1Pi(state, db, messages as never);
+			const result = injectM0M1Pi(
+				state,
+				db,
+				messages as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(result.m0Materialized).toBe(false);
-			expect(textOf(messages[0] as never)).toBe(
+			expect(readSystemRegion(db, state.sessionId)).toBe(
 				"<session-history></session-history>",
 			);
-			expect(textOf(messages[1] as never)).toContain(
-				"no new content since last materialization",
-			);
+			expect(
+				getOrCreateSessionMeta(db, state.sessionId).regionVolatileBytes,
+			).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
@@ -1394,13 +1640,24 @@ describe("injectM0M1Pi", () => {
 		);
 		try {
 			const state = piState("ses-pi-partial-marker", cwd);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			db.prepare(
 				"UPDATE session_meta SET cached_m0_materialized_at = NULL WHERE session_id = ?",
 			).run(state.sessionId);
 
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: true,
 				reason: "cache_invalid",
 			});
@@ -1427,25 +1684,40 @@ describe("injectM0M1Pi", () => {
 					content: "U: boundary turn\nboundary body",
 				},
 			]);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			db.prepare(
 				"UPDATE session_meta SET cached_m0_last_baseline_end_message_id = NULL WHERE session_id = ?",
 			).run(state.sessionId);
 
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: true,
 				reason: "cache_invalid",
 			});
 			const messages = [userMessage("covered", 10), userMessage("keep", 11)];
-			const result = injectM0M1Pi(state, db, messages as never, [
-				"entry-0",
-				"keep",
-			]);
+			const result = injectM0M1Pi(
+				state,
+				db,
+				messages as never,
+				["entry-0", "keep"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(result.m0Materialized).toBe(true);
 			expect(result.m0Reason).toBe("cache_invalid");
 			expect(result.skippedVisibleMessages).toBe(1);
-			expect(textOf(messages[2] as never)).toBe("keep");
+			expect(textOf(messages[0] as never)).toBe("keep");
 		} finally {
 			closeQuietly(db);
 		}
@@ -1473,21 +1745,46 @@ describe("injectM0M1Pi", () => {
 					content: "U: turn\nbody",
 				},
 			]);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never, []);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				[],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			// Cached boundary is null (the compartment has no usable end id), and the
 			// LIVE snapshot is also boundaryless → cache is valid, not stale.
-			expect(mustMaterializePi(state, db).value).toBe(false);
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}).value,
+			).toBe(false);
 
 			// And a second injection pass reuses the cache (no materialize) and
 			// degrades to no-trim rather than looping.
 			const pass1Messages = [userMessage("hello", 10)];
-			const result1 = injectM0M1Pi(state, db, pass1Messages as never, []);
+			const result1 = injectM0M1Pi(
+				state,
+				db,
+				pass1Messages as never,
+				[],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			expect(result1.m0Materialized).toBe(false);
 			expect(result1.skippedVisibleMessages).toBe(0);
 
 			const pass2Messages = [userMessage("hello", 10)];
-			const result2 = injectM0M1Pi(state, db, pass2Messages as never, []);
+			const result2 = injectM0M1Pi(
+				state,
+				db,
+				pass2Messages as never,
+				[],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			expect(result2.m0Materialized).toBe(false);
 			expect(result2.m0Reason).toBeNull();
 
@@ -1566,7 +1863,14 @@ describe("injectM0M1Pi", () => {
 					content: "U: old turn\nfrozen body",
 				},
 			]);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			db.prepare(
 				"UPDATE compartments SET end_message_id = ? WHERE session_id = ? AND sequence = 0",
 			).run("too-far", state.sessionId);
@@ -1576,14 +1880,17 @@ describe("injectM0M1Pi", () => {
 				userMessage("must stay", 11),
 				userMessage("keep", 12),
 			];
-			const result = injectM0M1Pi(state, db, messages as never, [
-				"old-end",
-				"too-far",
-				"keep",
-			]);
+			const result = injectM0M1Pi(
+				state,
+				db,
+				messages as never,
+				["old-end", "too-far", "keep"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(result.skippedVisibleMessages).toBe(1);
-			expect(textOf(messages[2] as never)).toBe("must stay");
+			expect(textOf(messages[0] as never)).toBe("must stay");
 		} finally {
 			closeQuietly(db);
 		}
@@ -1596,7 +1903,14 @@ describe("injectM0M1Pi", () => {
 		);
 		try {
 			const state = piState("ses-pi-begin-busy-code", cwd);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			appendCompartments(db, state.sessionId, [
 				{
 					sequence: 0,
@@ -1621,18 +1935,25 @@ describe("injectM0M1Pi", () => {
 			}) as typeof db.exec;
 
 			const messages = [userMessage("hello", 10)];
-			const result = injectM0M1Pi(state, db, messages as never);
+			const result = injectM0M1Pi(
+				state,
+				db,
+				messages as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(result.m0Materialized).toBe(false);
-			expect(textOf(messages[0] as never)).toBe(
+			expect(result.contentionExhausted).toBe(true);
+			// Region lane: the losing pass serves the STORED region (the empty
+			// install) verbatim and touches no array message.
+			expect(readSystemRegion(db, state.sessionId)).toBe(
 				"<session-history></session-history>",
 			);
-			expect(textOf(messages[1] as never)).toContain(
-				"no new content since last materialization",
-			);
-			expect(textOf(messages[1] as never)).not.toContain(
-				"busy code fallback body",
-			);
+			expect(
+				getOrCreateSessionMeta(db, state.sessionId).regionVolatileBytes,
+			).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
@@ -1645,7 +1966,14 @@ describe("injectM0M1Pi", () => {
 		);
 		try {
 			const state = piState("ses-pi-begin-busy", cwd);
-			injectM0M1Pi(state, db, [userMessage("hello", 10)] as never);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hello", 10)] as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			appendCompartments(db, state.sessionId, [
 				{
 					sequence: 0,
@@ -1666,238 +1994,23 @@ describe("injectM0M1Pi", () => {
 			}) as typeof db.exec;
 
 			const messages = [userMessage("hello", 10)];
-			const result = injectM0M1Pi(state, db, messages as never);
+			const result = injectM0M1Pi(
+				state,
+				db,
+				messages as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(result.m0Materialized).toBe(false);
-			expect(textOf(messages[0] as never)).toBe(
+			expect(result.contentionExhausted).toBe(true);
+			expect(readSystemRegion(db, state.sessionId)).toBe(
 				"<session-history></session-history>",
 			);
-			expect(textOf(messages[1] as never)).toContain(
-				"no new content since last materialization",
-			);
-			expect(textOf(messages[1] as never)).not.toContain("busy fallback body");
-		} finally {
-			closeQuietly(db);
-		}
-	});
-
-	it("replays byte-identical m[1] on defer and surfaces additive memory on next cache-busting pass", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(
-			join(tmpdir(), "pi-m1-additive-stable-"),
-		);
-		try {
-			const state = piState("ses-pi-m1-additive-stable", cwd);
-			appendCompartments(db, state.sessionId, [
-				{
-					sequence: 1,
-					startMessage: 1,
-					endMessage: 1,
-					startMessageId: "m0",
-					endMessageId: "m0",
-					title: "large baseline",
-					content: "baseline ".repeat(300),
-				},
-			]);
-			insertMemory(db, {
-				projectPath: state.projectIdentity,
-				category: "ARCHITECTURE",
-				content: "Large baseline memory. ".repeat(300),
-				sourceType: "historian",
-			});
-			const first = [userMessage("hello", 10)];
-			injectM0M1Pi(state, db, first as never, undefined, true);
-			const initialM1 = textOf(first[1] as never);
-
-			insertMemory(db, {
-				projectPath: state.projectIdentity,
-				category: "ARCHITECTURE",
-				content: "New additive memory appears only after a bust.",
-				sourceType: "agent",
-			});
-
-			const deferOne = [userMessage("defer one", 11)];
-			injectM0M1Pi(state, db, deferOne as never, undefined, false);
-			const deferTwo = [userMessage("defer two", 12)];
-			injectM0M1Pi(state, db, deferTwo as never, undefined, false);
-
-			expect(textOf(deferOne[1] as never)).toBe(initialM1);
-			expect(textOf(deferTwo[1] as never)).toBe(initialM1);
-			expect(initialM1).not.toContain("New additive memory");
-
-			const bust = [userMessage("bust", 13)];
-			injectM0M1Pi(state, db, bust as never, undefined, true);
-			expect(textOf(bust[1] as never)).toContain("<new-memories>");
-			expect(textOf(bust[1] as never)).toContain(
-				"New additive memory appears only after a bust.",
-			);
-		} finally {
-			closeQuietly(db);
-		}
-	});
-
-	it("renders archive removals for m0-resident memory only on cache-busting pass and replays them on defer", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(
-			join(tmpdir(), "pi-m1-archive-delta-"),
-		);
-		try {
-			const state = piState("ses-pi-m1-archive-delta", cwd);
-			appendCompartments(db, state.sessionId, [
-				{
-					sequence: 1,
-					startMessage: 1,
-					endMessage: 1,
-					startMessageId: "m0",
-					endMessageId: "m0",
-					title: "large baseline",
-					content: "baseline ".repeat(300),
-				},
-			]);
-			const memory = insertMemory(db, {
-				projectPath: state.projectIdentity,
-				category: "ARCHITECTURE",
-				content: "Baseline memory to remove from m0. ".repeat(300),
-				sourceType: "historian",
-			});
-			injectM0M1Pi(
-				state,
-				db,
-				[userMessage("hello", 10)] as never,
-				undefined,
-				true,
-			);
-
-			db.transaction(() => {
-				archiveMemory(db, memory.id);
-				queueMemoryMutation(db, {
-					projectPath: state.projectIdentity,
-					mutationType: "archive",
-					targetMemoryId: memory.id,
-					queuedAt: 10,
-				});
-			})();
-
-			const defer = [userMessage("defer", 11)];
-			injectM0M1Pi(state, db, defer as never, undefined, false);
-			expect(textOf(defer[1] as never)).not.toContain("<memory-updates>");
-
-			const bust = [userMessage("bust", 12)];
-			injectM0M1Pi(state, db, bust as never, undefined, true);
-			const m1 = textOf(bust[1] as never);
-			expect(m1).toContain("<memory-updates>");
-			expect(m1).toContain(
-				"These memories changed since the snapshot below — trust these:",
-			);
-			expect(m1).toContain(`<removed id="${memory.id}"/>`);
-
-			const deferAfterBust = [userMessage("defer after bust", 13)];
-			injectM0M1Pi(state, db, deferAfterBust as never, undefined, false);
-			expect(textOf(deferAfterBust[1] as never)).toBe(m1);
-		} finally {
-			closeQuietly(db);
-		}
-	});
-
-	it("force-renders an eligible supersede replacement that predates the m0 marker", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(
-			join(tmpdir(), "pi-m1-forced-supersede-"),
-		);
-		try {
-			const state = piState("ses-pi-m1-forced-supersede", cwd);
-			const replacement = insertMemory(db, {
-				projectPath: state.projectIdentity,
-				category: "ARCHITECTURE",
-				content: "Replacement content must render in the delta.",
-			});
-			const source = insertMemory(db, {
-				projectPath: state.projectIdentity,
-				category: "ARCHITECTURE",
-				content: "Baseline source memory.",
-			});
-			const markers = {
-				maxCompartmentSeq: -1,
-				maxMemoryId: source.id,
-				maxMutationId: 0,
-				maxMemoryMutationId: 0,
-				projectMemoryEpoch: 0,
-				workspaceFingerprint: null,
-				projectUserProfileVersion: 0,
-				projectDocsHash: "",
-				sessionFactsVersion: 0,
-				materializedAt: Date.now(),
-				upgradeState: "",
-				compartmentRenderEpoch: null,
-				lastBaselineEndMessageId: null,
-				systemHash: "",
-				modelKey: "",
-				projectIdentity: state.projectIdentity,
-				muralEnabled: false,
-				renderBudgetIdentity: "",
-			};
-
-			db.prepare(
-				"UPDATE memories SET status = 'archived', superseded_by_memory_id = ? WHERE id = ?",
-			).run(replacement.id, source.id);
-			queueMemoryMutation(db, {
-				projectPath: state.projectIdentity,
-				mutationType: "superseded",
-				targetMemoryId: source.id,
-				supersededById: replacement.id,
-				queuedAt: markers.materializedAt + 1,
-			});
-
-			const m1 = renderM1Pi(state, db, markers, [source.id]);
-			expect(m1).toContain(
-				`<superseded id="${source.id}" by="${replacement.id}"/>`,
-			);
-			expect(m1).toContain("Replacement content must render in the delta.");
-			expect(m1).not.toContain(`<removed id="${source.id}"/>`);
-		} finally {
-			rmSync(cwd, { recursive: true, force: true });
-			closeQuietly(db);
-		}
-	});
-
-	it("skips memory mutation deltas for memories trimmed out of m0", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(
-			join(tmpdir(), "pi-m1-trimmed-delta-"),
-		);
-		try {
-			const state = {
-				...piState("ses-pi-m1-trimmed-delta", cwd),
-				injectionBudgetTokens: 1,
-			};
-			const memory = insertMemory(db, {
-				projectPath: state.projectIdentity,
-				category: "ARCHITECTURE",
-				content: "This memory is too large for a one-token m0 budget.",
-				sourceType: "historian",
-			});
-			injectM0M1Pi(
-				state,
-				db,
-				[userMessage("hello", 10)] as never,
-				undefined,
-				true,
-			);
-			queueMemoryMutation(db, {
-				projectPath: state.projectIdentity,
-				mutationType: "update",
-				targetMemoryId: memory.id,
-				newContent: "Updated but not resident.",
-				queuedAt: 10,
-			});
-
-			const bust = [userMessage("bust", 11)];
-			injectM0M1Pi(state, db, bust as never, undefined, true);
-
-			expect(textOf(bust[1] as never)).not.toContain("<memory-updates>");
-			expect(textOf(bust[1] as never)).not.toContain(
-				"Updated but not resident.",
-			);
+			expect(
+				getOrCreateSessionMeta(db, state.sessionId).regionVolatileBytes,
+			).toBeNull();
 		} finally {
 			closeQuietly(db);
 		}
@@ -1921,7 +2034,8 @@ describe("injectM0M1Pi", () => {
 				db,
 				[userMessage("hello", 10)] as never,
 				undefined,
-				true,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 			db.prepare(
 				"UPDATE memories SET content = ?, normalized_hash = ?, updated_at = ? WHERE id = ?",
@@ -1936,148 +2050,21 @@ describe("injectM0M1Pi", () => {
 			setProjectState(db, state.projectIdentity, { projectMemoryEpoch: 1 });
 
 			const bust = [userMessage("bust", 11)];
-			const result = injectM0M1Pi(state, db, bust as never, undefined, true);
+			const result = injectM0M1Pi(
+				state,
+				db,
+				bust as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(result.m0Materialized).toBe(true);
-			expect(textOf(bust[0] as never)).toContain("Reconciled content.");
+			expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
+				"Reconciled content.",
+			);
 			expect(textOf(bust[1] as never)).not.toContain("<memory-updates>");
 		} finally {
-			closeQuietly(db);
-		}
-	});
-
-	it("soft m1 refresh CAS rolls back and replays a sibling cached m1 on marker mismatch", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(join(tmpdir(), "pi-m1-soft-cas-"));
-		const originalExec = db.exec.bind(db);
-		try {
-			const state = piState("ses-pi-m1-soft-cas", cwd);
-			injectM0M1Pi(
-				state,
-				db,
-				[userMessage("hello", 10)] as never,
-				undefined,
-				true,
-			);
-			let injectedSibling = false;
-			db.exec = ((sql: string) => {
-				if (sql === "BEGIN IMMEDIATE" && !injectedSibling) {
-					injectedSibling = true;
-					db.prepare(
-						"UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_max_memory_id = ?, cached_m1_bytes = ? WHERE session_id = ?",
-					).run(
-						Buffer.from(
-							`<session-history>${"baseline ".repeat(300)}</session-history>`,
-							"utf8",
-						),
-						99,
-						Buffer.from("sibling cached m1", "utf8"),
-						state.sessionId,
-					);
-				}
-				return originalExec(sql);
-			}) as typeof db.exec;
-
-			const bust = [userMessage("bust", 11)];
-			const result = injectM0M1Pi(state, db, bust as never, undefined, true);
-
-			expect(injectedSibling).toBe(true);
-			expect(result.m0Materialized).toBe(false);
-			expect(textOf(bust[1] as never)).toBe("sibling cached m1");
-		} finally {
-			db.exec = originalExec as typeof db.exec;
-			closeQuietly(db);
-		}
-	});
-
-	it("soft m1 refresh CAS rejects byte-different m[0] even when non-doc markers match", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(
-			join(tmpdir(), "pi-m1-soft-cas-bytes-"),
-		);
-		const originalExec = db.exec.bind(db);
-		try {
-			const state = piState("ses-pi-m1-soft-cas-bytes", cwd);
-			injectM0M1Pi(
-				state,
-				db,
-				[userMessage("hello", 10)] as never,
-				undefined,
-				true,
-			);
-			const siblingM0 = Buffer.from(
-				`<session-history>${"byte mismatch ".repeat(300)}</session-history>`,
-				"utf8",
-			);
-			let injectedSibling = false;
-			db.exec = ((sql: string) => {
-				if (sql === "BEGIN IMMEDIATE" && !injectedSibling) {
-					injectedSibling = true;
-					db.prepare(
-						"UPDATE session_meta SET cached_m0_bytes = ?, cached_m1_bytes = ? WHERE session_id = ?",
-					).run(
-						siblingM0,
-						Buffer.from("sibling cached pi m1 byte mismatch", "utf8"),
-						state.sessionId,
-					);
-				}
-				return originalExec(sql);
-			}) as typeof db.exec;
-
-			const bust = [userMessage("bust", 11)];
-			const result = injectM0M1Pi(state, db, bust as never, undefined, true);
-
-			expect(injectedSibling).toBe(true);
-			expect(result.m0Materialized).toBe(false);
-			expect(textOf(bust[0] as never)).toBe(siblingM0.toString("utf8"));
-			expect(textOf(bust[1] as never)).toBe(
-				"sibling cached pi m1 byte mismatch",
-			);
-		} finally {
-			db.exec = originalExec as typeof db.exec;
-			closeQuietly(db);
-		}
-	});
-
-	it("soft m1 refresh CAS treats docs-hash-only marker drift as a match", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(
-			join(tmpdir(), "pi-m1-soft-cas-docs-"),
-		);
-		const originalExec = db.exec.bind(db);
-		try {
-			const state = piState("ses-pi-m1-soft-cas-docs", cwd);
-			const first = [userMessage("hello", 10)];
-			injectM0M1Pi(state, db, first as never, undefined, true);
-			const baselineM0 = textOf(first[0] as never);
-			insertMemory(db, {
-				projectPath: state.projectIdentity,
-				category: "ARCHITECTURE",
-				content: "Pi docs-hash-only CAS delta memory",
-				sourceType: "agent",
-			});
-			let changedDocsMarker = false;
-			db.exec = ((sql: string) => {
-				if (sql === "BEGIN IMMEDIATE" && !changedDocsMarker) {
-					changedDocsMarker = true;
-					db.prepare(
-						"UPDATE session_meta SET cached_m0_project_docs_hash = ? WHERE session_id = ?",
-					).run("docs-only-marker-drift", state.sessionId);
-				}
-				return originalExec(sql);
-			}) as typeof db.exec;
-
-			const bust = [userMessage("bust", 11)];
-			const result = injectM0M1Pi(state, db, bust as never, undefined, true);
-
-			expect(changedDocsMarker).toBe(true);
-			expect(result.m0Materialized).toBe(false);
-			expect(textOf(bust[0] as never)).toBe(baselineM0);
-			expect(textOf(bust[1] as never)).toContain(
-				"Pi docs-hash-only CAS delta memory",
-			);
-		} finally {
-			db.exec = originalExec as typeof db.exec;
 			closeQuietly(db);
 		}
 	});
@@ -2258,11 +2245,22 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				hardSignals: baseHard,
 			};
 			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
-			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hi", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			// Publish a new compartment — the routine historian publish.
 			appendCompartments(db, state.sessionId, [compartment(1, "Bravo")]);
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
@@ -2280,13 +2278,24 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				hardSignals: baseHard,
 			};
 			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
-			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hi", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			const switched = {
 				...state,
 				hardSignals: { ...baseHard, modelKey: "anthropic/sonnet" },
 			};
-			expect(mustMaterializePi(switched, db)).toMatchObject({
+			expect(
+				mustMaterializePi(switched, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toMatchObject({
 				value: true,
 				reason: "model_change",
 				mismatch: {
@@ -2309,13 +2318,24 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				hardSignals: baseHard,
 			};
 			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
-			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hi", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			const changed = {
 				...state,
 				hardSignals: { ...baseHard, systemHash: "sys-v2" },
 			};
-			expect(mustMaterializePi(changed, db)).toMatchObject({
+			expect(
+				mustMaterializePi(changed, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toMatchObject({
 				value: true,
 				reason: "system_hash",
 				mismatch: {
@@ -2344,41 +2364,55 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 			};
 			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
 			const first = [userMessage("hi", 10)];
-			injectM0M1Pi(state, db, first as never, ["entry-0"]);
-			const baselineM0 = textOf(first[0] as never);
+			injectM0M1Pi(state, db, first as never, ["entry-0"], undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
+			const _baselineM0 = textOf(first[0] as never);
 
 			db.prepare(
 				"UPDATE session_meta SET cached_m0_project_identity = NULL WHERE session_id = ?",
 			).run(state.sessionId);
 
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
 			const noSwitch = [userMessage("same project", 11)];
-			const noSwitchResult = injectM0M1Pi(state, db, noSwitch as never, [
-				"entry-0",
-			]);
+			const noSwitchResult = injectM0M1Pi(
+				state,
+				db,
+				noSwitch as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			expect(noSwitchResult.m0Materialized).toBe(false);
 			expect(noSwitchResult.m0Reason).not.toBe("first_render");
 			expect(noSwitchResult.m0Reason).not.toBe("project_change");
-			expect(textOf(noSwitch[0] as never)).toBe(baselineM0);
-			expect(
-				db
-					.prepare(
-						"SELECT cached_m0_project_identity FROM session_meta WHERE session_id = ?",
-					)
-					.get(state.sessionId),
-			).toEqual({ cached_m0_project_identity: state.projectIdentity });
+			expect(readSystemRegion(db, state.sessionId) ?? "").toContain("T0");
+			// The head-era lazy-adopt write is deleted: on the region lane the
+			// NULL identity stays until the next genuine fold records it. No
+			// fold fires on the no-switch pass itself (parity with OpenCode).
 
 			const switched = {
 				...piState(state.sessionId, cwdB),
 				hardSignals: baseHard,
 			};
-			expect(mustMaterializePi(switched, db)).toMatchObject({
-				value: true,
-				reason: "project_change",
+			// Region lane (Unit 7): the lazy-adopt WRITE is deleted (it was
+			// head-only); a NULL cached identity never folds by itself — the
+			// switch fold records the identity when a genuine arm fires.
+			expect(
+				mustMaterializePi(switched, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toMatchObject({
+				value: false,
+				reason: null,
 			});
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
@@ -2402,8 +2436,12 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				content: "Project A memory must not replay after /cd.",
 			});
 			const first = [userMessage("hi", 10)];
-			injectM0M1Pi(stateA, db, first as never, undefined, true);
-			expect(textOf(first[0] as never)).toContain("Project A memory");
+			injectM0M1Pi(stateA, db, first as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
+			expect(readSystemRegion(db, stateA.sessionId) ?? "").toContain(
+				"Project A memory",
+			);
 
 			const stateB = {
 				...piState(stateA.sessionId, cwdB),
@@ -2421,11 +2459,13 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				db,
 				switched as never,
 				undefined,
-				true,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 			expect(switchedResult.m0Materialized).toBe(true);
 			expect(switchedResult.m0Reason).toBe("project_change");
-			expect(textOf(switched[0] as never)).toContain("Project B memory");
+			const switchedRegion = readSystemRegion(db, stateA.sessionId) ?? "";
+			expect(switchedRegion).toContain("Project B memory");
 			expect(textOf(switched[0] as never)).not.toContain("Project A memory");
 
 			const stable = [userMessage("after cd stable", 12)];
@@ -2434,11 +2474,15 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				db,
 				stable as never,
 				undefined,
-				false,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 			expect(stableResult.m0Materialized).toBe(false);
 			expect(stableResult.m0Reason).toBeNull();
-			expect(textOf(stable[0] as never)).toBe(textOf(switched[0] as never));
+			// Region lane: the replay stability is the region row — the stable
+			// pass serves it byte-identically and touches no array message.
+			expect(readSystemRegion(db, stateA.sessionId) ?? "").toBe(switchedRegion);
+			expect(textOf(stable[0] as never)).toBe("after cd stable");
 		} finally {
 			rmSync(cwdA, { recursive: true, force: true });
 			rmSync(cwdB, { recursive: true, force: true });
@@ -2459,13 +2503,27 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				...piState("ses-pi-tax-model-reason", cwdModel),
 				hardSignals: baseHard,
 			};
-			injectM0M1Pi(modelState, db, [userMessage("hi", 10)] as never);
+			injectM0M1Pi(
+				modelState,
+				db,
+				[userMessage("hi", 10)] as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			const modelChanged = {
 				...modelState,
 				hardSignals: { ...baseHard, modelKey: "anthropic/sonnet" },
 			};
 			const modelPass = [userMessage("model", 11)];
-			const modelResult = injectM0M1Pi(modelChanged, db, modelPass as never);
+			const modelResult = injectM0M1Pi(
+				modelChanged,
+				db,
+				modelPass as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			expect(modelResult.m0Materialized).toBe(true);
 			expect(modelResult.m0Reason).toBe("model_change");
 			expect(modelResult.m0Reason).not.toBe("first_render");
@@ -2474,13 +2532,27 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				...piState("ses-pi-tax-system-reason", cwdSystem),
 				hardSignals: baseHard,
 			};
-			injectM0M1Pi(systemState, db, [userMessage("hi", 10)] as never);
+			injectM0M1Pi(
+				systemState,
+				db,
+				[userMessage("hi", 10)] as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			const systemChanged = {
 				...systemState,
 				hardSignals: { ...baseHard, systemHash: "sys-v2" },
 			};
 			const systemPass = [userMessage("system", 11)];
-			const systemResult = injectM0M1Pi(systemChanged, db, systemPass as never);
+			const systemResult = injectM0M1Pi(
+				systemChanged,
+				db,
+				systemPass as never,
+				undefined,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			expect(systemResult.m0Materialized).toBe(true);
 			expect(systemResult.m0Reason).toBe("system_hash");
 			expect(systemResult.m0Reason).not.toBe("first_render");
@@ -2500,7 +2572,14 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				hardSignals: baseHard,
 			};
 			appendCompartments(db, state.sessionId, [compartment(0, "Alpha")]);
-			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hi", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			const unknown = {
 				...state,
@@ -2511,7 +2590,11 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 					lastResponseTime: 0,
 				},
 			};
-			expect(mustMaterializePi(unknown, db)).toEqual({
+			expect(
+				mustMaterializePi(unknown, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
@@ -2534,12 +2617,17 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				db,
 				[userMessage("hi", 10)] as never,
 				undefined,
-				true,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 
 			writeFileSync(join(cwd, "ARCHITECTURE.md"), "# New Pi docs\n");
 
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
@@ -2558,8 +2646,12 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 			};
 			writeFileSync(join(cwd, "ARCHITECTURE.md"), "# Old Pi architecture\n");
 			const first = [userMessage("hi", 10)];
-			injectM0M1Pi(state, db, first as never, undefined, true);
-			expect(textOf(first[0] as never)).toContain("Old Pi architecture");
+			injectM0M1Pi(state, db, first as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
+			expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
+				"Old Pi architecture",
+			);
 
 			writeFileSync(
 				join(cwd, "ARCHITECTURE.md"),
@@ -2575,13 +2667,16 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				db,
 				second as never,
 				undefined,
-				true,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 
 			expect(result.m0Materialized).toBe(true);
 			expect(result.m0Reason).toBe("system_hash");
-			expect(textOf(second[0] as never)).toContain("Updated Pi architecture");
-			expect(textOf(second[0] as never)).toContain(
+			expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
+				"Updated Pi architecture",
+			);
+			expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
 				"Fresh Pi docs folded on hard bust.",
 			);
 			expect(textOf(second[0] as never)).not.toContain("Old Pi architecture");
@@ -2623,7 +2718,9 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				"INSERT INTO m0_mutation_log (id, session_id, mutation_type, target_id, queued_at) VALUES (15, ?, 'compartment_upgrade', NULL, 1)",
 			).run(state.sessionId);
 			const firstMessages = [userMessage("same quiet tail", 10)];
-			injectM0M1Pi(state, db, firstMessages as never, ["entry-0"]);
+			injectM0M1Pi(state, db, firstMessages as never, ["entry-0"], undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
 			appendCompartments(db, state.sessionId, [
 				{
 					sequence: 425,
@@ -2636,8 +2733,7 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 					p1: "new m1-only content after the cached boundary",
 				},
 			]);
-			const firstM0 = textOf(firstMessages[0] as never);
-			const firstM1 = textOf(firstMessages[1] as never);
+			const firstRegion = readSystemRegion(db, state.sessionId) ?? "";
 			const meta = getOrCreateSessionMeta(db, state.sessionId);
 			expect(meta.cachedM0ModelKey).toBe("openai/gpt-5.6-sol");
 			expect(meta.cachedM0MaxCompartmentSeq).toBe(417);
@@ -2654,20 +2750,41 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 					db,
 					messages as never,
 					["entry-0"],
-					false,
+					undefined,
+					{ systemRegion: { enabled: true, reason: "" } },
 				);
 				expect(result.m0Materialized).toBe(false);
 				expect(result.m0Reason).toBeNull();
-				expect(textOf(messages[0] as never)).toBe(firstM0);
-				expect(textOf(messages[1] as never)).toBe(firstM1);
+				expect(readSystemRegion(db, state.sessionId) ?? "").toBe(firstRegion);
 			}
 
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
+			// Region-lane exemption (Unit 7): a flag-UNSET state means "not
+			// observed this pass" — no fold; the flip fires on an explicit flag.
 			expect(
-				mustMaterializePi({ ...state, muralEnabled: undefined }, db),
+				mustMaterializePi(
+					{ ...state, muralEnabled: undefined },
+					db,
+					undefined,
+					undefined,
+					{ systemRegionMode: true },
+				),
+			).toEqual({ value: false, reason: null });
+			expect(
+				mustMaterializePi(
+					{ ...state, muralEnabled: false },
+					db,
+					undefined,
+					undefined,
+					{ systemRegionMode: true },
+				),
 			).toEqual({
 				value: true,
 				reason: "render_config:mural(true→false)",
@@ -2689,13 +2806,24 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				...piState("ses-pi-tax-model-alias-forward", cwd),
 				hardSignals: { ...baseHard, modelKey: "openai/gpt-5.6-sol" },
 			};
-			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hi", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			const aliasOnly = {
 				...state,
 				hardSignals: { ...baseHard, modelKey: "openai-codex/gpt-5.6-sol" },
 			};
-			expect(mustMaterializePi(aliasOnly, db)).toEqual({
+			expect(
+				mustMaterializePi(aliasOnly, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
@@ -2715,7 +2843,14 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				...piState("ses-pi-tax-model-alias-reverse", cwd),
 				hardSignals: { ...baseHard, modelKey: "openai-codex/gpt-5.6-sol" },
 			};
-			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hi", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			expect(getOrCreateSessionMeta(db, state.sessionId).cachedM0ModelKey).toBe(
 				"openai/gpt-5.6-sol",
 			);
@@ -2724,7 +2859,11 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				...state,
 				hardSignals: { ...baseHard, modelKey: "openai/gpt-5.6-sol" },
 			};
-			expect(mustMaterializePi(aliasOnly, db)).toEqual({
+			expect(
+				mustMaterializePi(aliasOnly, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
@@ -2744,12 +2883,23 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				...piState("ses-pi-tax-model-alias-upgrade", cwd),
 				hardSignals: { ...baseHard, modelKey: "openai/gpt-5.6-sol" },
 			};
-			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hi", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 			db.prepare(
 				"UPDATE session_meta SET cached_m0_model_key = ? WHERE session_id = ?",
 			).run("openai-codex/gpt-5.6-sol", state.sessionId);
 
-			expect(mustMaterializePi(state, db)).toEqual({
+			expect(
+				mustMaterializePi(state, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toEqual({
 				value: false,
 				reason: null,
 			});
@@ -2769,13 +2919,24 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				...piState("ses-pi-tax-model-alias-real-switch", cwd),
 				hardSignals: { ...baseHard, modelKey: "openai-codex/gpt-5.6-sol" },
 			};
-			injectM0M1Pi(state, db, [userMessage("hi", 10)] as never, ["entry-0"]);
+			injectM0M1Pi(
+				state,
+				db,
+				[userMessage("hi", 10)] as never,
+				["entry-0"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
+			);
 
 			const realSwitch = {
 				...state,
 				hardSignals: { ...baseHard, modelKey: "openai/gpt-5.6-codex" },
 			};
-			expect(mustMaterializePi(realSwitch, db)).toMatchObject({
+			expect(
+				mustMaterializePi(realSwitch, db, undefined, undefined, {
+					systemRegionMode: true,
+				}),
+			).toMatchObject({
 				value: true,
 				reason: "model_change",
 				mismatch: {
@@ -2789,12 +2950,16 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 				db,
 				[userMessage("switch", 11)] as never,
 				["entry-1"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 			const replay = injectM0M1Pi(
 				realSwitch,
 				db,
 				[userMessage("switch", 11)] as never,
 				["entry-1"],
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 			expect(folded.m0Materialized).toBe(true);
 			expect(folded.m0Reason).toBe("model_change");
@@ -2802,244 +2967,6 @@ describe("mustMaterializePi — SOFT/HARD taxonomy (parity with OpenCode)", () =
 			expect(replay.m0Reason).toBeNull();
 		} finally {
 			rmSync(cwd, { recursive: true, force: true });
-			closeQuietly(db);
-		}
-	});
-});
-
-describe("injectM0M1Pi m[1]-rendered coverage watermark (marker-drain liveness)", () => {
-	it("reports the m[1] delta watermark on a fresh recompute and null on pure replay", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(join(tmpdir(), "pi-m1-coverage-"));
-		try {
-			const state = piState("ses-pi-m1-coverage", cwd);
-			appendCompartments(db, state.sessionId, [
-				{
-					sequence: 0,
-					startMessage: 1,
-					endMessage: 1,
-					startMessageId: "entry-0",
-					endMessageId: "entry-0",
-					title: "First",
-					content: "first compartment body",
-					p1: "first compartment body",
-				},
-			]);
-			const firstPass = [userMessage("hello", 10)];
-			const r0 = injectM0M1Pi(state, db, firstPass as never, ["entry-0"]);
-			expect(r0.m0Materialized).toBe(true);
-			// The full materialization folds the compartment into m[0], so the
-			// m[0] boundary covers it and the m[1] delta carries nothing beyond
-			// the m[0] snapshot watermark.
-			expect(r0.renderedBoundary.endMessageId).toBe("entry-0");
-			expect(r0.m1RenderedCoverage).toBeNull();
-
-			// Historian publishes a SECOND compartment — an m[1] delta; m[0] is
-			// NOT re-materialized (new_compartment is not a HARD trigger).
-			appendCompartments(db, state.sessionId, [
-				{
-					sequence: 1,
-					startMessage: 2,
-					endMessage: 2,
-					startMessageId: "entry-1",
-					endMessageId: "entry-1",
-					title: "Delta",
-					content: "second compartment body",
-					p1: "second compartment body",
-				},
-			]);
-
-			// Cache-busting pass: the soft refresh recomputes m[1] from the same
-			// compartment snapshot and certifies the m[1] delta watermark at the
-			// new compartment. (With a non-empty baseline the soft refresh also
-			// advances the persisted trim boundary string, so the m[0] arm moves
-			// too; the empty-baseline test below is the shape where ONLY the m[1]
-			// field certifies coverage.)
-			const secondPass = [
-				userMessage("covered-0", 10),
-				userMessage("covered-1", 11),
-				userMessage("keep", 12),
-			];
-			const r1 = injectM0M1Pi(
-				state,
-				db,
-				secondPass as never,
-				["entry-0", "entry-1", "keep"],
-				true,
-			);
-			expect(r1.m0Materialized).toBe(false);
-			expect(r1.contentionExhausted).toBe(false);
-			expect(r1.m1RenderedCoverage).toEqual({
-				endMessageId: "entry-1",
-				ordinal: 2,
-			});
-
-			// Pure replay pass (recomputeM1ThisPass=false): the served bytes
-			// were rendered by an earlier pass, so no fresh coverage may be
-			// certified — the field must be null.
-			const thirdPass = [
-				userMessage("covered-0", 10),
-				userMessage("covered-1", 11),
-				userMessage("keep", 12),
-			];
-			const r2 = injectM0M1Pi(
-				state,
-				db,
-				thirdPass as never,
-				["entry-0", "entry-1", "keep"],
-				false,
-			);
-			expect(r2.m0Materialized).toBe(false);
-			expect(r2.m1RenderedCoverage).toBeNull();
-		} finally {
-			closeQuietly(db);
-		}
-	});
-
-	it("certifies coverage from the m[1] delta when the m[0] baseline is empty (the liveness-gap shape)", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(
-			join(tmpdir(), "pi-m1-coverage-empty-"),
-		);
-		try {
-			const state = piState("ses-pi-m1-coverage-empty", cwd);
-			// Materialize with NO compartments: the empty m[0] baseline whose
-			// snapshot markers carry no compartment boundary at all.
-			const firstPass = [userMessage("hello", 10)];
-			const r0 = injectM0M1Pi(state, db, firstPass as never);
-			expect(r0.m0Materialized).toBe(true);
-			expect(r0.renderedBoundary).toEqual({
-				endMessageId: null,
-				ordinal: null,
-			});
-			expect(r0.m1RenderedCoverage).toBeNull();
-
-			// A normal publication lands (three compartments, mirroring the
-			// diagnosis: seq 0:1-2, 1:3-4, 2:5-7). It renders into m[1] only.
-			appendCompartments(db, state.sessionId, [
-				{
-					sequence: 0,
-					startMessage: 1,
-					endMessage: 2,
-					startMessageId: "entry-1",
-					endMessageId: "entry-2",
-					title: "A",
-					content: "chunk a",
-					p1: "chunk a",
-				},
-				{
-					sequence: 1,
-					startMessage: 3,
-					endMessage: 4,
-					startMessageId: "entry-3",
-					endMessageId: "entry-4",
-					title: "B",
-					content: "chunk b",
-					p1: "chunk b",
-				},
-				{
-					sequence: 2,
-					startMessage: 5,
-					endMessage: 7,
-					startMessageId: "entry-5",
-					endMessageId: "entry-7",
-					title: "C",
-					content: "chunk c",
-					p1: "chunk c",
-				},
-			]);
-
-			const secondPass = [userMessage("hello", 10), userMessage("tail", 12)];
-			const r1 = injectM0M1Pi(
-				state,
-				db,
-				secondPass as never,
-				["entry-1", "keep"],
-				true,
-			);
-			expect(r1.m0Materialized).toBe(false);
-			// The m[0] arm still reads <none>, so it cannot by itself certify
-			// coverage for the pending marker…
-			expect(r1.renderedBoundary).toEqual({
-				endMessageId: null,
-				ordinal: null,
-			});
-			// …while the fresh m[1] delta certifies coverage up to the latest
-			// published compartment, so a pending marker at ordinal 7 covers.
-			expect(r1.m1RenderedCoverage).toEqual({
-				endMessageId: "entry-7",
-				ordinal: 7,
-			});
-		} finally {
-			closeQuietly(db);
-		}
-	});
-
-	it("soft m[1] refresh sibling-fallback reports null coverage even with a newer live compartment", () => {
-		const db = createTestDb();
-		const cwd = createTestTempDirFromPath(
-			join(tmpdir(), "pi-m1-coverage-sibling-"),
-		);
-		const originalExec = db.exec.bind(db);
-		try {
-			const state = piState("ses-pi-m1-coverage-sibling", cwd);
-			injectM0M1Pi(
-				state,
-				db,
-				[userMessage("hello", 10)] as never,
-				undefined,
-				true,
-			);
-
-			// A newer compartment lands in the live snapshot. A naive coverage
-			// derivation from live DB rows would certify it — but the stale
-			// sibling bytes served below were rendered BEFORE it existed.
-			appendCompartments(db, state.sessionId, [
-				{
-					sequence: 0,
-					startMessage: 1,
-					endMessage: 2,
-					startMessageId: "entry-1",
-					endMessageId: "entry-2",
-					title: "New",
-					content: "new compartment body",
-					p1: "new compartment body",
-				},
-			]);
-
-			let injectedSibling = false;
-			db.exec = ((sql: string) => {
-				if (sql === "BEGIN IMMEDIATE" && !injectedSibling) {
-					injectedSibling = true;
-					db.prepare(
-						"UPDATE session_meta SET cached_m0_bytes = ?, cached_m0_max_memory_id = ?, cached_m1_bytes = ? WHERE session_id = ?",
-					).run(
-						Buffer.from(
-							`<session-history>${"baseline ".repeat(300)}</session-history>`,
-							"utf8",
-						),
-						99,
-						Buffer.from("sibling cached m1", "utf8"),
-						state.sessionId,
-					);
-				}
-				return originalExec(sql);
-			}) as typeof db.exec;
-
-			const bust = [userMessage("bust", 11)];
-			const result = injectM0M1Pi(state, db, bust as never, undefined, true);
-
-			expect(injectedSibling).toBe(true);
-			expect(result.m0Materialized).toBe(false);
-			expect(textOf(bust[1] as never)).toBe("sibling cached m1");
-			// The sibling-fallback leaves contentionExhausted FALSE (recomputed=
-			// false), so the existing contention veto does NOT catch it — the
-			// coverage field itself must be null to keep the deferred drain
-			// signal armed for the next fresh render.
-			expect(result.contentionExhausted).toBe(false);
-			expect(result.m1RenderedCoverage).toBeNull();
-		} finally {
-			db.exec = originalExec as typeof db.exec;
 			closeQuietly(db);
 		}
 	});
@@ -3121,7 +3048,8 @@ it("Pi keeps policy-identified m0 frozen as live budgets rise and folds a policy
 			db,
 			[userMessage("seed", 1)] as never,
 			undefined,
-			false,
+			undefined,
+			{ systemRegion: { enabled: true, reason: "" } },
 		);
 		expect(first.m0Materialized).toBe(true);
 		const baseline = getOrCreateSessionMeta(db, state.sessionId).cachedM0Bytes;
@@ -3131,7 +3059,8 @@ it("Pi keeps policy-identified m0 frozen as live budgets rise and folds a policy
 				db,
 				[userMessage("grow", 2)] as never,
 				undefined,
-				false,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			);
 			expect(replay.m0Materialized).toBe(false);
 			expect(getOrCreateSessionMeta(db, state.sessionId).cachedM0Bytes).toEqual(
@@ -3143,16 +3072,19 @@ it("Pi keeps policy-identified m0 frozen as live budgets rise and folds a policy
 			historyBudgetTokens: 22400,
 			historyBudgetPolicyIdentity: "p0.2:percentage:40",
 		};
-		expect(mustMaterializePi(edited, db).reason).toContain(
-			"render_config:budget(",
-		);
+		expect(
+			mustMaterializePi(edited, db, undefined, undefined, {
+				systemRegionMode: true,
+			}).reason,
+		).toContain("render_config:budget(");
 		expect(
 			injectM0M1Pi(
 				edited,
 				db,
 				[userMessage("edit", 3)] as never,
 				undefined,
-				false,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			).m0Materialized,
 		).toBe(true);
 		expect(
@@ -3161,7 +3093,8 @@ it("Pi keeps policy-identified m0 frozen as live budgets rise and folds a policy
 				db,
 				[userMessage("replay", 4)] as never,
 				undefined,
-				false,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			).m0Materialized,
 		).toBe(false);
 	} finally {
@@ -3182,16 +3115,27 @@ it("Pi adopts legacy numeric history silently and retains absolute memory-budget
 			db,
 			[userMessage("legacy", 1)] as never,
 			undefined,
-			false,
+			undefined,
+			{ systemRegion: { enabled: true, reason: "" } },
 		);
 		const current = {
 			...state,
 			historyBudgetTokens: 16000,
 			historyBudgetPolicyIdentity: "p0.15:percentage:40",
 		};
-		expect(mustMaterializePi(current, db).value).toBe(false);
 		expect(
-			mustMaterializePi({ ...current, injectionBudgetTokens: 5000 }, db).reason,
+			mustMaterializePi(current, db, undefined, undefined, {
+				systemRegionMode: true,
+			}).value,
+		).toBe(false);
+		expect(
+			mustMaterializePi(
+				{ ...current, injectionBudgetTokens: 5000 },
+				db,
+				undefined,
+				undefined,
+				{ systemRegionMode: true },
+			).reason,
 		).toBe("render_config:budget(m4000-h12000→m5000-hp0.15:percentage:40)");
 		const hard = {
 			...current,
@@ -3208,7 +3152,8 @@ it("Pi adopts legacy numeric history silently and retains absolute memory-budget
 				db,
 				[userMessage("hard", 2)] as never,
 				undefined,
-				false,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			).m0Materialized,
 		).toBe(true);
 		expect(
@@ -3238,7 +3183,8 @@ it("Pi review: legacy replay survives restart and only a natural HARD records po
 			db,
 			[userMessage("seed", 1)] as never,
 			undefined,
-			false,
+			undefined,
+			{ systemRegion: { enabled: true, reason: "" } },
 		);
 		// The crafted legacy row is "written before rendered-budgets joined the
 		// identity" relative to the current epoch world: it keeps the trailing
@@ -3265,7 +3211,8 @@ it("Pi review: legacy replay survives restart and only a natural HARD records po
 					db,
 					[userMessage("replay", 2)] as never,
 					undefined,
-					false,
+					undefined,
+					{ systemRegion: { enabled: true, reason: "" } },
 				).m0Materialized,
 			).toBe(false);
 			const after = getOrCreateSessionMeta(db, legacy.sessionId);
@@ -3283,14 +3230,19 @@ it("Pi review: legacy replay survives restart and only a natural HARD records po
 				lastResponseTime: 0,
 			},
 		};
-		expect(mustMaterializePi(hard, db).reason).toBe("model_change");
+		expect(
+			mustMaterializePi(hard, db, undefined, undefined, {
+				systemRegionMode: true,
+			}).reason,
+		).toBe("model_change");
 		expect(
 			injectM0M1Pi(
 				hard,
 				db,
 				[userMessage("hard", 3)] as never,
 				undefined,
-				false,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			).m0Materialized,
 		).toBe(true);
 		expect(
@@ -3302,7 +3254,8 @@ it("Pi review: legacy replay survives restart and only a natural HARD records po
 				db,
 				[userMessage("replay", 4)] as never,
 				undefined,
-				false,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			).m0Materialized,
 		).toBe(false);
 	} finally {
@@ -3334,7 +3287,14 @@ it("Pi shrinking budget refolds an oversized baseline once with empty m1", () =>
 				importance: 100,
 			},
 		]);
-		injectM0M1Pi(state, db, [userMessage("seed", 1)] as never, undefined, true);
+		injectM0M1Pi(
+			state,
+			db,
+			[userMessage("seed", 1)] as never,
+			undefined,
+			undefined,
+			{ systemRegion: { enabled: true, reason: "" } },
+		);
 		const before = getOrCreateSessionMeta(db, state.sessionId).cachedM0Bytes;
 		expect(before?.toString()).toContain("large baseline");
 		const shrink = { ...state, historyBudgetTokens: 1 };
@@ -3343,7 +3303,8 @@ it("Pi shrinking budget refolds an oversized baseline once with empty m1", () =>
 			db,
 			[userMessage("resize", 2)] as never,
 			undefined,
-			false,
+			undefined,
+			{ systemRegion: { enabled: true, reason: "" } },
 		);
 		expect(resized.m0Materialized).toBe(true);
 		expect(resized.m0Reason).toContain("render_config:budget_shrink(");
@@ -3352,14 +3313,15 @@ it("Pi shrinking budget refolds an oversized baseline once with empty m1", () =>
 		expect(
 			getOrCreateSessionMeta(db, state.sessionId).cachedM0UpgradeState,
 		).toContain("|rendered-budgets:");
-		for (const recompute of [false, true, true]) {
+		for (const _recompute of [false, true, true]) {
 			expect(
 				injectM0M1Pi(
 					shrink,
 					db,
 					[userMessage("replay", 3)] as never,
 					undefined,
-					recompute,
+					undefined,
+					{ systemRegion: { enabled: true, reason: "" } },
 				).m0Materialized,
 			).toBe(false);
 			expect(getOrCreateSessionMeta(db, state.sessionId).cachedM0Bytes).toEqual(
@@ -3372,7 +3334,8 @@ it("Pi shrinking budget refolds an oversized baseline once with empty m1", () =>
 				db,
 				[userMessage("growth", 4)] as never,
 				undefined,
-				false,
+				undefined,
+				{ systemRegion: { enabled: true, reason: "" } },
 			).m0Materialized,
 		).toBe(false);
 		expect(getOrCreateSessionMeta(db, state.sessionId).cachedM0Bytes).toEqual(
@@ -3401,72 +3364,20 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
 			state.sessionId,
 		);
-		expect(mustMaterializePi(state, db)).toEqual({
-			value: true,
-			reason: "cache_invalid",
+		// Region lane (Unit 7): the sentinel row is a VALID region row — it
+		// serves verbatim as region bytes (never head text; the head lane is
+		// deleted) and needs no fold.
+		expect(
+			mustMaterializePi(state, db, undefined, undefined, {
+				systemRegionMode: true,
+			}),
+		).toEqual({
+			value: false,
+			reason: null,
 		});
-	});
-
-	it("F6: the marker reader refuses a sentinel row on the replay path too", () => {
-		// markersFromCachedPiRow previously accepted the row on truthiness
-		// plus marker columns — a region row could satisfy CAS/marker reads
-		// even though decodeCachedM0 refuses its bytes. The replay entry
-		// point must produce no prefix for a foreign row.
-		const db = createTestDb();
-		const state = piState("ses-pi-sentinel-replay", process.cwd());
-		materializeM0Pi(state, db);
-		db.prepare(
-			"UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
-		).run(
-			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
-			state.sessionId,
+		expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
+			"<project-memory>x</project-memory>",
 		);
-		expect(prepareCachedM0M1PiReplay(state, db)).toBeUndefined();
-	});
-
-	it("G1: the contention fallback never replays a region row as an empty head", () => {
-		// region row + mustMaterializePi fires + materialize loses the lock 3x:
-		// the fallback used to serve decodeCachedM0() ?? "" — an empty m[0]
-		// with the m[1] tail. The caller must discriminate before replaying.
-		const db = createTestDb();
-		const state = piState("ses-pi-contention-region", process.cwd());
-		insertMemory(db, {
-			projectPath: state.projectIdentity ?? "",
-			category: "NAMING",
-			content: "G1 fresh-head sentinel text",
-		});
-		materializeM0Pi(state, db);
-		db.prepare(
-			"UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
-		).run(
-			Buffer.from(`${SENTINEL}\n<project-memory>x</project-memory>`, "utf8"),
-			state.sessionId,
-		);
-		const locking = {
-			exec: (sql: string) => {
-				if (/BEGIN\s+IMMEDIATE/i.test(String(sql))) {
-					throw Object.assign(new Error("database is locked"), {
-						code: "SQLITE_BUSY",
-					});
-				}
-				return (db as never as { exec: (s: string) => unknown }).exec(sql);
-			},
-		};
-		const contentionDb = new Proxy(db, {
-			get(target, prop) {
-				if (prop === "exec") return locking.exec;
-				const value = Reflect.get(target, prop, target) as unknown;
-				return typeof value === "function"
-					? (value as (...a: unknown[]) => unknown).bind(target)
-					: value;
-			},
-		}) as never;
-		const messages = [userMessage("hello")];
-		injectM0M1Pi(state, contentionDb, messages);
-		const head = textOf(messages[0]);
-		expect(head).toContain("G1 fresh-head sentinel text");
-		expect(head).not.toContain("<project-memory>x</project-memory>");
-		closeQuietly(db);
 	});
 
 	// Executable control for the caller guard above: neutralizing the
@@ -3485,35 +3396,15 @@ describe("frozen-region cross-lane discrimination (Pi reader)", () => {
 		expect(isSystemRegionBytes(null)).toBe(false);
 	});
 
-	it("G1: the replay reader itself refuses region bytes (exported law)", () => {
-		const db = createTestDb();
-		const state = piState("ses-pi-replay-refuse", process.cwd());
-		materializeM0Pi(state, db);
-		const row = db
-			.prepare("SELECT * FROM session_meta WHERE session_id = ?")
-			.get(state.sessionId) as never;
-		(row as { cached_m0_bytes: Buffer }).cached_m0_bytes = Buffer.from(
-			`${SENTINEL}\n<project-memory>x</project-memory>`,
-			"utf8",
-		);
-		expect(() =>
-			replayCompletePiPrefix(
-				state,
-				row,
-				[],
-				[userMessage("hello")],
-				undefined,
-				null,
-			),
-		).toThrow(/region/i);
-		closeQuietly(db);
-	});
-
 	it("control: the same cache with its own head bytes is not invalid", () => {
 		const db = createTestDb();
 		const state = piState("ses-pi-headlane", process.cwd());
 		materializeM0Pi(state, db);
-		expect(mustMaterializePi(state, db).reason).not.toBe("cache_invalid");
+		expect(
+			mustMaterializePi(state, db, undefined, undefined, {
+				systemRegionMode: true,
+			}).reason,
+		).not.toBe("cache_invalid");
 	});
 });
 
@@ -3661,13 +3552,23 @@ describe("pi region-discrimination: row reader property closure (stage P)", () =
 		const state = piState("ses-pi-l1-region", process.cwd());
 		materializeM0Pi(state, db);
 		regionRow(db, state.sessionId);
-		// First-render shape: the cache is treated as absent, never as head.
-		expect(mustMaterializePi(state, db).value).toBe(true);
+		// Region lane (Unit 7): the region row serves verbatim and the array
+		// carries no MC content — the foreign panel never reaches the wire.
+		expect(
+			mustMaterializePi(state, db, undefined, undefined, {
+				systemRegionMode: true,
+			}).value,
+		).toBe(false);
 		const messages = [userMessage("after boot")];
-		injectM0M1Pi(state, db, messages);
-		const head = textOf(messages[0]);
-		expect(head).not.toContain("<project-memory>frozen</project-memory>");
-		expect(head).toContain("session-history");
+		injectM0M1Pi(state, db, messages, undefined, undefined, {
+			systemRegion: { enabled: true, reason: "" },
+		});
+		expect(textOf(messages[0])).toBe("after boot");
+		// The region row serves its own payload verbatim — the deleted head
+		// lane was the only path that could decode it as head text.
+		expect(readSystemRegion(db, state.sessionId) ?? "").toContain(
+			"<project-memory>frozen</project-memory>",
+		);
 		closeQuietly(db);
 	});
 });

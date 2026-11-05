@@ -95,7 +95,6 @@ import {
 	DEFAULT_USER_PROFILE_BUDGET_TOKENS,
 	type MemoryRenderOptions,
 	renderMemoryBlockV2,
-	stripMemoryMuralBlock,
 	trimMemoriesToBudgetV2,
 	trimUserMemoriesToBudget,
 	trimWorkspaceMemoriesToBudgetV2,
@@ -342,8 +341,6 @@ function getPiToolResultCallId(message: PiToolResultMessage): string | null {
 
 export const __test = {
 	trimPiMessagesToBoundary,
-	renderFreshM0PiNonPersisted,
-	clearPiMuralProcessCache,
 	setProjectDocsReadObserverForTests(
 		observer: (() => void) | undefined,
 	): () => void {
@@ -407,14 +404,6 @@ function safeGetActiveUserMemoriesPi(db: ContextDatabase): UserMemory[] {
 }
 
 export interface PiM0M1State {
-	/** These delivery fields are scoped to one context pass, never persisted. */
-	freezePrefixForPass?: boolean;
-	allowFreshContentionFallback?: boolean;
-	preparedPrefix?: {
-		result: PiM0M1InjectionResult;
-		messages: PiAgentMessage[];
-		trimBoundaryId: string | null;
-	};
 	sessionId: string;
 	projectIdentity: string;
 	projectDirectory: string;
@@ -741,64 +730,6 @@ function piMaterializeMismatch(
 	return { value: true, reason, mismatch: { signal, cached, current } };
 }
 
-interface PiInjectionTokenCountCache {
-	m0: string;
-	m0Tokens: number;
-	m1: string;
-	m1Tokens: number;
-}
-
-const injectionTokenCountsBySession = new Map<
-	string,
-	PiInjectionTokenCountCache
->();
-
-/** Process-local mirror of the mural payload persisted with the cached m0 row. */
-interface CachedPiMural {
-	dataUrl: string | null;
-	contentHash: string | null;
-}
-
-const cachedMuralBySession = new Map<string, CachedPiMural>();
-
-function clearPiMuralProcessCache(sessionId?: string): void {
-	if (sessionId) cachedMuralBySession.delete(sessionId);
-	else cachedMuralBySession.clear();
-}
-
-function rememberPiMuralPayload(
-	sessionId: string,
-	dataUrl: string | null | undefined,
-	contentHash: string | null | undefined,
-): void {
-	cachedMuralBySession.set(sessionId, {
-		dataUrl: dataUrl ?? null,
-		contentHash: contentHash ?? null,
-	});
-}
-
-function rememberPiMural(
-	sessionId: string,
-	mural: MuralWireOptions | undefined,
-): void {
-	rememberPiMuralPayload(
-		sessionId,
-		mural?.enabled && mural.supportsVision ? mural.dataUrl : null,
-		mural?.enabled && mural.supportsVision ? mural.contentHash : null,
-	);
-}
-
-function muralForWire(sessionId: string): MuralWireOptions | undefined {
-	const cached = cachedMuralBySession.get(sessionId);
-	if (!cached?.dataUrl) return undefined;
-	return {
-		enabled: true,
-		supportsVision: true,
-		dataUrl: cached.dataUrl,
-		contentHash: cached.contentHash ?? undefined,
-	};
-}
-
 /** Convert a PNG data URL into Pi's native image content block (raw base64). */
 function piImageFromDataUrl(dataUrl: string): PiImageContent | null {
 	const match = /^data:(image\/[a-zA-Z0-9.+-]+);base64,(.+)$/s.exec(dataUrl);
@@ -827,27 +758,6 @@ function resolveMuralForM0Pi(
 		true,
 		budgetTokens,
 	);
-}
-
-function cachedInjectionTokenCounts(
-	sessionId: string,
-	m0: string,
-	m1: string,
-): { m0Tokens: number; m1Tokens: number } {
-	const cached = injectionTokenCountsBySession.get(sessionId);
-	if (cached?.m0 === m0 && cached.m1 === m1) return cached;
-	const counts = {
-		m0,
-		m0Tokens: estimateTokens(m0),
-		m1,
-		m1Tokens: m1 === PI_M1_PLACEHOLDER ? 0 : estimateTokens(m1),
-	};
-	injectionTokenCountsBySession.set(sessionId, counts);
-	return counts;
-}
-
-export function clearPiInjectionTokenCountCache(sessionId: string): void {
-	injectionTokenCountsBySession.delete(sessionId);
 }
 
 export interface PiRenderedCompartmentBoundary {
@@ -1077,8 +987,7 @@ function getCachedMarkers(
 	// without visible-prefix trimming"), so a materialize can correctly persist a
 	// null boundary. Rejecting that every pass caused a re-materialize loop for
 	// legacy / partially-upgraded sessions. When the live snapshot also has no
-	// usable boundary, reuse the cache and let findCompartmentBoundaryForSnapshot
-	// degrade to no-trim.
+	// usable boundary, reuse the cache and degrade to no-trim.
 	const liveBoundary = lastBaselineEndMessageId(compartments);
 	if (
 		maxCompartmentSeq >= 0 &&
@@ -1296,12 +1205,21 @@ export function mustMaterializePi(
 		);
 	}
 	if (cached.muralEnabled !== current.muralEnabled) {
-		return piMaterializeMismatch(
-			`render_config:mural(${cached.muralEnabled}→${current.muralEnabled})`,
-			"muralEnabled",
-			cached.muralEnabled,
-			current.muralEnabled,
-		);
+		// Region-lane exemption (plugin inject-compartments guard, U1): in
+		// region mode the fold's freeze persists on the stored row, so an
+		// absent current flag means "not observed this pass", not "switched
+		// off" — firing it would re-fold with the mural stripped on every
+		// flag-less pass.
+		if (
+			!(options?.systemRegionMode === true && state.muralEnabled === undefined)
+		) {
+			return piMaterializeMismatch(
+				`render_config:mural(${cached.muralEnabled}→${current.muralEnabled})`,
+				"muralEnabled",
+				cached.muralEnabled,
+				current.muralEnabled,
+			);
+		}
 	}
 	if (
 		renderBudgetIdentityChanged(
@@ -1765,81 +1683,6 @@ function readFrozenM0InputsPi(
 	return read.deferred();
 }
 
-function renderFreshM0PiNonPersisted(
-	state: PiM0M1State,
-	db: ContextDatabase,
-): {
-	m0: string;
-	snapshotMarkers: PiM0SnapshotMarkers;
-	renderedMemoryIds: number[];
-} {
-	const docs = readProjectDocsForPiM0(state);
-	const cachedMaterializedAt =
-		getOrCreateSessionMeta(db, state.sessionId).cachedM0MaterializedAt ?? 0;
-	const frozen = readFrozenM0InputsPi(state, db, docs, cachedMaterializedAt);
-	// CACHE STABILITY: materializedAt feeds the m[1] expiry cutoff. It must be
-	// stable across consecutive fallback passes, so reuse the last persisted value
-	// (or 0 when no cached baseline exists) rather than live Date.now().
-	frozen.markers.materializedAt = cachedMaterializedAt;
-	const historyBudget = historyLocalBudget(
-		state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
-		piModelRefToCanonical(state.hardSignals?.modelKey ?? ""),
-	);
-	const memoryBudget =
-		state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
-	// Fresh fallback is a last-resort HARD-equivalent render: resolve mural once
-	// so the non-persisted pair still carries the image when the feature is on.
-	const mural = resolveMuralForM0Pi(
-		state,
-		db,
-		frozen.markers.modelKey,
-		memoryBudget,
-	);
-	rememberPiMural(state.sessionId, mural);
-	let dpm = 1;
-	let m0 = renderM0Pi(
-		state,
-		db,
-		docs.renderedBlock,
-		dpm,
-		frozen.memories,
-		frozen.compartments,
-		frozen.userProfile,
-		frozen.workspace,
-		mural,
-	);
-	let attempts = 0;
-	while (
-		historyBudget > 0 &&
-		historySliceTokensPi(m0) > historyBudget * 1.05 &&
-		attempts < 3
-	) {
-		dpm *= 1.15;
-		m0 = renderM0Pi(
-			state,
-			db,
-			docs.renderedBlock,
-			dpm,
-			frozen.memories,
-			frozen.compartments,
-			frozen.userProfile,
-			frozen.workspace,
-			mural,
-		);
-		attempts += 1;
-	}
-	return {
-		m0,
-		snapshotMarkers: frozen.markers,
-		renderedMemoryIds: renderedMemoryIdsForPi(
-			state,
-			frozen.memories,
-			frozen.workspace,
-			db,
-		),
-	};
-}
-
 export function materializeM0Pi(
 	state: PiM0M1State,
 	db: ContextDatabase,
@@ -1878,7 +1721,7 @@ export function materializeM0Pi(
 	);
 	// On-demand mural: runs INSIDE the HARD fold only (not on defers). Explicit
 	// test-supplied `state.mural` wins; otherwise resolve from muralEnabled +
-	// this fold's model key. Baked-in cachedMuralBySession replays on defer.
+	// this fold's model key.
 	const memoryBudget =
 		state.injectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
 	const mural = resolveMuralForM0Pi(
@@ -2125,11 +1968,6 @@ export function materializeM0Pi(
 
 		db.exec("COMMIT");
 		logSlowWriteTransaction("pi_materialize_cache", transactionStartedAt);
-		rememberPiMuralPayload(
-			state.sessionId,
-			frozenMuralDataUrl,
-			frozenMuralHash,
-		);
 		return {
 			m0,
 			m1: foldDelta,
@@ -2518,44 +2356,6 @@ export interface CachedPiM0M1Row {
 	memory_block_ids: string | null;
 }
 
-function toCachedBuffer(value: Buffer | Uint8Array): Buffer {
-	return Buffer.isBuffer(value)
-		? value
-		: Buffer.from(value.buffer, value.byteOffset, value.byteLength);
-}
-
-function bufferEqualsNullable(
-	left: Buffer | Uint8Array | null,
-	right: Buffer | Uint8Array | null,
-): boolean {
-	if (left === null || right === null) return left === right;
-	return toCachedBuffer(left).equals(toCachedBuffer(right));
-}
-
-function parseMemoryBlockIds(raw: string | null): number[] {
-	if (!raw) return [];
-	try {
-		const parsed = JSON.parse(raw) as unknown;
-		if (!Array.isArray(parsed)) return [];
-		return parsed.filter((value): value is number => typeof value === "number");
-	} catch {
-		return [];
-	}
-}
-
-function readCachedPiM0M1Row(
-	db: ContextDatabase,
-	sessionId: string,
-): CachedPiM0M1Row | null {
-	const row = readCachedPiM0M1RowRaw(db, sessionId);
-	// Stage P property closure: a frozen-system-region row presents as ABSENT
-	// to every Pi consumer at the single row reader. All serve/decision lanes
-	// (pass snapshot -> firstRenderBust; replay pair; soft-refresh CAS) derive
-	// from this row, so discriminating here — not per-caller — makes each
-	// truthiness decision structurally correct.
-	return row && isSystemRegionBytes(row.cached_m0_bytes) ? null : row;
-}
-
 function readCachedPiM0M1RowRaw(
 	db: ContextDatabase,
 	sessionId: string,
@@ -2628,284 +2428,6 @@ export function createPiM0M1PassSnapshot(args: {
 	};
 }
 
-function markersFromCachedPiRow(
-	row: CachedPiM0M1Row,
-	compartmentsForNormalization: readonly PiCompartment[],
-): PiM0SnapshotMarkers | null {
-	if (!row.cached_m0_bytes) return null;
-	// Same cross-lane discipline as decodeCachedM0: a frozen-system-region row
-	// is not a head snapshot, so its marker columns must not satisfy CAS or
-	// marker reads (F6).
-	if (isSystemRegionBytes(row.cached_m0_bytes)) return null;
-	const cachedUpgradeIdentity = decodeCachedM0UpgradeIdentity(
-		row.cached_m0_upgrade_state,
-	);
-	if (row.cached_m0_project_memory_epoch === null) return null;
-	if (row.cached_m0_project_user_profile_version === null) return null;
-	if (row.cached_m0_max_compartment_seq === null) return null;
-	if (row.cached_m0_max_memory_id === null) return null;
-	if (row.cached_m0_max_mutation_id === null) return null;
-	if (row.cached_m0_max_memory_mutation_id === null) return null;
-	if (row.cached_m0_session_facts_version === null) return null;
-	if (row.cached_m0_materialized_at === null) return null;
-	if (row.cached_m0_upgrade_state === null) return null;
-	return {
-		maxCompartmentSeq: normalizeCachedMaxCompartmentSeq(
-			row.cached_m0_max_compartment_seq,
-			compartmentsForNormalization,
-		),
-		maxMemoryId: row.cached_m0_max_memory_id,
-		maxMutationId: row.cached_m0_max_mutation_id,
-		maxMemoryMutationId: row.cached_m0_max_memory_mutation_id,
-		projectMemoryEpoch: row.cached_m0_project_memory_epoch,
-		workspaceFingerprint: row.cached_m0_workspace_fingerprint,
-		projectUserProfileVersion: row.cached_m0_project_user_profile_version,
-		projectDocsHash: row.cached_m0_project_docs_hash ?? "",
-		materializedAt: row.cached_m0_materialized_at,
-		sessionFactsVersion: row.cached_m0_session_facts_version,
-		upgradeState: cachedUpgradeIdentity.upgradeState ?? "",
-		compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
-		memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
-		profileRenderEpoch: cachedUpgradeIdentity.profileRenderEpoch ?? "",
-		lastBaselineEndMessageId:
-			typeof row.cached_m0_last_baseline_end_message_id === "string" &&
-			row.cached_m0_last_baseline_end_message_id.length > 0
-				? row.cached_m0_last_baseline_end_message_id
-				: null,
-		systemHash: row.cached_m0_system_hash ?? "",
-		modelKey: row.cached_m0_model_key ?? "",
-		projectIdentity: row.cached_m0_project_identity ?? null,
-		muralEnabled: cachedUpgradeIdentity.muralEnabled ?? false,
-		renderBudgetIdentity: cachedUpgradeIdentity.renderBudgetIdentity ?? "",
-		renderedBudgets: cachedUpgradeIdentity.renderedBudgets,
-	};
-}
-
-function cachedPiRowMatchesSnapshot(args: {
-	row: CachedPiM0M1Row;
-	m0Bytes: Buffer;
-	markers: PiM0SnapshotMarkers;
-	compartmentsForNormalization: readonly PiCompartment[];
-}): boolean {
-	const rowMarkers = markersFromCachedPiRow(
-		args.row,
-		args.compartmentsForNormalization,
-	);
-	if (!rowMarkers) return false;
-	return (
-		bufferEqualsNullable(args.row.cached_m0_bytes, args.m0Bytes) &&
-		rowMarkers.projectMemoryEpoch === args.markers.projectMemoryEpoch &&
-		rowMarkers.projectUserProfileVersion ===
-			args.markers.projectUserProfileVersion &&
-		rowMarkers.maxCompartmentSeq === args.markers.maxCompartmentSeq &&
-		rowMarkers.maxMemoryId === args.markers.maxMemoryId &&
-		rowMarkers.maxMutationId === args.markers.maxMutationId &&
-		rowMarkers.maxMemoryMutationId === args.markers.maxMemoryMutationId &&
-		// Project-docs hash is inert for CAS decisions: byte-different m[0] rows
-		// fail the buffer compare above, while hash-only drift with identical bytes
-		// must still refresh m[1] against the current cached prefix.
-		rowMarkers.materializedAt === args.markers.materializedAt &&
-		rowMarkers.sessionFactsVersion === args.markers.sessionFactsVersion &&
-		(rowMarkers.upgradeState ?? null) === (args.markers.upgradeState ?? null) &&
-		rowMarkers.compartmentRenderEpoch === args.markers.compartmentRenderEpoch &&
-		rowMarkers.profileRenderEpoch === args.markers.profileRenderEpoch &&
-		// HARD-bust markers (parity with OpenCode cachedRowMatchesState): a sibling
-		// that re-materialized under a new system/tool/model identity must invalidate
-		// this process's cached row so the soft-refresh CAS adopts the sibling's m[0].
-		(rowMarkers.systemHash ?? "") === (args.markers.systemHash ?? "") &&
-		piModelRefToCanonical(rowMarkers.modelKey ?? "") ===
-			piModelRefToCanonical(args.markers.modelKey ?? "") &&
-		(rowMarkers.projectIdentity ?? null) ===
-			(args.markers.projectIdentity ?? null) &&
-		// Workspace fingerprint (parity with OpenCode cachedRowMatchesState):
-		// projectMemoryEpoch above only tracks THIS session's own project, but a
-		// FOREIGN member's epoch bump changes the workspace fingerprint without
-		// touching this session's epoch. Without this compare, a sibling row
-		// materialized under different workspace membership would pass the CAS and
-		// be adopted with the wrong union baseline.
-		(rowMarkers.workspaceFingerprint ?? null) ===
-			(args.markers.workspaceFingerprint ?? null)
-	);
-}
-
-function adoptCachedPiProjectIdentity(
-	db: ContextDatabase,
-	state: PiM0M1State,
-): void {
-	db.prepare(
-		"UPDATE session_meta SET cached_m0_project_identity = ? WHERE session_id = ? AND cached_m0_project_identity IS NULL",
-	).run(state.projectIdentity, state.sessionId);
-}
-
-function decodeCachedM1(row: CachedPiM0M1Row, sessionId: string): string {
-	if (!row.cached_m1_bytes) {
-		throw new PiMaterializeContentionError(
-			`missing cached m[1] for ${sessionId}`,
-		);
-	}
-	return decodeCachedM0(row.cached_m1_bytes) ?? PI_M1_PLACEHOLDER;
-}
-
-function applyCachedPiRow(args: {
-	row: CachedPiM0M1Row;
-	state: PiM0M1State;
-	compartmentsForNormalization: readonly PiCompartment[];
-}): { m0: string; m1: string; markers: PiM0SnapshotMarkers } {
-	const markers = markersFromCachedPiRow(
-		args.row,
-		args.compartmentsForNormalization,
-	);
-	const m0 = decodeCachedM0(args.row.cached_m0_bytes);
-	if (!m0 || !markers || !args.row.cached_m1_bytes) {
-		throw new PiMaterializeContentionError(
-			`invalid cached m[0]/m[1] for ${args.state.sessionId}`,
-		);
-	}
-	rememberPiMuralPayload(
-		args.state.sessionId,
-		args.row.cached_m0_mural_data_url,
-		args.row.cached_m0_mural_hash,
-	);
-	return {
-		m0,
-		m1: decodeCachedM1(args.row, args.state.sessionId),
-		markers,
-	};
-}
-
-function replayCachedM1Pi(
-	db: ContextDatabase,
-	state: PiM0M1State,
-	compartmentsForNormalization: readonly PiCompartment[],
-	rowOverride?: CachedPiM0M1Row | null,
-): { m0: string; m1: string; markers: PiM0SnapshotMarkers } {
-	const row =
-		rowOverride === undefined
-			? readCachedPiM0M1Row(db, state.sessionId)
-			: rowOverride;
-	if (!row) {
-		throw new PiMaterializeContentionError(
-			`missing cached m[0]/m[1] for ${state.sessionId}`,
-		);
-	}
-	return applyCachedPiRow({ row, state, compartmentsForNormalization });
-}
-
-function softRefreshCachedM1Pi(args: {
-	state: PiM0M1State;
-	db: ContextDatabase;
-	m0Bytes: Buffer;
-	markers: PiM0SnapshotMarkers;
-	compartmentsForNormalization: readonly PiCompartment[];
-}): {
-	m0: string;
-	m1: string;
-	markers: PiM0SnapshotMarkers;
-	memoryUpdateCount: number;
-	recomputed: boolean;
-} {
-	args.db.exec("BEGIN IMMEDIATE");
-	const transactionStartedAt = performance.now();
-	try {
-		const row = readCachedPiM0M1Row(args.db, args.state.sessionId);
-		if (
-			!row ||
-			!cachedPiRowMatchesSnapshot({
-				row,
-				m0Bytes: args.m0Bytes,
-				markers: args.markers,
-				compartmentsForNormalization: args.compartmentsForNormalization,
-			})
-		) {
-			args.db.exec("ROLLBACK");
-			const sibling = readCachedPiM0M1Row(args.db, args.state.sessionId);
-			if (!sibling) {
-				throw new PiMaterializeContentionError(
-					`missing sibling cached m[0]/m[1] for ${args.state.sessionId}`,
-				);
-			}
-			const siblingCompartments = getRenderableCompartmentsPi(
-				args.db,
-				args.state,
-			);
-			return {
-				...applyCachedPiRow({
-					row: sibling,
-					state: args.state,
-					compartmentsForNormalization: siblingCompartments,
-				}),
-				memoryUpdateCount: 0,
-				recomputed: false,
-			};
-		}
-
-		const markers = markersFromCachedPiRow(
-			row,
-			args.compartmentsForNormalization,
-		);
-		if (!markers) {
-			throw new PiMaterializeContentionError(
-				`invalid cached m[0] markers for ${args.state.sessionId}`,
-			);
-		}
-		const rendered = renderM1PiWithMetadata(
-			args.state,
-			args.db,
-			markers,
-			parseMemoryBlockIds(row.memory_block_ids),
-			// Render new compartments from the SAME snapshot the boundary advances
-			// from below, so a concurrent sibling publish can't put a compartment
-			// in m[1] while its raw messages stay in the tail.
-			args.compartmentsForNormalization,
-		);
-		const m1Bytes = Buffer.from(rendered.text, "utf8");
-		// Advance the persisted trim boundary to the latest compartment now rendered
-		// in m[1]. renderM1 covers compartments seq > cachedM0Seq up to the current
-		// latest, so the visible-message trim must move with it — otherwise the newly
-		// summarized compartment's raw messages stay in the tail (duplication) on
-		// this and every subsequent replay pass. Persisted in the SAME transaction as
-		// cached_m1_bytes so replay passes (which read the boundary from this row)
-		// trim consistently. Mirrors OpenCode caching prepared.compartmentEndMessageId
-		// on each cache-busting pass. Boundary is NOT part of the m[0] CAS identity
-		// (cachedPiRowMatchesSnapshot excludes it), so advancing it cannot spuriously
-		// invalidate a sibling's cached m[0].
-		const latestCompartment = args.compartmentsForNormalization.at(-1);
-		const advancedBoundary =
-			latestCompartment?.endMessageId &&
-			latestCompartment.endMessageId.length > 0
-				? latestCompartment.endMessageId
-				: markers.lastBaselineEndMessageId;
-		args.db
-			.prepare(
-				"UPDATE session_meta SET cached_m1_bytes = ?, cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
-			)
-			.run(m1Bytes, advancedBoundary, args.state.sessionId);
-		args.db.exec("COMMIT");
-		logSlowWriteTransaction("pi_soft_refresh_cache", transactionStartedAt);
-		return {
-			m0: decodeCachedM0(row.cached_m0_bytes) ?? "",
-			m1: rendered.text,
-			markers: { ...markers, lastBaselineEndMessageId: advancedBoundary },
-			memoryUpdateCount: rendered.memoryUpdateCount,
-			recomputed: true,
-		};
-	} catch (error) {
-		try {
-			args.db.exec("ROLLBACK");
-		} catch {
-			// already rolled back
-		}
-		throw error;
-	}
-}
-
-function findCompartmentBoundaryForSnapshot(
-	markers: PiM0SnapshotMarkers,
-): string | null {
-	if (markers.maxCompartmentSeq < 0) return null;
-	return markers.lastBaselineEndMessageId;
-}
-
 function resolveRenderedCompartmentBoundary(
 	compartments: readonly PiCompartment[],
 	boundaryId: string | null,
@@ -2923,152 +2445,51 @@ function resolveRenderedCompartmentBoundary(
 	};
 }
 
-function prependM0M1Messages(
-	piMessages: PiAgentMessage[],
-	m0: string,
-	m1: string,
-	mural?: { enabled: boolean; supportsVision: boolean; dataUrl?: string },
-	timestampHint?: number,
-): number {
-	const firstTimestamp = timestampHint ?? piMessages[0]?.timestamp;
-	const baseTimestamp =
-		typeof firstTimestamp === "number" ? firstTimestamp : Date.now();
-	// Pi's native image part is `{ type: "image", data: base64, mimeType }` —
-	// serializers rebuild `data:…;base64,…` for providers. OpenCode uses a
-	// file-part with a data URL; same PNG bytes, different envelope.
-	const muralImage =
-		mural?.enabled && mural.supportsVision && mural.dataUrl
-			? piImageFromDataUrl(mural.dataUrl)
-			: null;
-	const m0Content: (PiTextContent | PiImageContent)[] = [
-		{ type: "text", text: m0 },
-		...(muralImage ? [muralImage] : []),
-	];
-	const insertionIndex = placePiInitialSystemAtHead(piMessages);
-	piMessages.splice(
-		insertionIndex,
-		0,
-		{
-			role: "user",
-			content: m0Content,
-			timestamp: baseTimestamp - 2,
-		},
-		{
-			role: "user",
-			content: [{ type: "text", text: m1 }],
-			timestamp: baseTimestamp - 1,
-		},
+/** The persisted mural is present and belongs to a region this process can
+ *  serve: the legend ships inside the region bytes, so a vision-unsupported
+ *  rotation (no mural rendered) leaves the columns empty and nothing rides.
+ *  The row encodes the fold's mural switch inside the upgrade identity; a
+ *  legacy row without the identity keeps the carriage (undefined !== false). */
+function muralCarriageWantedPi(meta: {
+	cachedM0MuralDataUrl: string | null;
+	cachedM0UpgradeState: string | null;
+}): boolean {
+	if (!meta.cachedM0MuralDataUrl) return false;
+	return (
+		decodeCachedM0UpgradeIdentity(meta.cachedM0UpgradeState).muralEnabled !==
+		false
 	);
-	return insertionIndex;
-}
-
-// Cached bytes and their boundary come from one row. Replaying them must not
-// depend on live marker validation or fresh rendering succeeding.
-export function replayCompletePiPrefix(
-	state: PiM0M1State,
-	row: CachedPiM0M1Row,
-	compartments: PiCompartment[],
-	messages: PiAgentMessage[],
-	entryIds: readonly (string | undefined)[] | undefined,
-	reason: string | null,
-): PiM0M1InjectionResult {
-	// Refusal at the reader, not only at callers (G1): serving `"" + m1` for a
-	// foreign row is the exact defect this closes — a region row (or any row
-	// whose bytes the head decoder refuses) must never produce a head-less
-	// prefix. Callers discriminate first; this throw is the structural floor.
-	if (isSystemRegionBytes(row.cached_m0_bytes)) {
-		throw new Error(
-			`pi replay refused: cached_m0_bytes is a frozen system-region row for session ${state.sessionId}`,
-		);
-	}
-	const decodedM0 = decodeCachedM0(row.cached_m0_bytes);
-	if (decodedM0 === null) {
-		throw new Error(
-			`pi replay refused: cached_m0_bytes are not decodable head bytes for session ${state.sessionId}`,
-		);
-	}
-	let m0 = decodedM0;
-	const m1 = decodeCachedM1(row, state.sessionId);
-	rememberPiMuralPayload(
-		state.sessionId,
-		row.cached_m0_mural_data_url,
-		row.cached_m0_mural_hash,
-	);
-	const mural = m0.includes("<memory-mural>")
-		? muralForWire(state.sessionId)
-		: undefined;
-	if (!mural) m0 = stripMemoryMuralBlock(m0);
-	const trimBoundaryId = row.cached_m0_last_baseline_end_message_id;
-	const skippedVisibleMessages = trimBoundaryId
-		? trimPiMessagesToBoundary(
-				messages,
-				entryIds,
-				trimBoundaryId,
-				false,
-				state.sessionId,
-				compartments.some(
-					(c) => c.endMessageId === trimBoundaryId && c.endBlockIndex != null,
-				),
-			)
-		: 0;
-	const head: PiAgentMessage[] = [];
-	prependM0M1Messages(head, m0, m1, mural, messages[0]?.timestamp);
-	const insertionIndex = placePiInitialSystemAtHead(messages);
-	messages.splice(insertionIndex, 0, ...structuredClone(head));
-	const result: PiM0M1InjectionResult = {
-		injected: true,
-		compartmentCount: compartments.length,
-		factCount: 0,
-		memoryCount: parseMemoryBlockIds(row.memory_block_ids).length,
-		skippedVisibleMessages,
-		m0Materialized: false,
-		m0Reason: reason,
-		m0Bytes: m0.length,
-		m1Bytes: m1.length,
-		contentionExhausted: true,
-		renderedBoundary: resolveRenderedCompartmentBoundary(
-			compartments,
-			trimBoundaryId,
-		),
-		m1RenderedCoverage: null,
-		syntheticLeadingCount: insertionIndex + 2,
-	};
-	if (state.freezePrefixForPass)
-		state.preparedPrefix = { result, messages: head, trimBoundaryId };
-	return result;
-}
-
-export function prepareCachedM0M1PiReplay(
-	state: PiM0M1State,
-	db: ContextDatabase,
-	rowOverride?: CachedPiM0M1Row | null,
-): PiM0M1State["preparedPrefix"] {
-	const cached =
-		rowOverride === undefined
-			? readCachedPiM0M1Row(db, state.sessionId)
-			: rowOverride;
-	if (!cached?.cached_m0_bytes || !cached.cached_m1_bytes) return undefined;
-	// A frozen-system-region row is not a head snapshot: replaying it would
-	// serve "" + m1 (decodeCachedM0 refuses the bytes). Decline the replay;
-	// the fold path regenerates a real head cache (F6).
-	if (isSystemRegionBytes(cached.cached_m0_bytes)) return undefined;
-	const snapshot: PiM0M1State = {
-		...state,
-		freezePrefixForPass: true,
-		preparedPrefix: undefined,
-	};
-	replayCompletePiPrefix(snapshot, cached, [], [], undefined, "cache_hit");
-	return snapshot.preparedPrefix;
 }
 
 /**
- * Region-lane injection (§23 D8, L5): the array side contributes nothing but
- * trimming. The served bytes (history + memories + profile + docs) live in
- * the system channel, appended by processSystemPromptForCache from the
- * stored region; this pass only (a) folds a stale/absent region through the
- * rotation funnel and (b) removes summarized raw messages. Contention falls
- * back to serving the current stored bytes — replay, never re-render (L2).
+ * The mural PNG carriage, region form (plugin Unit 1 ruling mirror; census
+ * "Mural carriage group"; Unit 7 adjudication): the frozen region carries the
+ * `<memory-mural>` legend inside its bytes, and the image rides beside it as
+ * a synthetic user message. The part is a pure function of the persisted
+ * mural columns — replay-identical per rotation, never re-derived from
+ * mutated content. Pi codec COPY: the envelope is Pi's own; the plugin's
+ * region-render mint is never imported (no-import law in the mural tests).
+ * The timestamp sits 1ms before the first retained message (the head-era
+ * image-part convention) so temporal-marker gaps are unchanged.
  */
+function buildRegionMuralMessagePi(args: {
+	muralDataUrl?: string | null;
+	muralHash?: string | null;
+	timestampHint?: number;
+}): PiAgentMessage | null {
+	const image = args.muralDataUrl
+		? piImageFromDataUrl(args.muralDataUrl)
+		: null;
+	if (!image) return null;
+	const baseTimestamp =
+		typeof args.timestampHint === "number" ? args.timestampHint : 0;
+	return {
+		role: "user",
+		content: [image],
+		timestamp: baseTimestamp - 1,
+	};
+}
+
 function injectM0M1PiRegion(
 	state: PiM0M1State,
 	db: ContextDatabase,
@@ -3135,6 +2556,32 @@ function injectM0M1PiRegion(
 		: 0;
 	const insertionIndex = placePiInitialSystemAtHead(piMessages);
 	const servedRegion = readSystemRegion(db, state.sessionId);
+	// Mural carriage (plugin Unit 1 ruling mirror; Unit 7 adjudication): the
+	// frozen region carries the <memory-mural> legend; the PNG rides beside
+	// it as a synthetic image message, emitted only while a servable region
+	// exists so the legend and the image always travel together. No
+	// compaction-off carve-out: the legend ships inside the region bytes for
+	// an off install too (owner ruling — compaction-off rides the region), so
+	// the image must ride as well or the legend strands. The message is a
+	// pure function of the persisted mural columns — replay-identical per
+	// rotation, never re-derived from mutated content.
+	let muralLeadingCount = 0;
+	if (servedRegion !== null && muralCarriageWantedPi(snapshot.sessionMeta)) {
+		const firstRetained = piMessages[insertionIndex];
+		const muralMessage = buildRegionMuralMessagePi({
+			muralDataUrl: snapshot.sessionMeta.cachedM0MuralDataUrl,
+			muralHash: snapshot.sessionMeta.cachedM0MuralHash,
+			timestampHint:
+				typeof (firstRetained as { timestamp?: number } | undefined)
+					?.timestamp === "number"
+					? (firstRetained as { timestamp: number }).timestamp
+					: undefined,
+		});
+		if (muralMessage) {
+			piMessages.splice(insertionIndex, 0, muralMessage);
+			muralLeadingCount = 1;
+		}
+	}
 	const memPath = memoryProjectPath(state);
 	const workspace = resolveWorkspaceRenderContextPi(state, db);
 	const memoryCount = memPath
@@ -3165,8 +2612,9 @@ function injectM0M1PiRegion(
 			boundaryId,
 		),
 		m1RenderedCoverage: null,
-		// MC contributes zero heads: only Pi's own leading system entries.
-		syntheticLeadingCount: insertionIndex,
+		// MC contributes at most one synthetic message (the mural carriage);
+		// the rest is Pi's own leading system entries.
+		syntheticLeadingCount: insertionIndex + muralLeadingCount,
 	};
 }
 
@@ -3175,7 +2623,6 @@ export function injectM0M1Pi(
 	db: ContextDatabase,
 	piMessages: PiAgentMessage[],
 	entryIds?: readonly (string | undefined)[],
-	recomputeM1ThisPass = false,
 	passSnapshot?: PiM0M1PassSnapshot,
 	options?: {
 		/**
@@ -3187,421 +2634,24 @@ export function injectM0M1Pi(
 		systemRegion?: { enabled: boolean; reason: string };
 	},
 ): PiM0M1InjectionResult {
-	const regionMode = options?.systemRegion?.enabled === true;
-	if (regionMode) {
-		return injectM0M1PiRegion(
-			state,
-			db,
-			piMessages,
-			entryIds,
-			passSnapshot,
-			options?.systemRegion?.reason ?? "",
+	// Unit 7 carry-forward A (owner's binary ruling): the head carriage is
+	// deleted. The frozen-system-region lane is unconditional — every Pi row
+	// the region lane produces routes here, so injection splices no synthetic
+	// heads and the panels are served from the system channel. A caller that
+	// does not pass the region option is a programmer error.
+	if (options?.systemRegion?.enabled !== true) {
+		throw new Error(
+			"pi injection requires the frozen-system-region lane (head carriage deleted in Unit 7)",
 		);
 	}
-	if (state.preparedPrefix) {
-		const prepared = state.preparedPrefix;
-		const skippedVisibleMessages = prepared.trimBoundaryId
-			? trimPiMessagesToBoundary(
-					piMessages,
-					entryIds,
-					prepared.trimBoundaryId,
-					false,
-					state.sessionId,
-					isPartialCompartmentEnd(db, state.sessionId, prepared.trimBoundaryId),
-				)
-			: 0;
-		const head = structuredClone(prepared.messages);
-		// Timestamps are Pi envelope metadata, not cached provider content. Keep
-		// their existing position relative to the first retained raw message.
-		const timestamp = piMessages[0]?.timestamp;
-		if (typeof timestamp === "number") {
-			head[0].timestamp = timestamp - 2;
-			head[1].timestamp = timestamp - 1;
-		}
-		const insertionIndex = placePiInitialSystemAtHead(piMessages);
-		piMessages.splice(insertionIndex, 0, ...head);
-		return {
-			...prepared.result,
-			skippedVisibleMessages,
-			syntheticLeadingCount: insertionIndex + 2,
-		};
-	}
-	// One snapshot for the WHOLE decision: the materialize decision and every
-	// cache replay normalize against this same publish sequence. The snapshot is
-	// refreshed only when the lock-time CAS proves that a publisher advanced it.
-	const snapshot =
-		passSnapshot ??
-		createPiM0M1PassSnapshot({
-			db,
-			sessionId: state.sessionId,
-			compactionOff: state.compactionOff === true,
-		});
-	const currentCompartments = snapshot.compartments;
-	let decision = mustMaterializePi(state, db, currentCompartments, snapshot);
-	if (decision.value) {
-		const mismatch = decision.mismatch
-			? ` mismatch=${JSON.stringify(decision.mismatch)}`
-			: "";
-		logSession(
-			state.sessionId,
-			`pi m[0] HARD fold firing: reason=${decision.reason ?? "unknown"}${mismatch}`,
-		);
-	}
-	let m0 = "";
-	let m1 = PI_M1_PLACEHOLDER;
-	let markers: PiM0SnapshotMarkers | null = null;
-	let materialized = false;
-	let contentionExhausted = false;
-	let memoryUpdateCount = 0;
-	let m1Recomputed = false;
-	let freshFallbackRenderedMemoryIds: number[] | null = null;
-
-	if (decision.value) {
-		// On contention exhaustion, reuse the cached m[0]/m[1] pair rather than
-		// throwing (matches OpenCode injectM0M1). A sibling process mutated state
-		// mid-materialization; serving the slightly-stale cached pair this pass is
-		// correct and the next pass retries — dropping injection entirely would lose
-		// the whole history block.
-		try {
-			const result = materializeM0PiWithRetry(state, db, 3, snapshot);
-			m0 = result.m0;
-			m1 = result.m1;
-			markers = result.snapshotMarkers;
-			materialized = true;
-			m1Recomputed = true;
-		} catch (error) {
-			if (!(error instanceof PiMaterializeContentionError)) throw error;
-
-			// Replay the pair captured when this pass began. A sibling may publish a
-			// newer pair while materialization retries, but adopting it here would make
-			// this request's prefix change without an authorized bust.
-			const cached = state.allowFreshContentionFallback
-				? null
-				: snapshot.cachedRow;
-			if (
-				cached?.cached_m0_bytes &&
-				cached.cached_m1_bytes &&
-				!isSystemRegionBytes(cached.cached_m0_bytes)
-			) {
-				return replayCompletePiPrefix(
-					state,
-					cached,
-					currentCompartments,
-					piMessages,
-					entryIds,
-					decision.reason,
-				);
-			}
-			const fresh = renderFreshM0PiNonPersisted(state, db);
-			m0 = fresh.m0;
-			markers = fresh.snapshotMarkers;
-			freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
-			contentionExhausted = true;
-		}
-	} else {
-		const meta = snapshot.sessionMeta;
-		m0 = decodeCachedM0(meta.cachedM0Bytes) ?? "";
-		rememberPiMuralPayload(
-			state.sessionId,
-			meta.cachedM0MuralDataUrl,
-			meta.cachedM0MuralHash,
-		);
-		markers = getCachedMarkers(
-			db,
-			state,
-			currentCompartments,
-			meta,
-			snapshot.cachedRow,
-		);
-		if (!m0 || !markers) {
-			decision = { value: true, reason: "cache_invalid" };
-			try {
-				const result = materializeM0PiWithRetry(state, db, 3, snapshot);
-				m0 = result.m0;
-				m1 = result.m1;
-				markers = result.snapshotMarkers;
-				materialized = true;
-				m1Recomputed = true;
-			} catch (error) {
-				if (!(error instanceof PiMaterializeContentionError)) throw error;
-				const cached = state.allowFreshContentionFallback
-					? null
-					: snapshot.cachedRow;
-				if (
-					cached?.cached_m0_bytes &&
-					cached.cached_m1_bytes &&
-					!isSystemRegionBytes(cached.cached_m0_bytes)
-				) {
-					return replayCompletePiPrefix(
-						state,
-						cached,
-						currentCompartments,
-						piMessages,
-						entryIds,
-						decision.reason,
-					);
-				}
-				// Cache was already invalid (no usable cached m[0]/markers to reuse) AND
-				// we lost the materialize lock to a sibling process. Dropping injection
-				// would lose the whole history block, so render a fresh non-persisted
-				// m[0]/m[1] as a last resort — the next pass re-materializes and persists.
-				const fresh = renderFreshM0PiNonPersisted(state, db);
-				m0 = fresh.m0;
-				markers = fresh.snapshotMarkers;
-				freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
-				contentionExhausted = true;
-				logSession(
-					state.sessionId,
-					"pi m[0] cache_invalid materialization contention exhausted; rendered fresh non-persisted m[0]/m[1]",
-				);
-			}
-		}
-	}
-
-	if (!markers) {
-		throw new PiMaterializeContentionError(
-			`missing m[0] markers for ${state.sessionId}`,
-		);
-	}
-	if (!materialized && markers.projectIdentity === null) {
-		adoptCachedPiProjectIdentity(db, state);
-		markers = { ...markers, projectIdentity: state.projectIdentity };
-	}
-
-	if (materialized) {
-		// m[1] was rendered and persisted atomically inside materializeM0Pi.
-	} else if (contentionExhausted && freshFallbackRenderedMemoryIds) {
-		const freshM1 = renderM1PiWithMetadata(
-			state,
-			db,
-			markers,
-			freshFallbackRenderedMemoryIds,
-		);
-		m1 = freshM1.text;
-		memoryUpdateCount = freshM1.memoryUpdateCount;
-		m1Recomputed = true;
-	} else if (contentionExhausted) {
-		// m[1] was replayed with the cached m[0] pair above.
-	} else if (recomputeM1ThisPass) {
-		try {
-			const refreshed = softRefreshCachedM1Pi({
-				state,
-				db,
-				m0Bytes: Buffer.from(m0, "utf8"),
-				markers,
-				compartmentsForNormalization: currentCompartments,
-			});
-			m0 = refreshed.m0;
-			m1 = refreshed.m1;
-			markers = refreshed.markers;
-			memoryUpdateCount = refreshed.memoryUpdateCount;
-			m1Recomputed = refreshed.recomputed;
-		} catch (error) {
-			if (!state.allowFreshContentionFallback) throw error;
-			// Force recovery cannot depend on winning the soft-refresh write lock.
-			const fresh = renderFreshM0PiNonPersisted(state, db);
-			m0 = fresh.m0;
-			markers = fresh.snapshotMarkers;
-			freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
-			const delta = renderM1PiWithMetadata(
-				state,
-				db,
-				markers,
-				fresh.renderedMemoryIds,
-			);
-			m1 = delta.text;
-			memoryUpdateCount = delta.memoryUpdateCount;
-			m1Recomputed = true;
-			contentionExhausted = true;
-		}
-	} else {
-		const replayed = replayCachedM1Pi(
-			db,
-			state,
-			currentCompartments,
-			snapshot.cachedRow,
-		);
-		m0 = replayed.m0;
-		m1 = replayed.m1;
-		markers = replayed.markers;
-	}
-
-	// Pressure backstop refold (parity with OpenCode) — only on Pi's cache-busting
-	// recompute gate (`executedWorkThisPass`) where m[1] was freshly recomputed;
-	// defer passes replay persisted bytes and must never live-read/refold. Three
-	// independent triggers (any one folds):
-	//   1. memoryUpdateCount > 40 — supersede-delta drift (size-independent).
-	//   2. m[1]/m[0] SIZE RATIO — gated by M0_DRIFT_RATIO_FLOOR so a tiny early
-	//      m[0] doesn't make 15% trivially exceeded and refold every pass.
-	//   3. m[1] ABSOLUTE CAP — when m[0] is small the ratio test is suppressed, so
-	//      m[1] could otherwise grow unbounded after the new_compartment trigger
-	//      was removed. Fold once m[1] exceeds a fixed share of the history budget.
-	// Token counts (NOT char lengths) on both sides of the ratio — parity with
-	// OpenCode. The documented intent is "m[1] exceeds ~15% of m[0] tokens";
-	// char length diverges from token count on XML-heavy / non-Latin content.
-	const M0_DRIFT_RATIO_FLOOR_TOKENS = 500;
-	const M1_DRIFT_RATIO = 0.15;
-	const M1_ABSOLUTE_CAP_RATIO = 0.2;
-	const m1AbsoluteBudget =
-		(state.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS) *
-		M1_ABSOLUTE_CAP_RATIO;
-	const m1HasContent = m1 !== PI_M1_PLACEHOLDER;
-	const { m0Tokens, m1Tokens } = cachedInjectionTokenCounts(
-		state.sessionId,
-		m0,
-		m1,
+	return injectM0M1PiRegion(
+		state,
+		db,
+		piMessages,
+		entryIds,
+		passSnapshot,
+		options.systemRegion.reason ?? "",
 	);
-	const m1OverAbsoluteCap = m1HasContent && m1Tokens > m1AbsoluteBudget;
-	if (
-		!materialized &&
-		!contentionExhausted &&
-		m1Recomputed &&
-		recomputeM1ThisPass &&
-		(memoryUpdateCount > 40 ||
-			m1OverAbsoluteCap ||
-			(m1HasContent &&
-				m0Tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS &&
-				m1Tokens > m0Tokens * M1_DRIFT_RATIO))
-	) {
-		decision = { value: true, reason: "drift" };
-		try {
-			const result = materializeM0PiWithRetry(state, db, 3, snapshot);
-			m0 = result.m0;
-			m1 = result.m1;
-			markers = result.snapshotMarkers;
-			materialized = true;
-		} catch (error) {
-			if (!(error instanceof PiMaterializeContentionError)) throw error;
-			// Keep the un-refolded m[0]/m[1]; next pass retries the fold.
-		}
-	}
-
-	const boundaryId = findCompartmentBoundaryForSnapshot(markers);
-	const renderedBoundary = resolveRenderedCompartmentBoundary(
-		currentCompartments,
-		boundaryId,
-	);
-	// lastBaselineEndMessageId can come from either m[0] or m[1]. Since the first
-	// compartment may be in m[1] while m[0] is still empty, use the latest baseline
-	// end message id for trimming instead of the m[0] coverage boundary.
-	const trimBoundaryId = markers.lastBaselineEndMessageId;
-	// m[1]-side coverage watermark for the deferred-marker drain (liveness
-	// fix): fresh publications render their compartment into the m[1] delta —
-	// m[0] folds new compartments only on a HARD bust — so the m[0] snapshot
-	// boundary above stays behind the pending marker until an unrelated HARD
-	// fold. The drain may apply once the marker is covered by a compartment
-	// THIS pass actually rendered into m[1]. Derived from the SAME compartment
-	// snapshot the m[1] render used (TOCTOU: the drain gate must never
-	// re-derive this from live DB rows), and only when m[1] was freshly
-	// recomputed this pass without a contention fallback — the sibling-
-	// fallback (stale bytes, recomputed=false) and pure-replay branches leave
-	// it null so the drain preserves the deferred signal. Compartments at or
-	// below markers.maxCompartmentSeq are m[0] content already certified by
-	// renderedBoundary; only compartments beyond that watermark are m[1]
-	// content, so the latest snapshot compartment qualifies exactly when the
-	// m[1] delta carried it.
-	let m1RenderedCoverage: PiRenderedCompartmentBoundary | null = null;
-	if (m1Recomputed && !contentionExhausted) {
-		const latestM1Compartment = currentCompartments.at(-1);
-		if (
-			latestM1Compartment &&
-			latestM1Compartment.sequence > markers.maxCompartmentSeq &&
-			latestM1Compartment.endMessageId.length > 0 &&
-			latestM1Compartment.endBlockIndex == null
-		) {
-			m1RenderedCoverage = {
-				endMessageId: latestM1Compartment.endMessageId,
-				ordinal:
-					typeof latestM1Compartment.endMessage === "number"
-						? latestM1Compartment.endMessage
-						: null,
-			};
-		}
-	}
-	const skippedVisibleMessages = trimBoundaryId
-		? trimPiMessagesToBoundary(
-				piMessages,
-				entryIds,
-				trimBoundaryId,
-				false,
-				state.sessionId,
-				isPartialCompartmentEnd(db, state.sessionId, trimBoundaryId),
-			)
-		: 0;
-	const muralWire = m0.includes("<memory-mural>")
-		? muralForWire(state.sessionId)
-		: undefined;
-	// A legacy row with no paired payload cannot replay its old image part. Since
-	// that omission already changes provider-visible bytes, remove the false text
-	// claiming an image follows and keep the fallback internally consistent.
-	if (!muralWire) m0 = stripMemoryMuralBlock(m0);
-	const insertionIndex = prependM0M1Messages(piMessages, m0, m1, muralWire);
-	logSession(
-		state.sessionId,
-		`injected m[0]/m[1] into Pi messages (${m0.length} + ${m1.length} bytes, materialized=${materialized}${decision.reason ? ` reason=${decision.reason}` : ""})`,
-	);
-	const comparison = decision.mismatch;
-	const systemHashPrev =
-		comparison?.signal === "systemHash" && typeof comparison.cached === "string"
-			? comparison.cached
-			: null;
-	const systemHashNew =
-		comparison?.signal === "systemHash" &&
-		typeof comparison.current === "string"
-			? comparison.current
-			: null;
-	const m0ModelKeyPrev =
-		comparison?.signal === "modelKey" && typeof comparison.cached === "string"
-			? comparison.cached
-			: null;
-	const m0ModelKeyNew =
-		comparison?.signal === "modelKey" && typeof comparison.current === "string"
-			? comparison.current
-			: null;
-	const memPath = memoryProjectPath(state);
-	const workspace = resolveWorkspaceRenderContextPi(state, db);
-	const memoryCount = memPath
-		? workspace.isWorkspaced
-			? getMemoriesByProjects(
-					db,
-					workspace.expandedIdentities,
-					["active", "permanent"],
-					Date.now(),
-					workspace.ownIdentities,
-					workspace.shareCategories,
-				).length
-			: getMemoriesByProject(db, memPath, ["active", "permanent"]).length
-		: 0;
-	const result: PiM0M1InjectionResult = {
-		injected: true,
-		compartmentCount: currentCompartments.length,
-		factCount: 0, // v2: facts retired as a render source (facts = promoted memories)
-		memoryCount,
-		skippedVisibleMessages,
-		m0Materialized: materialized,
-		m0Reason: decision.reason,
-		systemHashPrev: materialized ? systemHashPrev : null,
-		systemHashNew: materialized ? systemHashNew : null,
-		m0ModelKeyPrev: materialized ? m0ModelKeyPrev : null,
-		m0ModelKeyNew: materialized ? m0ModelKeyNew : null,
-		m0Bytes: m0.length,
-		m1Bytes: m1.length,
-		contentionExhausted,
-		renderedBoundary,
-		m1RenderedCoverage,
-		// Skip entries before the retained message tail and Magic Context's two
-		// synthetic history messages.
-		syntheticLeadingCount: insertionIndex + 2,
-	};
-	if (state.freezePrefixForPass)
-		state.preparedPrefix = {
-			result,
-			messages: structuredClone(
-				piMessages.slice(insertionIndex, insertionIndex + 2),
-			),
-			trimBoundaryId,
-		};
-	return result;
 }
 
 export function clearM0M1PiCache(
@@ -3611,7 +2661,6 @@ export function clearM0M1PiCache(
 ): void {
 	clearCachedM0M1(db, sessionId, reason);
 	setCachedBoundary(db, sessionId, null);
-	cachedMuralBySession.delete(sessionId);
 	logSession(sessionId, `cleared cached m[0] (${reason})`);
 }
 

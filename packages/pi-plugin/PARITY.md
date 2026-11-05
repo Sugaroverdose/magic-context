@@ -1169,3 +1169,12 @@ Tail-hygiene parity is active. Persisted `last_nudge_undropped` and `last_nudge_
 ## 39. Boot replay on the region lane (Unit 7)
 
 Pi's boot/serve path performs zero region computation: `before_agent_start` decodes the stored region verbatim after the composed host prompt (`processSystemPromptForCache`) and appends the volatile segment only when its watermark names the served row. No fold runs at boot; a head-row or absent region folds once as an install on the first context pass (`region_first_install`), and the LKG slot carries no panel bytes — it is region-orthogonal and replays byte-identically across rotations (D10/L6). Boot replay for the panels is the serve site's decode; the head-era `prepareCachedM0M1PiReplay` boot prefix has no successor because there is no array-side prefix to replay.
+
+## 40. Mural region carriage (Unit 7 adjudication)
+
+| Aspect | Pi shape |
+| --- | --- |
+| Carriage | Plugin Unit 1 ruling mirrored: the frozen region carries the `<memory-mural>` legend inside its bytes and the PNG rides beside it as a synthetic user message (`buildRegionMuralMessagePi`, emitted in `injectM0M1PiRegion` while a servable region exists — legend and image travel together; the message is a pure function of the persisted mural columns, replay-identical per rotation). |
+| Envelope | Pi codec COPY (Task 5 pattern): the Pi message is Pi-envelope-native (`{ role: "user", content: [image] }`, timestamp 1ms before the first retained message so temporal-marker gaps are unchanged); the plugin's `region-render.ts` mint is never imported — a no-import law with a committed rogue pins the boundary. |
+| Gate | `muralCarriageWantedPi`: the persisted `cached_m0_mural_data_url` present AND the fold's mural switch (encoded in the upgrade identity) not false. A mural-disabled fold or a missing data URL emits nothing; compaction-off rides (owner ruling — no carve-out). |
+| Accounting | The mural message counts in `syntheticLeadingCount` (LKG entry-id nulling via `resolvePiLkgOutputEntryIds` and the first-retained-message reads); `piSyntheticHistoryAdoptionWindow` still returns [] on the region lane. The head-era `rememberPiMuralPayload` process cache is deleted — the row is the only authority. |

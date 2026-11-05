@@ -3,10 +3,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	appendCompartments,
-	getCompartments,
-} from "@magic-context/core/features/magic-context/compartment-storage";
+import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
 import {
 	__resetProjectIdentityForTests,
 	__setProjectIdentityTestHooks,
@@ -50,6 +47,7 @@ import {
 	recordDetectedContextLimit,
 	recordOverflowDetected,
 } from "@magic-context/core/features/magic-context/storage-meta-persisted";
+import { readSystemRegion } from "@magic-context/core/features/magic-context/system-region";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
@@ -91,7 +89,7 @@ import {
 	maybeChannel1ReminderForToolResult,
 	setPiChannel1Baseline,
 } from "./ctx-reduce-nudge-pi";
-import { injectM0M1Pi, mustMaterializePi } from "./inject-compartments-pi";
+import { injectM0M1Pi } from "./inject-compartments-pi";
 import {
 	assistantMessage,
 	assistantToolCall,
@@ -5049,7 +5047,7 @@ describe("registerPiContextHandler", () => {
 			}
 		});
 
-		it("Pi contended prefix replays cached bytes then drains on the next persisted fold", async () => {
+		it("Pi contended fold replays the stored region bytes then drains on the next persisted fold", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-persist-before-serve";
 			let restoreInjection = () => {};
@@ -5060,7 +5058,10 @@ describe("registerPiContextHandler", () => {
 					{ messages: raw },
 					contextFor(sessionId, raw),
 				);
-				const cachedBytes = JSON.stringify(baseline.messages.slice(0, 2));
+				// Region lane: no synthetic heads — the served array is the real
+				// messages only. A contended fold must replay it byte-identically
+				// (the stored region keeps serving; the fold retries next pass).
+				const baselineArray = JSON.stringify(baseline.messages);
 				appendCompartments(db, sessionId, [
 					{
 						sequence: 1,
@@ -5078,7 +5079,11 @@ describe("registerPiContextHandler", () => {
 				let contend = true;
 				restoreInjection = contextHandlerInternals.setInjectM0M1PiForTests(
 					(...args) => {
-						if (!contend || args[2].length > 0) return injectM0M1Pi(...args);
+						// Contend BOTH the pre-fold and the wire inject: a fold
+						// that lands on either rewrites the served bytes, and
+						// the replay property under test is about the pass that
+						// genuinely lost every fold attempt.
+						if (!contend) return injectM0M1Pi(...args);
 						const exec = db.exec.bind(db);
 						const blocker = spyOn(db, "exec").mockImplementation((sql) => {
 							if (sql === "BEGIN IMMEDIATE")
@@ -5102,9 +5107,9 @@ describe("registerPiContextHandler", () => {
 						contextFor(sessionId, messages),
 					);
 					if (contend) {
-						expect(JSON.stringify(result.messages.slice(0, 2))).toBe(
-							cachedBytes,
-						);
+						// Replay: the array is byte-identical, the queued drop
+						// stays queued (the pass rewrote no served bytes).
+						expect(JSON.stringify(result.messages)).toBe(baselineArray);
 						expect(getPendingOps(db, sessionId)).toHaveLength(1);
 						expect(
 							getTagsBySession(db, sessionId).find(
@@ -5112,9 +5117,11 @@ describe("registerPiContextHandler", () => {
 							)?.status,
 						).toBe("active");
 					} else {
-						expect(JSON.stringify(result.messages.slice(0, 2))).toContain(
-							"PUBLISHED_A",
-						);
+						// The fold landed: the region absorbed the compartment,
+						// the queued drop drained with it.
+						expect(
+							readSystemRegion(db, sessionId)?.includes("PUBLISHED_A"),
+						).toBe(true);
 						expect(getPendingOps(db, sessionId)).toHaveLength(0);
 						expect(
 							getTagsBySession(db, sessionId).find(
@@ -5123,101 +5130,6 @@ describe("registerPiContextHandler", () => {
 						).toBe("dropped");
 					}
 				}
-			} finally {
-				restoreInjection();
-				clearContextHandlerSession(sessionId);
-				closeQuietly(db);
-			}
-		});
-
-		it.each([
-			"first",
-			"force",
-			"force-soft",
-		])("Pi %s-render recovery admits drops when contention requires fresh bytes", async (mode) => {
-			const db = createTestDb();
-			const sessionId = `ses-pi-fresh-${mode}`;
-			let restoreInjection = () => {};
-			try {
-				if (mode === "force-soft")
-					appendCompartments(db, sessionId, [
-						{
-							sequence: 1,
-							startMessage: 1,
-							endMessage: 1,
-							startMessageId: "entry-user",
-							endMessageId: "entry-user",
-							title: "BASELINE",
-							content: "BASELINE",
-						},
-					]);
-				const { handler, toolTagNumber } = await primeBaseline(db, sessionId);
-				appendCompartments(db, sessionId, [
-					{
-						sequence: mode === "force-soft" ? 2 : 1,
-						startMessage: mode === "force-soft" ? 2 : 1,
-						endMessage: mode === "force-soft" ? 2 : 1,
-						startMessageId:
-							mode === "force-soft" ? "new-covered" : "entry-user",
-						endMessageId: mode === "force-soft" ? "new-covered" : "entry-user",
-						title: "FRESH_RECOVERY",
-						content: "FRESH_RECOVERY",
-					},
-				]);
-				if (mode !== "force-soft")
-					db.prepare(
-						"UPDATE session_meta SET cached_m0_max_compartment_seq = NULL WHERE session_id = ?",
-					).run(sessionId);
-				if (mode === "first")
-					db.prepare(
-						"UPDATE session_meta SET cached_m0_bytes = NULL, cached_m1_bytes = NULL WHERE session_id = ?",
-					).run(sessionId);
-				let sawFallback = false;
-				restoreInjection = contextHandlerInternals.setInjectM0M1PiForTests(
-					(...args) => {
-						if (mode === "force-soft" && args[2].length === 0)
-							expect(
-								mustMaterializePi(args[0], db, getCompartments(db, sessionId))
-									.value,
-							).toBe(false);
-						const exec = db.exec.bind(db);
-						const blocker = spyOn(db, "exec").mockImplementation((sql) => {
-							if (sql === "BEGIN IMMEDIATE")
-								throw Object.assign(new Error("database is locked"), {
-									code: "SQLITE_BUSY",
-								});
-							return exec(sql);
-						});
-						try {
-							const result = injectM0M1Pi(...args);
-							sawFallback ||=
-								result.contentionExhausted && !result.m0Materialized;
-							return result;
-						} finally {
-							blocker.mockRestore();
-						}
-					},
-				);
-				const messages = buildMessages();
-				const ctx = {
-					...fakeContext(sessionId, process.cwd(), entryIds, messages),
-					getContextUsage: () => ({
-						tokens: mode.startsWith("force") ? 90000 : 4000,
-						percent: mode.startsWith("force") ? 90 : 4,
-						contextWindow: 100000,
-					}),
-				} as never;
-				const result = await handler({ messages }, ctx);
-				expect(sawFallback).toBe(true);
-				expect(JSON.stringify(result.messages.slice(0, 2))).toContain(
-					"FRESH_RECOVERY",
-				);
-				expect(getPendingOps(db, sessionId)).toHaveLength(0);
-				expect(
-					getTagsBySession(db, sessionId).find(
-						(t) => t.tagNumber === toolTagNumber,
-					)?.status,
-				).toBe("dropped");
 			} finally {
 				restoreInjection();
 				clearContextHandlerSession(sessionId);
@@ -5318,7 +5230,7 @@ describe("registerPiContextHandler", () => {
 	});
 
 	describe("Pi wrapup then flush boundary adoption", () => {
-		it("trims a first m[1] compartment on the busting pass and keeps the defer replay byte-identical", async () => {
+		it("wrapup+flush keeps the raw tail on the region lane; the compartment rides the volatile segment and the defer replay stays byte-identical", async () => {
 			const db = createTestDb();
 			const sessionId = "ses-pi-wrapup-flush-boundary";
 			try {
@@ -5352,8 +5264,8 @@ describe("registerPiContextHandler", () => {
 					);
 				};
 
-				// Prime an empty m[0] baseline before wrapup publishes the first
-				// compartment. Its max-compartment watermark is therefore -1.
+				// Prime an empty region baseline before wrapup publishes the
+				// first compartment. Its max-compartment watermark is -1.
 				await runPass();
 				appendCompartments(db, sessionId, [
 					{
@@ -5367,31 +5279,34 @@ describe("registerPiContextHandler", () => {
 						p1: "U: covered request\nA: covered answer",
 					},
 				]);
-				// /ctx-wrapup queues deferred publication signals; /ctx-flush upgrades
-				// the next provider call to the priced busting/materializing pass.
+				// /ctx-wrapup queues deferred publication signals; /ctx-flush
+				// upgrades the next provider call to the priced busting pass.
 				signalPiDeferredHistoryRefresh(sessionId);
 				signalPiDeferredMaterialization(sessionId);
 				signalPiHistoryRefresh(sessionId);
 				signalPiPendingMaterialization(sessionId);
 
+				// Region lane: the publish is a DEMOTED delta — no fold, so the
+				// fold-owned trim boundary covers nothing new and the raw tail
+				// stays. The compartment reaches the wire through the volatile
+				// segment (persisted by the bust-lane recompute).
 				const busting = await runPass();
+				const volatileRow = getOrCreateSessionMeta(db, sessionId);
+				const volatileText =
+					volatileRow.regionVolatileBytes?.toString("utf8") ?? "";
+				expect(volatileText).toContain("Wrapped history");
+
 				const deferred = await runPass();
 				expect(JSON.stringify(deferred.messages)).toBe(
 					JSON.stringify(busting.messages),
 				);
-
+				// The raw covered messages stay in the tail (nothing folded over
+				// them yet — the trim moves only with a fold-owned boundary).
 				const bustingText = busting.messages.map((message) =>
 					textOf(message as never),
 				);
-				expect(bustingText.join("\n")).toContain("Wrapped history");
-				const rawTailText = bustingText.slice(2);
-				expect(rawTailText).not.toContainEqual(
-					expect.stringContaining("covered request"),
-				);
-				expect(rawTailText).not.toContainEqual(
-					expect.stringContaining("covered answer"),
-				);
-				expect(rawTailText).toEqual([expect.stringContaining("live tail")]);
+				expect(bustingText.join("\n")).toContain("covered request");
+				expect(bustingText.join("\n")).toContain("live tail");
 			} finally {
 				clearContextHandlerSession(sessionId);
 				closeQuietly(db);

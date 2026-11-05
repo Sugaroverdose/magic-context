@@ -4,7 +4,9 @@ import { rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import {
+	bumpProjectMemoryEpoch,
 	copySessionStateForClone,
 	getCompartments,
 	getPendingPiCompactionMarkerState,
@@ -12,6 +14,7 @@ import {
 	setPendingPiCompactionMarkerState,
 	updateSessionMeta,
 } from "@magic-context/core/features/magic-context/storage";
+import { readSystemRegion } from "@magic-context/core/features/magic-context/system-region";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import {
@@ -252,9 +255,15 @@ it("A C D reporter fold, process restart, LKG and second cut", async () => {
 			manager.buildSessionContext().messages,
 		);
 		publish(db, manager, end2, tail2, 1);
+		// Region lane (Unit 7): the compartment publish is a demoted delta —
+		// it never folds on its own, so the pending marker waits for a fold
+		// whose boundary covers it. Force that fold with a genuine HARD arm
+		// (project memory epoch); the flush signals alone do not fold a region.
+		bumpProjectMemoryEpoch(db, resolveProjectIdentity(process.cwd()));
 		const second = capture("CD-fold", (await pass(70000)).messages);
 		expect(second.tools).toEqual(["read", "bash", "mcp-b", "late"]);
 		expect(second.prompt).toBe(secondBefore.prompt);
+		expect(readSystemRegion(db, sid)).toContain("<session-history");
 		expect(
 			manager.getBranch().filter((e) => e.type === "compaction"),
 		).toHaveLength(2);
@@ -308,6 +317,8 @@ for (const order of ["inject-first", "marker-first"])
 						.getBranch()
 						.filter((e) => e.type === "message")
 						.map((e) => e.id),
+					undefined,
+					{ systemRegion: { enabled: true, reason: "" } },
 				);
 			const marker = () => manager.appendCompaction("MC marker", tail, 70000);
 			if (order === "inject-first") {
@@ -317,7 +328,12 @@ for (const order of ["inject-first", "marker-first"])
 				marker();
 				inject();
 			}
-			expect(JSON.stringify(messages)).toContain("<session-history>");
+			// Region lane (Unit 7): the array carries NO MC content — the
+			// panels ride the system channel from the region row. The
+			// snapshot-exclusion property keeps its force against the region
+			// bytes: the native snapshot's prompt must exclude them too.
+			expect(JSON.stringify(messages)).not.toContain("<session-history>");
+			expect(readSystemRegion(db, sid)).toContain("<session-history");
 			const state = capture(`B-${order}`, messages);
 			const snapshot = manager
 				.getBranch()
@@ -355,6 +371,8 @@ it("E displaced system is promoted for the initial resolver on defer", () => {
 			db,
 			messages as never,
 			entryIds,
+			undefined,
+			{ systemRegion: { enabled: true, reason: "" } },
 		);
 		capture("E-displaced", messages);
 		expect(getCurrentTools(messages as never)).toHaveLength(3);
@@ -363,10 +381,11 @@ it("E displaced system is promoted for the initial resolver on defer", () => {
 				(entry) => entry.name,
 			),
 		).toEqual(["read", "edit", "bash"]);
+		// Region lane (Unit 7): the initial resolver's promotion still runs
+		// (index-zero contract), and MC splices nothing after it.
 		expect(messages[0]?.role).toBe("system");
 		expect(messages[1]).toEqual(userMessage("EXTENSION_BEFORE_SYSTEM", -1));
 		expect(messages.slice(2, 4).map((message) => message.role)).toEqual([
-			"user",
 			"user",
 		]);
 		expect(entryIds).toEqual(["extension", "system", "tail"]);
@@ -628,7 +647,9 @@ for (const mode of ["missing-method", "throwing-signature", "readonly-085"])
 				manager.getBranch().filter((e) => e.type === "compaction"),
 			).toHaveLength(0);
 			expect(getPendingPiCompactionMarkerState(db, sid)).not.toBeNull();
-			expect(JSON.stringify(served)).toContain("<session-history>");
+			// Region lane (Unit 7): the fold witness is the region row (the
+			// array carries no MC content).
+			expect(readSystemRegion(db, sid)).toContain("<session-history>");
 			expect(capture(`J-${mode}`, served).tools).toHaveLength(3);
 		} finally {
 			clearContextHandlerSession(sid);
@@ -693,7 +714,8 @@ it("J populated stale-view snapshot is refused by the equivalence fence", async 
 		expect(after.tools).toEqual(["read", "edit", "bash"]);
 		expect(after.prompt).toBe("BASE_GATE_PROMPT");
 		expect(getPendingPiCompactionMarkerState(db, sid)).not.toBeNull();
-		expect(JSON.stringify(served)).toContain("<session-history>");
+		// Region lane (Unit 7): the fold witness is the region row.
+		expect(readSystemRegion(db, sid)).toContain("<session-history>");
 
 		const journal = capture(
 			"J-fence-journal",
