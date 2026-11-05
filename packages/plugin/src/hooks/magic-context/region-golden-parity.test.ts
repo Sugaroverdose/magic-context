@@ -156,4 +156,29 @@ describe("region golden parity (Law B: renderRegionM0 panels == committed bytes)
             expect(createHash("sha256").update(body).digest("hex")).toBe(window.regionSha256);
         });
     }
+
+    it("capture and replay seed from one table set (no independent builders)", () => {
+        // Reviewer-recommended closure (Unit 2 round 1): a future re-capture
+        // could reproduce committed bytes through the production path while
+        // driveOnce drifted off the replay seeder's table set. Both sides
+        // must go through seedGoldenStore — no per-table insertRows in either
+        // the capture script or the harness itself.
+        const capturePath = join(
+            import.meta.dir,
+            "..",
+            "..",
+            "..",
+            "..",
+            "..",
+            "scripts",
+            "region-golden",
+            "capture.ts",
+        );
+        const capture = readFileSync(capturePath, "utf8");
+        expect(capture).toContain("seedGoldenStore(db, extraction)");
+        expect(capture).not.toMatch(/insertRows\(\s*db\s*,\s*"/);
+        const harness = readFileSync(join(import.meta.dir, "region-golden-harness.ts"), "utf8");
+        const seedBody = harness.slice(harness.indexOf("export function seedWindow("));
+        expect(seedBody.slice(0, seedBody.indexOf("\n}"))).not.toMatch(/insertRows\(/);
+    });
 });

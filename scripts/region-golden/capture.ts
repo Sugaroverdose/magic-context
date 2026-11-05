@@ -34,6 +34,7 @@ import {
     type M0M1State,
 } from "../../packages/plugin/src/hooks/magic-context/inject-compartments";
 import { getTokenEstimatorFingerprint } from "../../packages/plugin/src/hooks/magic-context/read-session-formatting";
+import { seedGoldenStore } from "../../packages/plugin/src/hooks/magic-context/region-golden-harness";
 import { createTestTempDirFromPath } from "../../packages/plugin/src/shared/test-temp-dir";
 
 const HERE = import.meta.dirname;
@@ -263,33 +264,6 @@ function extractRows(
     });
 }
 
-function tableColumns(db: Database, table: string): string[] {
-    return (db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>).map(
-        (row) => row.name,
-    );
-}
-
-function insertRows(db: Database, table: string, rows: Array<Record<string, unknown>>): void {
-    if (rows.length === 0) return;
-    const target = new Set(tableColumns(db, table));
-    const columns = Object.keys(rows[0]).filter((name) => target.has(name));
-    if (columns.length === 0) return;
-    const placeholders = columns.map(() => "?").join(", ");
-    const statement = db.prepare(
-        `INSERT OR REPLACE INTO ${table} (${columns.join(", ")}) VALUES (${placeholders})`,
-    );
-    for (const row of rows) {
-        const values = columns.map((name) => {
-            const value = row[name];
-            if (value !== null && typeof value === "object" && "__b64" in (value as object)) {
-                return Buffer.from(String((value as { __b64: string }).__b64), "base64");
-            }
-            return value;
-        });
-        statement.run(...(values as never[]));
-    }
-}
-
 function clearCachedPrefixColumns(meta: Record<string, unknown>): Record<string, unknown> {
     const clean: Record<string, unknown> = {};
     for (const [column, value] of Object.entries(meta)) {
@@ -444,15 +418,10 @@ function driveOnce(
         }
         const db = openDatabase();
         if (!db) throw new Error(`${spec.id}: openDatabase returned null`);
-        insertRows(db, "session_meta", [extraction.sessionMeta]);
-        insertRows(db, "compartments", extraction.compartments);
-        insertRows(db, "message_fts_rowid_map", extraction.rowidMap);
-        insertRows(db, "m0_mutation_log", extraction.m0Mutations);
-        insertRows(db, "session_projects", extraction.sessionProjects);
-        insertRows(db, "memories", extraction.memories);
-        insertRows(db, "memory_mutation_log", extraction.memoryMutations);
-        insertRows(db, "user_memories", extraction.userMemories);
-        insertRows(db, "project_state", extraction.projectState);
+        // One seed-table set with the replay harness (region-golden-harness
+        // seedGoldenStore): the capture driver and the test seeder cannot
+        // drift apart on which tables constitute a window store.
+        seedGoldenStore(db, extraction);
         const state = getOrCreateSessionMeta(db, spec.sessionId) as unknown as M0M1State;
         const options: M0M1RenderOptions = {
             db,
@@ -732,9 +701,6 @@ function main(): void {
             );
         }
 
-        const m1Placeholder = first.toString("utf8").endsWith(
-            "\n\n<session-history-since>(no new content since last materialization)</session-history-since>",
-        );
         manifestWindows.push({
             id: spec.id,
             kind: spec.kind,
@@ -759,13 +725,12 @@ function main(): void {
             regionFile: `bytes/${spec.id}.region`,
             regionSha256: createHash("sha256").update(first).digest("hex"),
             regionByteLength: first.length,
-            m1PlaceholderHalf: m1Placeholder,
             storedRegionSha256: extraction.storedRegionSha256,
             seedFile: `windows/${spec.id}.seed.json.gz`,
             docsFile: docsFiles.length > 0 ? `windows/${spec.id}.docs.json.gz` : null,
         });
         console.log(
-            `${spec.id}: ${first.length} bytes m1Placeholder=${m1Placeholder} sha=${createHash("sha256").update(first).digest("hex").slice(0, 16)}`,
+            `${spec.id}: ${first.length} bytes sha=${createHash("sha256").update(first).digest("hex").slice(0, 16)}`,
         );
     }
 
@@ -798,6 +763,11 @@ function main(): void {
         writeFileSync(join(outDir, "shared", "project-state.json.gz"), gzipJson(sharedProjectState));
     }
 
+    // captureCommit is informational provenance (HEAD at run time) — the
+    // authority for byte content is the per-window regionSha256 pinned by
+    // Laws A/B (see Manifest.captureCommit in region-golden-harness.ts).
+    // A corpus-replay or a re-capture against a restored corpus legitimately
+    // keeps or stamps a commit older than the bytes; do not read it as drift.
     const commit = Bun.spawnSync(["git", "-C", PLUGIN_ROOT, "rev-parse", "HEAD"])
         .stdout.toString()
         .trim();

@@ -52,7 +52,6 @@ export interface ManifestWindow {
     regionFile: string;
     regionSha256: string;
     regionByteLength: number;
-    m1PlaceholderHalf: boolean;
     storedRegionSha256: string | null;
     seedFile: string;
     docsFile: string | null;
@@ -141,6 +140,45 @@ export interface SeededWindow {
 }
 
 /**
+ * The canonical seed-table set: which tables constitute a golden window
+ * store, in insertion order. ONE list shared by both builders — the capture
+ * driver (`driveOnce` in scripts/region-golden/capture.ts) and the replay
+ * seeder (seedWindow below). A table added to one path and not the other is
+ * the silent-drift class this closes: bytes stay Law-A green while the
+ * corpus quietly stops representing a real install.
+ */
+export const GOLDEN_SEED_TABLES = [
+    { key: "sessionMeta", table: "session_meta", single: true },
+    { key: "compartments", table: "compartments" },
+    { key: "rowidMap", table: "message_fts_rowid_map" },
+    { key: "m0Mutations", table: "m0_mutation_log" },
+    { key: "sessionProjects", table: "session_projects" },
+    { key: "memories", table: "memories" },
+    { key: "memoryMutations", table: "memory_mutation_log" },
+    { key: "userMemories", table: "user_memories" },
+    { key: "projectState", table: "project_state" },
+] as const satisfies ReadonlyArray<{ key: string; table: string; single?: boolean }>;
+
+export type GoldenSeedKey = (typeof GOLDEN_SEED_TABLES)[number]["key"];
+
+export type GoldenSeedRows = {
+    [K in GoldenSeedKey]: K extends "sessionMeta"
+        ? Record<string, unknown>
+        : Array<Record<string, unknown>>;
+};
+
+/** Seeds every canonical table from a row bundle through the shared insertRows. */
+export function seedGoldenStore(db: Database, rows: GoldenSeedRows): void {
+    for (const entry of GOLDEN_SEED_TABLES) {
+        if ("single" in entry && entry.single) {
+            insertRows(db, entry.table, [rows[entry.key as GoldenSeedKey]]);
+        } else {
+            insertRows(db, entry.table, rows[entry.key as GoldenSeedKey]);
+        }
+    }
+}
+
+/**
  * Materializes the window's committed seed into a fresh temp store (real
  * windows pull their project-scoped tables from the shared store), pins TZ,
  * and returns everything needed to build the production render options.
@@ -182,15 +220,7 @@ export function seedWindow(window: ManifestWindow, manifest: Manifest): SeededWi
 
     const db = openDatabase();
     if (!db) throw new Error(`${window.id}: openDatabase returned null`);
-    insertRows(db, "session_meta", [seed.sessionMeta]);
-    insertRows(db, "compartments", seed.compartments);
-    insertRows(db, "message_fts_rowid_map", seed.rowidMap);
-    insertRows(db, "m0_mutation_log", seed.m0Mutations);
-    insertRows(db, "session_projects", seed.sessionProjects);
-    insertRows(db, "memories", seed.memories);
-    insertRows(db, "memory_mutation_log", seed.memoryMutations);
-    insertRows(db, "user_memories", seed.userMemories);
-    insertRows(db, "project_state", seed.projectState);
+    seedGoldenStore(db, seed);
     const state = getOrCreateSessionMeta(db, window.sessionId) as unknown as M0M1State;
     return { db, docsDir, state, dataHome };
 }
