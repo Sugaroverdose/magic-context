@@ -14,6 +14,10 @@ import {
 import { updateSessionMeta } from "../features/magic-context/storage-meta-session";
 import { DegradedPassRefusalError } from "../hooks/magic-context/degraded-pass-refusal";
 import { EmergencyFailClosedError } from "../hooks/magic-context/emergency-fail-closed";
+import {
+    applyEmptyAssistantWireGuard,
+    type GuardableMessage,
+} from "../hooks/magic-context/empty-wire-guard";
 import { replayLkg, resolveLkgModelKeys } from "../hooks/magic-context/lkg-replay";
 import { dropSlot, getSlot, noteEntry } from "../hooks/magic-context/lkg-slot";
 import { RawFallbackContextLimitError } from "../hooks/magic-context/raw-fallback-context-limit";
@@ -113,21 +117,27 @@ function moveUserToTail(
 }
 
 function enforcePersistedUserTerminatedTail(messages: MessageWithParts[]): void {
-    if (messages.at(-1)?.info.role !== "assistant") return;
+    const tail = messages.at(-1);
+    if (tail?.info.role !== "assistant") return;
     const userIndex = findLatestUserIndex(messages);
+    if (userIndex < 0) return;
     const trailing = messages.slice(userIndex + 1);
     if (
-        userIndex < 0 ||
         trailing.some(
             (message) => message.info.role !== "assistant" || assistantHasCompletedContent(message),
         )
     ) {
         // An assistant with real content at the array tail is OpenCode's NORMAL
-        // mid-turn continuation shape: tool results ride as parts on the streaming
-        // assistant, and the provider serializer emits the user-terminated wire
-        // itself. Leave the array untouched — refusing (or reordering) here kills
-        // every tool-using turn at its first continuation pass.
-        return;
+        // mid-turn continuation shape only while the serializer can still emit a
+        // user-terminated wire from it: tool parts become a trailing tool-result
+        // turn, and a length-capped tail is a genuine prefill continuation.
+        // Anything else (natural stop, tool-less, unknown finish) is the host
+        // re-looping after the model already finished its turn — strict
+        // validators 400 that ("requests ending with a model turn") while a
+        // steering message sent mid-turn sits unanswered below. Re-anchor it.
+        const tailHasTools = tail.parts.some((part) => (part as { type?: string }).type === "tool");
+        const tailFinish = (tail.info as { finish?: string }).finish;
+        if (tailHasTools || tailFinish === "length") return;
     }
     moveUserToTail(messages, messages[userIndex], userIndex);
 }
@@ -611,7 +621,27 @@ export function createMessagesTransformHandler(args: {
             const inputTailRole = wireTailRole(output.messages);
             enforcePersistedUserTerminatedTail(output.messages);
             try {
-                return await run(input, output);
+                const result = await run(input, output);
+                const targets =
+                    result === output.messages
+                        ? [output.messages as unknown as GuardableMessage[]]
+                        : [
+                              output.messages as unknown as GuardableMessage[],
+                              result as unknown as GuardableMessage[],
+                          ];
+                let removed = 0;
+                let stripped = 0;
+                for (const target of targets) {
+                    const guardStats = applyEmptyAssistantWireGuard(target);
+                    removed += guardStats.removedMessages;
+                    stripped += guardStats.strippedParts;
+                }
+                if (removed > 0 || stripped > 0) {
+                    log(
+                        `[magic-context] empty-assistant wire guard: removed ${removed} assistant(s), stripped ${stripped} part(s) (opencode-go 400 class)`,
+                    );
+                }
+                return result;
             } finally {
                 preserveUserTerminatedTail(output.messages, inputMessages);
                 reportAssistantTerminatedTail(
