@@ -1,5 +1,4 @@
 import { describe, expect, it } from "bun:test";
-import { createHash } from "node:crypto";
 import { rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -28,10 +27,15 @@ import {
 } from "./compaction-off-pi";
 import { handlePiSessionBeforeCompact } from "./index";
 import { injectM0M1Pi } from "./inject-compartments-pi";
-import { createTestDb, textOf, userMessage } from "./test-utils.test";
+import { createTestDb, userMessage } from "./test-utils.test";
 
 describe("Pi compaction-off mode", () => {
-	it("keeps the cached m[0] sha256 unchanged from cancelled compaction through the next context injection pass", async () => {
+	it("keeps the served region bytes unchanged from cancelled compaction through the next context injection pass", async () => {
+		// Re-expressed to the region lane (Unit 7 carry-forward A, owner's
+		// binary ruling: compaction-off gets no carve-out — the head-shape
+		// m[0] splice this test used to pin is deleted, and the same property
+		// (docs edits ride to a real HARD fold; the cancelled-compaction flow
+		// folds nothing) holds against the region row + its serve.
 		const db = createTestDb();
 		const sessionId = "ses-cancelled-native-prefix";
 		const cwd = createTestTempDirFromPath(join(tmpdir(), "pi-cancelled-m0-"));
@@ -43,14 +47,25 @@ describe("Pi compaction-off mode", () => {
 			injectionBudgetTokens: 10_000,
 		};
 		try {
-			writeFileSync(join(cwd, "AGENTS.md"), "# Cached before cancellation\n");
+			// The docs reader's file set is ARCHITECTURE.md/STRUCTURE.md
+			// (project-docs-hash.ts) — the doc must be one of those for the
+			// property to be non-trivial.
+			writeFileSync(
+				join(cwd, "ARCHITECTURE.md"),
+				"# Cached before cancellation\n",
+			);
 			const before = [userMessage("before", 1)];
-			injectM0M1Pi(state, db, before as never);
-			const beforeM0 = textOf(before[0] as never);
-			const beforeM0Sha = createHash("sha256").update(beforeM0).digest("hex");
+			injectM0M1Pi(state, db, before as never, undefined, undefined, {
+				systemRegion: { enabled: true, reason: "" },
+			});
+			const beforeRegion = getOrCreateSessionMeta(db, sessionId).cachedM0Bytes;
+			expect(beforeRegion).not.toBeNull();
+			expect(beforeRegion?.toString("utf8")).toContain(
+				"# Cached before cancellation",
+			);
 
 			writeFileSync(
-				join(cwd, "AGENTS.md"),
+				join(cwd, "ARCHITECTURE.md"),
 				"# Must wait for a real HARD fold\n",
 			);
 			expect(
@@ -58,12 +73,22 @@ describe("Pi compaction-off mode", () => {
 			).toEqual({ cancel: true });
 
 			const next = [userMessage("next context", 2)];
-			const replay = injectM0M1Pi(state, db, next as never);
-			const nextM0 = textOf(next[0] as never);
-			const nextM0Sha = createHash("sha256").update(nextM0).digest("hex");
+			const replay = injectM0M1Pi(
+				state,
+				db,
+				next as never,
+				undefined,
+				undefined,
+				{
+					systemRegion: { enabled: true, reason: "" },
+				},
+			);
+			const afterRegion = getOrCreateSessionMeta(db, sessionId).cachedM0Bytes;
 			expect(replay.m0Materialized).toBe(false);
-			expect(nextM0Sha).toBe(beforeM0Sha);
-			expect(nextM0).toBe(beforeM0);
+			expect(afterRegion?.equals(beforeRegion as Buffer)).toBe(true);
+			expect(afterRegion?.toString("utf8")).toContain(
+				"# Cached before cancellation",
+			);
 			expect(
 				getOrCreateSessionMeta(db, sessionId).cachedM0Bytes,
 			).not.toBeNull();

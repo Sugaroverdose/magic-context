@@ -513,6 +513,10 @@ describe("system-region L0: per-actor producer census", () => {
                 blessedHolders: [
                     "hooks/magic-context/inject-compartments.ts",
                     "hooks/magic-context/region-volatile.ts",
+                    // Unit 7 Pi mirror: the Pi fold and the Pi codec call the
+                    // SAME shared accessor (one database, one write surface).
+                    "pi/inject-compartments-pi.ts",
+                    "pi/region-volatile-pi.ts",
                 ],
             },
             {
@@ -528,7 +532,12 @@ describe("system-region L0: per-actor producer census", () => {
             {
                 name: "decodeRegionVolatileBytes",
                 definition: "hooks/magic-context/region-volatile.ts",
-                blessedHolders: [],
+                blessedHolders: [
+                    // Unit 7 Pi mirror: the codec is a Pi COPY of the carrier
+                    // API (Task 5 — no import of this file), so it re-defines
+                    // the decode under the same name.
+                    "pi/region-volatile-pi.ts",
+                ],
             },
         ] as const;
         type EntryRoots = ReadonlyArray<{ dir: string; prefix: string }>;

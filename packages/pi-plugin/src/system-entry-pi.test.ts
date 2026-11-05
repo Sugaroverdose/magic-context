@@ -255,7 +255,12 @@ describe("Pi 0.86 provider contract", () => {
 			let bytes = "";
 			for (let pass = 0; pass < 5; pass++) {
 				const messages = structuredClone(input);
-				injectM0M1Pi(state, db, messages, ["s0", "u0", "s1", "u1"]);
+				// Region lane (Unit 7): the injection splices no synthetic
+				// heads — the array is the real messages with the fold-covered
+				// tail trimmed; the panels ride the system channel.
+				injectM0M1Pi(state, db, messages, ["s0", "u0", "s1", "u1"], undefined, {
+					systemRegion: { enabled: true, reason: "" },
+				});
 				expect(messages[0]?.role).toBe("system");
 				expect(getInitialSystemMessage(messages)?.toolsAdded).toHaveLength(70);
 				expect(getCurrentTools(messages)).toEqual(initial.toolsAdded);
@@ -265,8 +270,6 @@ describe("Pi 0.86 provider contract", () => {
 				expect(messages.map((m) => m.role)).toEqual([
 					"system",
 					"system",
-					"user",
-					"user",
 					"user",
 				]);
 				if (pass === 0) bytes = JSON.stringify(messages);

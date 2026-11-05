@@ -252,7 +252,6 @@ import {
 import { readPiHistorianTail } from "./historian-tail-pi";
 import {
 	clearM0M1PiCache,
-	clearPiInjectionTokenCountCache,
 	createPiM0M1PassSnapshot,
 	injectM0M1Pi,
 	mustMaterializePi,
@@ -260,7 +259,6 @@ import {
 	type PiM0M1PassSnapshot,
 	type PiM0M1State,
 	piRegionRotationPromotion,
-	prepareCachedM0M1PiReplay,
 	trimPiMessagesToCachedBoundary,
 } from "./inject-compartments-pi";
 import {
@@ -327,6 +325,7 @@ import {
 	replayStrippedInlineThinkingPi,
 	stripInlineThinkingPi,
 } from "./reasoning-replay-pi";
+import { recomputeRegionVolatileSegmentPi } from "./region-volatile-pi";
 import { capturePiServedArray } from "./served-array-ledger";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import { stripPiProcessedImages } from "./strip-processed-images-pi";
@@ -2784,7 +2783,6 @@ export function registerPiContextHandler(
 					clearPiCompactionOffInMemoryState(sessionId);
 				}
 				if (compactionTransition.invalidatedBaseline) {
-					clearPiInjectionTokenCountCache(sessionId);
 					sessionMetaForUsage.cachedM0Bytes = null;
 					sessionMetaForUsage.cachedM1Bytes = null;
 					piM0M1PassSnapshot = options.injection
@@ -3415,7 +3413,12 @@ export function registerPiContextHandler(
 				readBranchEntries: resolvePiReadBranchEntries(ctx),
 				isSubagent: sessionMeta.isSubagent,
 				compactionOff: options.compactionOff === true,
-				systemRegionLane: options.systemRegionLane === true,
+				// The frozen-system-region capability is constant-true (the
+				// shared predicate has no false branch, pinned by
+				// system-region-lane-law.test.ts); index.ts always threads the
+				// boot resolution, so an omitted flag (tests falling back to
+				// baseOptions) defaults to the production value.
+				systemRegionLane: options.systemRegionLane ?? true,
 				injectionPassSnapshot: piM0M1PassSnapshot,
 			});
 			logTransformTiming(sessionId, "runPipeline", tRunPipeline);
@@ -5278,6 +5281,9 @@ async function runCompactionOffPipeline(
 ): Promise<RunPipelineResult> {
 	let injectionResult: PiInjectionResult | null = null;
 	if (args.injection) {
+		// Unit 7 carry-forward A (owner's binary ruling: no carve-out —
+		// compaction-off rides the region lane like every other row; sessions
+		// re-render once onto the region serve).
 		injectionResult = injectM0M1Pi(
 			{
 				sessionId: args.sessionId,
@@ -5294,8 +5300,8 @@ async function runCompactionOffPipeline(
 			args.db,
 			args.messages as Parameters<typeof injectM0M1Pi>[2],
 			args.entryIds,
-			false,
 			args.injectionPassSnapshot,
+			{ systemRegion: { enabled: true, reason: "" } },
 		);
 	}
 	return {
@@ -5546,9 +5552,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 						args.injection.historyBudgetPolicyIdentity,
 					hardSignals: piHardSignals,
 					muralEnabled: args.injection.muralEnabled === true,
-					freezePrefixForPass: true,
-					allowFreshContentionFallback:
-						args.forceMaterialization === true || emergencyDropEligible,
 				}
 			: undefined;
 	const systemRegionLane = args.systemRegionLane === true;
@@ -5609,17 +5612,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 	let publishedM1RefreshedThisPass = false;
 	let prefixPreflightContended = false;
 	const softRefreshOpportunity = args.schedulerDecision === "execute";
-	const cachedPrefixBeforePreflight =
-		piM0State &&
-		!systemRegionLane &&
-		(foldDueDecision.value || softRefreshOpportunity) &&
-		!emergencyDropEligible
-			? prepareCachedM0M1PiReplay(
-					piM0State,
-					args.db,
-					injectionPassSnapshot?.cachedRow,
-				)
-			: undefined;
 	let preFoldInjectionResult: PiInjectionResult | null = null;
 	const persistedM0BeforeFold =
 		injectionPassSnapshot?.sessionMeta ?? args.sessionMeta;
@@ -5642,7 +5634,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				[],
 				undefined,
-				softRefreshOpportunity,
 				injectionPassSnapshot,
 				{
 					systemRegion: systemRegionLane
@@ -5715,7 +5706,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				);
 			}
 		} catch (error) {
-			piM0State.preparedPrefix = cachedPrefixBeforePreflight;
 			prefixPreflightContended = true;
 			sessionLog(
 				args.sessionId,
@@ -5765,7 +5755,56 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				publishedM1RefreshedThisPass ||
 				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
 	};
-	const isCacheBustingPass = hasReclaimRide(rideSignals);
+	// Unit 7 (plugin Unit 2 Task 1 mirror): the volatile delta segment
+	// recomputes only on a pass that already holds the bust permission; every
+	// other pass serves the stored bytes verbatim (the serve site is a pure
+	// decode). Four closures mirror the plugin's demotion-gap shape: the
+	// deferred-queue consumer forces absorb at the consuming boundary (the
+	// request only schedules); this recompute — the one post-fold mutation
+	// that rewrites served bytes — widens the ONE mutation permission below;
+	// contention-exhausted passes skip it; and when the fold executed this
+	// pass the fold-row persist already absorbed the segment in the fold
+	// transaction. Bust authority stays with the window manager: the
+	// backstop's fold request never opens a gate here.
+	const volatileRecomputeAllowed =
+		(args.schedulerDecision === "execute" ||
+			rideSignals.hardFold ||
+			rideSignals.force ||
+			hasPendingMaterializeSignal ||
+			rideSignals.publishedHistory ||
+			args.forceMaterialization === true) &&
+		// Contention-exhausted pass: the fold aborted, so this pass replays
+		// every persisted byte unchanged — region and segment alike.
+		!prefixPreflightContended;
+	let volatileRewroteServedBytes = false;
+	if (volatileRecomputeAllowed && !foldExecutedThisPass && piM0State) {
+		try {
+			const volatileRendered = recomputeRegionVolatileSegmentPi({
+				db: args.db,
+				sessionId: args.sessionId,
+				meta: args.sessionMeta,
+				state: piM0State,
+				onFoldRequest: (reason) => {
+					deferredMaterializationSessions.add(args.sessionId);
+					sessionLog(
+						args.sessionId,
+						`region-volatile fold requested reason=${reason}`,
+					);
+				},
+			});
+			volatileRewroteServedBytes = volatileRendered !== null;
+		} catch (error) {
+			// The segment is additive carriage: a failed recompute leaves the
+			// previously stored bytes served — never fail the pass for it.
+			sessionLog(
+				args.sessionId,
+				"region-volatile recompute failed (ignored):",
+				error,
+			);
+		}
+	}
+	const isCacheBustingPass =
+		hasReclaimRide(rideSignals) || volatileRewroteServedBytes;
 	const publishedWorkDrainAllowed = isCacheBustingPass;
 	// System-origin reclaim (queued drops, the sweeper, heuristics) may only
 	// ride a pass that actually rewrites served bytes. A consumed deferred-
@@ -5779,7 +5818,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		rideSignals.force ||
 		hasPendingMaterializeSignal ||
 		rideSignals.publishedHistory ||
-		(deferredMaterializeEligible && prefixPreflightContended);
+		(deferredMaterializeEligible && prefixPreflightContended) ||
+		volatileRewroteServedBytes;
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
 		args.protectedTokens !== undefined;
@@ -6932,14 +6972,6 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				args.db,
 				args.messages as Parameters<typeof injectM0M1Pi>[2],
 				args.entryIds,
-				// recomputeM1ThisPass: recompute m[1] (vs byte-identical replay) on any
-				// cache-busting pass — history refresh (new compartment published),
-				// deferred history refresh, OR executed work (drops/heuristics). A
-				// history-refresh-only pass has executedWorkThisPass=false but MUST
-				// re-render m[1] so the new compartment surfaces; gating on work alone
-				// (the prior behavior, masked by the now-removed cache clear) would
-				// replay stale m[1]. Mirrors OpenCode's isCacheBustingPass gate.
-				isCacheBustingPass,
 				injectionPassSnapshot,
 				{
 					// Region lane (§23 D8): no synthetic heads — the injection only
@@ -7933,7 +7965,6 @@ export function clearContextHandlerSession(sessionId: string): void {
 	piTagToolTokenCacheBySession.delete(sessionId);
 	piTextIdentitySourceCacheBySession.delete(sessionId);
 	piBranchProjectionBySession.delete(sessionId);
-	clearPiInjectionTokenCountCache(sessionId);
 	clearPiChannel1State(sessionId);
 	lastHeuristicsTurnIdBySession.delete(sessionId);
 	routinePressureAppliedBySession.delete(sessionId);

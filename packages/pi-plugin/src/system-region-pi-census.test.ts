@@ -98,6 +98,10 @@ const ALLOWED_READERS: ReadonlyMap<string, string> = new Map([
 		"fold module: installs via the rotation funnel inside the boundary transaction (§23 D4); head-lane row reader nulls region rows; trim uses the fold-co-resident boundary (D6)",
 	],
 	[
+		"region-volatile-pi.ts",
+		"Unit 7 volatile carrier: the bust-lane recompute reads the CACHED marker columns off the region row's meta (watermark operands only — never current data) and refuses an undecodable region; writes route through the receipted writeRegionVolatile + the memory_block accounting update",
+	],
+	[
 		"system-prompt.ts",
 		"serve path: appends the funnel-decoded region after the host bytes in the watched system channel; hash covers host bytes only (§23 D2/D3); corrupt rows declined by name",
 	],
@@ -171,6 +175,108 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 		}
 		return holders;
 	}
+
+	// Unit 7 L0 mirror (plugin system-region-producers holder-set form, G1
+	// shape): the Pi codec's volatile entries have exactly the named holders —
+	// any occurrence outside the definition file must name its holder,
+	// whatever the syntax (alias/rebind class). The carrier is a Pi COPY, so
+	// these are Pi names; the shared writeRegionVolatile accessor is pinned by
+	// the plugin-side census.
+	it("the volatile carrier entries have only named holders (Unit 7 L0 mirror)", () => {
+		const VOLATILE_ENTRIES_PI = [
+			{
+				name: "recomputeRegionVolatileSegmentPi",
+				definition: "region-volatile-pi.ts",
+				blessedHolders: ["context-handler.ts"],
+			},
+			{
+				name: "serveRegionVolatilePi",
+				definition: "region-volatile-pi.ts",
+				blessedHolders: ["system-prompt.ts"],
+			},
+			{
+				name: "decodeRegionVolatileBytes",
+				definition: "region-volatile-pi.ts",
+				blessedHolders: [],
+			},
+			{
+				name: "renderM1PiVolatileSegment",
+				definition: "inject-compartments-pi.ts",
+				blessedHolders: ["region-volatile-pi.ts"],
+			},
+		] as const;
+		const files = walkPiCensusZones().filter(
+			({ rel }) => !rel.endsWith(".test.ts"),
+		);
+		for (const entry of VOLATILE_ENTRIES_PI) {
+			const bare = new RegExp(`\\b${entry.name}\\b`);
+			const call = new RegExp(`\\b${entry.name}\\s*\\(`);
+			const holders: string[] = [];
+			const callers: string[] = [];
+			for (const { rel, full } of files) {
+				if (rel === entry.definition) continue;
+				const text = readFileSync(full, "utf8");
+				if (!bare.test(text)) continue;
+				holders.push(rel);
+				if (call.test(text)) callers.push(rel);
+			}
+			expect(holders.sort(), `${entry.name} holders`).toEqual(
+				[...entry.blessedHolders].sort(),
+			);
+			expect(callers.sort(), `${entry.name} callers`).toEqual(
+				[...entry.blessedHolders].sort(),
+			);
+		}
+	});
+
+	// Unit 7 carry-forward A deletion census (owner's binary ruling: the
+	// region lane is unconditional, so the head-injection body is dead): the
+	// head-era carriage symbols must have ZERO live references in the Pi
+	// production tree. Verified unreachable at the census tip —
+	// `isSystemRegionLane` is a pure `return true` (system-region-lane.ts,
+	// pinned by system-region-lane-law.test.ts), so `injectM0M1Pi` always
+	// routes to `injectM0M1PiRegion`. A planted rogue re-call is a committed
+	// witness (#2780).
+	it("the head-era carriage stays deleted (Unit 7 deletion census)", () => {
+		const BANNED: ReadonlyArray<[RegExp, string]> = [
+			[/\bprependM0M1Messages\s*\(/, "prependM0M1Messages("],
+			[/\breplayCompletePiPrefix\s*\(/, "replayCompletePiPrefix("],
+			[/\brenderFreshM0PiNonPersisted\s*\(/, "renderFreshM0PiNonPersisted("],
+			[/\bprepareCachedM0M1PiReplay\s*\(/, "prepareCachedM0M1PiReplay("],
+			[/\.preparedPrefix\b/, "state.preparedPrefix"],
+		];
+		const offenders: string[] = [];
+		for (const { rel, full } of walkPiCensusZones()) {
+			if (rel.endsWith(".test.ts")) continue;
+			const text = readFileSync(full, "utf8");
+			for (const [pattern, label] of BANNED) {
+				if (pattern.test(text)) offenders.push(`${rel}: ${label}`);
+			}
+		}
+		expect(offenders).toEqual([]);
+	});
+
+	it("rogue witness: a planted head-carriage re-call reddens the deletion census (#2780)", () => {
+		const rogue = join(SRC, "__census-rogue-head-carriage.ts");
+		writeFileSync(
+			rogue,
+			'import { prependM0M1Messages } from "./inject-compartments-pi";\nexport const f = (m: unknown[], a: unknown, b: unknown) => prependM0M1Messages(m, a, b);\n',
+		);
+		try {
+			const text = readFileSync(rogue, "utf8");
+			expect(/\bprependM0M1Messages\s*\(/.test(text)).toBe(true);
+		} finally {
+			rmSync(rogue, { force: true });
+		}
+		// Removal regreens the steady law.
+		const offenders: string[] = [];
+		for (const { rel, full } of walkPiCensusZones()) {
+			if (rel.endsWith(".test.ts")) continue;
+			const text = readFileSync(full, "utf8");
+			if (/\bprependM0M1Messages\s*\(/.test(text)) offenders.push(rel);
+		}
+		expect(offenders).toEqual([]);
+	});
 
 	it("the region capability is decided exactly once at boot and threaded thereafter (F7, D1)", () => {
 		// §23 D1 is a boot-once law: a second capability holder — especially

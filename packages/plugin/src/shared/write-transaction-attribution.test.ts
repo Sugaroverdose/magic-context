@@ -82,7 +82,10 @@ const fencedSources: Array<{ path: string; sites: string[]; reporterCalls?: stri
     },
     {
         path: "packages/pi-plugin/src/inject-compartments-pi.ts",
-        sites: ["pi_materialize_cache", "pi_soft_refresh_cache"],
+        // Unit 7 head deletion (06d430813) removed the soft-refresh BEGIN
+        // IMMEDIATE; the fold is the file's one covered site and the volatile
+        // write (writeRegionVolatile) rides inside that same transaction.
+        sites: ["pi_materialize_cache"],
     },
     {
         path: "packages/pi-plugin/src/pi-historian-runner.ts",

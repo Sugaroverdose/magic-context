@@ -79,6 +79,11 @@ const SESSION_META_RESETS: &[(&str, ResetValue)] = &[
     ("cached_m0_model_key", ResetValue::Null),
     ("cached_m0_project_identity", ResetValue::Null),
     ("cached_m0_last_baseline_end_message_id", ResetValue::Null),
+    // Unit 7 (Pi volatile carrier): the host clear nulls the volatile
+    // segment with the region row — the repair reset must cover it too
+    // (parsed textually by the system-region-rust-parity law).
+    ("region_volatile_bytes", ResetValue::Null),
+    ("region_volatile_watermark", ResetValue::Null),
     ("memory_block_cache", ResetValue::Empty),
     ("memory_block_count", ResetValue::Zero),
     ("memory_block_ids", ResetValue::Empty),

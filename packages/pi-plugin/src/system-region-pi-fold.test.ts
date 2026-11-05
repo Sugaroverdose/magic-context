@@ -752,10 +752,7 @@ describe("Pi region lane: heads come off the wire (D8, L5)", () => {
 		const db = createTestDb();
 		const dir = createTestTempDirFromPath("/tmp/pi-region-novheads-");
 		try {
-			const state = {
-				...piState("ses-pi-region-noheads", dir),
-				freezePrefixForPass: true,
-			};
+			const state = piState("ses-pi-region-noheads", dir);
 			seedStore(db, state);
 			materializeM0Pi(state, db, undefined, {
 				enabled: true,
@@ -778,7 +775,6 @@ describe("Pi region lane: heads come off the wire (D8, L5)", () => {
 				db,
 				messages as never,
 				entryIds,
-				false,
 				snapshot,
 				{
 					systemRegion: { enabled: true, reason: "hard_fold" },
@@ -799,10 +795,10 @@ describe("Pi region lane: heads come off the wire (D8, L5)", () => {
 			// zero heads (system[2] never exists on this lane).
 			expect(result.syntheticLeadingCount).toBe(1);
 			expect(messages[0].role).toBe("system");
-			// L6 support: no array-side prefix exists to freeze.
-			expect(
-				(state as { preparedPrefix?: unknown }).preparedPrefix,
-			).toBeUndefined();
+			// L6 support: no array-side prefix exists to freeze — the
+			// preparedPrefix carriage was DELETED in Unit 7 (carry-forward A);
+			// the state no longer carries the field at all.
+			expect("preparedPrefix" in state).toBe(false);
 			expect(result.injected).toBe(true);
 		} finally {
 			closeQuietly(db);
@@ -915,5 +911,190 @@ describe("Pi region lane: trim reads region-co-resident boundaries only (D6, #26
 		} finally {
 			closeQuietly(db);
 		}
+	});
+});
+
+describe("Pi region lane: volatile delta carrier (Unit 7, plugin Unit 2 mirror)", () => {
+	it("the fold writes the baseline panels only — no delta half in the region bytes", () => {
+		// Unit 7 carry-forward B: the pre-Unit-7 fold baked
+		// `${m0}\n\n${m1Render.text}` — the delta half (even as the empty
+		// placeholder) froze into the region bytes, so inter-fold deltas had
+		// no carrier at all. The region is the four baseline panels; the
+		// `<session-history-since>` wrapper belongs to the volatile segment.
+		const db = createTestDb();
+		const dir = createTestTempDirFromPath("/tmp/pi-region-no-delta-half-");
+		try {
+			const state = piState("ses-pi-region-no-delta-half", dir);
+			seedStore(db, state);
+			materializeM0Pi(state, db, undefined, {
+				enabled: true,
+				reason: "region_first_install",
+			});
+			const region = readSystemRegion(db, state.sessionId);
+			expect(region).not.toBeNull();
+			expect(region).toContain("<session-history");
+			expect(region).not.toContain("<session-history-since>");
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("inter-fold delta classes fold and promote on no pass (demotion fence)", () => {
+		// Fence anchor (plugin system-region-rotation.test.ts Task 3 mirror):
+		// re-adding a delta trigger — to mustMaterializePi's region arm or to
+		// the shared DELTA_TRIGGER_FIELDS table the promotion comparator
+		// reads — reddens this law. The delta's ONLY carrier is the volatile
+		// segment; neither the fold nor the promotion may originate its bust.
+		const db = createTestDb();
+		const dir = createTestTempDirFromPath("/tmp/pi-region-demotion-");
+		try {
+			const state = piState("ses-pi-region-demotion", dir);
+			seedStore(db, state);
+			materializeM0Pi(state, db, undefined, {
+				enabled: true,
+				reason: "region_first_install",
+			});
+			// Delta classes land AFTER the capture: additive memory
+			// (maxMemoryId), published compartment (maxCompartmentSeq),
+			// user-profile promotion (profile version).
+			insertMemory(db, {
+				projectPath: state.projectIdentity,
+				category: "CONSTRAINTS",
+				content: "inter-fold memory write",
+			});
+			appendCompartments(db, state.sessionId, [
+				{
+					sequence: 2,
+					startMessage: 10,
+					endMessage: 12,
+					startMessageId: "u3",
+					endMessageId: "a4",
+					title: "Later",
+					content: "U: later work\nmore parser progress",
+				},
+			]);
+			const decision = mustMaterializePi(state, db, undefined, undefined, {
+				systemRegionMode: true,
+			});
+			expect(decision).toEqual({ value: false, reason: null });
+			const snapshot = createPiM0M1PassSnapshot({
+				db,
+				sessionId: state.sessionId,
+				compactionOff: false,
+			});
+			expect(
+				piRegionRotationPromotion({
+					state,
+					db,
+					passSnapshot: snapshot,
+					systemRegionLane: true,
+					foldDue: false,
+					boundaryPermission: true,
+					forceBand: false,
+				}),
+			).toEqual({ promote: false, reason: null });
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	// The bust-lane wiring census (plugin region-volatile.test.ts anti-vacuity
+	// mirror, #2718 generalization): the recompute call site is the ONE
+	// post-fold mutation arm, so the law pins EVERY operand at the call site —
+	// the gate arms, the fold-executed skip, the contention skip, and a
+	// request-only callback (deferred queue + receipt, never a rotation).
+	// Committed rogue witnesses (#2780): fixture blocks run through the same
+	// extractor — a callback that rotates and a call missing the fold skip
+	// both redden.
+	const HANDLER_SRC = join(import.meta.dir, "context-handler.ts");
+	function recomputeBlock(source: string): string | null {
+		const blockStart = source.indexOf("const volatileRecomputeAllowed");
+		if (blockStart === -1) return null;
+		return source.slice(blockStart, source.indexOf("} catch", blockStart));
+	}
+	function wiringIssues(source: string): string[] {
+		const issues: string[] = [];
+		const block = recomputeBlock(source);
+		if (block === null) {
+			issues.push("bust lane never calls recomputeRegionVolatileSegmentPi");
+			return issues;
+		}
+		for (const operand of [
+			"db: args.db",
+			"sessionId: args.sessionId",
+			"meta: args.sessionMeta",
+			"state: piM0State",
+			"onFoldRequest: (reason)",
+			"deferredMaterializationSessions.add(args.sessionId)",
+		]) {
+			if (!block.includes(operand)) issues.push(`missing operand: ${operand}`);
+		}
+		for (const forbidden of [
+			"executeSystemRegionRotation",
+			"writeRegionVolatile",
+			"writeSystemRegion",
+		]) {
+			if (block.includes(forbidden)) {
+				issues.push(`request-only callback violated by: ${forbidden}`);
+			}
+		}
+		if (!block.includes("!foldExecutedThisPass")) {
+			issues.push("missing skip: fold executed this pass (segment absorbed)");
+		}
+		if (!block.includes("!prefixPreflightContended")) {
+			issues.push(
+				"missing skip: contention-exhausted pass replays persisted bytes",
+			);
+		}
+		if (!source.includes("volatileRewroteServedBytes")) {
+			issues.push(
+				"the ONE mutation permission is not widened by the recompute",
+			);
+		}
+		return issues;
+	}
+
+	it("the bust lane recomputes the volatile segment with the four closures (wiring census)", () => {
+		expect(wiringIssues(readFileSync(HANDLER_SRC, "utf8"))).toEqual([]);
+	});
+
+	it("rogue witnesses: a rotating callback and an ungated call both redden the wiring census (#2780)", () => {
+		const rogueRotating = [
+			"const volatileRecomputeAllowed =",
+			'\t(args.schedulerDecision === "execute" || rideSignals.hardFold) &&',
+			"\t!prefixPreflightContended;",
+			"const volatileRendered = recomputeRegionVolatileSegmentPi({",
+			"\tdb: args.db,",
+			"\tsessionId: args.sessionId,",
+			"\tmeta: args.sessionMeta,",
+			"\tstate: piM0State,",
+			"\tonFoldRequest: (reason) => {",
+			"\t\twriteRegionVolatile(args.db, args.sessionId, reason, 0);",
+			"\t\tdeferredMaterializationSessions.add(args.sessionId);",
+			"\t},",
+			"});",
+			"if (volatileRecomputeAllowed && !foldExecutedThisPass) { volatileRewroteServedBytes = true; }",
+		].join("\n");
+		const rotatingIssues = wiringIssues(rogueRotating);
+		expect(
+			rotatingIssues.some((issue) => issue.startsWith("request-only")),
+		).toBe(true);
+
+		const rogueUngated = [
+			"const volatileRecomputeAllowed = true;",
+			"const volatileRendered = recomputeRegionVolatileSegmentPi({",
+			"\tdb: args.db,",
+			"\tsessionId: args.sessionId,",
+			"\tmeta: args.sessionMeta,",
+			"\tstate: piM0State,",
+			"\tonFoldRequest: (reason) => {",
+			"\t\tdeferredMaterializationSessions.add(args.sessionId);",
+			"\t},",
+			"});",
+		].join("\n");
+		const ungatedIssues = wiringIssues(rogueUngated);
+		expect(
+			ungatedIssues.some((issue) => issue.startsWith("missing skip")),
+		).toBe(true);
 	});
 });

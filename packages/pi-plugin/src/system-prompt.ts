@@ -21,6 +21,7 @@ import { estimateTokens } from "@magic-context/core/hooks/magic-context/read-ses
 import { sessionLog } from "@magic-context/core/shared/logger";
 import type { PromptSurfacePreset } from "@magic-context/core/shared/prompt-surface";
 import { promptSurfaceHashMaterial } from "@magic-context/core/shared/prompt-surface-runtime";
+import { serveRegionVolatilePi } from "./region-volatile-pi";
 
 const PROJECT_DOCS_MARKER = "<project-docs>";
 const USER_PROFILE_MARKER = "<user-profile>";
@@ -253,9 +254,20 @@ export function processSystemPromptForCache(args: {
 		args.systemRegionLane === true
 			? servePiSystemRegion(sessionId, sessionMeta?.cachedM0Bytes ?? null)
 			: null;
-	const servedPrompt = regionServed
+	let servedPrompt = regionServed
 		? `${frozenPrompt}\n\n${regionServed}`
 		: frozenPrompt;
+	// ── Unit 7: volatile delta segment (plugin Unit 2 Task 1 mirror) ──
+	// The delta carriage rides after the region bytes and is served ONLY when
+	// its watermark names the region row being served — a segment rendered
+	// against an older region is refused. Pure decode from the session meta
+	// already loaded; recomputation happens on the bust lane, never here.
+	if (regionServed !== null && sessionMeta) {
+		const volatileText = serveRegionVolatilePi(sessionMeta);
+		if (volatileText !== null) {
+			servedPrompt = `${servedPrompt}\n\n${volatileText}`;
+		}
+	}
 
 	// Persist hash + token estimate so dashboard / status surfaces are
 	// up-to-date and the next turn can compare against this value.
