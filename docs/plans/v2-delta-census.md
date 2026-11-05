@@ -122,12 +122,15 @@ stated. Walks performed this session (agent-run):
 
 ## Mural carriage group (adjudicated with §22.4)
 
-`inject-compartments.ts` :2810-2811 (co-persist `muralDataUrl`/`muralHash`), :3464 (PNG file
-part `synthetic: true`), :4021-4028 (replay mural carriage), :4348-4353 (`muralForWire`),
-:3232 `hydrateCachedM0Mural`, :2357 `stripMemoryMuralBlock`, :2416 (`MEMORY_MURAL_BLOCK`
-section) — all inside the inject-compartments adjudicate row (U1 sever + U4/U6 strata);
-lines re-anchored to this tree per #2632. The appendage seam is :2844
-(`const regionText = m0Text + "\n\n" + m1Text`).
+`inject-compartments.ts` — co-persist `muralDataUrl`/`muralHash`, replay mural carriage,
+`hydrateCachedM0Mural`, `stripMemoryMuralBlock`, `MEMORY_MURAL_BLOCK` section (the PNG file
+part mint moved to `region-render.ts` and the emit to `transform.ts` at the U1 sever) —
+all inside the inject-compartments adjudicate row (U1 sever + U4/U6 strata).
+Symbol-anchored per #2632: line numbers drifted twice (U1 −1,800, U2 volatile lift); the
+authoritative pinned inventory is the carriage census (`system-region-carriage.test.ts`),
+which fails on any holder-set drift. The U0-era appendage seam
+(`regionText = m0Text + "\n\n" + m1Text`) is deleted: Unit 2 lifted the delta half into the
+volatile segment; the region body is `renderRegionM0` alone.
 
 ## Exclusions (8 rows, non-production; recorded for the 192-file reconciliation)
 
