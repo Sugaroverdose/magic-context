@@ -5358,7 +5358,14 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             expect(sha(after.messages)).toBe(sha(exec.messages));
         });
 
-        it("control: a queued drop on a plain execute pass with no HARD and no m[1] change", async () => {
+        it("widen negative arm: a recompute returning null (rendered == stored) leaves the lanes shut", async () => {
+            // The volatile bust widen is conditional on the segment actually
+            // changing. An execute pass runs the recompute gate; with no
+            // pending delta the render equals the stored bytes and the entry
+            // returns null — publishedWorkDrainAllowed, shouldApplyPendingOps
+            // and systemReclaimAllowed must all stay shut (no drain, no
+            // heuristics, no reclaim). If the widen keyed off the scheduler
+            // instead of the rewrite, the queued drop would land HERE.
             db = new Database(":memory:");
             initializeDatabase(db);
             const sessionId = "ses-adv-control-execute";
@@ -5366,10 +5373,31 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             const defer = await pass(sessionId);
             const target = toolTag(sessionId, "c-mid", "m-mid");
             queuePendingOp(db, sessionId, target, "drop");
-            const exec = await pass(sessionId, { scheduler: "execute", turn: "t-exec" });
-            console.log(
-                `ADV_CONTROL_EXEC materialized=${exec.result.materialized} status=${statusOf(sessionId, target)} changed=${sha(exec.messages) !== sha(defer.messages)}`,
-            );
+            const before = getOrCreateSessionMeta(db, sessionId);
+            const b64 = (b: Uint8Array | null) => (b ? Buffer.from(b).toString("base64") : "");
+            const beforeSegment = b64(before.regionVolatileBytes ?? null);
+            const beforeWatermark = before.regionVolatileWatermark;
+            const logs: string[] = [];
+            const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...v) => {
+                logs.push(v.join(" "));
+            });
+            let exec;
+            try {
+                exec = await pass(sessionId, { scheduler: "execute", turn: "t-exec" });
+            } finally {
+                spy.mockRestore();
+            }
+            expect(exec.result.materialized).toBe(false);
+            expect(statusOf(sessionId, target)).toBe("active");
+            expect(getPendingOps(db, sessionId)).toHaveLength(1);
+            expect(exec.result.droppedTokens).toBe(0);
+            expect(sha(exec.messages)).toBe(sha(defer.messages));
+            // The recompute gate RAN (execute is a bust-lane signal) and
+            // wrote nothing: the success line prints only when bytes change.
+            const after = getOrCreateSessionMeta(db, sessionId);
+            expect(b64(after.regionVolatileBytes ?? null)).toBe(beforeSegment);
+            expect(after.regionVolatileWatermark).toBe(beforeWatermark);
+            expect(logs.filter((l) => l.includes("region-volatile recomputed"))).toEqual([]);
         });
 
         it("starvation: a held drop lands on the next explicit /ctx-flush pass", async () => {
