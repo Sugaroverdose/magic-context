@@ -82,8 +82,12 @@ describe("createToolRegistry — memory gating", () => {
         isolateDb();
         const tools = buildRegistry({});
         const expectedFields: Record<string, string[]> = {
-            ctx_reduce: ["drop"],
-            ctx_expand: ["start", "end", "verbose", "message", "tag"],
+            // ctx_reduce v1: `drop` is retired from ctx_reduce's advertised
+            // shape (the passthrough engine path still accepts it).
+            // ctx_expand stays byte-vanilla: tags are the plugin's addressing
+            // mechanism and the release echo returns tags for vanilla reuse.
+            ctx_reduce: ["ctx_handles"],
+            ctx_expand: ["start", "end", "verbose", "message"],
             ctx_note: [
                 "action",
                 "content",
@@ -397,6 +401,9 @@ describe("createToolRegistry — prompt-surface registration", () => {
             for (const [name, description] of Object.entries(
                 LIGHT_PARAMETER_DESCRIPTIONS[toolId as keyof typeof LIGHT_PARAMETER_DESCRIPTIONS],
             )) {
+                // Retired advertised fields (drop, tag) still carry mapping
+                // rows but no longer reach the provider schema.
+                if (!(name in lightParameters)) continue;
                 expect((lightParameters[name] as { description?: string }).description).toBe(
                     description,
                 );

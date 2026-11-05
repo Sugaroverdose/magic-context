@@ -78,7 +78,7 @@ const deleteFtsMapStatements = new WeakMap<Database, PreparedStatement>();
 const deleteFtsMapRangeStatements = new WeakMap<Database, PreparedStatement>();
 const deleteMessageFtsMapStatements = new WeakMap<Database, PreparedStatement>();
 
-function normalizeIndexText(text: string): string {
+export function normalizeIndexText(text: string): string {
     return text.replace(/\s+/g, " ").trim();
 }
 

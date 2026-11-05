@@ -44,6 +44,7 @@ import {
     getChannel2NudgeClaim,
     getChannel2NudgeState,
 } from "../../features/magic-context/storage-meta-persisted";
+import { enrichReclaimHintsWithCallIds } from "../../features/magic-context/tool-call-registry";
 import { sessionLog } from "../../shared/logger";
 import { resolvePromptContext } from "../../shared/prompt-context";
 import type { Database } from "../../shared/sqlite";
@@ -251,7 +252,11 @@ export async function maybeDeliverChannel2(
             buildChannel2Reminder(
                 effectiveU,
                 reclaimableToolOutputCount(deps.baseline?.baselineParts ?? []),
-                deps.oldestReclaimableToolTags,
+                enrichReclaimHintsWithCallIds(
+                    deps.db,
+                    sessionId,
+                    deps.oldestReclaimableToolTags ?? [],
+                ),
             );
         const sent = await deliverSyntheticUserMessage(sessionId, {
             client,

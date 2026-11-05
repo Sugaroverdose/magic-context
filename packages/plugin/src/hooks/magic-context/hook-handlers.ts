@@ -21,6 +21,7 @@ import {
     setChannel1NudgeState,
     setLastNudgeUndropped,
 } from "../../features/magic-context/storage-meta-persisted";
+import { enrichReclaimHintsWithCallIds } from "../../features/magic-context/tool-call-registry";
 import { clearSidebarSnapshotCache } from "../../plugin/sidebar-snapshot-cache";
 import type { PluginContext } from "../../plugin/types";
 import { seedSessionCacheTtlIfUnsynced } from "../../shared/cache-ttl-seed";
@@ -589,7 +590,7 @@ function maybeInjectChannel1Nudge(
         decision.level,
         decision.undroppedTokens,
         reclaimableToolOutputCount(state.baselineParts),
-        state.oldestReclaimableToolTags,
+        enrichReclaimHintsWithCallIds(args.db, sessionId, state.oldestReclaimableToolTags ?? []),
         decision.sticky,
     );
     setChannel1NudgeState(args.db, sessionId, {

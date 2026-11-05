@@ -367,7 +367,7 @@ export function maybeDeliverChannel2Pi(
 }
 
 // Delivery can follow a sibling emergency drop or an agent queue operation after the baseline was saved.
-function currentReclaimHints(
+export function currentReclaimHints(
 	db: Database,
 	sessionId: string,
 	hints: SharedChannel1State["oldestReclaimableToolTags"],

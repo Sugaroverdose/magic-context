@@ -53,13 +53,13 @@ export function queueDropsForCompartmentalizedMessages(
             }
             // Rows created before tool ownership was persisted retain the legacy
             // call-id fallback until a later tagging pass adopts an owner.
-            queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+            queuePendingOp(db, sessionId, tag.tagNumber, "auto_drop");
             dropsQueued += 1;
             continue;
         }
 
         if (observedKeys.messageFileKeys.has(tag.messageId)) {
-            queuePendingOp(db, sessionId, tag.tagNumber, "drop");
+            queuePendingOp(db, sessionId, tag.tagNumber, "auto_drop");
             dropsQueued += 1;
         }
     }

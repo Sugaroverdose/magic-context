@@ -70,7 +70,7 @@ function isPendingOpRow(row: unknown): row is PendingOpRow {
 }
 
 function toPendingOp(row: PendingOpRow): PendingOp | null {
-    if (row.operation !== "drop") {
+    if (row.operation !== "drop" && row.operation !== "auto_drop") {
         sessionLog(row.session_id, `unknown pending operation "${row.operation}"; ignoring`);
         return null;
     }
@@ -124,4 +124,29 @@ export function clearPendingOps(db: Database, sessionId: string): void {
 
 export function removePendingOp(db: Database, sessionId: string, tagId: number): void {
     getRemovePendingOpStatement(db).run(sessionId, tagId);
+}
+
+const removePendingOpByIdStatements = new WeakMap<Database, PreparedStatement>();
+
+function getRemovePendingOpByIdStatement(db: Database): PreparedStatement {
+    let stmt = removePendingOpByIdStatements.get(db);
+    if (!stmt) {
+        stmt = db.prepare("DELETE FROM pending_ops WHERE id = ? AND session_id = ?");
+        removePendingOpByIdStatements.set(db, stmt);
+    }
+    return stmt;
+}
+
+/**
+ * Delete one queue row by its primary key (session-scoped).
+ *
+ * `removePendingOp` deletes by (session, tag) and cannot discriminate
+ * provenance: a tag may hold an agent "drop" row and a system "auto_drop" row
+ * at once, and the ctx_expand stamp-withdraw lane may revoke ONLY the agent
+ * row (rule: system-origin rows are not revocable from a tool call). That
+ * requires row-level deletion; this is the sanctioned statement for it —
+ * callers pass ids read back from `getPendingOps`, never a tag sweep.
+ */
+export function removePendingOpById(db: Database, sessionId: string, opId: number): void {
+    getRemovePendingOpByIdStatement(db).run(opId, sessionId);
 }

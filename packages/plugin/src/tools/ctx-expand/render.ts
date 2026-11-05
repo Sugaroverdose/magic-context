@@ -23,6 +23,7 @@
 
 import { createHash } from "node:crypto";
 import { type ContextDatabase, getTagById } from "../../features/magic-context/storage";
+import type { TagEntry } from "../../features/magic-context/types";
 import {
     readRawSessionMessageById,
     readRawSessionMessages,
@@ -304,48 +305,88 @@ export function renderVerboseRange(
 }
 
 /** Resolve a transcript handle by persisted ownership, never by message ordinal. */
-export function renderItemByTag(
-    db: ContextDatabase,
+/**
+ * The single resolution of a tag into the content renderItemByTag serves,
+ * plus the raw-message ids that content is served from. This is THE resolver:
+ * the renderer and the stamp-withdraw lane both run it, so "what expand
+ * serves" and "what expand may withdraw" cannot drift (withdraw.test.ts
+ * pins the biconditional). `ok: false` means the renderer emits its error
+ * string verbatim; `servedMessageIds` covers the sibling message a Pi-split
+ * tool result is walked to, so the ordinal lane matches the same addresses.
+ */
+export type TagRenderResolution =
+    | {
+          ok: true;
+          kind: "tool";
+          parts: Record<string, unknown>[];
+          servedMessageIds: Set<string>;
+      }
+    | {
+          ok: true;
+          kind: "text";
+          selected: unknown;
+          servedMessageIds: Set<string>;
+      }
+    | { ok: false; error: string };
+
+export function resolveTagRender(
     sessionId: string,
-    number: number,
+    tag: TagEntry,
     textIndexDomain: "part" | "text" = "part",
-): string {
-    const tag = getTagById(db, sessionId, number);
-    if (!tag)
-        return `no tag ${number} in this session; if ${number} came from a <session-history> heading or a ctx_search hit, it is an ordinal: use message=${number}`;
+): TagRenderResolution {
+    const number = tag.tagNumber;
     if (tag.type === "tool") {
         const owner = tag.toolOwnerMessageId;
         if (!owner)
-            return `Tag ${number}'s tool owner is unknown; its original call cannot be resolved safely.`;
+            return {
+                ok: false,
+                error: `Tag ${number}'s tool owner is unknown; its original call cannot be resolved safely.`,
+            };
         const message = readRawSessionMessageById(sessionId, owner);
-        if (!message) return `Tag ${number}'s original tool owner is no longer in stored history.`;
+        if (!message)
+            return {
+                ok: false,
+                error: `Tag ${number}'s original tool owner is no longer in stored history.`,
+            };
         const parts =
             message?.parts.filter(
-                (part) => isRecord(part) && asToolPart(part)?.callId === tag.messageId,
+                (part): part is Record<string, unknown> =>
+                    isRecord(part) && asToolPart(part)?.callId === tag.messageId,
             ) ?? [];
+        const servedMessageIds = new Set([owner]);
         // Pi stores a tool's invocation and result as separate messages.
-        if (!parts.some((part) => isRecord(part) && asToolPart(part)?.output !== null)) {
+        if (!parts.some((part) => asToolPart(part)?.output !== null)) {
             const messages = readRawSessionMessages(sessionId);
             const ownerIndex = messages.findIndex((candidate) => candidate.id === owner);
             for (const candidate of messages.slice(Math.max(0, ownerIndex + 1))) {
                 const matching = candidate.parts.filter(
-                    (part) => isRecord(part) && asToolPart(part)?.callId === tag.messageId,
+                    (part): part is Record<string, unknown> =>
+                        isRecord(part) && asToolPart(part)?.callId === tag.messageId,
                 );
                 if (matching.some((part) => isRecord(part) && part.type === "tool_use")) break;
                 parts.push(...matching);
-                if (matching.length > 0) break;
+                if (matching.length > 0) {
+                    servedMessageIds.add(candidate.id);
+                    break;
+                }
             }
         }
-        const rendered = parts.map(renderPartFull).filter((part): part is string => part !== null);
-        return rendered.length
-            ? rendered.join("\n")
-            : `Tag ${number}'s original tool call is no longer in stored history.`;
+        if (!parts.length)
+            return {
+                ok: false,
+                error: `Tag ${number}'s original tool call is no longer in stored history.`,
+            };
+        return { ok: true, kind: "tool", parts, servedMessageIds };
     }
     const scoped = /^(.*):p(\d+)$/.exec(tag.messageId);
     const derived = /^(.*):mc-text-v1:([a-f0-9]+):([a-f0-9]+):o(\d+)$/.exec(tag.messageId);
     const owner = scoped?.[1] ?? derived?.[1] ?? tag.messageId;
     const message = readRawSessionMessageById(sessionId, owner);
-    if (!message) return `Tag ${number}'s original text is no longer in stored history.`;
+    if (!message)
+        return {
+            ok: false,
+            error: `Tag ${number}'s original text is no longer in stored history.`,
+        };
     const index = scoped ? Number(scoped[2]) : 0;
     // Text tag locators count all message parts in OpenCode, but only text parts in Pi.
     const piText = message.parts.filter((part) => isRecord(part) && part.type === "text");
@@ -363,7 +404,32 @@ export function renderItemByTag(
         : textIndexDomain === "text"
           ? piText[index]
           : part;
-    return selected
-        ? (renderPartFull(selected) ?? "")
-        : `Tag ${number}'s original text part is no longer in stored history.`;
+    if (!selected)
+        return {
+            ok: false,
+            error: `Tag ${number}'s original text part is no longer in stored history.`,
+        };
+    return { ok: true, kind: "text", selected, servedMessageIds: new Set([owner]) };
+}
+
+export function renderItemByTag(
+    db: ContextDatabase,
+    sessionId: string,
+    number: number,
+    textIndexDomain: "part" | "text" = "part",
+): string {
+    const tag = getTagById(db, sessionId, number);
+    if (!tag)
+        return `no tag ${number} in this session; if ${number} came from a <session-history> heading or a ctx_search hit, it is an ordinal: use message=${number}`;
+    const resolution = resolveTagRender(sessionId, tag, textIndexDomain);
+    if (!resolution.ok) return resolution.error;
+    if (resolution.kind === "tool") {
+        const rendered = resolution.parts
+            .map(renderPartFull)
+            .filter((part): part is string => part !== null);
+        return rendered.length
+            ? rendered.join("\n")
+            : `Tag ${number}'s original tool call is no longer in stored history.`;
+    }
+    return renderPartFull(resolution.selected) ?? "";
 }

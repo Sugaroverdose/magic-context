@@ -115,7 +115,7 @@ describe("prompt-surface CI gates", () => {
     test("the committed light mapping resolves every compressed checklist rule", () => {
         const result = validateChecklist(checklistPath);
         expect(result.errors).toEqual([]);
-        expect(result.messages.some((message) => message.includes("resolved 40"))).toBe(true);
+        expect(result.messages.some((message) => message.includes("resolved 39"))).toBe(true);
     });
 
     test("deleting a mapped light line is a red mapping gate", () => {
