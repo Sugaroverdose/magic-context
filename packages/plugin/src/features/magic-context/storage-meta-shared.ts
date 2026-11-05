@@ -638,6 +638,14 @@ export function clearCachedM0M1(db: Database, sessionId: string, reason: string)
         ["cached_m0_model_key", null],
         ["cached_m0_project_identity", null],
         ["cached_m0_last_baseline_end_message_id", null],
+        // Unit 7 (Pi volatile-carrier caveat, plugin parity): a full cache
+        // invalidation must not leave a stale volatile segment beside the
+        // cleared region row. Watermark 0 never matches a real
+        // cached_m0_materialized_at (serve guard), so this is belt-and-braces
+        // with the watermark pairing — pinned by the region-volatile laws on
+        // both harnesses.
+        ["region_volatile_bytes", null],
+        ["region_volatile_watermark", 0],
         ["memory_block_cache", ""],
         ["memory_block_count", 0],
         ["memory_block_ids", ""],

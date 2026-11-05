@@ -53,6 +53,7 @@ import {
 	persistCachedM0,
 	readProjectDocsCanonical,
 } from "@magic-context/core/features/magic-context/storage";
+import { writeRegionVolatile } from "@magic-context/core/features/magic-context/storage-meta-shared";
 import {
 	decideSystemRegionRotation,
 	decodeSystemRegionRow,
@@ -1448,11 +1449,13 @@ export function mustMaterializePi(
 	// maxMemoryId watermark, so they must not bust the m[0] cache. Memory
 	// mutations use cachedM0MaxMemoryMutationId as an m[1] reconcile cursor,
 	// not as a materialization trigger; keep it out of this trigger set.
-	// projectDocsHash is also NOT a trigger HERE: docs-only edits ride along
+	// projectDocsHash is also NOT a trigger: docs-only edits ride along
 	// until a natural HARD fold, which reads fresh docs and persists the hash
-	// matching the bytes it rendered. On the region lane it IS a rotation
-	// trigger via the boundary-gated promotion comparator, whose current side
-	// is the live canonical hash (§25); there too it never originates a bust.
+	// matching the bytes it rendered. The shared DELTA_TRIGGER_FIELDS table
+	// the promotion comparator reads is empty by owner ruling (Task 3), so a
+	// docs edit rotates the region on no pass either — it surfaces through
+	// the next fold's fresh docs read (the volatile segment carries no docs
+	// class on Pi; see PARITY.md).
 	// session_facts is retired as a render source (facts = promoted memories),
 	// so its version is pinned to 0 and never triggers either.
 	return { value: false, reason: null };
@@ -1929,6 +1932,10 @@ export function materializeM0Pi(
 		attempts += 1;
 	}
 	const m0Bytes = Buffer.from(m0, "utf8");
+	// What the fold carried as its delta half: the volatile segment text on the
+	// region lane (m[1] is vacated there), the persisted m[1] bytes on the head
+	// shape (dead at runtime — every production fold is a region fold).
+	let foldDelta = "";
 
 	// Phase 2 + 3 (locked): re-read markers under BEGIN IMMEDIATE; if anything
 	// changed since Phase 1, the rendered bytes are stale — roll back and let the
@@ -1978,14 +1985,6 @@ export function materializeM0Pi(
 		}
 		snapshotMarkers.materializedAt = foldMaterializedAt;
 
-		const m1Render = renderM1PiWithMetadata(
-			state,
-			db,
-			snapshotMarkers,
-			renderedMemoryIds,
-		);
-		const m1Bytes = Buffer.from(m1Render.text, "utf8");
-
 		const foldPayload = {
 			muralDataUrl: frozenMuralDataUrl,
 			muralHash: frozenMuralHash,
@@ -2013,20 +2012,41 @@ export function materializeM0Pi(
 			projectIdentity: snapshotMarkers.projectIdentity,
 		};
 		if (regionOptions?.enabled) {
-			// Frozen system-region fold (§23 D4): the assembled m[0] + m[1]
-			// installs as the system channel through the rotation funnel — the
-			// second named production caller, after the OpenCode-1 materialize.
-			// The persist callback runs inside this same BEGIN IMMEDIATE:
-			// region bytes, marker capture, and the trim boundary land
-			// atomically, which is what makes the boundary a legitimate trim
-			// operand on a region row (D6). m[1] is vacated: region mode has
-			// no delta head. A refusal throws — the fold never persists head
+			// Frozen system-region fold (§23 D4): the assembled m[0] installs
+			// as the system channel through the rotation funnel — the second
+			// named production caller, after the OpenCode-1 materialize. The
+			// persist callback runs inside this same BEGIN IMMEDIATE: region
+			// bytes, marker capture, and the trim boundary land atomically,
+			// which is what makes the boundary a legitimate trim operand on a
+			// region row (D6). A refusal throws — the fold never persists head
 			// bytes beside a region that did not land.
+			//
+			// Unit 7 (plugin Unit 2 mirror): the region is the baseline panels
+			// ONLY. The delta half is carried by the volatile segment beside
+			// the region — rendered against this fold's own marker capture in
+			// the same transaction, so the region row, its markers, and the
+			// segment never diverge. persistCachedM0 absorbs any stale segment
+			// (the receipted fold-row update nulls it); the fresh row below
+			// names this region's materialized_at, so the serve pairing
+			// (watermark == cached_m0_materialized_at) holds from the commit
+			// onward. Empty text clears the row (the absorbed state).
+			const volatileRender = renderM1PiVolatileSegment(
+				state,
+				db,
+				snapshotMarkers,
+				renderedMemoryIds,
+			);
+			// The accounting is re-derived from the two renders: panel ids ∪
+			// volatile ids (ctx_search's hide-already-visible filter reads
+			// session_meta.memory_block_ids).
+			const visibleMemoryIds = [
+				...new Set([...renderedMemoryIds, ...volatileRender.memoryIds]),
+			];
 			const rotated = executeSystemRegionRotation(
 				db,
 				state.sessionId,
 				regionOptions.reason,
-				`${m0}\n\n${m1Render.text}`,
+				m0,
 				regionMarkersFromPiSnapshot(snapshotMarkers),
 				(regionBlob) => {
 					persistCachedM0(db, state.sessionId, {
@@ -2037,8 +2057,8 @@ export function materializeM0Pi(
 					db.prepare(
 						"UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
 					).run(
-						renderedMemoryIds.length,
-						JSON.stringify(renderedMemoryIds),
+						visibleMemoryIds.length,
+						JSON.stringify(visibleMemoryIds),
 						state.sessionId,
 					);
 				},
@@ -2053,11 +2073,27 @@ export function materializeM0Pi(
 					`system-region rotation refused for ${state.sessionId}`,
 				);
 			}
+			// The fold's fresh volatile row, after the fold-row clear ran inside
+			// the persist callback — still inside this BEGIN IMMEDIATE, before
+			// COMMIT.
+			writeRegionVolatile(
+				db,
+				state.sessionId,
+				volatileRender.text,
+				snapshotMarkers.materializedAt,
+			);
+			foldDelta = volatileRender.text;
 		} else {
+			const m1Render = renderM1PiWithMetadata(
+				state,
+				db,
+				snapshotMarkers,
+				renderedMemoryIds,
+			);
 			persistCachedM0(db, state.sessionId, {
 				...foldPayload,
 				m0Bytes,
-				m1Bytes,
+				m1Bytes: Buffer.from(m1Render.text, "utf8"),
 			});
 			// Persist the rendered-memory identity in the SAME transaction as
 			// the m[0] snapshot (parity with OpenCode materializeM0).
@@ -2073,6 +2109,7 @@ export function materializeM0Pi(
 				JSON.stringify(renderedMemoryIds),
 				state.sessionId,
 			);
+			foldDelta = m1Render.text;
 		}
 
 		// Persist the frozen trim boundary INSIDE the materialize transaction,
@@ -2095,7 +2132,7 @@ export function materializeM0Pi(
 		);
 		return {
 			m0,
-			m1: m1Render.text,
+			m1: foldDelta,
 			snapshotMarkers,
 			renderedMemoryIds,
 		};
@@ -2239,20 +2276,32 @@ function renderMemoryUpdatesBlockPi(args: {
 interface RenderM1PiResult {
 	text: string;
 	memoryUpdateCount: number;
+	/** Memory ids this render places on the wire (delta class) — the
+	 *  session_meta.memory_block_* accounting union (ctx_search hide-filter). */
+	memoryIds: number[];
 }
 
-function renderM1PiWithMetadata(
+/**
+ * The marker fields the m[1] delta render actually consumes. The volatile
+ * carrier renders against the CACHED row's markers (never current data); the
+ * Pick keeps the renderer structurally unable to widen its inputs.
+ */
+export type PiVolatileWatermark = Pick<
+	PiM0SnapshotMarkers,
+	| "maxCompartmentSeq"
+	| "maxMemoryId"
+	| "maxMemoryMutationId"
+	| "projectUserProfileVersion"
+	| "materializedAt"
+>;
+
+function renderM1PiCore(
 	state: PiM0M1State,
 	db: ContextDatabase,
-	markers: PiM0SnapshotMarkers,
+	watermark: PiVolatileWatermark,
 	renderedMemoryIds: readonly number[],
-	// The compartment set the CALLER will use to advance the persisted trim
-	// boundary. When provided, the new-compartments filter renders from this
-	// exact set instead of a fresh live read — so a compartment can never be
-	// rendered into m[1] while the boundary advances from a different (older)
-	// snapshot, which would leave its raw messages in the tail too (duplication).
-	// Omitted by callers that don't advance the boundary (e.g. renderM1Pi probe).
-	compartmentsOverride?: readonly PiCompartment[],
+	compartmentsOverride: readonly PiCompartment[] | undefined,
+	volatileMode: boolean,
 ): RenderM1PiResult {
 	const sections: string[] = [];
 	const workspace = resolveWorkspaceRenderContextPi(state, db);
@@ -2264,7 +2313,7 @@ function renderM1PiWithMetadata(
 					db,
 					workspace.expandedIdentities,
 					["active", "permanent"],
-					markers.materializedAt,
+					watermark.materializedAt,
 					workspace.ownIdentities,
 					workspace.shareCategories,
 				)
@@ -2272,7 +2321,7 @@ function renderM1PiWithMetadata(
 					db,
 					memPath,
 					["active", "permanent"],
-					markers.materializedAt,
+					watermark.materializedAt,
 				)
 		: [];
 	const eligibleMemoryIds = new Set(
@@ -2283,7 +2332,7 @@ function renderM1PiWithMetadata(
 				db,
 				projectPath: memPath,
 				workspace,
-				afterId: markers.maxMemoryMutationId,
+				afterId: watermark.maxMemoryMutationId,
 				renderedMemoryIds,
 				eligibleMemoryIds,
 			})
@@ -2294,7 +2343,7 @@ function renderM1PiWithMetadata(
 		compartmentsOverride ?? getRenderableCompartmentsPi(db, state)
 	).filter(
 		(compartment) =>
-			compartment.sequence > markers.maxCompartmentSeq &&
+			compartment.sequence > watermark.maxCompartmentSeq &&
 			!isNoContentCompartment(compartment),
 	);
 	if (newCompartments.length > 0) {
@@ -2308,7 +2357,7 @@ function renderM1PiWithMetadata(
 	const forcedMemoryIds = new Set(memoryUpdates.forcedMemoryIds);
 	const newMemories = eligibleMemories.filter(
 		(memory) =>
-			memory.id > markers.maxMemoryId && !forcedMemoryIds.has(memory.id),
+			memory.id > watermark.maxMemoryId && !forcedMemoryIds.has(memory.id),
 	);
 	// Trim ordinary new memories to 25% of the budget, but always include eligible
 	// memories referenced by a supersede operation. Such a replacement may have an
@@ -2350,7 +2399,7 @@ function renderM1PiWithMetadata(
 			?.projectUserProfileVersion ?? 0;
 	if (
 		state.memoryEnabled !== false &&
-		currentUserProfileVersion !== markers.projectUserProfileVersion
+		currentUserProfileVersion !== watermark.projectUserProfileVersion
 	) {
 		const profileBudget =
 			state.userProfileBudgetTokens ?? DEFAULT_USER_PROFILE_BUDGET_TOKENS;
@@ -2366,20 +2415,75 @@ function renderM1PiWithMetadata(
 		if (profileBlock) sections.push(profileBlock);
 	}
 
+	const memoryIds = [...new Set(deltaMemories.map((memory) => memory.id))];
 	if (sections.length === 0) {
-		return {
-			text: PI_M1_PLACEHOLDER,
-			memoryUpdateCount: memoryUpdates.count,
-		};
+		return volatileMode
+			? // The volatile has no placeholder duty (plugin parity): the empty
+				// segment is the absorbed state, served as no tail at all.
+				{ text: "", memoryUpdateCount: memoryUpdates.count, memoryIds }
+			: {
+					text: PI_M1_PLACEHOLDER,
+					memoryUpdateCount: memoryUpdates.count,
+					memoryIds,
+				};
 	}
 	// Join with "\n" (single newline) to match OpenCode renderM1 exactly — the
 	// m[1] delta bytes must be identical across harnesses.
+	const joined = sections.join("\n");
 	return {
-		text: state.compactionOff
-			? `<knowledge-updates>\n${sections.join("\n")}\n</knowledge-updates>`
-			: `<session-history-since>\n${sections.join("\n")}\n</session-history-since>`,
+		text: volatileMode
+			? `<session-history-since>\n${joined}\n</session-history-since>`
+			: state.compactionOff
+				? `<knowledge-updates>\n${joined}\n</knowledge-updates>`
+				: `<session-history-since>\n${joined}\n</session-history-since>`,
 		memoryUpdateCount: memoryUpdates.count,
+		memoryIds,
 	};
+}
+
+function renderM1PiWithMetadata(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	markers: PiM0SnapshotMarkers,
+	renderedMemoryIds: readonly number[],
+	// The compartment set the CALLER will use to advance the persisted trim
+	// boundary. When provided, the new-compartments filter renders from this
+	// exact set instead of a fresh live read — so a compartment can never be
+	// rendered into m[1] while the boundary advances from a different (older)
+	// snapshot, which would leave its raw messages in the tail too (duplication).
+	// Omitted by callers that don't advance the boundary (e.g. renderM1Pi probe).
+	compartmentsOverride?: readonly PiCompartment[],
+): RenderM1PiResult {
+	return renderM1PiCore(
+		state,
+		db,
+		markers,
+		renderedMemoryIds,
+		compartmentsOverride,
+		false,
+	);
+}
+
+/**
+ * The volatile-segment producer (Unit 7, plugin Unit 2 mirror): the delta
+ * classes beyond the CACHED watermark — memory-updates, new-compartments,
+ * new-memories, new-user-profile. Callers pass the cached row's markers, never
+ * current ones; empty renders "" (no placeholder duty).
+ */
+export function renderM1PiVolatileSegment(
+	state: PiM0M1State,
+	db: ContextDatabase,
+	watermark: PiVolatileWatermark,
+	renderedMemoryIds: readonly number[],
+): RenderM1PiResult {
+	return renderM1PiCore(
+		state,
+		db,
+		watermark,
+		renderedMemoryIds,
+		undefined,
+		true,
+	);
 }
 
 export function renderM1Pi(

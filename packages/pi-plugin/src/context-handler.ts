@@ -327,6 +327,7 @@ import {
 	replayStrippedInlineThinkingPi,
 	stripInlineThinkingPi,
 } from "./reasoning-replay-pi";
+import { recomputeRegionVolatileSegmentPi } from "./region-volatile-pi";
 import { capturePiServedArray } from "./served-array-ledger";
 import { stripPiDroppedPlaceholderMessages } from "./strip-placeholders-pi";
 import { stripPiProcessedImages } from "./strip-processed-images-pi";
@@ -5765,7 +5766,56 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 				publishedM1RefreshedThisPass ||
 				(canConsumeDeferredLate && deferredHistoryWasPendingAtPassStart)),
 	};
-	const isCacheBustingPass = hasReclaimRide(rideSignals);
+	// Unit 7 (plugin Unit 2 Task 1 mirror): the volatile delta segment
+	// recomputes only on a pass that already holds the bust permission; every
+	// other pass serves the stored bytes verbatim (the serve site is a pure
+	// decode). Four closures mirror the plugin's demotion-gap shape: the
+	// deferred-queue consumer forces absorb at the consuming boundary (the
+	// request only schedules); this recompute — the one post-fold mutation
+	// that rewrites served bytes — widens the ONE mutation permission below;
+	// contention-exhausted passes skip it; and when the fold executed this
+	// pass the fold-row persist already absorbed the segment in the fold
+	// transaction. Bust authority stays with the window manager: the
+	// backstop's fold request never opens a gate here.
+	const volatileRecomputeAllowed =
+		(args.schedulerDecision === "execute" ||
+			rideSignals.hardFold ||
+			rideSignals.force ||
+			hasPendingMaterializeSignal ||
+			rideSignals.publishedHistory ||
+			args.forceMaterialization === true) &&
+		// Contention-exhausted pass: the fold aborted, so this pass replays
+		// every persisted byte unchanged — region and segment alike.
+		!prefixPreflightContended;
+	let volatileRewroteServedBytes = false;
+	if (volatileRecomputeAllowed && !foldExecutedThisPass && piM0State) {
+		try {
+			const volatileRendered = recomputeRegionVolatileSegmentPi({
+				db: args.db,
+				sessionId: args.sessionId,
+				meta: args.sessionMeta,
+				state: piM0State,
+				onFoldRequest: (reason) => {
+					deferredMaterializationSessions.add(args.sessionId);
+					sessionLog(
+						args.sessionId,
+						`region-volatile fold requested reason=${reason}`,
+					);
+				},
+			});
+			volatileRewroteServedBytes = volatileRendered !== null;
+		} catch (error) {
+			// The segment is additive carriage: a failed recompute leaves the
+			// previously stored bytes served — never fail the pass for it.
+			sessionLog(
+				args.sessionId,
+				"region-volatile recompute failed (ignored):",
+				error,
+			);
+		}
+	}
+	const isCacheBustingPass =
+		hasReclaimRide(rideSignals) || volatileRewroteServedBytes;
 	const publishedWorkDrainAllowed = isCacheBustingPass;
 	// System-origin reclaim (queued drops, the sweeper, heuristics) may only
 	// ride a pass that actually rewrites served bytes. A consumed deferred-
@@ -5779,7 +5829,8 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		rideSignals.force ||
 		hasPendingMaterializeSignal ||
 		rideSignals.publishedHistory ||
-		(deferredMaterializeEligible && prefixPreflightContended);
+		(deferredMaterializeEligible && prefixPreflightContended) ||
+		volatileRewroteServedBytes;
 	const usesTokenProtection =
 		args.protectedTokenTierOverrides !== undefined ||
 		args.protectedTokens !== undefined;

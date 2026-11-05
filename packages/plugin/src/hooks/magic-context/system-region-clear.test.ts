@@ -177,6 +177,10 @@ const STATIC_SET_WRITERS: ReadonlyMap<string, string> = new Map([
         "hooks/magic-context/region-volatile.ts",
         "bust-lane hide-filter accounting merge (memory_block_count/ids only; never region columns) — pinned by the Unit 2 volatile census",
     ],
+    [
+        "pi/region-volatile-pi.ts",
+        "Pi volatile carrier (Unit 7 mirror): bust-lane hide-filter accounting merge (memory_block_count/ids only; never region columns) — pinned by the Unit 7 volatile census",
+    ],
     ["hooks/magic-context/note-nudger.ts", "note columns (static)"],
     [
         "pi/inject-compartments-pi.ts",

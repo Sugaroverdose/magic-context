@@ -98,6 +98,10 @@ const ALLOWED_READERS: ReadonlyMap<string, string> = new Map([
 		"fold module: installs via the rotation funnel inside the boundary transaction (§23 D4); head-lane row reader nulls region rows; trim uses the fold-co-resident boundary (D6)",
 	],
 	[
+		"region-volatile-pi.ts",
+		"Unit 7 volatile carrier: the bust-lane recompute reads the CACHED marker columns off the region row's meta (watermark operands only — never current data) and refuses an undecodable region; writes route through the receipted writeRegionVolatile + the memory_block accounting update",
+	],
+	[
 		"system-prompt.ts",
 		"serve path: appends the funnel-decoded region after the host bytes in the watched system channel; hash covers host bytes only (§23 D2/D3); corrupt rows declined by name",
 	],
@@ -171,6 +175,59 @@ describe("pi region contract: named-member census (stage P / P2)", () => {
 		}
 		return holders;
 	}
+
+	// Unit 7 L0 mirror (plugin system-region-producers holder-set form, G1
+	// shape): the Pi codec's volatile entries have exactly the named holders —
+	// any occurrence outside the definition file must name its holder,
+	// whatever the syntax (alias/rebind class). The carrier is a Pi COPY, so
+	// these are Pi names; the shared writeRegionVolatile accessor is pinned by
+	// the plugin-side census.
+	it("the volatile carrier entries have only named holders (Unit 7 L0 mirror)", () => {
+		const VOLATILE_ENTRIES_PI = [
+			{
+				name: "recomputeRegionVolatileSegmentPi",
+				definition: "region-volatile-pi.ts",
+				blessedHolders: ["context-handler.ts"],
+			},
+			{
+				name: "serveRegionVolatilePi",
+				definition: "region-volatile-pi.ts",
+				blessedHolders: ["system-prompt.ts"],
+			},
+			{
+				name: "decodeRegionVolatileBytes",
+				definition: "region-volatile-pi.ts",
+				blessedHolders: [],
+			},
+			{
+				name: "renderM1PiVolatileSegment",
+				definition: "inject-compartments-pi.ts",
+				blessedHolders: ["region-volatile-pi.ts"],
+			},
+		] as const;
+		const files = walkPiCensusZones().filter(
+			({ rel }) => !rel.endsWith(".test.ts"),
+		);
+		for (const entry of VOLATILE_ENTRIES_PI) {
+			const bare = new RegExp(`\\b${entry.name}\\b`);
+			const call = new RegExp(`\\b${entry.name}\\s*\\(`);
+			const holders: string[] = [];
+			const callers: string[] = [];
+			for (const { rel, full } of files) {
+				if (rel === entry.definition) continue;
+				const text = readFileSync(full, "utf8");
+				if (!bare.test(text)) continue;
+				holders.push(rel);
+				if (call.test(text)) callers.push(rel);
+			}
+			expect(holders.sort(), `${entry.name} holders`).toEqual(
+				[...entry.blessedHolders].sort(),
+			);
+			expect(callers.sort(), `${entry.name} callers`).toEqual(
+				[...entry.blessedHolders].sort(),
+			);
+		}
+	});
 
 	it("the region capability is decided exactly once at boot and threaded thereafter (F7, D1)", () => {
 		// §23 D1 is a boot-once law: a second capability holder — especially
