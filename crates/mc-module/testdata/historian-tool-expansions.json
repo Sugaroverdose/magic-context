@@ -33,6 +33,6 @@
     { "ordinal": 2, "id": "a2", "role": "assistant", "parts": [{ "type": "tool", "tool": "peer_send", "callID": "p1", "state": { "input": { "agent": "Ada", "message": "Check the parser." }, "output": "queued pmid=pm_1" } }, { "type": "text", "text": "I am coordinating." }, { "type": "tool", "tool": "ask", "callID": "q1", "state": { "input": { "question": "Which mode?", "options": ["Strict", "Fast"] }, "output": "Strict" } }, { "type": "tool", "tool": "read", "callID": "r1", "state": { "input": { "path": "src/index.ts" }, "output": "noisy source" } }] },
     { "ordinal": 3, "id": "a3", "role": "assistant", "parts": [{ "type": "tool", "tool": "read", "callID": "r2", "state": { "input": { "path": "README.md" } } }, { "type": "tool", "tool": "peer_send", "callID": "p2", "state": { "input": { "agent": "Lin", "message": "Review tests." } } }] }
   ],
-  "chunk": "[1] U: Delegate and ask about mode.\n[2-3] A: TC: PM to Ada: Check the parser. / I am coordinating. / TC: Asked: Which mode? [options: Strict / Fast]  → Strict / TC: read(README.md) / TC: PM to Lin: Review tests.",
+  "chunk": "[1] U: Delegate and ask about mode.\n[2-3] A: TC: PM to Ada: Check the parser. / I am coordinating. / TC: Asked: Which mode? [options: Strict / Fast] → Strict / TC: read(README.md) / TC: PM to Lin: Review tests.",
   "legacyChunk": "[1] U: Delegate and ask about mode.\n[2-3] A: I am coordinating. / TC: read(README.md) / TC: peer_send"
 }

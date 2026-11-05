@@ -3,6 +3,8 @@
 // the generated constant.
 export { COMPARTMENT_AGENT_SYSTEM_PROMPT } from "./historian-prompt.generated";
 
+import { historianWrapperClose, historianWrapperOpen } from "./historian-wrapper-tags";
+
 export const HISTORIAN_EDITOR_SYSTEM_PROMPT = `You are a historian editor for the magic-context system, refining a historian draft. The draft was produced by a first-pass historian and may contain noise — low-signal U: lines, redundant quotes across compartments, and weak preservation decisions.
 
 Your job is to clean the draft without changing its structure:
@@ -130,19 +132,19 @@ export function buildCompartmentAgentPrompt(inputs: CompartmentPromptInputs): st
     if (inputs.projectMemory) parts.push(inputs.projectMemory);
     if (inputs.extractionFree) {
         parts.push(
-            "<extraction>disabled</extraction>\nStructural recomp mode: emit compartments and <meta> only. Do NOT emit <facts>, <events>, <user_observations>, or <primer_candidates>.",
+            `${historianWrapperOpen("extraction")}disabled${historianWrapperClose("extraction")}\nStructural recomp mode: emit compartments and <meta> only. Do NOT emit <facts>, <events>, <user_observations>, or <primer_candidates>.`,
         );
     }
     if (inputs.memoryEnabled === false) {
         // Memory disabled → no fact store exists. Tell the historian to skip
         // the <facts> section so it spends its budget on compartments only.
         parts.push(
-            "<fact_extraction>disabled</fact_extraction>\nMemory is disabled for this project: do NOT emit a <facts> block. Produce compartments only.",
+            `${historianWrapperOpen("fact_extraction")}disabled${historianWrapperClose("fact_extraction")}\nMemory is disabled for this project: do NOT emit a <facts> block. Produce compartments only.`,
         );
     }
-    parts.push("<new_messages>");
+    parts.push(historianWrapperOpen("new_messages"));
     parts.push(inputs.inputSource);
-    parts.push("</new_messages>");
+    parts.push(historianWrapperClose("new_messages"));
     parts.push(HISTORIAN_TRANSCRIPT_GUARD);
     return parts.join("\n\n");
 }

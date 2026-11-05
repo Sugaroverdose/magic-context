@@ -7,6 +7,7 @@ import { COMMIT_VERB_PATTERN, createCommitHashExtractPattern } from "../../share
 import { OMO_INTERNAL_INITIATOR_MARKER } from "../../shared/internal-initiator-marker";
 import { log } from "../../shared/logger";
 import { isSystemDirective, removeSystemReminders } from "../../shared/system-directive";
+import { HISTORIAN_WRAPPER_TAGS } from "./historian-wrapper-tags";
 
 export interface SessionChunkLine {
     ordinal: number;
@@ -99,14 +100,18 @@ export function extractToolCallSummaries(parts: unknown[]): string[] {
             (input && typeof input.description === "string" && input.description) ||
             (metadata && typeof metadata.description === "string" && metadata.description);
         if (description) {
-            summaries.push(`TC: ${description}`);
+            summaries.push(`TC: ${sanitizeSpliceText(description)}`);
             continue;
         }
 
         // Fall back to tool_name(key_arg) for common tools
         const toolName = p.tool as string;
         const keyArg = extractKeyArg(toolName, input);
-        summaries.push(keyArg ? `TC: ${toolName}(${keyArg})` : `TC: ${toolName}`);
+        summaries.push(
+            keyArg
+                ? `TC: ${sanitizeSpliceText(toolName)}(${sanitizeSpliceText(keyArg)})`
+                : `TC: ${sanitizeSpliceText(toolName)}`,
+        );
     }
     return summaries;
 }
@@ -128,9 +133,23 @@ function extractKeyArg(_toolName: string, input: Record<string, unknown> | null)
     return null;
 }
 
-function truncateArg(value: string, maxLen = 60): string {
-    if (value.length <= maxLen) return value;
-    return `${value.slice(0, maxLen)}…`;
+export function truncateArg(value: string, maxLen = 60): string {
+    // Fold-then-truncate (order deliberately pinned; the measured protocol-breaking
+    // class is heredoc/multi-line key args — 4,368 of 80,692 production TC(keyArg)
+    // lines): fold + defang the WHOLE value first, then spend the visible 60-unit
+    // budget on collapsed text. Truncate-then-fold would keep a raw newline that
+    // sits inside the cap and still break the line protocol.
+    const folded = sanitizeSpliceText(value);
+    if (folded.length <= maxLen) return folded;
+    let cut = folded.slice(0, maxLen);
+    // Drop a trailing lone high surrogate so an astral character split by the
+    // 60-unit cap is excluded whole — byte-identical to the Rust twin
+    // (truncate_utf16 in boundary.rs), which cannot hold a lone surrogate and
+    // leaves the whole character out. Shared vectors pin this in
+    // truncate_vectors (historian-splice-sanitize-vectors.json).
+    const last = cut.charCodeAt(cut.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) cut = cut.slice(0, -1);
+    return `${cut}…`;
 }
 
 // Keep ai-tokenizer out of the eager module graph. Pi imports this module through
@@ -413,8 +432,51 @@ export function estimateTokens(text: string): number {
     }
 }
 
+// Builder-owned tokens in the line-based historian serialization. Pasted
+// content must never remain byte-identical to them: the defang inserts one
+// backslash before the terminating character (colon / closing bracket), which
+// breaks the literal without touching readability. Identity for any text that
+// contains none of the tokens; idempotent on its own output. The envelope set
+// is the single canonical wrapper-tag constant the builder itself emits —
+// historian-wrapper-tags.ts (Rust twin: historian_prompt.rs wrapper constants;
+// sanitizer twin: defang_splice_tokens in boundary.rs). Shared fixtures are
+// pinned in crates/mc-module/testdata/historian-splice-sanitize-vectors.json.
+const TURN_MARKER_TOKEN = /(\] (?:U|A|TC|M)):/g;
+// The media placeholder prefix is builder-exclusive (Rust lane renders
+// `[media:{kind} {type} {filename}]`; the TS lane emits no media lines): the
+// census treats it as a content token, so the defang family carries it too —
+// builder-exclusive tokens never survive inside pasted content.
+const MEDIA_TOKEN_PREFIX = /(\[media):/g;
+const ENVELOPE_TAG_TOKEN = new RegExp(
+    `(<\\/?${[...HISTORIAN_WRAPPER_TAGS]
+        .sort((a, b) => b.length - a.length)
+        .map((tag) => tag.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+        .join("|")})>`,
+    "g",
+);
+
+export function defangSpliceTokens(text: string): string {
+    return text
+        .replace(TURN_MARKER_TOKEN, "$1\\:")
+        .replace(MEDIA_TOKEN_PREFIX, "$1\\:")
+        .replace(ENVELOPE_TAG_TOKEN, "$1\\>");
+}
+
 export function normalizeText(text: string): string {
-    return text.replace(/\s+/g, " ").trim();
+    // Pinned fold set: JS \s (which includes U+FEFF) unioned with U+0085 NEL —
+    // the Rust twin enumerates the same set (is_splice_fold_whitespace in
+    // boundary.rs); neither class name is the contract, the shared vectors pin
+    // both characters.
+    return defangSpliceTokens(text.replace(/[\s\u0085]+/g, " ").trim());
+}
+
+/**
+ * The single sanitizer for every model-authored field spliced into a
+ * serialization line (TC descriptions, tool names, key args, expansions).
+ * Same whitespace semantics as normalizeText plus the builder-token defang.
+ */
+export function sanitizeSpliceText(text: string): string {
+    return normalizeText(text);
 }
 
 export function compactRole(role: string): string {
@@ -464,8 +526,12 @@ export function compactTextForSummary(
         .replace(/\s+([,.;:])/g, "$1")
         .trim();
 
+    // Removing hash tokens can manufacture a `] U:` adjacency that did not
+    // exist when the input was sanitized (`[7] <hash> U:` -> `[7]  U:` ->
+    // `[7] U:` after the space collapse), so the defang must run again on the
+    // stripped output. No-op when nothing forged a token.
     return {
-        text: withoutHashes.length > 0 ? withoutHashes : text,
+        text: withoutHashes.length > 0 ? defangSpliceTokens(withoutHashes) : text,
         commitHashes,
     };
 }

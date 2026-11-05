@@ -1,0 +1,17 @@
+# Harness run artifacts — repo convention: raw dumps are local state, never
+# source. Raw model calls (artifacts/calls/), stage-2 summaries and census
+# samples embed real host transcripts and stay local; regenerate with
+# `bun stage1-census.ts` (deterministic), `bun stage2-ab.ts` /
+# `bun stage3-forgery.ts` (idempotent by (promptHash, arm, variant)).
+# The committed files below are the mechanical evidence the report cites:
+# stage-2 drift/fact-audit rows and the synthetic stage-3 forgeries.
+*
+!stage2/
+!stage2/analysis.json
+!stage3/
+!stage3/analysis.json
+!stage3/chunks-forgery-desc-poison-v4.txt
+!stage3/chunks-forgery-heredoc-keyarg-v4.txt
+
+# keep the fence itself tracked
+!.gitignore

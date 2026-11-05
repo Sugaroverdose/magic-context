@@ -1,0 +1,929 @@
+[
+  {
+    "window": "ses_f8d5630e9ffe62EbC0BG9dkwZJ-23179-23583",
+    "classes": {
+      "keyArg-fold": 2,
+      "per-part-commits": 10,
+      "defang-envelope": 2,
+      "defang-marker": 10,
+      "other": 2
+    },
+    "diffLines": 26,
+    "chunkHashes": {
+      "unsanitized-r1": "39c9600d49af19e363cf5ae6b79e9eb3@r1",
+      "unsanitized-r2": "39c9600d49af19e363cf5ae6b79e9eb3@r2",
+      "sanitized": "d7c264bdb35bb3b6cc06e11a9f821635@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T20:50:52.478Z",
+      "unsanitized-r2": "2026-11-04T20:57:06.807Z",
+      "sanitized": "2026-11-04T20:52:37.281Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.9458972282871991,
+      "cross1": 0.9337567354573332,
+      "cross2": 0.959384575065658
+    },
+    "chunkFactAudit": {
+      "baseFacts": 1484,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 208,
+      "sanCount": 290,
+      "lostBySan": [
+        "/repeat-call",
+        "/master",
+        "/SOFT",
+        "/pays-at-boundary.",
+        "/boot-is-replay/",
+        "`scripts/*`",
+        "`BindIdentity`",
+        "`mc:system-region`",
+        "`systemRegionLane`",
+        "`executeSystemRegionRotation`",
+        "`sanitizeReasonToken`",
+        "`system_region`",
+        "`options.systemRegion?.enabled === true`",
+        "`transform-postprocess-phase.ts:2063`",
+        "`DELTA_TRIGGER_FIELDS`",
+        "`diff -rq`",
+        "`input 62–931 / read 123–150K`",
+        "`git fetch`",
+        "`ARCHITECTURE.md:21`",
+        "`mc:protected`",
+        "\"not a trigger\"",
+        "6903",
+        "7060",
+        "1550",
+        "2063",
+        "126,912",
+        "45.0",
+        "12.7",
+        "150K",
+        "23378",
+        "2610.31710",
+        "23379"
+      ],
+      "lostCount": 32,
+      "modelNoiseFloor": 73,
+      "gainedBySan": [
+        "/Users/Sugaroverdose/...",
+        "/Users/mc/...",
+        "/lossy/unrecoverable",
+        "/REMORY",
+        "/already-displayed",
+        "/opencode",
+        "/260-WorkBuddyBench-tasks",
+        "/pending-ops-gc",
+        "/colons/quotes",
+        "/key_arg/name",
+        "/historian-splice-sanitize",
+        "/core/src/session/compaction.ts",
+        "/memory",
+        "/new_messages",
+        "/inline-script",
+        "/erase",
+        "/unresolvable",
+        "/glm-5.3-flash-free",
+        "/render",
+        "`features/...`",
+        "`options.systemRegion?.enabled`",
+        "`DELTA_TRIGGERS_FIELDS`",
+        "`upgrade_state`",
+        "`/Users/Sugaroverdose/...`",
+        "`/Users/mc/...`",
+        "`, and the user's \"use codegraph already\" nudge): `",
+        "`fix/historian-splice-sanitize`",
+        "`prj_8dfc57e6910be859`",
+        "`packages/core/src/session/compaction.ts`",
+        "`ffe6fed`",
+        "`not_planned`",
+        "`SECURITY.md`",
+        "`input_source`",
+        "`</new_messages>`",
+        "`escape_xml_content`",
+        "`TC: tool(keyArg)`",
+        "`truncateArg`",
+        "`truncate_arg`",
+        "`truncate_utf16(value, 60)`",
+        "`package main`"
+      ],
+      "gainedCount": 121
+    }
+  },
+  {
+    "window": "ses_f868f59a5ffeXl5KrFHuC2F0Wc-12945-13987",
+    "classes": {
+      "per-part-commits": 13,
+      "other": 4,
+      "keyArg-fold": 5,
+      "tc-hash-preservation": 1
+    },
+    "diffLines": 23,
+    "chunkHashes": {
+      "unsanitized-r1": "53b0ef47933c55aa4016f51304a293b0@r1",
+      "unsanitized-r2": "53b0ef47933c55aa4016f51304a293b0@r2",
+      "sanitized": "e54eaee1a3740313de2f17727f845ad0@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T20:58:39.684Z",
+      "unsanitized-r2": "2026-11-04T21:00:44.447Z",
+      "sanitized": "2026-11-04T21:02:22.980Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.885519806109728,
+      "cross1": 0.9166517325704571,
+      "cross2": 0.8845759918276632
+    },
+    "chunkFactAudit": {
+      "baseFacts": 803,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 101,
+      "sanCount": 172,
+      "lostBySan": [
+        "/2603fe0",
+        "0217520",
+        "\"lagging behind 3090\"",
+        "1.63",
+        "0217520",
+        "12.8"
+      ],
+      "lostCount": 6,
+      "modelNoiseFloor": 45,
+      "gainedBySan": [
+        "/below",
+        "/pair",
+        "/17.7",
+        "/DEPTH6",
+        "/v17_producer_split_budget.md",
+        "/7.49/README.",
+        "/reported",
+        "/1000",
+        "/note",
+        "`#else`",
+        "`NINFER_SM80_V10AF`",
+        "`(a_row & 7) == (lane & 7)`",
+        "`col ^ x`",
+        "`v16_addr_equiv_test`",
+        "`ops::target_topk_logprobs`",
+        "`Program::causal_score(..., ScoreTopK*)`",
+        "`apps/kl_probe`",
+        "`tools/kl_report.py`",
+        "`__shared__`",
+        "`target_logprobs_kernel<256>`",
+        "`--kv-dtype bf16`",
+        "`15248 -- ALL EQUAL`",
+        "`kl_topk_merge_test`",
+        "`1000/1000 exact`",
+        "cfcd8e4",
+        "a4c43ea",
+        "6b14709",
+        "23f0416",
+        "1b57801",
+        "5174eba",
+        "\"7.48 Hungary session: v10a GA100 validation + serve ladder\"",
+        "\"3090/V100 competitive calibration and stale-number correction\"",
+        "\"i'm talking about prefill since we only work on it right now\"",
+        "\"if we talk about ninfer-v100 than their numbers are around 1100 prefil\"",
+        "\"~2× per-card\"",
+        "\" was a wrong-denominator artifact (36.6% against their actual fp16-acc peak). U: \"",
+        "\"Chunk-4096 root cause and v15 bundle prep\"",
+        "\"investigation,design\"",
+        "\"maybe add more changes to test more stuff at once... than running every small change full-prepare cycle\"",
+        "\"v15 bundle session (7.49): four gates in one prepare cycle\""
+      ],
+      "gainedCount": 73
+    }
+  },
+  {
+    "window": "ses_f8d5630e9ffe62EbC0BG9dkwZJ-23584-23747",
+    "classes": {
+      "other": 5,
+      "per-part-commits": 1,
+      "defang-media": 2,
+      "defang-marker": 1
+    },
+    "diffLines": 9,
+    "chunkHashes": {
+      "unsanitized-r1": "c1b82ff40c6d3f4168aee7579d91f6ea@r1",
+      "unsanitized-r2": "c1b82ff40c6d3f4168aee7579d91f6ea@r2",
+      "sanitized": "fa5393d33a14457349070dbcf059478e@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:03:58.054Z",
+      "unsanitized-r2": "2026-11-04T21:05:44.598Z",
+      "sanitized": "2026-11-04T21:07:20.603Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.9207499167668155,
+      "cross1": 0.9506216780530502,
+      "cross2": 0.9295607019643222
+    },
+    "chunkFactAudit": {
+      "baseFacts": 632,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 205,
+      "sanCount": 172,
+      "lostBySan": [
+        "`cond ? sanitize(a) : raw`",
+        "\"amend after battery\"",
+        "\"Dispatched natural-output test for splice sanitizer\"",
+        "7079",
+        "7085",
+        "1.20",
+        "23726",
+        "23727"
+      ],
+      "lostCount": 8,
+      "modelNoiseFloor": 118,
+      "gainedBySan": [
+        "/window.",
+        "/threshold.",
+        "/opportunistic",
+        "/I9-adjacent",
+        "/strip/re-defang",
+        "/status/served",
+        "/region-era",
+        "`[media\\:…] {filename}]`",
+        "`unresolved`",
+        "`software-agent-sdk`",
+        "`historian_chunk.rs:1576-1577`",
+        "`830d82c0`",
+        "`media_type`",
+        "`8776e88f`",
+        "`{text, modelText}`",
+        "`ChunkPart { text, model_text }`",
+        "`af50ec8e`",
+        "`withdraw.ts`",
+        "830d82c0",
+        "8776e88f",
+        "af50ec8e",
+        "\"Converged regret-withdraw review loop\"",
+        "\"Recorded arc-detection findings; caught research-agent fabrication\"",
+        "\"Ran splice-sanitizer adversarial review loop R1 through R3\"",
+        "\" + sanitize(a) + raw`); runtime-split tokens (`\"",
+        "\"Compared ReFold to MC; took DCP and reasoning-redundancy corrections\"",
+        "\"Closed splice-sanitizer loop and committed literature map adjudication\"",
+        "\"Pinned subagent attribution rule; dispatched natural sanitizer test\"",
+        "\"infra,investigation\"",
+        "\"Explained regret implementation; shelved Rust renderer; opened from-scratch discussion\"",
+        "\"declare region the only lane and let the rest die by subtraction\"",
+        "\"declare region the only lane, let rest die by subtraction\"",
+        "1576",
+        "1577",
+        "2665",
+        "1573",
+        "1,983",
+        "23697",
+        "8,700"
+      ],
+      "gainedCount": 39
+    }
+  },
+  {
+    "window": "ses_f868f59a5ffeXl5KrFHuC2F0Wc-11733-12944",
+    "classes": {
+      "keyArg-fold": 4,
+      "per-part-commits": 8,
+      "other": 4,
+      "tc-hash-preservation": 1,
+      "defang-envelope": 2
+    },
+    "diffLines": 19,
+    "chunkHashes": {
+      "unsanitized-r1": "3a864d138731c7417f6b64a8bcbae2d9@r1",
+      "unsanitized-r2": "3a864d138731c7417f6b64a8bcbae2d9@r2",
+      "sanitized": "0621266553bf4b0c526c68bf72e94616@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:09:10.390Z",
+      "unsanitized-r2": "2026-11-04T21:10:48.898Z",
+      "sanitized": "2026-11-04T21:12:46.505Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.9467677569160686,
+      "cross1": 0.9718760673863567,
+      "cross2": 0.94770566447584
+    },
+    "chunkFactAudit": {
+      "baseFacts": 770,
+      "lostCount": 3,
+      "lost": [
+        "`git show --stat`",
+        "` (sm80-port, HEAD ). READ FIRST: `",
+        "\"artifact is STATIC V2 rev \""
+      ]
+    },
+    "summaryFactAudit": {
+      "unsanCount": 113,
+      "sanCount": 104,
+      "lostBySan": [
+        "/data",
+        "/vision/mtp/dflash2",
+        "`nvfp4_sm80_a16_mma_kernel<BM16>`",
+        "\"'v3 only ever exists as the on-box upgrade output' no it is not, you downloading older hash specifically by-yourself\"",
+        "\"STATIC V2, never substitute\""
+      ],
+      "lostCount": 5,
+      "modelNoiseFloor": 59,
+      "gainedBySan": [
+        "/7.43",
+        "/7.43.",
+        "`nvfp4_sm80_a16_mma_kernel&lt;BM16&gt;`",
+        "`resolve/&lt;head&gt;/qwen3_8_27b_nvfp4.ninfer`",
+        "9877580",
+        "\"Decode-utilization premise corrected: 17% of wire, not 84%\"",
+        "\"wire-bound\"",
+        "\"v11 raw-stream decode GEMV built and serve-validated (+10.7% at zero bytes)\"",
+        "\"feature,infra\"",
+        "\"Artifact lineage correction: HF HEAD ships v3, not v2\"",
+        "\"HF publishes only the v2-format file; v3 only ever exists as the on-box upgrade output\"",
+        "\"v3 only ever exists as the on-box upgrade output\\\"",
+        "\"artifact is STATIC V2 rev 5290713, never substitute\"",
+        "\"STATIC V2 never substitute\"",
+        "\"v2-only, never substitute\"",
+        "\"VRAM-goal confrontation and the D1 raw-staging gate that decided the survivor layout\"",
+        "\"design,investigation,infra\"",
+        "\"whole this run should've been about removing vram overhead\"",
+        "\") and used the user's 5090 reference (\"",
+        "132.9",
+        "7.43",
+        "12129",
+        "9877580"
+      ],
+      "gainedCount": 23
+    }
+  },
+  {
+    "window": "ses_f8d5630e9ffe62EbC0BG9dkwZJ-21090-22101",
+    "classes": {
+      "per-part-commits": 7,
+      "keyArg-fold": 7,
+      "defang-envelope": 2,
+      "tc-hash-preservation": 1,
+      "other": 1
+    },
+    "diffLines": 18,
+    "chunkHashes": {
+      "unsanitized-r1": "aed8a1b8d7774c99dfb987a8603c2071@r1",
+      "unsanitized-r2": "aed8a1b8d7774c99dfb987a8603c2071@r2",
+      "sanitized": "e5004813f355fb32e477e0964168cacb@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:14:38.784Z",
+      "unsanitized-r2": "2026-11-04T21:16:14.634Z",
+      "sanitized": "2026-11-04T21:17:58.014Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.8999940632817824,
+      "cross1": 0.9243798542288303,
+      "cross2": 0.9722431912245125
+    },
+    "chunkFactAudit": {
+      "baseFacts": 1194,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 131,
+      "sanCount": 167,
+      "lostBySan": [
+        "`providerID`",
+        "`rematerialized=…, reason=cache_hit, lkg=mem|disk|absent`"
+      ],
+      "lostCount": 2,
+      "modelNoiseFloor": 46,
+      "gainedBySan": [
+        "/tables.",
+        "/research/fpe-source-gated-drop-modes.md",
+        "/carrier",
+        "`eeafa6327`",
+        "`c1d86a64c`",
+        "`docs/research/fpe-source-gated-drop-modes.md`",
+        "` so the emptied drop escaped the persisted-neutralization set; `",
+        "` must register `",
+        "`lkg-slot.ts:408`",
+        "`reason=cache_hit`",
+        "`Connection: close`",
+        "`[dropped §N§]`",
+        "`df87b2286`",
+        "`transform.rs:15576`",
+        "` in TS; port owed with a cargo gate. Then the #763 closing comment: `",
+        "` proved the Oct 23 \"posted\" record was FALSE (never posted, `",
+        "`transform.ts:2994-2995`",
+        "`bustedThisPass && !captured → dropSlot(sessionId, \"lkg_refresh_declined\")`",
+        "`dropSlot`",
+        "`lkg-slot.ts:560-566`",
+        "`lkg-slot.ts:458`",
+        "`\"[content omitted]\"`",
+        "`step-start + reasoning + text(\"[content omitted]\") + tool + step-finish`",
+        "eeafa6327",
+        "df87b2286",
+        "\"R11 — emptied dropped-message text, shape frozen per tag\"",
+        "\"feature,bug,docs\"",
+        "\"` so the emptied drop escaped the persisted-neutralization set; `isDroppedPlaceholder` must register `\"",
+        "\"LKG telemetry honesty fix + infernix keepalive re-check\"",
+        "\"Misleading-docs audit and the #763 closing comment (false posting claim)\"",
+        "\"1. what about concerns about misleading readme, etc?\"",
+        "\"empty sentinels only for exact `anthropic`; Rust uses the same exact-equality gate\"",
+        "\"after that, re-read maintainer comment and make sure you covered all of his concerns\"",
+        "\"oh damn, those maintainer concerns was for other sesssion, forget about them\"",
+        "\"ruling pending\"",
+        "\")` (`transform.rs:15576`) — station renders `[dropped]` in Rust vs `\"",
+        "\"` in TS; port owed with a cargo gate. Then the #763 closing comment: `gh api` proved the Oct 23 \"",
+        "\"24 MiB LKG cap theory retracted — the 429 MB figure was a raw-row reconstruction\"",
+        "\"cap collides with recommended config\"",
+        "\"served prefix\""
+      ],
+      "gainedCount": 45
+    }
+  },
+  {
+    "window": "ses_f868f59a5ffeXl5KrFHuC2F0Wc-13988-14937",
+    "classes": {
+      "other": 3,
+      "per-part-commits": 12,
+      "defang-envelope": 2,
+      "keyArg-fold": 1
+    },
+    "diffLines": 18,
+    "chunkHashes": {
+      "unsanitized-r1": "129f51ea70d2e26ef9662bc6152eaa11@r1",
+      "unsanitized-r2": "129f51ea70d2e26ef9662bc6152eaa11@r2",
+      "sanitized": "1bb8faae17cb503a85d40077e8e287aa@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:19:48.032Z",
+      "unsanitized-r2": "2026-11-04T21:21:23.945Z",
+      "sanitized": "2026-11-04T21:23:09.287Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.9598003378516885,
+      "cross1": 0.9463527041195147,
+      "cross2": 0.945014048583683
+    },
+    "chunkFactAudit": {
+      "baseFacts": 847,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 132,
+      "sanCount": 102,
+      "lostBySan": [
+        "/1.706/1.630",
+        "/gdn-in/linear_add",
+        "/slot",
+        "6ad0accd",
+        "6ad0c340",
+        "\"6.3 GiB marker code\"",
+        "\"does not exist.\"",
+        "1.39",
+        "1.66",
+        "1.57",
+        "1.05",
+        "1.699",
+        "1.706",
+        "1.630",
+        "75.9",
+        "14336",
+        "36.9",
+        "1410",
+        "2.00",
+        "14127"
+      ],
+      "lostCount": 20,
+      "modelNoiseFloor": 51,
+      "gainedBySan": [
+        "/kl_corpus.txt",
+        "/instantiate",
+        "/token.",
+        "415185a",
+        "\"7.54: v19 fp8 BM256 gate on CMP170HX + plan wiring\"",
+        "\"investigation,feature\"",
+        "\"D3 marker code: the 7.50 phantom audit was wrong\"",
+        "\"the 6.3 GiB marker code\"",
+        "\"exists, never executed — the run = serve boot with the env\"",
+        "\"does not exist\"",
+        "\"write the D3 marker code\"",
+        "\"cmpunlocker card assessment + A100/CMP rate reconciliation\"",
+        "\"A100 nearly 50% faster in prefill\"",
+        "\"that's spec numbers per datatype for A100\"",
+        "\"70 SM latest unlocker gives 4 more SM's\"",
+        "\"7.55 serve bundle: D3 closed — the 6.3 GiB named\"",
+        "\"investigation,infra\"",
+        "\"Reconciling 1.28k vs 1.23k: cross-box float and the share-model miss\"",
+        "14125",
+        "23.7",
+        "4.25",
+        "14335",
+        "14353",
+        "1.23",
+        "11.90",
+        "7.48",
+        "25.5"
+      ],
+      "gainedCount": 27
+    }
+  },
+  {
+    "window": "ses_ec63be9b0ffe1M64dM19KolQrE-1-697",
+    "classes": {
+      "keyArg-fold": 18
+    },
+    "diffLines": 18,
+    "chunkHashes": {
+      "unsanitized-r1": "55cbd3465b388191145d482c2a8b48e4@r1",
+      "unsanitized-r2": "55cbd3465b388191145d482c2a8b48e4@r2",
+      "sanitized": "ea688d86f9efef075a99db57ce49be99@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:24:50.257Z",
+      "unsanitized-r2": "2026-11-04T21:26:17.901Z",
+      "sanitized": "2026-11-04T21:27:57.635Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.7961275550147162,
+      "cross1": 0.8758907758395036,
+      "cross2": 0.8803469586693847
+    },
+    "chunkFactAudit": {
+      "baseFacts": 949,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 68,
+      "sanCount": 160,
+      "lostBySan": [
+        "/get/delete",
+        "/probe",
+        "ba34c39",
+        "ee1befd",
+        "\"reads survive, writes refuse\"",
+        "\"out of the question\""
+      ],
+      "lostCount": 6,
+      "modelNoiseFloor": 38,
+      "gainedBySan": [
+        "/no-go",
+        "/Mimir.",
+        "/ldapsearch",
+        "/electricity",
+        "//127.0.0.1",
+        "/cron",
+        "/25.12",
+        "/vehicle",
+        "/edge/nginx.conf",
+        "/vehicle/alloy.alloy",
+        "/vehicle/daemon.json",
+        "/vehicle/README.md",
+        "/opt/grafana/deploy/...",
+        "/opt/grafana/deploy/.",
+        "/opt/grafana/deploy",
+        "//10.7.53.20",
+        "/opt/grafana/loki-compactor",
+        "/console/",
+        "`deploy/dev/compose.yaml`",
+        "` → later corrected to `",
+        "`, label exactly `",
+        "` → converted both composes to bind dirs under `",
+        "`U: we do not want to push whole project there, only specifically needed files`",
+        "`mountpoint /data/silo0 && ...`",
+        "`/opt/grafana/<service>`",
+        "`/data/silo0`",
+        "`U: we'll also need to add ldap access to dashboards and maybe even silo`",
+        "`U: \"humans _may_ work\" it does work, it was tested`",
+        "`deploy/ldap/ldap-mapping.env`",
+        "`deploy/ldap/grafana-ldap.toml`",
+        "`internal/config/identity/ldap/config.go`",
+        "`[[servers]]`",
+        "`tls_skip_verify=on`",
+        "`OU=Accounts,DC=corp,DC=wi-fi,DC=ru`",
+        "`common.storage.backend`",
+        "`storage_config.aws`",
+        "`ingester.wal`",
+        "`-verify-config`",
+        "`-print-config-stderr`",
+        "`out_of_order_time_window: 0s`"
+      ],
+      "gainedCount": 100
+    }
+  },
+  {
+    "window": "ses_f868f59a5ffeXl5KrFHuC2F0Wc-9940-10730",
+    "classes": {
+      "other": 7,
+      "per-part-commits": 2,
+      "tc-hash-preservation": 2,
+      "keyArg-fold": 5
+    },
+    "diffLines": 16,
+    "chunkHashes": {
+      "unsanitized-r1": "2a732ea635c4fac31c0cb171bd9c62a8@r1",
+      "unsanitized-r2": "2a732ea635c4fac31c0cb171bd9c62a8@r2",
+      "sanitized": "664b1476591f033fa6a29203d3316c5d@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:30:06.363Z",
+      "unsanitized-r2": "2026-11-04T21:31:53.656Z",
+      "sanitized": "2026-11-04T21:33:37.624Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.8805084847113148,
+      "cross1": 0.9117397416468979,
+      "cross2": 0.8959108881557035
+    },
+    "chunkFactAudit": {
+      "baseFacts": 861,
+      "lostCount": 1,
+      "lost": [
+        "\"feat(nvfp4):...\""
+      ]
+    },
+    "summaryFactAudit": {
+      "unsanCount": 105,
+      "sanCount": 192,
+      "lostBySan": [
+        "`billed-cost = raw × ratio`",
+        "1.34",
+        "1462"
+      ],
+      "lostCount": 3,
+      "modelNoiseFloor": 58,
+      "gainedBySan": [
+        "/17408/6144",
+        "/int8/v4",
+        "/0.80",
+        "/forward",
+        "/issue",
+        "/nsys",
+        "/v4_ablation.cu",
+        "/power",
+        "/prepack",
+        "/Marlin",
+        "/loop",
+        "/grep",
+        "/llama.cpp",
+        "`n%64==0`",
+        "`ragged-k48`",
+        "`68fa3b8efe83b162bd8b2f86`",
+        "`store_vec`",
+        "`load_vec`",
+        "` formula had one extra `",
+        "`tools/v4_ablation.cu`",
+        "`__half*`",
+        "`const std::uint8_t*`",
+        "`(s·a)·(t·b) = (s·t)·(a·b)`",
+        "`| uniq`",
+        "`grep <key>`",
+        "`--warning=no-unknown-keyword`",
+        "`block128*8 + sub`",
+        "`2*group`",
+        "2daf87b",
+        "3a9c2d0",
+        "b902310",
+        "a3d5596",
+        "fa0f6fd",
+        "8c19a4d",
+        "6361111",
+        "d38c7c0",
+        "7a3d077",
+        "fa95f23",
+        "\"v3 int8 GEMM box session: instruction rates settled, gate fails at 1.35×\"",
+        "\"investigation,bug,infra\""
+      ],
+      "gainedCount": 92
+    }
+  },
+  {
+    "window": "ses_f8d5630e9ffe62EbC0BG9dkwZJ-14514-15201",
+    "classes": {
+      "per-part-commits": 4,
+      "keyArg-fold": 11
+    },
+    "diffLines": 15,
+    "chunkHashes": {
+      "unsanitized-r1": "86927a1d54683b0d6271710baa374f28@r1",
+      "unsanitized-r2": "86927a1d54683b0d6271710baa374f28@r2",
+      "sanitized": "49ad8fb7f1f5409c70ed4f9deb420263@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:35:26.988Z",
+      "unsanitized-r2": "2026-11-04T21:37:04.281Z",
+      "sanitized": "2026-11-04T21:38:54.971Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.9612658693973372,
+      "cross1": 0.9652911189362382,
+      "cross2": 0.9590712670874165
+    },
+    "chunkFactAudit": {
+      "baseFacts": 970,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 99,
+      "sanCount": 107,
+      "lostBySan": [
+        "/render/lookup",
+        "/Pi/transform",
+        "/registry",
+        "/rebuild",
+        "`§N§`",
+        "\"never run live\""
+      ],
+      "lostCount": 6,
+      "modelNoiseFloor": 38,
+      "gainedBySan": [
+        "/month",
+        "/Pi-pin/transform-digest",
+        "/installed",
+        "/null-slots",
+        "`fpeGateLegacy`",
+        "`c3734de81`",
+        "`70dfeb9`",
+        "`journal_mode=wal`",
+        "`mason:`",
+        "`Alfonso`",
+        "`drop_mode=skeleton_real`",
+        "`ctx_expand(tag=N)`",
+        "`{\"note\":…}`",
+        "\"FPE lineage dispute resolved by rollback to the v1 soup codec\"",
+        "\"investigation,bug,release\"",
+        "\"never ran live\"",
+        "\"Explorer-wave adjudication and MC upstream change provenance\"",
+        "\"fragmentation\"",
+        "\"Keep issue 713 production gating... unchanged\"",
+        "\"ctx_reduce Rev 6 JSON report and the positional-mirror contract breach\"",
+        "\"feature,design,docs\"",
+        "\"did you solidify the rule to not be an implementation detail but base design choice\"",
+        "14670",
+        "3.7.0",
+        "3.51.2",
+        "1,658",
+        "49.13"
+      ],
+      "gainedCount": 27
+    }
+  },
+  {
+    "window": "ses_f8d5630e9ffe62EbC0BG9dkwZJ-8088-9338",
+    "classes": {},
+    "diffLines": 0,
+    "chunkHashes": {
+      "unsanitized-r1": "50c61627fbc0e65ef3f7914b8e91c4cc@r1",
+      "unsanitized-r2": "50c61627fbc0e65ef3f7914b8e91c4cc@r2",
+      "sanitized": "50c61627fbc0e65ef3f7914b8e91c4cc@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:40:42.583Z",
+      "unsanitized-r2": "2026-11-04T21:42:21.917Z",
+      "sanitized": "2026-11-04T21:40:42.583Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.9279525433888349,
+      "cross1": 1,
+      "cross2": 0.9279525433888349
+    },
+    "chunkFactAudit": {
+      "baseFacts": 1549,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 119,
+      "sanCount": 119,
+      "lostBySan": [],
+      "lostCount": 0,
+      "modelNoiseFloor": 70,
+      "gainedBySan": [],
+      "gainedCount": 0
+    }
+  },
+  {
+    "window": "ses_f8d5630e9ffe62EbC0BG9dkwZJ-3894-4746",
+    "classes": {},
+    "diffLines": 0,
+    "chunkHashes": {
+      "unsanitized-r1": "3d72d5765015b0f5c28d526aabfb4c3d@r1",
+      "unsanitized-r2": "3d72d5765015b0f5c28d526aabfb4c3d@r2",
+      "sanitized": "3d72d5765015b0f5c28d526aabfb4c3d@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:43:23.330Z",
+      "unsanitized-r2": "2026-11-04T21:44:15.378Z",
+      "sanitized": "2026-11-04T21:43:23.330Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.9209742699296297,
+      "cross1": 1,
+      "cross2": 0.9209742699296297
+    },
+    "chunkFactAudit": {
+      "baseFacts": 1108,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 115,
+      "sanCount": 115,
+      "lostBySan": [],
+      "lostCount": 0,
+      "modelNoiseFloor": 46,
+      "gainedBySan": [],
+      "gainedCount": 0
+    }
+  },
+  {
+    "window": "ses_f0d4730c3ffelZOaqhSCvxxA9I-2849-3396",
+    "classes": {},
+    "diffLines": 0,
+    "chunkHashes": {
+      "unsanitized-r1": "034c5fe78051c9ee2f21d85d376eaad4@r1",
+      "unsanitized-r2": "034c5fe78051c9ee2f21d85d376eaad4@r2",
+      "sanitized": "034c5fe78051c9ee2f21d85d376eaad4@r1"
+    },
+    "callTimes": {
+      "unsanitized-r1": "2026-11-04T21:46:00.855Z",
+      "unsanitized-r2": "2026-11-04T21:47:23.046Z",
+      "sanitized": "2026-11-04T21:46:00.855Z"
+    },
+    "markers": {
+      "unsanitized": 0,
+      "sanitized": 0
+    },
+    "drift": {
+      "withinArmControl": 0.937154939061493,
+      "cross1": 1,
+      "cross2": 0.937154939061493
+    },
+    "chunkFactAudit": {
+      "baseFacts": 1222,
+      "lostCount": 0,
+      "lost": []
+    },
+    "summaryFactAudit": {
+      "unsanCount": 103,
+      "sanCount": 103,
+      "lostBySan": [],
+      "lostCount": 0,
+      "modelNoiseFloor": 68,
+      "gainedBySan": [],
+      "gainedCount": 0
+    }
+  }
+]
