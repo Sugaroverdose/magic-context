@@ -1,6 +1,7 @@
 /// <reference types="bun-types" />
 
 import { beforeEach, describe, expect, it, mock } from "bun:test";
+import { readFileSync } from "node:fs";
 import { deriveKey, renderDropToken } from "./fpe";
 import { isNeutralizedReasoningPart, TOOL_RELEASED_SENTINEL } from "./sentinel";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
@@ -274,6 +275,93 @@ describe("tool-drop-target", () => {
                     expect(thinkingParts[1]).toEqual({ type: "text", text: "" });
                     expect(isNeutralizedReasoningPart(thinkingParts[1])).toBe(true);
                 });
+            });
+        });
+
+        describe("#given a protected thinking block alongside ordinary reasoning", () => {
+            // The drop/erase lanes neutralize the dropped call's reasoning via
+            // the single shared primitive (neutralizeDroppedReasoningPart),
+            // which every wire-mutating site uses — the pending-op drain, the
+            // heuristic cleanup, and the auto-reclaim all route through it, as
+            // does the erased (stamp) path. A protected block is one with no
+            // `thinking`/`text` (a redacted_thinking block, or a signed block
+            // whose payload the provider must replay byte-identical); the
+            // primitive must leave it intact. This law attacks that guard on
+            // both release shapes (skeleton-carrier drop + stamp erase) so a
+            // regression that clears protected bytes on either path reddens.
+            const completePair = (): {
+                messages: MessageLike[];
+                index: ToolCallIndex;
+                batch: ToolMutationBatch;
+                protectedBlock: Record<string, unknown>;
+            } => {
+                const protectedBlock: Record<string, unknown> = {
+                    type: "redacted_thinking",
+                    data: "SIGNATURE_BYTES_MUST_NOT_CHANGE",
+                };
+                const messages: MessageLike[] = [
+                    message("m-inv", "assistant", [{ type: "tool-invocation", callID: "call-1" }]),
+                    message("m-tool", "tool", [
+                        { type: "tool", callID: "call-1", state: { output: buildOutput("tool") } },
+                    ]),
+                    message("m-wrapper", "assistant", [
+                        { type: "tool_use", id: "call-1" },
+                        { type: "tool_result", tool_use_id: "call-1", content: buildOutput("r") },
+                    ]),
+                    message("m-keep", "assistant", [{ type: "text", text: "keep me" }]),
+                ];
+                const index = buildIndex(messages);
+                const batch = new ToolMutationBatch(messages);
+                return { messages, index, batch, protectedBlock };
+            };
+
+            for (const [name, run] of [
+                ["drop", (t: ReturnType<typeof createToolDropTarget>) => t.drop()],
+                ["erase", (t: ReturnType<typeof createToolDropTarget>) => t.erase()],
+            ] as const) {
+                it(`leaves the protected block byte-identical while clearing ordinary reasoning (${name})`, () => {
+                    const { messages, index, batch, protectedBlock } = completePair();
+                    const before = JSON.stringify(protectedBlock);
+                    const ordinary: ThinkingLikePart[] = [{ type: "thinking", thinking: "private" }];
+                    const thinkingParts = [...ordinary, protectedBlock] as ThinkingLikePart[];
+                    const target = createToolDropTarget(
+                        "call-1",
+                        thinkingParts,
+                        index,
+                        batch,
+                        1,
+                        sessionKey,
+                    );
+                    const result = run(target);
+                    expect(result).toBe("removed");
+                    batch.finalize();
+
+                    // The ordinary reasoning part is neutralized off the wire.
+                    expect(isNeutralizedReasoningPart(ordinary[0])).toBe(true);
+                    // The protected block survives byte-for-byte — not neutralized,
+                    // not emptied, its provider payload intact.
+                    expect(JSON.stringify(protectedBlock)).toBe(before);
+                    expect(isNeutralizedReasoningPart(protectedBlock)).toBe(false);
+                });
+            }
+        });
+
+        describe("#given the volatile-segment recompute lane", () => {
+            it("has no code path into message reasoning (cannot strip a protected block)", () => {
+                // Ruling 3's fourth site: the volatile drain must never strip a
+                // protected thinking block. This lane renders only head bytes
+                // from memory/compartment/docs state — it takes no message
+                // array at all — so its reach-freedom is a structural property.
+                // Pin it as a falsifiable guard: importing or calling any
+                // reasoning-neutralize / part-mutation primitive here reddens.
+                const source = readFileSync(
+                    new URL("./region-volatile.ts", import.meta.url),
+                    "utf8",
+                );
+                expect(source).not.toMatch(/neutralizeDroppedReasoningPart/);
+                expect(source).not.toMatch(/clearThinkingParts/);
+                expect(source).not.toMatch(/\bMessageLike\b/);
+                expect(source).not.toMatch(/\.parts\b/);
             });
         });
 
