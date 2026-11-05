@@ -51,10 +51,15 @@ import {
 import {
     assertExecutableToolInput,
     createDroppedInputGuard,
+    type DroppedInputGuard,
     recordToolParameters,
 } from "../../hooks/magic-context/dropped-input-guard";
 import { EmergencyFailClosedError } from "../../hooks/magic-context/emergency-fail-closed";
 import { resolveContextLimit } from "../../hooks/magic-context/event-resolvers";
+import {
+    lookupReleasedToolInput,
+    resolveReleasedToolInput,
+} from "../../hooks/magic-context/fpe-resolve";
 import {
     type HistoryBoundaryRepair,
     repairMissingHistoryBoundary,
@@ -515,6 +520,60 @@ export async function applyV2SystemPrompt(
     );
 }
 
+export interface V2ToolExecuteBeforeDraft {
+    sessionID?: string;
+    tool?: string;
+    input?: unknown;
+}
+
+/**
+ * The v2 `execute.before` composition: dropped-input guard, then the FPE
+ * released-input resolver — the same two stages the v1 production composition
+ * (`createToolExecuteBeforeHook`, fpe-resolve.ts) runs, in the same order.
+ *
+ * Ordering is guard-first: the guard scans the RAW args, so a model echo of a
+ * `[dropped §N§]` message placeholder refuses and is never fed to the resolver
+ * (a resolved original is never scanned). Only guard-accepted calls reach
+ * resolution, where a re-emitted carrier is restored to its released input
+ * before the executor runs it. The resolver is a resolver, not a gate: a fault
+ * inside it passes the call through untouched (never blocks a tool call).
+ *
+ * The replacement mutates `draft.input` in place — the harness re-reads the
+ * same args object it handed us (the v1 engine contract, fpe-resolve.ts:211).
+ */
+export function createV2ToolExecuteBeforeHook(deps: {
+    droppedInputGuard: DroppedInputGuard;
+    db: Database | null | undefined;
+}): (draft: V2ToolExecuteBeforeDraft) => void {
+    return (draft) => {
+        assertExecutableToolInput(deps.droppedInputGuard, {
+            sessionID: draft.sessionID,
+            toolName: draft.tool,
+            input: draft.input,
+        });
+        const sessionId = draft.sessionID;
+        const db = deps.db;
+        if (!db || !sessionId || !draft.input) return;
+        try {
+            const original = resolveReleasedToolInput(draft.input, sessionId, {
+                lookupOriginal: (sid, tagNumber) => lookupReleasedToolInput(db, sid, tagNumber),
+            });
+            if (
+                original !== undefined &&
+                draft.input !== null &&
+                typeof draft.input === "object" &&
+                typeof original === "object"
+            ) {
+                const target = draft.input as Record<string, unknown>;
+                for (const key of Object.keys(target)) delete target[key];
+                Object.assign(target, original as Record<string, unknown>);
+            }
+        } catch {
+            // Resolver, not gate: a defect must never block a tool call.
+        }
+    };
+}
+
 export async function registerContext(context: V2Context) {
     const directory = context.location.directory;
     const config = loadPluginConfigDetailed(directory).config;
@@ -838,13 +897,8 @@ export async function registerContext(context: V2Context) {
     let passDuties: ReturnType<typeof createChatMessageHook> | undefined;
     let toolDuties: ReturnType<typeof createToolExecuteAfterHook> | undefined;
     const droppedInputGuard = createDroppedInputGuard();
-    await context.tool.hook("execute.before", (draft) =>
-        assertExecutableToolInput(droppedInputGuard, {
-            sessionID: draft.sessionID,
-            toolName: draft.tool,
-            input: draft.input,
-        }),
-    );
+    const executeToolBefore = createV2ToolExecuteBeforeHook({ droppedInputGuard, db });
+    await context.tool.hook("execute.before", (draft) => executeToolBefore(draft));
     await context.tool.hook("execute.after", async (draft) => {
         if (!db) return;
         if (draft.status && draft.status !== "completed") return;
