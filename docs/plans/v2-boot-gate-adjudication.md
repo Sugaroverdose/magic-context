@@ -7,10 +7,13 @@ a v2 test: `packages/plugin/src/hooks/magic-context/region-boot-law.test.ts`
 (2 tests, green on v2 as-is — no production code changed by this unit).
 
 All greps/reads/tests below were run by this agent on 2026-11-05 against
-`assembly@9c1520810` (the current tip; the brief's `dcd769d6f` verified an ancestor, and the
+`assembly@9c1520810` (the current tip; `dcd769d6f` located by this agent during rev
+verification — coordinator correction 2026-11-05: the dispatch brief cited only the seed tip
+`d31586f83`, verified an ancestor, and the
 restore-only surface is unchanged between them — anchors re-verified at the tip) and
-`v2@d31586f83` (revs `git rev-parse`-verified; the brief's `2f67a75f4` is not a valid object
-in this repository), unless a claim is explicitly labeled `[assembly-doc]` (recorded in
+`v2@d31586f83` (revs `git rev-parse`-verified; `2f67a75f4`, an invalid object that appeared in
+this agent's working notes — coordinator correction: never in the dispatch brief), unless a
+claim is explicitly labeled `[assembly-doc]` (recorded in
 assembly comments; not re-measured here) or `[reasoned]` (grounded in cited source, not
 directly exercised).
 

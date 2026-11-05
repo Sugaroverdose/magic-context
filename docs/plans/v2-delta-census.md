@@ -2,12 +2,16 @@
 
 Revs (each verified with `git rev-parse` by this agent on 2026-11-05, agent-run):
 base `feat/synthetic-head-residency` = `0a15ac87f` (== the v2 seed, plan Architecture line);
-assembly side = `assembly` @ `9c1520810` — the brief cited the merge `dcd769d6f`, verified an
+assembly side = `assembly` @ `9c1520810` — the merge `dcd769d6f` was located by this agent
+during rev verification (coordinator correction 2026-11-05: the dispatch brief cited only the
+seed tip `d31586f83`, never this hash; verified an
 ancestor of the current tip; the census measures the **current** tip so the two late lane
 merges (`413383251` stamp-withdraw, `9c1520810` splice-sanitizer review rounds) are inside
 it. v2 tree = this worktree, branch `feat/v2-unit-0` @ `d31586f83` (plan commits on the
-region seed; no source commits). The brief's `2f67a75f4` is **not a valid object in this
-repository** (flagged as a deviation in the Unit 0 report; the real trunk tip is `d31586f83`).
+region seed; no source commits). The hash `2f67a75f4` appearing in this agent's earlier
+working notes is **not a valid object in this
+repository** (coordinator correction: it was never in the dispatch brief — an agent-side
+mis-transcription; the real trunk tip is `d31586f83`).
 
 Command: `git -c core.quotepath=false diff --name-status feat/synthetic-head-residency..assembly`
 in `~/Git/magic-context-worktrees/assembly`. Full range: 192 files, +20,373/−1,641,
@@ -17,8 +21,9 @@ in `~/Git/magic-context-worktrees/assembly`. Full range: 192 files, +20,373/−1
 
 - Full-tree `--name-status` diff; production trees walked: `packages/plugin/src`,
   `packages/pi-plugin/src`, `packages/plugin/scripts`, `packages/plugin/test-preload.ts`,
-  root `scripts/`, `crates/`. **184 production rows** — 172 from the plan's original
-  figure (re-verified: every one still in the range, zero numstat drift against rows.json)
+  root `scripts/`, `crates/`. **184 production rows** — 172 from the pre-plan measurement
+  (coordinator correction: the plan carries only the 20 A / 84 M plugin/src baseline, no 172;
+  re-verified: every one still in the range, zero numstat drift against rows.json)
   plus 12 rows the pre-plan measurement missed, added this session (8 tooling files under
   `packages/plugin/scripts` + `test-preload.ts`, 4 path-loaded prompt-surface fixtures
   under `docs/specs/prompt-surface/` — pulled back from docs exclusion by the floor rule).
@@ -54,8 +59,8 @@ stated. Walks performed this session (agent-run):
 
 - `packages/plugin/src` command-dispatch floor: `hooks/magic-context/command-handler.ts:189-229`
   (SENTINEL_PREFIX string dispatch — read). NOTE: `src/features/builtin-commands/` **does not
-  exist in either tree** at HEAD (`git ls-files` empty both sides) — the plan's §15.7 example
-  path is stale; the floor was walked at the real dispatch site instead.
+  exist in either tree** at HEAD (`git ls-files` empty both sides) — the dispatch brief's
+  example path is stale; the floor was walked at the real dispatch site instead.
 - Prompt-surface family: `shared/prompt-surface-a1-golden.md` path-loaded by
   `packages/plugin/scripts/check-prompt-surface.ts:14` + `export-agent-surface.ts:16`;
   `docs/specs/prompt-surface/{checklist.json,budget-fixture.json,light-mapping.md,load-bearing-rules-checklist.md}`
@@ -88,7 +93,7 @@ stated. Walks performed this session (agent-run):
   `packages/plugin/src/hooks/magic-context/region-boot-law.test.ts` (new, green on v2 as-is).
 - `openai-compat-adjacency.ts` — **zero delta** (not in the range; assembly == v2
   byte-identical for this file). `grep -c "syntheticHead|phantom|prependM0M1"` on the v2
-  file = **0**: the plan's "head cases in v2 — verify and mark" resolves to **no head
+  file = **0**: the dispatch brief's "no head cases in v2 — verify and mark" resolves to **no head
   cases**; Unit 1's Modify-list entry for this file (:64-78, :293-298) is void.
 - `resolveTagRender` — assembly-only symbol (`git grep -l` on assembly:
   `tools/ctx-expand/render.ts`, `withdraw.ts`, `withdraw.test.ts`; v2 grep: zero). Withdraw
