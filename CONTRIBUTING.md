@@ -41,5 +41,25 @@ twin. It is advisory only, never converts drafts, and is not proof of complete
 coverage: differently named implementations, OpenCode 2, OMP and Rust still need
 explicit review.
 
-Run the relevant tests and formatting checks before submitting; CI rejects
-unformatted code.
+## Test discipline (mc-gate)
+
+Full suites are expensive and agents iterate with scoped runs, paying for one
+battery per final tip. The mechanical gate is
+`~/Git/magic-context/.mcgate/mc-gate` (state and logs under
+`~/.local/state/mc-test-gate/`).
+
+- Scoped iteration: `mc-gate scoped <repo> <files>` — blast-radius tests only;
+  records a green marker keyed to the tree hash.
+- Batteries: `mc-gate battery <repo>` — refused unless scoped-green matches the
+  current tree hash; run once at the final tip, never mid-iteration. The gate
+  runs suites in parallel internally.
+- Never hand-run `bun test src` as a battery substitute; its output is
+  diagnostic only and is not an accepted receipt.
+- Never exclude a failing test from a battery run. A suspected pre-existing
+  flake is reported with its log path for adjudication, not filtered out.
+- Accepted receipts are the gate's parsed summary lines plus the tree-hash
+  marker under `~/.local/state/mc-test-gate/`; merge gates verify them against
+  the tip being merged.
+
+Run the relevant formatting checks before submitting; CI rejects unformatted
+code (`@biomejs/biome` pinned per package).
