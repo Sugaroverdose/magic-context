@@ -1703,8 +1703,11 @@ describe("deferred compaction marker representation", () => {
             ...options,
             ctxReduceAvailability: { callable: true, frozen: true },
         });
-        const taggedText = (frozen[0]?.parts[0] as { text?: string }).text;
-        expect(taggedText).toMatch(/^§\d+§ /);
+        // ctx_reduce v1: the frozen callable choice never materializes a §N§
+        // wire prefix on the persisted summary marker; the tag row is still
+        // assigned so the drop machinery owns it.
+        const markerText = (frozen[0]?.parts[0] as { text?: string }).text;
+        expect(markerText).toBe(MARKER_SUMMARY_TEXT);
         const stable = structuredClone(frozen);
         reconcileMarkerRepresentation(stable, state, {
             ...options,

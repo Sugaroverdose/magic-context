@@ -43,19 +43,20 @@ function servedToolOutput(messages: MessageLike[]): string {
 }
 
 describe("dangling-tag prefix strip stays byte-stable on a defer pass", () => {
-    // The leading strip (DANGLING_TAG_PREFIX_REGEX) makes the improvised closer
-    // optional, so "§5 of ..." loses "§5". OpenCode re-prefixes a tool output from
-    // the host's own text on every pass (tag-messages.ts:
-    // `toolPart.state.output = prependTag(tagId, output)`), with no saved source
-    // and no epoch, so any change to that rule would first apply on whatever pass
-    // comes first after deploy, a defer pass included, and bust the cache.
+    // ctx_reduce v1: the tagger never materializes a §N§ wire prefix — the
+    // tool branch of tag-messages leaves state.output byte-untouched, so a
+    // host-authored leading "§5 ..." survives verbatim on every pass, and a
+    // defer pass after a restart must serve exactly what was cached. Any
+    // re-introduced prefixing would first apply on whatever pass comes first
+    // after deploy, a defer pass included, and bust the cache.
     it("an already-tagged tool output serves the bytes the previous release served", () => {
         const db = new Database(":memory:");
         try {
             initializeDatabase(db);
             runMigrations(db);
             const hostOutput = "\u00a75 of the contract applies to every tenant";
-            const previousReleaseServed = "\u00a72\u00a7 of the contract applies to every tenant";
+            // ctx_reduce v1 (the previous release): no prefix; output served verbatim.
+            const previousReleaseServed = hostOutput;
 
             // The pass the previous release served: it created the tool tag (tag
             // rows record no output bytes, so the row is the same either way).

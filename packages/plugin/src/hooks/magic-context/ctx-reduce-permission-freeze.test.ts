@@ -239,7 +239,8 @@ for (const order of ["messages-first", "system-first"] as const) {
                 const allowedServed = await pass(allowed, turns, order);
                 const unreadServed = await pass(unread, turns, order);
                 expect(allowedServed).toEqual(unreadServed);
-                expect(allowedServed.messages).toMatch(TAG);
+                // ctx_reduce v1: callable never materializes §N§ wire prefixes.
+                expect(allowedServed.messages).not.toMatch(TAG);
                 expect(allowedServed.system).toContain(REDUCE_GUIDANCE);
             }
             // The callable session gets the Channel 1 baseline the denied session must not.
@@ -283,7 +284,8 @@ for (const order of ["messages-first", "system-first"] as const) {
             for (let turns = 2; turns <= 4; turns += 1) {
                 const flippedServed = await pass(flipped, turns, order);
                 expect(flippedServed).toEqual(await pass(steady, turns, order));
-                expect(flippedServed.messages).toMatch(TAG);
+                // ctx_reduce v1: callable never materializes §N§ wire prefixes.
+                expect(flippedServed.messages).not.toMatch(TAG);
                 expect(flippedServed.system).toContain(REDUCE_GUIDANCE);
             }
             // Permissions were read once, before the freeze, and never again.

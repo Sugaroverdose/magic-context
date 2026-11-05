@@ -23,7 +23,7 @@ import {
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import { neutralizeDroppedReasoningPart } from "./sentinel";
-import { byteSize, isThinkingPart, prependTag } from "./tag-content-primitives";
+import { byteSize, isThinkingPart } from "./tag-content-primitives";
 import { createExistingTagResolver } from "./tag-id-fallback";
 import {
     buildFileSourceContent,
@@ -909,7 +909,7 @@ export function tagMessages(
                     Math.max(messageTagNumbers.get(message) ?? 0, tagId),
                 );
                 if (!skipPrefixInjection) {
-                    textPart.text = prependTag(tagId, textPart.text);
+                    // ctx_reduce v1: no materialized wire prefix; target still registered.
                     normalizationTargets.push({
                         tagNumber: tagId,
                         message,
@@ -919,7 +919,7 @@ export function tagMessages(
                 }
                 targets.set(tagId, {
                     message,
-                    textPrefix: skipPrefixInjection ? "" : prependTag(tagId, ""),
+                    textPrefix: "",
                     setContent: (content, options) => {
                         if (textPart.text === content) return false;
                         const partialEnd = messageId ? getPartialEnds().get(messageId) : undefined;
@@ -1003,7 +1003,7 @@ export function tagMessages(
                     Math.max(messageTagNumbers.get(message) ?? 0, tagId),
                 );
                 if (!skipPrefixInjection) {
-                    toolPart.state.output = prependTag(tagId, toolPart.state.output);
+                    // ctx_reduce v1: no materialized wire prefix; target still registered.
                     normalizationTargets.push({
                         tagNumber: tagId,
                         message,

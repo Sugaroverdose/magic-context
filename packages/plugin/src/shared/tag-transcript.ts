@@ -61,7 +61,6 @@ import { estimateImageTokensFromDataUrl } from "../hooks/magic-context/image-tok
 import { estimateTokens } from "../hooks/magic-context/read-session-formatting";
 import {
     byteSize,
-    prependTag,
     stripTagPrefix,
     stripWellFormedLeadingTagPrefix,
 } from "../hooks/magic-context/tag-content-primitives";
@@ -746,7 +745,10 @@ function partKey(part: TranscriptPart): unknown {
 function applyToolPrefixAndTarget(args: ApplyToolPrefixAndTargetArgs): void {
     if (!args.skipPrefixInjection && args.part.kind === "tool_result") {
         const prefixStart = args.timing ? performance.now() : 0;
-        args.part.setText(prependTag(args.tagId, args.text));
+        // ctx_reduce v1: no materialized wire prefix. The registry target
+        // below still owns the drop machinery; the prefix bytes were only a
+        // model-facing handle surface.
+        args.part.setText(args.text);
         if (args.timing) args.timing.prefix += performance.now() - prefixStart;
     }
     const targetStart = args.timing ? performance.now() : 0;
@@ -969,19 +971,12 @@ function tagTextPart(args: TagTextPartArgs): void {
 function applyTextPrefixAndTarget(args: TagTextPartArgs, tagId: number, text: string): void {
     if (!args.skipPrefixInjection) {
         const prefixStart = args.timing ? performance.now() : 0;
-        args.part.setText(prependTag(tagId, text));
+        args.part.setText(text);
         if (args.timing) args.timing.prefix += performance.now() - prefixStart;
     }
 
     const targetStart = args.timing ? performance.now() : 0;
-    args.targets.set(
-        tagId,
-        buildTextTarget(
-            args.part,
-            args.message,
-            args.skipPrefixInjection ? "" : prependTag(tagId, ""),
-        ),
-    );
+    args.targets.set(tagId, buildTextTarget(args.part, args.message, ""));
     if (args.timing) args.timing.targets += performance.now() - targetStart;
 }
 
@@ -1061,7 +1056,7 @@ function applySingleToolPrefixAndTarget(args: TagToolPartArgs, tagId: number, te
     // matches the OpenCode behavior of tagging tool outputs.
     if (!args.skipPrefixInjection && args.part.kind === "tool_result") {
         const prefixStart = args.timing ? performance.now() : 0;
-        args.part.setText(prependTag(tagId, text));
+        args.part.setText(text);
         if (args.timing) args.timing.prefix += performance.now() - prefixStart;
     }
 
