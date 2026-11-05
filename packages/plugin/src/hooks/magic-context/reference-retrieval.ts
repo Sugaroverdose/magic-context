@@ -21,6 +21,7 @@
  */
 import { escapeXmlAttr, escapeXmlContent } from "../../features/magic-context/compartment-storage";
 import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
+import { historianWrapperClose, historianWrapperOpen } from "./historian-wrapper-tags";
 import { REFERENCE_SEEDS, type ReferenceSeed } from "./reference-seeds.generated";
 
 /**
@@ -153,7 +154,7 @@ export function selectSeeds(
 export function renderSeedExamplesBlock(seeds: ReferenceSeed[]): string {
     if (seeds.length === 0) return "";
     const body = seeds.map((s) => s.block).join("\n\n");
-    return `<compartment_examples_from_other_projects>\n${body}\n</compartment_examples_from_other_projects>`;
+    return `${historianWrapperOpen("compartment_examples_from_other_projects")}\n${body}\n${historianWrapperClose("compartment_examples_from_other_projects")}`;
 }
 
 /**
@@ -211,7 +212,7 @@ export function renderSessionReferencesBlock(
     if (allCompartments.length === 0 || count === 0) return "";
     const recent = allCompartments.slice(-count);
     const body = recent.map(renderSessionRefCompartment).join("\n\n");
-    return `<session_references>\n${body}\n</session_references>`;
+    return `${historianWrapperOpen("session_references")}\n${body}\n${historianWrapperClose("session_references")}`;
 }
 
 export interface ReferenceBlocks {

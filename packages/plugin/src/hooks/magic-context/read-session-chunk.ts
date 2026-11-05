@@ -27,6 +27,7 @@ import {
     mergeCommitHashes,
     normalizeText,
     type SessionChunkLine,
+    sanitizeSpliceText,
 } from "./read-session-formatting";
 import {
     countRawSessionMessageOrdinalsFromDb,
@@ -1286,7 +1287,9 @@ export function readSessionChunk(
             const tcSummaries = msg.parts.flatMap((part) => {
                 if (expandedResults.has(part)) return [];
                 const expansion = expandedParts.get(part) ?? null;
-                return expansion === null ? extractToolCallSummaries([part]) : [`TC: ${expansion}`];
+                return expansion === null
+                    ? extractToolCallSummaries([part])
+                    : [`TC: ${sanitizeSpliceText(expansion)}`];
             });
             if (tcSummaries.length === 0) {
                 recordFilteredNoise(meta);
@@ -1339,29 +1342,58 @@ export function readSessionChunk(
 
         // For messages with no text content, extract tool-call descriptions as
         // lightweight summaries so historian sees what actions were taken.
-        const allParts =
+        // R3-4: commit extract/strip/re-defang runs per model TEXT part BEFORE
+        // the join — builder output (TC expansion/summary lines, Rust-lane media
+        // placeholders) is never a compact-scan operand. Joined-operand
+        // compaction let a hex-looking builder substring be extracted as a fake
+        // commit hash, stripped, and re-defanged (the W2 re-run corrupting the
+        // builder's own tokens). Mirror of the Rust lane (historian_chunk.rs).
+        const classifiedParts: Array<{ text: string; modelText: boolean }> =
             options.expand === false
                 ? [
-                      ...textParts,
-                      ...(textParts.length === 0 ? extractToolCallSummaries(msg.parts) : []),
+                      ...textParts.map((t) => ({ text: t, modelText: true })),
+                      ...(textParts.length === 0
+                          ? extractToolCallSummaries(msg.parts).map((t) => ({
+                                text: t,
+                                modelText: false,
+                            }))
+                          : []),
                   ]
-                : msg.parts.flatMap((part) => {
+                : msg.parts.flatMap((part): Array<{ text: string; modelText: boolean }> => {
                       if (expandedResults.has(part)) return [];
                       const expansion = expandedParts.get(part) ?? null;
-                      if (expansion !== null) return [`TC: ${expansion}`];
+                      if (expansion !== null)
+                          return [
+                              {
+                                  text: `TC: ${sanitizeSpliceText(expansion)}`,
+                                  modelText: false,
+                              },
+                          ];
                       const texts = extractTexts([part])
                           .map((t) => (msg.role === "user" ? cleanUserText(t) : t))
                           .map(normalizeText)
                           .filter(Boolean);
-                      return texts.length
-                          ? texts
-                          : textParts.length === 0
-                            ? extractToolCallSummaries([part])
-                            : [];
+                      if (texts.length) return texts.map((t) => ({ text: t, modelText: true }));
+                      return textParts.length === 0
+                          ? extractToolCallSummaries([part]).map((t) => ({
+                                text: t,
+                                modelText: false,
+                            }))
+                          : [];
                   });
 
-        const compacted = compactTextForSummary(allParts.join(" / "), msg.role);
-        const text = compacted.text;
+        const compactedParts: string[] = [];
+        let compactedHashes: string[] = [];
+        for (const part of classifiedParts) {
+            if (!part.modelText) {
+                compactedParts.push(part.text);
+                continue;
+            }
+            const compacted = compactTextForSummary(part.text, msg.role);
+            compactedParts.push(compacted.text);
+            compactedHashes = mergeCommitHashes(compactedHashes, compacted.commitHashes);
+        }
+        const text = compactedParts.join(" / ");
 
         if (!text) {
             recordFilteredNoise(meta);
@@ -1383,7 +1415,7 @@ export function readSessionChunk(
             currentBlock.meta.push(...pendingNoiseMeta, meta);
             currentBlock.commitHashes = mergeCommitHashes(
                 currentBlock.commitHashes,
-                compacted.commitHashes,
+                compactedHashes,
             );
             // Once any message in the merged block contributes narrative, the block is
             // no longer tool-only.
@@ -1407,7 +1439,7 @@ export function readSessionChunk(
                 },
             ],
             meta: [...pendingNoiseMeta, meta],
-            commitHashes: [...compacted.commitHashes],
+            commitHashes: [...compactedHashes],
             isToolOnly: !msgHasNarrative,
         };
         pendingNoiseMeta = [];

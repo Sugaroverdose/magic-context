@@ -179,6 +179,7 @@ const VOLATILE_CLOSURE_SET = new Set([
     "hooks/magic-context/decision-calibration.ts",
     "hooks/magic-context/embed-session-state.ts",
     "hooks/magic-context/emergency-drop.ts",
+    "hooks/magic-context/historian-wrapper-tags.ts",
     "hooks/magic-context/host-served-rows.ts",
     "hooks/magic-context/image-token-estimate.ts",
     "hooks/magic-context/inject-compartments.ts",

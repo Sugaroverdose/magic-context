@@ -59,6 +59,7 @@ import {
     renderedBudgetShrinkReason,
     renderedBudgetSnapshot,
 } from "./compartment-render-epoch";
+import { historianWrapperClose, historianWrapperOpen } from "./historian-wrapper-tags";
 import { isHostRenderedSystemMessage } from "./host-served-rows";
 import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
@@ -364,9 +365,9 @@ export function renderHistorianMemoryBlock(memories: Memory[]): string | null {
             continue;
         }
         sections.push(
-            `<${category}>`,
+            historianWrapperOpen(category),
             ...categoryMemories.map((m) => `- ${escapeXmlContent(m.content)}`),
-            `</${category}>`,
+            historianWrapperClose(category),
         );
     }
 
@@ -374,7 +375,7 @@ export function renderHistorianMemoryBlock(memories: Memory[]): string | null {
         return null;
     }
 
-    return `<project-memory>\n${sections.join("\n")}\n</project-memory>`;
+    return `${historianWrapperOpen("project-memory")}\n${sections.join("\n")}\n${historianWrapperClose("project-memory")}`;
 }
 
 /** Constraint keywords that signal a memory encodes a rule rather than a description. */
