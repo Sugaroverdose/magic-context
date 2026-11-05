@@ -130,3 +130,5 @@ packages/*/.cortexkit/
 
 # Build residue from a sibling toolchain (Xcode/SwiftPM), never a project artifact
 .build/
+# npm pack output (install artifact for wrapper file: deps)
+packages/plugin/cortexkit-opencode-magic-context-*.tgz
