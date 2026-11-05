@@ -2170,7 +2170,7 @@ export async function runPostTransformPhase(
     // rides too — the volatile segment is the delta carrier for that lane
     // (assembly-v2 ruling: region treatment, no carve-out), so this gate
     // deliberately does not reuse the !compactionOff reclaim predicate. When
-    // the fold executed this pass, persistCachedM0 already absorbed the
+    // the fold executed this pass, the fold-row persist already absorbed the
     // segment in the fold transaction — no recompute.
     const volatileRecomputeAllowed =
         args.schedulerDecision === "execute" ||

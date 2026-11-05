@@ -3,14 +3,16 @@
 /**
  * Region golden parity law (assembly-v2 Unit 1, Step 2).
  *
- * Law B of the golden package: the extracted region renderers —
- * `renderRegionM0` (panel: decay + memories + user-profile + mural, pressure
- * loop, never-empty floor) + `renderRegionM1` (the m[1] delta half) joined by
- * the ONE region grammar `renderRegionBody` — must reproduce the committed
- * golden region bytes byte-exactly, driven through the same production
- * readers and composition materializeM0 uses (production-composition, #2715
- * precedent: every operand comes from the production reader, never a
- * hand-shaped fixture).
+ * Law B of the golden package: the extracted region renderer —
+ * `renderRegionM0` (panels: decay + memories + user-profile + mural, pressure
+ * loop, never-empty floor) — must reproduce the committed golden region bytes
+ * byte-exactly, driven through the same production readers and composition
+ * materializeM0 uses (production-composition, #2715 precedent: every operand
+ * comes from the production reader, never a hand-shaped fixture).
+ *
+ * Unit 2 Step 2: the delta half (`renderRegionM1` + the `renderRegionBody`
+ * join) left the region and moved to the volatile segment, so the parity
+ * composition is the panel text alone.
  *
  * The attack: if the sever changes any byte the rotation writes — renderer,
  * budget, decay, placeholder, join order, separator — a named window reddens
@@ -40,9 +42,7 @@ import {
 } from "./region-golden-harness";
 import {
     readM0Compartments,
-    renderRegionBody,
     renderRegionM0,
-    renderRegionM1,
     resolveWorkspaceRenderContext,
     safeGetActiveUserMemories,
 } from "./region-render";
@@ -139,19 +139,16 @@ function renderWindowBody(window: ManifestWindow): string {
         userMemories,
         workspace,
     });
-    const m1 = renderRegionM1({
-        options,
-        workspace,
-        snapshotMarkers,
-        renderedMemoryIds: m0.renderedMemoryIds,
-    });
-    return renderRegionBody(m0.m0Text, m1.m1Text);
+    // Unit 2 Step 2: the region is the four panels only. The delta half moved
+    // to the volatile segment (region-volatile.ts), so the parity composition
+    // is renderRegionM0's panel text with no join.
+    return m0.m0Text;
 }
 
-describe("region golden parity (Law B: renderRegionBody == committed bytes)", () => {
+describe("region golden parity (Law B: renderRegionM0 panels == committed bytes)", () => {
     const manifest = packagePresent() ? loadManifest() : null;
     for (const window of manifest?.windows ?? []) {
-        it.skipIf(!packagePresent())(`renderRegionBody(${window.id}) is byte-exact`, () => {
+        it.skipIf(!packagePresent())(`renderRegionM0(${window.id}) is byte-exact`, () => {
             const golden = readFileSync(join(GOLDEN_DIR, window.regionFile)).toString("utf8");
             const body = renderWindowBody(window);
             expect(body.length).toBeGreaterThan(0);

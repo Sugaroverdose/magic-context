@@ -37,6 +37,8 @@ import {
     persistCachedM0,
     readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
+import { writeRegionVolatile } from "../../features/magic-context/storage-meta-shared";
+import { renderRegionVolatile } from "./region-volatile";
 import {
     decodeSystemRegionRow,
     encodeSystemRegionRow,
@@ -127,7 +129,6 @@ import {
     historySliceTokens,
     lastCompartmentBoundaryId,
     M0_EMPTY_BODY,
-    M1_EMPTY_PLACEHOLDER,
     MAX_FORCED_MEMORIES_PER_DELTA,
     memoryCanonicalIdentity,
     memoryRenderOrder,
@@ -142,9 +143,7 @@ import {
     renderMemoryBlockV2,
     renderMemoryLineV2,
     renderMemoryUpdatesBlock,
-    renderRegionBody,
     renderRegionM0,
-    renderRegionM1,
     renderSessionHistoryWithDecay,
     renderUserProfileBlock,
     resolveMuralForM0,
@@ -1910,8 +1909,11 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     const renderedMemoryIds = region0.renderedMemoryIds;
     options.beforePhase3ForTest?.();
 
-    let m1Text = M1_EMPTY_PLACEHOLDER;
-    let m1Bytes = Buffer.from(m1Text, "utf8");
+    // Region era: the fold owns no m[1] bytes. The volatile segment carries
+    // the delta class beside the region (Unit 2 Step 2), so the result keeps
+    // the field for shape stability and reports it empty.
+    const m1Text = "";
+    const m1Bytes = Buffer.alloc(0);
     let persistedBaselineEnd: string | null = null;
     try {
         options.db.exec("BEGIN IMMEDIATE");
@@ -1996,15 +1998,27 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             throw new MaterializeContentionError({ reason: "snapshot changed before Phase 3" });
         }
 
-        const region1 = renderRegionM1({
-            options,
-            workspace,
-            snapshotMarkers,
+        // Unit 2 Step 2: the region is the four panels only. The delta half
+        // that used to be concatenated here (renderRegionM1) is carried by the
+        // volatile segment beside the region; the fold owns that segment too,
+        // rendered against its own marker capture in the same transaction —
+        // the region row, its markers, and the segment never diverge
+        // (same-transaction coherence; persistFoldRow clears the stale row,
+        // this fold re-renders the fresh one). The accounting is re-derived
+        // from the two renders: panel ids ∪ volatile ids (ctx_search's
+        // hide-already-visible filter reads session_meta.memory_block_ids).
+        const volatileRender = renderRegionVolatile(options, {
+            maxMemoryId: snapshotMarkers.maxMemoryId,
+            maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
+            maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
+            projectUserProfileVersion: snapshotMarkers.projectUserProfileVersion,
+            projectDocsHash: snapshotMarkers.projectDocsHash,
+            materializedAt: snapshotMarkers.materializedAt,
             renderedMemoryIds,
-        });
-        m1Text = region1.m1Text;
-        m1Bytes = region1.m1Bytes;
-        const visibleMemoryIds = region1.visibleMemoryIds;
+        }, docs);
+        const visibleMemoryIds = [
+            ...new Set([...renderedMemoryIds, ...volatileRender.memoryIds]),
+        ];
 
         const foldMarkers = regionMarkersFromSnapshot(snapshotMarkers);
         const persistFoldRow = (m0Payload: Buffer, m1Payload: Buffer | null) => {
@@ -2039,11 +2053,12 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             });
         };
         {
-            // The boundary assembles the panels once and installs the sentinel
-            // region row atomically with the marker capture. The empty/m1
-            // placeholder text still flows through, so a content-less session
-            // keeps the never-empty region floor via the placeholder blocks.
-            const regionText = renderRegionBody(m0Text, m1Text);
+            // The boundary assembles the four panels once and installs the
+            // sentinel region row atomically with the marker capture. The
+            // never-empty floor is the panels' own: renderRegionM0 guarantees a
+            // non-empty body (M0_EMPTY_BODY), so the delta-side placeholder
+            // that used to be concatenated here is no longer needed.
+            const regionText = m0Text;
             let installedBlob: Buffer | null = null;
             const rotated = executeSystemRegionRotation(
                 options.db,
@@ -2066,6 +2081,16 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             // head rendering it replaced.
             m0Bytes = installedBlob;
         }
+        // The fold's fresh volatile row, after the fold-row clear ran inside
+        // persistFoldRow: the segment names this region's materialized_at, so
+        // the serve pairing (watermark == cached_m0_materialized_at) holds from
+        // the commit onward. Empty text clears the row (the absorbed state).
+        writeRegionVolatile(
+            options.db,
+            options.sessionId,
+            volatileRender.text,
+            snapshotMarkers.materializedAt,
+        );
 
         // v2 path persists the rendered-memory identity itself. `memory_block_ids`
         // / `memory_block_count` are otherwise written ONLY by the dead legacy v1
@@ -2269,9 +2294,8 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
  * serve zero session context; rendering fresh (un-persisted) keeps the frozen
  * panels present for this pass while the next pass re-materializes and
  * rotates. Uses a plain read (no BEGIN IMMEDIATE) since we are explicitly NOT
- * persisting; the bytes are the same producer as the fold (renderRegionM0 +
- * renderRegionM1 + renderRegionBody), sentinel-encoded so the serving reader
- * accepts them.
+ * persisting; the bytes are the same producer as the fold (renderRegionM0 —
+ * the four panels), sentinel-encoded so the serving reader accepts them.
  */
 function renderFreshRegionNonPersisted(options: M0M1RenderOptions): {
     m0Bytes: Buffer;
@@ -2348,14 +2372,11 @@ function renderFreshRegionNonPersisted(options: M0M1RenderOptions): {
         userMemories,
         workspace,
     });
-    const delta = renderRegionM1({
-        options,
-        workspace,
-        snapshotMarkers,
-        renderedMemoryIds: panel.renderedMemoryIds,
-    });
+    // Unit 2 Step 2: same producer as the fold — four panels only, no delta
+    // half. The volatile segment is stored separately and never synthesized
+    // here (its bytes are re-derived only on bust-lane recomputation).
     return {
-        m0Bytes: encodeSystemRegionRow(renderRegionBody(panel.m0Text, delta.m1Text)),
+        m0Bytes: encodeSystemRegionRow(panel.m0Text),
         snapshotMarkers,
         renderedMemoryIds: panel.renderedMemoryIds,
     };

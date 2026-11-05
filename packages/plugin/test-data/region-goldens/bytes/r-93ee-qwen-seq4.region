@@ -357,5 +357,3 @@ While stage 2 runs, I began drafting the report structure — this will be the f
 #2741: keyArg key list: chunk lanes (boundary.rs, historian_chunk.rs, read-session-formatting.ts) use filePath, path, pattern, query, symbol, module, action; ctx-expand lanes (render.ts, lib.rs verbose_expand_key_argument) add description. `command` is absent from all lanes.
 </CONFIG_VALUES>
 </project-memory>
-
-<session-history-since>(no new content since last materialization)</session-history-since>

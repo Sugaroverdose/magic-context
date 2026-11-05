@@ -472,6 +472,10 @@ describe("system-region L0: per-actor producer census", () => {
                 "hooks/magic-context/region-volatile.ts",
                 "read-only serve decode (SELECT region_volatile_bytes) + codec",
             ],
+            [
+                "hooks/magic-context/inject-compartments.ts",
+                "fold row: the boundary transaction writes the volatile segment it renders against the region capture (same-transaction coherence)",
+            ],
         ]);
         const offenders: string[] = [];
         let walkedVolatileZone = 0;
@@ -488,10 +492,13 @@ describe("system-region L0: per-actor producer census", () => {
         expect(offenders).toEqual([]);
 
         // Entry-point closure (#2713 holder-set form): the sanctioned write
-        // entries may only be invoked from their named production holders.
+        // entries may only be invoked from their named production holders —
+        // the accessor's own definition, the bust-lane recompute entry, and
+        // the fold row (materializeM0's boundary transaction).
         const writers = filesUsing(/\bwriteRegionVolatile\s*\(/);
         expect(writers).toEqual([
             "features/magic-context/storage-meta-shared.ts",
+            "hooks/magic-context/inject-compartments.ts",
             "hooks/magic-context/region-volatile.ts",
         ]);
         const recomputers = filesUsing(/\brecomputeRegionVolatileSegment\s*\(/);

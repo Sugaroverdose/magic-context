@@ -81,7 +81,7 @@ function row(db: Database): {
 }
 
 describe("system-region fold: materialization boundary installs the region", () => {
-    it("gate on: the fold writes the sentinel region (m0 + m1 concatenated), clears m1, captures markers, prints the receipt", () => {
+    it("gate on: the fold writes the sentinel region (four panels), clears m1, captures markers, prints the receipt", () => {
         const db = makeDb();
         seedPanels(db);
         const result = materializeM0({
@@ -95,11 +95,15 @@ describe("system-region fold: materialization boundary installs the region", () 
         const stored = row(db);
         expect(stored.cached_m0_bytes).not.toBeNull();
         const served = readSystemRegion(db, SESSION_ID);
-        // Assemble-once law: the served region is exactly the concatenation of
-        // what this fold rendered for the two panels — never a second render.
-        expect(served).toBe(`${result.m0Text}\n\n${result.m1Text}`);
+        // Assemble-once law (Unit 2 Step 2): the served region is exactly the
+        // panels this fold rendered — four panels, no delta half appended,
+        // never a second render. The delta class rides the volatile segment.
+        expect(served).toBe(result.m0Text);
+        expect(served).not.toContain("<session-history-since>");
+        expect(result.m1Text).toBe("");
+        expect(result.m1Bytes.length).toBe(0);
         expect(served).toContain("the region owns the panels after residency");
-        // m[1] has no separate slot in region mode; its bytes live in the region.
+        // m[1] has no separate slot in region mode.
         expect(stored.cached_m1_bytes).toBeNull();
         // Markers are captured with the region (decide compares against these).
         expect(stored.cached_m0_max_memory_id).toBe(result.snapshotMarkers.maxMemoryId);
@@ -132,11 +136,7 @@ describe("system-region fold: materialization boundary installs the region", () 
             SYSTEM_REGION_SENTINEL,
         );
         expect(stored.cached_m1_bytes).toBeNull();
-        expect(readSystemRegion(db, SESSION_ID)).toBe(
-            `${result.m0Text}
-
-${result.m1Text}`,
-        );
+        expect(readSystemRegion(db, SESSION_ID)).toBe(result.m0Text);
         expect(
             lines.filter((line) => line.includes("system-region rotation:")).length,
         ).toBe(1);

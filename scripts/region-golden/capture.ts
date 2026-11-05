@@ -18,10 +18,10 @@
  */
 import { Database } from "bun:sqlite";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import {
     closeDatabase,
     getOrCreateSessionMeta,
@@ -502,6 +502,96 @@ function gzipJson(value: unknown): Buffer {
     return gzipSync(Buffer.from(JSON.stringify(value), "utf8"), { mtime: 0 });
 }
 
+interface CorpusWindow {
+    id: string;
+    docsSource: string;
+    modelKey: string;
+    budgets: {
+        memoryInjectionBudgetTokens: number;
+        historyBudgetTokens: number;
+        historyBudgetPolicyIdentity: string | null;
+    };
+    muralEnabled: boolean;
+    frozenNowMs: number;
+    seedFile: string;
+    docsFile: string | null;
+}
+
+interface CorpusManifest {
+    windows: CorpusWindow[];
+}
+
+function gunzipJson(path: string): unknown {
+    return JSON.parse(gunzipSync(readFileSync(path)).toString("utf8"));
+}
+
+/**
+ * Re-drive a window from the committed corpus inputs (seed rows, shared
+ * snapshots, docs bytes, budgets, frozen clock) instead of the live host db.
+ * A re-capture over an unchanged corpus must therefore differ from the
+ * committed bytes only where the code changed — which is what the golden
+ * attribution rule requires (a golden that moved for any other reason stops
+ * the lane).
+ */
+function resolveFromCorpus(
+    corpus: CorpusManifest,
+    corpusDir: string,
+    spec: WindowSpec,
+): {
+    extraction: WindowExtraction;
+    docsFiles: Array<{ name: string; content: string }>;
+    docsSource: string;
+    parsed: ParsedIdentity;
+    frozenNowMs: number;
+} {
+    const w = corpus.windows.find((candidate) => candidate.id === spec.id);
+    if (!w) throw new Error(`${spec.id}: window missing from the corpus manifest`);
+    let extraction: WindowExtraction;
+    let docsFiles: Array<{ name: string; content: string }>;
+    let parsed: ParsedIdentity;
+    if (spec.kind === "fixture") {
+        // Fixtures are code-defined: the seed on disk was written from the
+        // same code, so drive from the spec (the docs inline in the fixture
+        // are the input of record).
+        extraction = buildFixtureWindow(spec);
+        docsFiles = spec.fixture?.docsFiles ?? [];
+        parsed = {
+            memoryBudget: spec.fixture?.memoryBudget ?? 4000,
+            historyBudget: spec.fixture?.historyBudget ?? 30000,
+            historyPolicyIdentity: undefined,
+            muralEnabled: false,
+        };
+    } else {
+        const seed = gunzipJson(join(corpusDir, w.seedFile)) as WindowExtraction;
+        const slug = spec.identity.replace(/[^a-z0-9]/g, "").slice(0, 12);
+        extraction = {
+            ...seed,
+            memories: gunzipJson(join(corpusDir, "shared", `memories-${slug}.json.gz`)) as Array<
+                Record<string, unknown>
+            >,
+            memoryMutations: gunzipJson(
+                join(corpusDir, "shared", `memory-mutation-log-${slug}.json.gz`),
+            ) as Array<Record<string, unknown>>,
+            userMemories: gunzipJson(join(corpusDir, "shared", "user-memories.json.gz")) as Array<
+                Record<string, unknown>
+            >,
+            projectState: gunzipJson(join(corpusDir, "shared", "project-state.json.gz")) as Array<
+                Record<string, unknown>
+            >,
+        };
+        docsFiles = w.docsFile
+            ? ((gunzipJson(join(corpusDir, w.docsFile)) as { files: Array<{ name: string; content: string }> }).files ?? [])
+            : [];
+        parsed = {
+            memoryBudget: w.budgets.memoryInjectionBudgetTokens,
+            historyBudget: w.budgets.historyBudgetTokens,
+            historyPolicyIdentity: w.budgets.historyBudgetPolicyIdentity ?? undefined,
+            muralEnabled: !!w.muralEnabled,
+        };
+    }
+    return { extraction, docsFiles, docsSource: w.docsSource, parsed, frozenNowMs: w.frozenNowMs };
+}
+
 function copyRealDocs(docsDirectory: string): Array<{ name: string; content: string }> {
     const copied: Array<{ name: string; content: string }> = [];
     for (const name of ["ARCHITECTURE.md", "STRUCTURE.md"]) {
@@ -520,17 +610,29 @@ function main(): void {
     };
     const hostDbPath = argValue("--host-db") ?? DEFAULT_HOST_DB;
     const outDir = argValue("--out") ?? DEFAULT_OUT;
-    const host = new Database(hostDbPath, { readonly: true });
+    const corpusDir = argValue("--from-corpus");
+    if (corpusDir && outDir === corpusDir) {
+        throw new Error("--from-corpus must differ from --out (the corpus is read through)");
+    }
+    const corpus = corpusDir
+        ? (JSON.parse(
+              readFileSync(join(corpusDir, "manifest.json"), "utf8"),
+          ) as CorpusManifest)
+        : null;
+    const host = corpusDir ? null : new Database(hostDbPath, { readonly: true });
 
     rmSync(outDir, { recursive: true, force: true });
     mkdirSync(join(outDir, "bytes"), { recursive: true });
     mkdirSync(join(outDir, "windows"), { recursive: true });
     mkdirSync(join(outDir, "shared"), { recursive: true });
 
-    sharedUserMemories = extractRows(host, "SELECT * FROM user_memories");
-    sharedProjectState = extractRows(host, "SELECT * FROM project_state");
+    if (host) {
+        sharedUserMemories = extractRows(host, "SELECT * FROM user_memories");
+        sharedProjectState = extractRows(host, "SELECT * FROM project_state");
+    }
     const identities = new Set<string>(REAL_WINDOWS.map((window) => window.identity));
     for (const identity of identities) {
+        if (!host) break;
         sharedCache.set(identity, {
             memories: extractRows(
                 host,
@@ -546,41 +648,56 @@ function main(): void {
     }
 
     const manifestWindows: Array<Record<string, unknown>> = [];
-    const frozenNowMs = Date.now();
+    // A corpus-driven re-capture must reproduce the committed package's clock,
+    // so the frozen instant comes from the corpus, not from the wall.
+    let frozenNowMs = 0;
 
     for (const spec of [...REAL_WINDOWS, ...FIXTURE_WINDOWS]) {
-        const extraction =
-            spec.kind === "real" ? extractRealWindow(host, spec) : buildFixtureWindow(spec);
+        let extraction: WindowExtraction;
         let docsFiles: Array<{ name: string; content: string }>;
         let docsSource: string;
-        if (spec.kind === "fixture") {
-            docsFiles = spec.fixture?.docsFiles ?? [];
-            docsSource = "fixture-inline";
-        } else if (spec.docsDirectory) {
-            docsFiles = copyRealDocs(spec.docsDirectory);
-            docsSource = spec.docsDirectory;
+        let parsed: ParsedIdentity;
+        if (corpus) {
+            const inputs = resolveFromCorpus(corpus, corpusDir!, spec);
+            extraction = inputs.extraction;
+            docsFiles = inputs.docsFiles;
+            docsSource = inputs.docsSource;
+            parsed = inputs.parsed;
+            if (frozenNowMs === 0) frozenNowMs = inputs.frozenNowMs;
         } else {
-            docsFiles = [];
-            docsSource = "empty";
+            if (!host) throw new Error("no host database");
+            extraction = extractRealWindow(host, spec);
+            if (spec.kind === "fixture") {
+                docsFiles = spec.fixture?.docsFiles ?? [];
+                docsSource = "fixture-inline";
+            } else if (spec.docsDirectory) {
+                docsFiles = copyRealDocs(spec.docsDirectory);
+                docsSource = spec.docsDirectory;
+            } else {
+                docsFiles = [];
+                docsSource = "empty";
+            }
+            parsed =
+                spec.kind === "real"
+                    ? parseStoredUpgradeIdentity(
+                          (
+                              host
+                                  .query(
+                                      "SELECT cached_m0_upgrade_state FROM session_meta WHERE session_id = ?",
+                                  )
+                                  .get(spec.sessionId) as {
+                                  cached_m0_upgrade_state: string | null;
+                              }
+                          ).cached_m0_upgrade_state,
+                      )
+                    : {
+                          memoryBudget: spec.fixture?.memoryBudget ?? 4000,
+                          historyBudget: spec.fixture?.historyBudget ?? 30000,
+                          historyPolicyIdentity: undefined,
+                          muralEnabled: false,
+                      };
+            if (frozenNowMs === 0) frozenNowMs = Date.now();
         }
-
-        const parsed: ParsedIdentity =
-            spec.kind === "real"
-                ? parseStoredUpgradeIdentity(
-                      (
-                          host
-                              .query(
-                                  "SELECT cached_m0_upgrade_state FROM session_meta WHERE session_id = ?",
-                              )
-                              .get(spec.sessionId) as { cached_m0_upgrade_state: string | null }
-                      ).cached_m0_upgrade_state,
-                  )
-                : {
-                      memoryBudget: spec.fixture?.memoryBudget ?? 4000,
-                      historyBudget: spec.fixture?.historyBudget ?? 30000,
-                      historyPolicyIdentity: undefined,
-                      muralEnabled: false,
-                  };
 
         // Determinism self-check: two independent temp stores, byte-identical.
         const first = driveOnce(spec, extraction, docsFiles, parsed, frozenNowMs);
@@ -664,8 +781,22 @@ function main(): void {
             gzipJson(shared.memoryMutations),
         );
     }
-    writeFileSync(join(outDir, "shared", "user-memories.json.gz"), gzipJson(sharedUserMemories));
-    writeFileSync(join(outDir, "shared", "project-state.json.gz"), gzipJson(sharedProjectState));
+    if (corpus) {
+        // Corpus-driven re-capture: the shared row snapshots and the per-window
+        // seeds are the committed inputs — copy them through unchanged so the
+        // only possible byte movement is in the rendered regions.
+        for (const dir of ["shared", "windows"] as const) {
+            for (const name of readdirSync(join(corpusDir!, dir))) {
+                writeFileSync(
+                    join(outDir, dir, name),
+                    readFileSync(join(corpusDir!, dir, name)),
+                );
+            }
+        }
+    } else {
+        writeFileSync(join(outDir, "shared", "user-memories.json.gz"), gzipJson(sharedUserMemories));
+        writeFileSync(join(outDir, "shared", "project-state.json.gz"), gzipJson(sharedProjectState));
+    }
 
     const commit = Bun.spawnSync(["git", "-C", PLUGIN_ROOT, "rev-parse", "HEAD"])
         .stdout.toString()
@@ -677,7 +808,7 @@ function main(): void {
                 schemaVersion: 1,
                 capturedAt: new Date(frozenNowMs).toISOString(),
                 captureCommit: commit,
-                hostDb: hostDbPath,
+                hostDb: corpus ? `corpus:${corpusDir}` : hostDbPath,
                 timezone: CAPTURE_TZ,
                 estimatorFingerprint: getTokenEstimatorFingerprint(),
                 windows: manifestWindows,
@@ -686,7 +817,7 @@ function main(): void {
             2,
         ),
     );
-    host.close();
+    host?.close();
     console.log(`wrote ${manifestWindows.length} windows to ${outDir}`);
 }
 

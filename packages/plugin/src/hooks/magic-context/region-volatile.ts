@@ -6,7 +6,7 @@
 // region panel, profile deltas, docs deltas — render here instead: a small
 // per-session segment stored beside the region and served at the tail of
 // system[0] AFTER the region bytes. The segment is absorbed by the next
-// natural fold (persistCachedM0 clears it in the fold transaction).
+// natural fold (the fold-row persist clears it inside the fold transaction).
 //
 // Replay-only law: serveRegionVolatile decodes persisted bytes and performs
 // zero computation; recomputation happens only on passes that already hold
@@ -62,6 +62,8 @@ export interface RegionVolatileRender {
     text: string;
     memoryUpdateCount: number;
     compartmentCount: number;
+    /** Memory ids this segment renders (overflow set + forced mutation rows). */
+    memoryIds: number[];
 }
 
 /**
@@ -74,6 +76,12 @@ export interface RegionVolatileRender {
 export function renderRegionVolatile(
     options: M0M1RenderOptions,
     watermark: RegionVolatileWatermark,
+    /**
+     * Pre-resolved canonical docs (the fold owns one read per boundary pass —
+     * the docs-read-count law). Omitted on bust-lane recomputation, which is
+     * the pass's only docs reader.
+     */
+    docsOverride?: { renderedBlock: string; canonicalHash: string },
 ): RegionVolatileRender {
     const blocks: string[] = [];
     let memoryUpdateCount = 0;
@@ -163,6 +171,10 @@ export function renderRegionVolatile(
         ...trimmedNewMemories.filter((memory) => !regionRendered.has(memory.id)),
         ...eligibleMemories.filter((memory) => forcedMemoryIds.has(memory.id)),
     ];
+    // Deduped identity of the memories this segment renders, for the
+    // session_meta.memory_block_* accounting (ctx_search's hide-already-visible
+    // filter reads it — region panel ids ∪ volatile ids).
+    const memoryIds = [...new Set(deltaMemories.map((memory) => memory.id))];
     const newMemoriesBlock = renderMemoryBlockV2(
         deltaMemories,
         "new-memories",
@@ -191,16 +203,17 @@ export function renderRegionVolatile(
         if (profileBlock) blocks.push(profileBlock);
     }
 
-    const docsDelta = renderDocsDeltaBlock(options, watermark);
+    const docsDelta = renderDocsDeltaBlock(options, watermark, docsOverride);
     if (docsDelta) blocks.push(docsDelta);
 
     if (blocks.length === 0) {
-        return { text: "", memoryUpdateCount: 0, compartmentCount: 0 };
+        return { text: "", memoryUpdateCount: 0, compartmentCount: 0, memoryIds: [] };
     }
     return {
         text: `<session-history-since>\n${blocks.join("\n")}\n</session-history-since>`,
         memoryUpdateCount,
         compartmentCount,
+        memoryIds,
     };
 }
 
@@ -212,9 +225,11 @@ export function renderRegionVolatile(
 function renderDocsDeltaBlock(
     options: M0M1RenderOptions,
     watermark: RegionVolatileWatermark,
+    docsOverride?: { renderedBlock: string; canonicalHash: string },
 ): string {
     if (!options.projectDirectory || options.injectDocs === false) return "";
-    const canonical = readProjectDocsCanonical(options.projectDirectory);
+    const canonical =
+        docsOverride ?? readProjectDocsCanonical(options.projectDirectory);
     if (!canonical.renderedBlock) return "";
     if (canonical.canonicalHash === watermark.projectDocsHash) return "";
     return canonical.renderedBlock;
@@ -264,7 +279,7 @@ function readMemoryBlockIds(db: Database, sessionId: string): number[] {
  * already holds the bust permission. Renders the segment against the stored
  * region row's captured watermark and persists it only when the bytes moved;
  * every other pass serves the stored bytes verbatim. When the fold executed
- * this pass the caller skips this — persistCachedM0 absorbed the segment in
+ * this pass the caller skips this — the fold-row persist absorbed the segment in
  * the fold transaction.
  */
 export function recomputeRegionVolatileSegment(args: {

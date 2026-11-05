@@ -2,9 +2,10 @@
 // (design §25.1, assembly-v2 Unit 1 Step 2). Moved verbatim from
 // inject-compartments.ts: the compartment/memory/user-profile renderers, their
 // trims and budgets, the render-side m[0]/m[1] primitives, and the shared
-// marker/state types they consume. The region grammar lives in ONE place here
-// (renderRegionBody); the transform never invents wire bytes, it only asks
-// this module to render them.
+// marker/state types they consume. The region is the four panels the
+// renderRegionM0 composition assembles (Unit 2 Step 2); the delta class rides
+// the volatile segment in region-volatile.ts. The transform never invents wire
+// bytes, it only asks this module to render them.
 
 import { Buffer } from "node:buffer";
 import { MEMORY_MURAL_BLOCK } from "../../agents/magic-context-prompt";
@@ -1371,8 +1372,4 @@ export function buildRegionMuralMessage(args: {
         },
         parts: [{ type: "file", mime: "image/png", url: dataUrl }],
     };
-}
-
-export function renderRegionBody(m0Text: string, m1Text: string): string {
-    return `${m0Text}\n\n${m1Text}`;
 }
