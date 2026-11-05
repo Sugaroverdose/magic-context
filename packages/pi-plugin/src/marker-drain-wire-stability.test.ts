@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import { appendCompartments } from "@magic-context/core/features/magic-context/compartment-storage";
+import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
+import { bumpProjectMemoryEpoch } from "@magic-context/core/features/magic-context/storage";
+import { readSystemRegion } from "@magic-context/core/features/magic-context/system-region";
 import {
+	getOrCreateSessionMeta,
 	getPendingOps,
 	getTagsBySession,
 	queuePendingOp,
@@ -188,7 +192,13 @@ describe("Pi marker-drain wire stability", () => {
 				{ messages: baselineInput },
 				physicalContext(sessionManager, 10_000) as never,
 			);
-			expect(messageText(baseline.messages[1]).length).toBeLessThan(200);
+			// Region lane (Unit 7): no synthetic heads — the fold-covered
+			// history left the wire via the fold-owned trim (320 raw − 255
+			// covered = 65 served; the handler trims args.messages in place,
+			// so baselineInput no longer shows the pre-pass length).
+			expect(baseline.messages).toHaveLength(65);
+			expect(baseline.messages.map(classifyMessage)).not.toContain("m0");
+			expect(baseline.messages.map(classifyMessage)).not.toContain("m1");
 
 			const toolTags = getTagsBySession(db, sessionId).filter(
 				(tag) => tag.type === "tool",
@@ -221,6 +231,11 @@ describe("Pi marker-drain wire stability", () => {
 			});
 			signalPiDeferredHistoryRefresh(sessionId);
 			signalPiDeferredMaterialization(sessionId);
+			// Region lane (Unit 7): the marker's projection lands in the same
+			// pass only when a FOLD covers it (the fold-owned boundary is the
+			// trim authority; the publication itself is a demoted delta).
+			// Force the covering fold with a genuine HARD arm.
+			bumpProjectMemoryEpoch(db, resolveProjectIdentity(process.cwd()));
 			updateSessionMeta(db, sessionId, {
 				lastResponseTime: Date.now(),
 				cacheTtl: "59m",
@@ -244,8 +259,20 @@ describe("Pi marker-drain wire stability", () => {
 			expect(
 				selectedToolTags.every((tag) => droppedTagNumbers.has(tag.tagNumber)),
 			).toBe(true);
-			expect(pass1.messages).toHaveLength(15);
-			expect(messageText(pass1.messages[1]).length).toBeGreaterThan(2_400);
+			// The published compartment is absorbed by the covering fold's
+			// region baseline — no synthetic head carries it anymore; the
+			// volatile segment starts (and stays) empty.
+			// (The compartment body renders only at a fuller decay tier; the
+			// title proves the absorption.)
+			expect(readSystemRegion(db, sessionId)).toContain(
+				"## 256-307 · New publication",
+			);
+			expect(
+				getOrCreateSessionMeta(db, sessionId).regionVolatileBytes,
+			).toBeNull();
+			// The covering fold advanced the fold-owned trim to the marker's
+			// boundary (307): 65 − 52 newly covered = 13 served.
+			expect(pass1.messages).toHaveLength(13);
 
 			const sessionFile = sessionManager.getSessionFile();
 			if (!sessionFile) throw new Error("expected persisted Pi session file");

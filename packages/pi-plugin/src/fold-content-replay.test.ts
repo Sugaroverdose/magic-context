@@ -270,7 +270,9 @@ describe("Pi fold content replay", () => {
 		};
 		try {
 			const preDeploy = await pass(70);
-			const preDeployReminder = textOf(preDeploy.messages[3] as never);
+			// Region lane (Unit 7): no synthetic heads — the raw index shifts
+			// forward by the two deleted head slots.
+			const preDeployReminder = textOf(preDeploy.messages[1] as never);
 			expect(preDeployReminder).toMatch(/^§\d+§ <!-- \+10h 30m -->$/);
 			expect(preDeployReminder).toHaveLength(24);
 			const tag = getTagsBySession(db, sessionId).find(
