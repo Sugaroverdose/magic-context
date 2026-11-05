@@ -46,7 +46,9 @@ describe("historian category vocabulary drift", () => {
     });
 
     it("uses the shared category order in both injection priority lookups", () => {
-        const source = read("packages/plugin/src/hooks/magic-context/inject-compartments.ts");
+        // Relocated with the render layer to region-render.ts (assembly-v2
+        // Unit 1 Step 2); the law follows the code, not the old path.
+        const source = read("packages/plugin/src/hooks/magic-context/region-render.ts");
         const lookups = [...source.matchAll(/(?:left|right)Priority = (\w+)\.indexOf\(/g)].map(
             (match) => match[1],
         );
