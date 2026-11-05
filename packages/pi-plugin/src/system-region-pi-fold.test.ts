@@ -6,6 +6,7 @@ import { appendCompartments } from "@magic-context/core/features/magic-context/c
 import { resolveProjectIdentity } from "@magic-context/core/features/magic-context/memory/project-identity";
 import { insertMemory } from "@magic-context/core/features/magic-context/memory/storage-memory";
 import {
+	bumpProjectMemoryEpoch,
 	getOrCreateSessionMeta,
 	queueMemoryMutation,
 } from "@magic-context/core/features/magic-context/storage";
@@ -201,7 +202,7 @@ describe("Pi region lane: the fold installs through the rotation funnel (D4)", (
 		}
 	});
 
-	it("rotation re-installs region bytes with the new delta content (delta fields ride the boundary)", () => {
+	it("fold absorbs pending delta memory into the region bytes (Unit 2 Task 3)", () => {
 		const db = createTestDb();
 		const dir = createTestTempDirFromPath("/tmp/pi-region-rotate-");
 		try {
@@ -214,7 +215,9 @@ describe("Pi region lane: the fold installs through the rotation funnel (D4)", (
 			const before = readSystemRegion(db, state.sessionId);
 			expect(before).not.toBeNull();
 			expect(before).not.toContain("late added fact");
-			// Additive memory = m[1]-delta field: rotates only at a boundary.
+			// Additive memory = delta class (Task 3): it never triggers a
+			// rotation of its own — it rides the volatile segment until the
+			// next legitimate fold, which absorbs it into the region panels.
 			insertMemory(db, {
 				projectPath: state.projectIdentity,
 				category: "CONSTRAINTS",
@@ -222,7 +225,7 @@ describe("Pi region lane: the fold installs through the rotation funnel (D4)", (
 			});
 			materializeM0Pi(state, db, undefined, {
 				enabled: true,
-				reason: "max_memory_id",
+				reason: "hard_fold",
 			});
 			const after = readSystemRegion(db, state.sessionId);
 			expect(after).toContain("late added fact");
@@ -384,36 +387,74 @@ describe("Pi region lane: rotation promotion is ride-only (D7, L3/L4 mirror)", (
 	});
 });
 
-// Storm comparator convergence, Pi mirror (§25, Fix A). The Pi promotion
-// wrapper fed readCurrentMarkersFromCompartments meta.cachedM0ProjectDocsHash
-// — the PERSISTED value — on the current side, so captured and current were
-// equal by construction and the project_docs_hash trigger could never fire:
-// a docs edit changed the panel only whenever some other trigger happened
-// to rotate. The TS storm was the same comparator defect in the other
-// direction (placeholder "" current side → rotate forever). Both sides of
-// the pair must be what production reads: captured = persisted, current =
-// live canonical hash, composed by the wrapper itself.
-describe("Pi region lane: promotion comparator convergence (storm, Fix A mirror)", () => {
+// Storm comparator convergence, Pi mirror (§25, Fix A), re-expressed for
+// Unit 2 Task 3: the docs hash is demoted from the rotation vocabulary (the
+// docs delta rides the volatile segment), so the docs-edit arm can no longer
+// promote — and the comparator must still read LIVE current state for the
+// surviving compared members (bitten here by the dashboard epoch through the
+// production writer). The original defect had two faces: the Pi wrapper fed
+// the PERSISTED docs hash on the current side (dead trigger), the TS side a
+// placeholder "" (rotate storm); both were caught by pinning the pair to
+// what production reads. The live-current-side pin survives on the epoch arm.
+describe("Pi region lane: promotion comparator convergence (storm, Fix A mirror; Task 3 demotion)", () => {
 	function installedWithDocs(dir: string, sid: string) {
-		writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\npanel doc v1.\n");
+		writeFileSync(
+			join(dir, "ARCHITECTURE.md"),
+			"# Architecture\n\npanel doc v1.\n",
+		);
 		writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nmap v1.\n");
 		const db = createTestDb();
 		const state = piState(sid, dir);
 		seedStore(db, state);
-		materializeM0Pi(state, db, undefined, { enabled: true, reason: "region_first_install" });
+		materializeM0Pi(state, db, undefined, {
+			enabled: true,
+			reason: "region_first_install",
+		});
 		return { db, state };
 	}
 
-	it("a docs edit promotes the boundary pass (live current side)", () => {
+	it("a docs edit never promotes (Task 3): the docs delta rides the volatile segment", () => {
 		const dir = createTestTempDirFromPath("/tmp/pi-region-docs-edit-");
 		const { db, state } = installedWithDocs(dir, "ses-pi-region-docs-edit");
 		try {
-			// Captured side carries the REAL persisted hash (not the
-			// head-lane placeholder) — the precondition the TS storm
-			// violated.
 			const meta = getOrCreateSessionMeta(db, state.sessionId);
 			expect(meta.cachedM0ProjectDocsHash).toBeTruthy();
-			writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\npanel doc v2.\n");
+			writeFileSync(
+				join(dir, "ARCHITECTURE.md"),
+				"# Architecture\n\npanel doc v2.\n",
+			);
+			const snapshot = createPiM0M1PassSnapshot({
+				db,
+				sessionId: state.sessionId,
+				compactionOff: false,
+			});
+			// Demoted: even with the boundary permission the docs change is
+			// invisible to rotation — the panel converges at the next fold.
+			expect(
+				piRegionRotationPromotion({
+					state,
+					db,
+					passSnapshot: snapshot,
+					systemRegionLane: true,
+					foldDue: false,
+					boundaryPermission: true,
+					forceBand: false,
+				}),
+			).toEqual({ promote: false, reason: null });
+		} finally {
+			closeQuietly(db);
+		}
+	});
+
+	it("comparator keeps its bite through the live current side (epoch control)", () => {
+		// Fix A's property, transplanted to a surviving compared member: the
+		// wrapper's current side must reflect the LIVE store (dashboard epoch
+		// bump via the production writer), not the persisted snapshot — the
+		// dead-trigger wiring class stays dead.
+		const dir = createTestTempDirFromPath("/tmp/pi-region-docs-bite-");
+		const { db, state } = installedWithDocs(dir, "ses-pi-region-docs-bite");
+		try {
+			bumpProjectMemoryEpoch(db, state.projectIdentity);
 			const snapshot = createPiM0M1PassSnapshot({
 				db,
 				sessionId: state.sessionId,
@@ -429,7 +470,7 @@ describe("Pi region lane: promotion comparator convergence (storm, Fix A mirror)
 					boundaryPermission: true,
 					forceBand: false,
 				}),
-			).toEqual({ promote: true, reason: "project_docs_hash" });
+			).toEqual({ promote: true, reason: "project_memory_epoch" });
 			// Ride-only still holds without the boundary.
 			expect(
 				piRegionRotationPromotion({
@@ -488,59 +529,61 @@ describe("Pi region lane: promotion comparator convergence (storm, Fix A mirror)
 		).toBe(false);
 	});
 
-	it(
-		"quiescent warm session with a region far past the cap must NOT rotate (Fix C mirror)",
-		() => {
-			// §25.3: the Pi wrapper wired pendingBytes = storedRegion.length
-			// (absolute size) — same defect class as the TS lane. A quiescent
-			// session (markers equal, no force band) must decline no matter how
-			// large the region is. The region grows through the PRODUCTION fold
-			// (a large memory block, budget raised so the trimmer keeps it) —
-			// post-install writeSystemRegion is NOT quiescent on Pi: its H3
-			// property retires the boundary deliberately.
-			const dir = createTestTempDirFromPath("/tmp/pi-region-big-");
-			writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\npanel doc v1.\n");
-			writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nmap v1.\n");
-			const db = createTestDb();
-			const state = { ...piState("ses-pi-region-big", dir), injectionBudgetTokens: 400_000 };
-			seedStore(db, state);
-			insertMemory(db, {
-				projectPath: state.projectIdentity,
-				category: "CONSTRAINTS",
-				content: "x".repeat(60_000),
+	it("quiescent warm session with a region far past the cap must NOT rotate (Fix C mirror)", () => {
+		// §25.3: the Pi wrapper wired pendingBytes = storedRegion.length
+		// (absolute size) — same defect class as the TS lane. A quiescent
+		// session (markers equal, no force band) must decline no matter how
+		// large the region is. The region grows through the PRODUCTION fold
+		// (a large memory block, budget raised so the trimmer keeps it) —
+		// post-install writeSystemRegion is NOT quiescent on Pi: its H3
+		// property retires the boundary deliberately.
+		const dir = createTestTempDirFromPath("/tmp/pi-region-big-");
+		writeFileSync(
+			join(dir, "ARCHITECTURE.md"),
+			"# Architecture\n\npanel doc v1.\n",
+		);
+		writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nmap v1.\n");
+		const db = createTestDb();
+		const state = {
+			...piState("ses-pi-region-big", dir),
+			injectionBudgetTokens: 400_000,
+		};
+		seedStore(db, state);
+		insertMemory(db, {
+			projectPath: state.projectIdentity,
+			category: "CONSTRAINTS",
+			content: "x".repeat(60_000),
+		});
+		try {
+			materializeM0Pi(state, db, undefined, {
+				enabled: true,
+				reason: "region_first_install",
 			});
-			try {
-				materializeM0Pi(state, db, undefined, {
-					enabled: true,
-					reason: "region_first_install",
-				});
-				const region = readSystemRegion(db, state.sessionId);
-				expect(region).not.toBeNull();
-				// Past every historical cap: the old wiring read this length as
-				// the "pending delta" (default budget cap = 40_000 * 0.2 * 4).
-				expect((region ?? "").length).toBeGreaterThan(40_000 * 0.2 * 4);
-				const snapshot = createPiM0M1PassSnapshot({
+			const region = readSystemRegion(db, state.sessionId);
+			expect(region).not.toBeNull();
+			// Past every historical cap: the old wiring read this length as
+			// the "pending delta" (default budget cap = 40_000 * 0.2 * 4).
+			expect((region ?? "").length).toBeGreaterThan(40_000 * 0.2 * 4);
+			const snapshot = createPiM0M1PassSnapshot({
+				db,
+				sessionId: state.sessionId,
+				compactionOff: false,
+			});
+			expect(
+				piRegionRotationPromotion({
+					state,
 					db,
-					sessionId: state.sessionId,
-					compactionOff: false,
-				});
-				expect(
-					piRegionRotationPromotion({
-						state,
-						db,
-						passSnapshot: snapshot,
-						systemRegionLane: true,
-						foldDue: false,
-						boundaryPermission: true,
-						forceBand: false,
-					}),
-				).toEqual({ promote: false, reason: null });
-			} finally {
-				closeQuietly(db);
-			}
-		},
-		20_000,
-	);
+					passSnapshot: snapshot,
+					systemRegionLane: true,
+					foldDue: false,
+					boundaryPermission: true,
+					forceBand: false,
+				}),
+			).toEqual({ promote: false, reason: null });
+		} finally {
+			closeQuietly(db);
+		}
+	}, 20_000);
 });
 
 describe("Pi region lane: compaction adoption touches zero real messages (F1)", () => {

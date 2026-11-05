@@ -150,6 +150,7 @@ import {
     selectReasoningRemovals,
     settleDroppedReasoningParts,
 } from "./reasoning-removal";
+import { recomputeRegionVolatileSegment } from "./region-volatile";
 import {
     isNeutralizedReasoningPart,
     modelAcceptsEmptyContent,
@@ -1720,7 +1721,9 @@ export function finalizeMessageRepresentation(
  * boundary it always declines, and a missing region is installed by
  * mustMaterialize, not here. There is no size/pressure arm: growth is
  * measured by the marker comparison, never by the absolute region size —
- * the deleted pending_growth class (§25.3).
+ * the deleted pending_growth class (§25.3). The volatile segment's growth
+ * backstop REQUESTS a fold through the deferred-materialization queue
+ * (Task 1 Step 4b); the scheduler still owns when the fold rides.
  */
 export function regionRotationPromotion(input: {
     systemRegionLane: boolean;
@@ -1936,6 +1939,23 @@ export async function runPostTransformPhase(
                     args.sessionId,
                     `system-region rotation promoted: reason=${promotion.reason} scheduler=${args.schedulerDecision}`,
                 );
+            } else if (deferredMaterialize) {
+                // Fold REQUEST consumer (Task 1 Step 4b; the same queue
+                // carries the historian publish intent and the wrapup
+                // operator rotation, #2628): with the DELTA arms emptied, the
+                // queue is the only mechanism that turns published deltas
+                // into region bytes. Consumption is the named boundary — the
+                // request never originates a bust (canConsumeDeferredLate is
+                // execute/force-band/publication-await only), it rides the
+                // pass that already holds the permission. The parser-
+                // recognized mint below is the rotation-reason vocabulary
+                // census witness:
+                //   systemRegion: { enabled: true, reason: "fold_request" }
+                regionRotationReason = "fold_request";
+                sessionLog(
+                    args.sessionId,
+                    `system-region rotation promoted: reason=fold_request scheduler=${args.schedulerDecision}`,
+                );
             }
         }
     }
@@ -2146,7 +2166,7 @@ export async function runPostTransformPhase(
                     args.rebuiltHistoryFromInitialPrepare ||
                     (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
     };
-    const publishedWorkDrainAllowed = !compactionOff && hasReclaimRide(rideSignals);
+    let publishedWorkDrainAllowed = !compactionOff && hasReclaimRide(rideSignals);
     // System-origin reclaim may only ride a pass that actually rewrites served
     // bytes. A consumed deferred-materialization intent whose fold rewrote
     // nothing leaves the pass warm; draining the queue, the sweeper, or
@@ -2154,7 +2174,7 @@ export async function runPostTransformPhase(
     // exception is the aborted-fold retry, where the provider is already cold
     // (prefixPreflightFailed). Subagent passes keep their execute-band pressure
     // semantics via the fullFeatureMode bypass.
-    const systemReclaimAllowed =
+    let systemReclaimAllowed =
         !args.fullFeatureMode ||
         (!compactionOff &&
             (rideSignals.hardFold ||
@@ -2162,7 +2182,84 @@ export async function runPostTransformPhase(
                 isExplicitFlush ||
                 rideSignals.publishedHistory ||
                 (deferredMaterialize && prefixPreflightFailed)));
-    const shouldApplyPendingOps = publishedWorkDrainAllowed;
+    let shouldApplyPendingOps = publishedWorkDrainAllowed;
+    // Unit 2 Task 1: the volatile delta segment recomputes only on a pass
+    // that already holds the bust permission; every other pass serves the
+    // stored bytes verbatim (the serve site is a pure decode). Compaction-off
+    // rides too — the volatile segment is the delta carrier for that lane
+    // (assembly-v2 ruling: region treatment, no carve-out), so this gate
+    // deliberately does not reuse the !compactionOff reclaim predicate. When
+    // the fold executed this pass, the fold-row persist already absorbed the
+    // segment in the fold transaction — no recompute.
+    const volatileRecomputeAllowed =
+        (args.schedulerDecision === "execute" ||
+            rideSignals.hardFold ||
+            rideSignals.force ||
+            isExplicitFlush ||
+            rideSignals.publishedHistory ||
+            forceMaterialization) &&
+        // Contention-exhausted pass: the fold aborted, so this pass replays
+        // every persisted byte unchanged — region and segment alike (head-era
+        // equivalence: the m[1] refresh was held too, and the queue lane
+        // stays shut until the uncontended drain).
+        !prefixPreflightFailed;
+    let volatileRewroteServedBytes = false;
+    if (
+        args.systemRegionLane === true &&
+        volatileRecomputeAllowed &&
+        !foldExecutedThisPass &&
+        args.m0M1
+    ) {
+        try {
+            const volatileRendered = recomputeRegionVolatileSegment({
+                db: args.db,
+                sessionId: args.sessionId,
+                meta: args.sessionMeta,
+                options: {
+                    db: args.db,
+                    sessionId: args.sessionId,
+                    state: args.sessionMeta as M0M1State,
+                    projectPath: args.m0M1.projectPath,
+                    projectDirectory: args.m0M1.projectDirectory,
+                    injectDocs: args.m0M1.injectDocs,
+                    memoryEnabled: args.m0M1.memoryEnabled,
+                    memoryInjectionBudgetTokens: args.m0M1.memoryInjectionBudgetTokens,
+                    historyBudgetTokens: args.m0M1.historyBudgetTokens,
+                    temporalAwareness: args.m0M1.temporalAwareness,
+                    isCacheBustingPass: true,
+                    hardSignals: args.m0M1.hardSignals,
+                    muralEnabled: args.m0M1.muralEnabled,
+                    compactionOff,
+                },
+                onFoldRequest: (reason) => {
+                    // Growth backstop (Task 1 Step 4b): the oversized segment
+                    // REQUESTS a fold — it schedules onto the deferred
+                    // materialization queue and the scheduler decides when the
+                    // fold rides. This pass performs zero region mutation;
+                    // consumption grants the boundary permission on a later
+                    // pass (deferredMaterialize), never here.
+                    args.deferredMaterializationSessions.add(args.sessionId);
+                    sessionLog(args.sessionId, `region-volatile fold requested reason=${reason}`);
+                },
+            });
+            volatileRewroteServedBytes = volatileRendered !== null;
+        } catch (error) {
+            // The segment is additive carriage: a failed recompute leaves the
+            // previously stored bytes served — never fail the pass for it.
+            sessionLog(args.sessionId, "region-volatile recompute failed (ignored):", error);
+        }
+    }
+    if (volatileRewroteServedBytes && !compactionOff) {
+        // The volatile rewrite changed the bytes the host is about to send —
+        // this pass already busts, exactly as the head-era m[1] refresh did
+        // (its successor). The ONE bust permission is widened here and every
+        // mutation lane consults it (no split busts). The fold REQUEST raised
+        // above is deliberately NOT such a signal: a request never opens the
+        // gates — only the boundary that pays for it does.
+        publishedWorkDrainAllowed = true;
+        shouldApplyPendingOps = true;
+        systemReclaimAllowed = true;
+    }
     const shouldRunHeuristics =
         !compactionOff &&
         systemReclaimAllowed &&

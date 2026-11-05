@@ -321,5 +321,3 @@ Continuing the Unit 0 boot-gate adjudication deliverable on `feat/v2-unit-0`. Au
 #2741: keyArg key list: chunk lanes (boundary.rs, historian_chunk.rs, read-session-formatting.ts) use filePath, path, pattern, query, symbol, module, action; ctx-expand lanes (render.ts, lib.rs verbose_expand_key_argument) add description. `command` is absent from all lanes.
 </CONFIG_VALUES>
 </project-memory>
-
-<session-history-since>(no new content since last materialization)</session-history-since>

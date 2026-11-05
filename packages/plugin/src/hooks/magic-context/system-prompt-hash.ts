@@ -24,6 +24,7 @@ import {
     spawnAgentFromOpenCodeDb,
 } from "./ctx-reduce-availability";
 import { estimateTokens } from "./read-session-formatting";
+import { serveRegionVolatile } from "./region-volatile";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
@@ -501,6 +502,16 @@ export function createSystemPromptHashHandler(deps: {
             regionServed = decodeSystemRegionRow(sessionMetaEarly.cachedM0Bytes);
             if (regionServed !== null) {
                 output.system[0] = `${output.system[0]}${SYSTEM_PROMPT_GUIDANCE_SEPARATOR}${regionServed}`;
+                // ── Step 2.5b: Volatile delta segment (Unit 2 Task 1) ──
+                // The delta-class carriage rides after the region bytes and is
+                // served ONLY when its watermark names the region row being
+                // served — a segment rendered against an older region is
+                // refused. Pure decode from the session meta already loaded;
+                // recomputation happens on the bust lane, never here.
+                const volatileText = serveRegionVolatile(sessionMetaEarly);
+                if (volatileText !== null) {
+                    output.system[0] = `${output.system[0]}${SYSTEM_PROMPT_GUIDANCE_SEPARATOR}${volatileText}`;
+                }
             }
         }
 

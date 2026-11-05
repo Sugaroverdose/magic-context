@@ -315,5 +315,3 @@ I began reconnaissance: confirmed HEAD at c5f4c9b5f with no unstaged changes. Di
 #2741: keyArg key list: chunk lanes (boundary.rs, historian_chunk.rs, read-session-formatting.ts) use filePath, path, pattern, query, symbol, module, action; ctx-expand lanes (render.ts, lib.rs verbose_expand_key_argument) add description. `command` is absent from all lanes.
 </CONFIG_VALUES>
 </project-memory>
-
-<session-history-since>(no new content since last materialization)</session-history-since>

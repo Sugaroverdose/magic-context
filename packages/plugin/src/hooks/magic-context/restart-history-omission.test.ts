@@ -30,6 +30,7 @@ import {
 } from "../../features/magic-context/compartment-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { readSystemRegion } from "../../features/magic-context/system-region";
 import { Database } from "../../shared/sqlite";
 import {
     clearInjectionCache,
@@ -40,9 +41,8 @@ import {
     regionMarkersFromSnapshot,
     snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
-import { readSystemRegion } from "../../features/magic-context/system-region";
-import { regionRotationPromotion } from "./transform-postprocess-phase";
 import type { MessageLike } from "./transform-operations";
+import { regionRotationPromotion } from "./transform-postprocess-phase";
 
 const SESSION_ID = "ses_restart_omit";
 const PROJECT_PATH = "/tmp/test-restart-omit-project";
@@ -144,8 +144,7 @@ function runProductionFlow(opts: {
         systemRegion: { enabled: true, reason: "hard_fold" },
         forceMaterializeReason,
     });
-    const tailIds = opts.messages
-        .map((m) => (typeof m.info.id === "string" ? m.info.id : ""));
+    const tailIds = opts.messages.map((m) => (typeof m.info.id === "string" ? m.info.id : ""));
     return {
         m0: result.m0Bytes ? result.m0Bytes.toString("utf8") : "",
         m1: result.m1Text ?? "",

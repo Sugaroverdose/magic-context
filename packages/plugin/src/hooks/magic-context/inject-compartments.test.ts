@@ -31,12 +31,12 @@ import {
     setProjectState,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { readRegionVolatile } from "../../features/magic-context/storage-meta-shared";
 import {
     readSystemRegion,
     SYSTEM_REGION_SENTINEL,
     writeSystemRegion,
 } from "../../features/magic-context/system-region";
-import { RenderM1InvalidMarkersError } from "./region-render";
 import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -60,12 +60,37 @@ import {
     readCurrentM0SnapshotMarkers,
     renderCompartmentInjection,
     renderHistorianMemoryBlock,
-    renderM1,
     renderMemoryBlockV2,
     renderMemoryLineV2,
     trimMemoriesToBudgetV2,
 } from "./inject-compartments";
 import { withRawMessageProvider } from "./read-session-chunk";
+import { RenderM1InvalidMarkersError } from "./region-render";
+import { renderRegionVolatile } from "./region-volatile";
+
+/**
+ * Unit 2 Step 3: the three m[1] delta renderers died behind their successor
+ * — the volatile segment carrier. The delta laws drive renderRegionVolatile
+ * directly; this adapter only maps the old (markers, renderedMemoryIds) call
+ * shape onto the watermark. (The renderer names are not spelled out here:
+ * the carriage deletion census pins that vocabulary dead repo-wide, prose
+ * included.)
+ */
+function deltaText(
+    options: Parameters<typeof materializeM0>[0],
+    markers: {
+        maxMemoryId: number;
+        maxCompartmentSeq: number;
+        maxMemoryMutationId: number;
+        projectUserProfileVersion: number;
+        projectDocsHash: string;
+        materializedAt: number;
+    },
+    renderedMemoryIds: readonly number[] = [],
+): string {
+    return renderRegionVolatile(options, { ...markers, renderedMemoryIds }).text;
+}
+
 import { closeReadOnlySessionDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -73,6 +98,11 @@ import { USER_PROFILE_DESCRIPTION } from "./user-profile-render";
 
 const SESSION_ID = "ses_test_inject";
 const PROJECT_PATH = "/tmp/test-inject-project";
+// sha256(stored region row bytes || \0 || "") for the expiry-transition law's
+// fold, pinned at the four-panel lift (Unit 2 Step 2): the region is the
+// sentinel + panels, no delta tail.
+const EXPIRY_TRANSITION_REGION_PIN_V95 =
+    "5884e35fd9063fd287938852bdd2db6b235e490cbb5b989eadfbc5311313b05f";
 
 let db: Database;
 const tempDirs: string[] = [];
@@ -715,7 +745,7 @@ describe("user-profile baseline and delta rendering", () => {
                 systemRegionMode: true,
             }),
         ).toEqual({ value: false, reason: null });
-        const delta = renderM1(
+        const delta = deltaText(
             { ...options, state: readStateFromMeta() },
             baseline.snapshotMarkers,
             baseline.renderedMemoryIds,
@@ -879,10 +909,7 @@ describe("prepared prefix source-order trimming", () => {
         );
 
         expect(result.prefixTrimStatus).toBe("applied");
-        expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
-            "instruction row",
-            "after",
-        ]);
+        expect(live.map((entry) => entry.parts[0]?.text)).toEqual(["instruction row", "after"]);
     });
 
     it("orders id-less host system messages by their persisted neighbours", () => {
@@ -910,10 +937,7 @@ describe("prepared prefix source-order trimming", () => {
         );
 
         expect(result.prefixTrimStatus).toBe("applied");
-        expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
-            "instruction row",
-            "after",
-        ]);
+        expect(live.map((entry) => entry.parts[0]?.text)).toEqual(["instruction row", "after"]);
     });
 
     it("still refuses an unserved boundary when no served row stands for it", () => {
@@ -1691,9 +1715,10 @@ describe("m[0]/m[1] materialization", () => {
         });
         // Headless era: age only the upgrade identity — the region row stays
         // servable, so the stale-epoch arm (not the install arm) decides.
-        db.prepare(
-            "UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?",
-        ).run("ready", SESSION_ID);
+        db.prepare("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?").run(
+            "ready",
+            SESSION_ID,
+        );
         const state = readStateFromMeta();
 
         expect(
@@ -1795,10 +1820,12 @@ describe("m[0]/m[1] materialization", () => {
         const oldM0 = Buffer.from(
             `${SYSTEM_REGION_SENTINEL}<session-history></session-history>\n\n${renderMemoryBlockV2([oldMemory])}`,
         );
-        writeSystemRegion(db, SESSION_ID, oldM0.subarray(SYSTEM_REGION_SENTINEL.length).toString("utf8"));
-        db.prepare(
-            "UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?",
-        ).run(
+        writeSystemRegion(
+            db,
+            SESSION_ID,
+            oldM0.subarray(SYSTEM_REGION_SENTINEL.length).toString("utf8"),
+        );
+        db.prepare("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?").run(
             encodeCachedM0UpgradeIdentity(
                 "ready",
                 COMPARTMENT_RENDER_EPOCH,
@@ -1957,7 +1984,8 @@ describe("m[0]/m[1] materialization", () => {
 
     it("mustMaterialize does NOT materialize m[0] on a new compartment (it rides m[1])", () => {
         // Taxonomy invariant: a new compartment is a SOFT delta that surfaces in
-        // m[1] via renderM1's <new-compartments> (sequence > cachedM0Seq). It must
+        // the wire via the volatile segment's <new-compartments> (sequence >
+        // cachedM0Seq). It must
         // NEVER fold m[0] — folding on every historian publish busts the prompt-
         // cache prefix on a routine background publish, the exact bug the m[0]/m[1]
         // split exists to prevent. New compartments fold into m[0] only on a HARD
@@ -2148,7 +2176,7 @@ describe("m[0]/m[1] materialization", () => {
     it("mustMaterialize does NOT materialize m[0] on the FIRST compartment (sequence 0)", () => {
         // The first compartment (sequence 0) is also a SOFT m[1] delta — the
         // EMPTY_MAX_COMPARTMENT_SEQ=-1 sentinel makes readNewCompartments(-1)
-        // include seq 0, so renderM1 surfaces it. mustMaterialize must NOT fold it
+        // include seq 0, so the volatile segment surfaces it. mustMaterialize must NOT fold it
         // into m[0]; that happens on the next HARD bust.
         db = makeDb();
         const projectDirectory = makeProjectDir();
@@ -2593,13 +2621,18 @@ describe("m[0]/m[1] materialization", () => {
             .get(SESSION_ID) as Record<string, unknown>;
 
         expect(row.cached_m0_bytes).not.toBeNull();
-        // Region era: the row is the sentinel region (panels + delta jointly);
-        // the legacy m[1] slot stays NULL — the delta reconciles at rotation.
+        // Region era (Unit 2 Step 2): the row is the sentinel region — four
+        // panels only. The legacy m[1] slot stays NULL and the fold reports no
+        // m[1] bytes: the delta class rides the volatile segment beside the
+        // region (re-capture in the fold is what reconciles it).
         expect(row.cached_m1_bytes).toBeNull();
+        expect(result.m1Bytes.length).toBe(0);
+        expect(result.m1Text).toBe("");
         const storedRegion = Buffer.from(row.cached_m0_bytes as Buffer).toString("utf8");
         expect(storedRegion.startsWith(SYSTEM_REGION_SENTINEL)).toBe(true);
-        expect(storedRegion).toContain(result.m0Text);
-        expect(storedRegion).toContain(result.m1Text);
+        // Four-panel assembly (Unit 2 Step 2): the row is the sentinel plus the
+        // panel text exactly — no delta half appended after the panels.
+        expect(storedRegion).toBe(`${SYSTEM_REGION_SENTINEL}${result.m0Text}`);
         expect(row.cached_m0_project_memory_epoch).toBe(0);
         expect(row.cached_m0_project_user_profile_version).toBe(0);
         // Empty session: maxCompartmentSeq is the empty sentinel (-1), not 0, so
@@ -2658,11 +2691,11 @@ describe("m[0]/m[1] materialization", () => {
         expect(new Set(ids)).toEqual(new Set([id1, id2]));
     });
 
-    it("filters a memory rendered only in m[1] while returning a memory rendered in neither", async () => {
+    it("filters a memory rendered only in the volatile segment while returning a memory rendered in neither", async () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
         let m1OnlyId = 0;
-        const materialized = materializeM0({
+        const _materialized = materializeM0({
             db,
             sessionId: SESSION_ID,
             state: readStateFromMeta(),
@@ -2676,7 +2709,12 @@ describe("m[0]/m[1] materialization", () => {
                 }).id;
             },
         });
-        expect(materialized.m1Text).toContain("RecallFilterToken");
+        // Region era (Unit 2 Step 2): the memory planted between the panel
+        // render and the marker capture is delta-class — it reaches the wire
+        // through the volatile segment the fold persists beside the region,
+        // never through the four panels.
+        const volatileRow = readRegionVolatile(db, SESSION_ID);
+        expect(volatileRow?.toString("utf8") ?? "").toContain("RecallFilterToken");
 
         const hiddenId = insertMemory(db, {
             projectPath: PROJECT_PATH,
@@ -3077,9 +3115,10 @@ describe("m[0]/m[1] materialization", () => {
         // Poison row: the durable row holds head-era bytes the region reader
         // refuses. A bust pass must fold (region_first_install), rotate, and
         // serve a real region — the poisoned bytes can never ride the wire.
-        db
-            .prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?")
-            .run(Buffer.from("<session-history>stale</session-history>", "utf8"), SESSION_ID);
+        db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(
+            Buffer.from("<session-history>stale</session-history>", "utf8"),
+            SESSION_ID,
+        );
         const result = injectM0M1({
             db,
             sessionId: SESSION_ID,
@@ -3338,11 +3377,13 @@ describe("m[0]/m[1] materialization", () => {
         }
     });
 
-    it("does NOT drift-refold on a defer pass when m[1] is the empty placeholder (tiny-baseline guard)", () => {
+    it("does NOT drift-refold on a defer pass when the volatile segment is empty (tiny-baseline guard)", () => {
         // Regression: the +15% drift refold must key off GENUINE accumulated
-        // delta, not the placeholder. With a tiny m[0], the ~80-byte empty
-        // placeholder can exceed m0*0.15 and wrongly trigger a refold every
-        // defer pass — busting the byte-identical-defer cache invariant.
+        // delta, not the empty carrier. In the region era the fold's own
+        // volatile segment is empty here (nothing moved past the capture), so
+        // the backstop compares against the real delta bytes — never a
+        // placeholder stand-in. With a tiny m[0] the guard must not fire on
+        // every defer pass (the byte-identical-defer cache invariant).
         db = makeDb();
         const projectDirectory = makeProjectDir();
         const state = readStateFromMeta();
@@ -3356,8 +3397,11 @@ describe("m[0]/m[1] materialization", () => {
             projectDirectory,
         });
         const firstM0 = regionText();
+        // The fold rendered no delta: the volatile row is cleared (absorbed).
+        expect(readRegionVolatile(db, SESSION_ID)).toBeNull();
 
-        // Defer pass: no new memories/compartments → m[1] is the placeholder.
+        // Defer pass: no new memories/compartments → the volatile segment stays
+        // empty and the region replays byte-identical.
         const second = [userMessage("m2", "hi again")];
         const result = injectM0M1({
             db,
@@ -3371,7 +3415,7 @@ describe("m[0]/m[1] materialization", () => {
         // Must NOT refold: an empty delta is not accumulated growth.
         expect(result.m0RematerializedThisPass).toBe(false);
         expect(regionText()).toBe(firstM0);
-        expect(regionText()).toContain("no new content since last materialization");
+        expect(regionText()).not.toContain("<session-history-since>");
     });
 
     it("keeps expiry-transition defer bytes pinned until the next cache-busting delta", async () => {
@@ -3453,9 +3497,10 @@ describe("m[0]/m[1] materialization", () => {
         const beforePin = pin(before);
         const afterPin = pin(after);
 
-        // Re-baselined at the headless sever (Unit 1 Step 3): the pin covers
-        // the stored region row (m1Text is ""), not head bytes.
-        expect(beforePin).toBe("cc5af6d2adb4c88937ab9ec026c3553e723e224d31b13bc5045ce8d99dad1599");
+        // Re-baselined at the headless sever (Unit 1 Step 3), then at the
+        // four-panel lift (Unit 2 Step 2): the pin covers the stored region
+        // row (m1Text is ""), not head bytes.
+        expect(beforePin).toBe(EXPIRY_TRANSITION_REGION_PIN_V95);
         expect(afterPin).toBe(beforePin);
         expect(after.m0RematerializedThisPass).toBe(false);
         expect(db.prepare("SELECT status FROM memories WHERE id = ?").get(expiring.id)).toEqual({
@@ -3745,7 +3790,7 @@ describe("m[0]/m[1] materialization", () => {
                     );
                 }
                 fixture.mutate(caseDb, source, targets);
-                const m1 = renderM1(
+                const m1 = deltaText(
                     {
                         db: caseDb,
                         sessionId: SESSION_ID,
@@ -3832,7 +3877,7 @@ describe("m[0]/m[1] materialization", () => {
             supersededById: terminal.id,
         });
 
-        const m1 = renderM1(
+        const m1 = deltaText(
             {
                 db,
                 sessionId: SESSION_ID,
@@ -3888,7 +3933,7 @@ describe("m[0]/m[1] materialization", () => {
             projectPath: PROJECT_PATH,
             memoryInjectionBudgetTokens: 8_000,
         };
-        const grant = renderM1(options, markers, [ownMemory.id]);
+        const grant = deltaText(options, markers, [ownMemory.id]);
         expect(grant).toContain("foreign visibility memory below watermark");
         expect(grant.match(new RegExp(`^#${foreignMemory.id}(?:\\s|\\[|:)`, "gm"))?.length).toBe(1);
 
@@ -3899,7 +3944,7 @@ describe("m[0]/m[1] materialization", () => {
             targetMemoryId: foreignMemory.id,
             category: "__mc_visibility__",
         });
-        const revoke = renderM1(options, { ...markers, maxMemoryMutationId: grantMutation.id }, [
+        const revoke = deltaText(options, { ...markers, maxMemoryMutationId: grantMutation.id }, [
             foreignMemory.id,
             ownMemory.id,
         ]);
@@ -3964,7 +4009,7 @@ describe("m[0]/m[1] materialization", () => {
             queuedAt: 11,
         });
 
-        const firstDefer = renderM1(
+        const firstDefer = deltaText(
             {
                 db,
                 sessionId: SESSION_ID,
@@ -4015,7 +4060,7 @@ describe("m[0]/m[1] materialization", () => {
             queuedAt: 30,
         });
 
-        const secondDefer = renderM1(
+        const secondDefer = deltaText(
             {
                 db,
                 sessionId: SESSION_ID,
@@ -4038,7 +4083,13 @@ describe("m[0]/m[1] materialization", () => {
             memoryInjectionBudgetTokens: 8_000,
         });
         expect(block(reconciled.m0Text, "project-memory")).toBe(fixture.reconciled_m0);
-        expect(reconciled.m1Text).not.toContain("<memory-updates>");
+        // Region era (Unit 2 Step 2/3): the fold owns no m[1] bytes and the
+        // volatile row it persists is rendered against the capture — with the
+        // mutations absorbed into the panels, no <memory-updates> survive.
+        expect(reconciled.m1Text).toBe("");
+        expect(readRegionVolatile(db, SESSION_ID)?.toString("utf8") ?? "").not.toContain(
+            "<memory-updates>",
+        );
     });
 
     it("keeps an archived memory frozen in the region until rotation removes it", () => {
@@ -4213,7 +4264,7 @@ describe("m[0]/m[1] materialization", () => {
             queuedAt: 10,
         });
 
-        const m1 = renderM1(
+        const m1 = deltaText(
             {
                 db,
                 sessionId: SESSION_ID,

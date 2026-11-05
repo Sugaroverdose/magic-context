@@ -1,42 +1,30 @@
 import { Buffer } from "node:buffer";
-import { MEMORY_MURAL_BLOCK } from "../../agents/magic-context-prompt";
 import {
     buildCompartmentBlock,
     type Compartment,
     type CompartmentDateRanges,
-    escapeXmlAttr,
     escapeXmlContent,
     getCompartments,
-    getLastCompartmentEndMessageId,
     isPartialCompartmentEnd,
     type SessionFact,
 } from "../../features/magic-context/compartment-storage";
-import {
-    CATEGORY_PRIORITY,
-    V2_MEMORY_CATEGORIES,
-} from "../../features/magic-context/memory/constants";
-import { compareMemorySelectionPriority } from "../../features/magic-context/memory/memory-selection";
+import { CATEGORY_PRIORITY } from "../../features/magic-context/memory/constants";
 import {
     getMaxMemoryIdForProjects,
     getMemoriesByProject,
     getMemoriesByProjects,
 } from "../../features/magic-context/memory/storage-memory";
 import type { Memory } from "../../features/magic-context/memory/types";
-import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
-import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
-import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import {
     GLOBAL_USER_PROFILE_PROJECT_PATH,
     getMaxM0MutationId,
     getMaxMemoryMutationId,
     getMaxMemoryMutationIdForProjects,
-    getMemoryMutationsForRender,
-    getMemoryMutationsForRenderByProjects,
     getProjectState,
-    MEMORY_VISIBILITY_MUTATION_CATEGORY,
     persistCachedM0,
     readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
+import { writeRegionVolatile } from "../../features/magic-context/storage-meta-shared";
 import {
     decodeSystemRegionRow,
     encodeSystemRegionRow,
@@ -46,17 +34,10 @@ import {
     readSystemRegion,
     sanitizeReceiptOperand,
 } from "../../features/magic-context/system-region";
-import {
-    getActiveUserMemories,
-    type UserMemory,
-} from "../../features/magic-context/user-memory/storage-user-memory";
+import type { UserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import {
     computeWorkspaceEpochFingerprint,
-    expandWorkspaceIdentitySetWithAliases,
-    resolveStoredPathWorkspaceIdentity,
     resolveWorkspaceIdentitySet,
-    resolveWorkspaceShareCategories,
-    sourceNameForMemory,
     type WorkspaceIdentitySet,
 } from "../../features/magic-context/workspaces";
 import { BoundedSessionMap } from "../../shared/bounded-session-map";
@@ -78,12 +59,11 @@ import {
     renderedBudgetShrinkReason,
     renderedBudgetSnapshot,
 } from "./compartment-render-epoch";
-import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
-import { historyLocalBudget } from "./decision-calibration";
 import { isHostRenderedSystemMessage } from "./host-served-rows";
 import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
+import { renderRegionVolatile } from "./region-volatile";
 import type { MessageLike } from "./tag-messages";
 import { formatDate } from "./temporal-awareness";
 
@@ -108,55 +88,25 @@ import type {
     M0M1State,
     M0SnapshotMarkers,
     MaterializeDecision,
-    MemoryRenderOptions,
     PrefixTrimSourceOrder,
     PrefixTrimStatus,
-    RenderM1Result,
-    TrimMemoriesResultV2,
     WorkspaceRenderContext,
 } from "./region-render";
 // Moved to region-render.ts (Step 2 severance): re-imported by the remaining
 // head-lane/apply code; re-exported so existing consumers keep their import paths.
 import {
     cachedStatement,
-    createMemoryBlockAccounting,
     DEFAULT_HISTORY_BUDGET_TOKENS,
     DEFAULT_MEMORY_BUDGET_TOKENS,
-    DEFAULT_USER_PROFILE_BUDGET_TOKENS,
     getGlobalUserProfileVersion,
-    historySliceTokens,
     lastCompartmentBoundaryId,
-    M0_EMPTY_BODY,
-    M1_EMPTY_PLACEHOLDER,
-    MAX_FORCED_MEMORIES_PER_DELTA,
-    memoryCanonicalIdentity,
-    memoryRenderOrder,
     newestCompartmentEndId,
-    nullableString,
     RenderM1InvalidMarkersError,
     readM0Compartments,
-    readNewCompartments,
-    renderM0,
-    renderM1,
-    renderM1WithMetadata,
     renderMemoryBlockV2,
-    renderMemoryLineV2,
-    renderMemoryUpdatesBlock,
-    renderRegionBody,
     renderRegionM0,
-    renderRegionM1,
-    renderSessionHistoryWithDecay,
-    renderUserProfileBlock,
-    resolveMuralForM0,
     resolveWorkspaceRenderContext,
-    rowToM0Compartment,
     safeGetActiveUserMemories,
-    sourceNamesForMemories,
-    stripMemoryMuralBlock,
-    trimMemoriesToBudgetV2,
-    trimUserMemoriesToBudget,
-    trimWorkspaceMemoriesToBudgetV2,
-    withCompartmentDates,
 } from "./region-render";
 
 export type {
@@ -171,7 +121,6 @@ export type {
     MemoryRenderOptions,
     PrefixTrimSourceOrder,
     PrefixTrimStatus,
-    RenderM1Result,
     TrimMemoriesResultV2,
     WorkspaceRenderContext,
 } from "./region-render";
@@ -181,7 +130,6 @@ export {
     DEFAULT_MEMORY_BUDGET_TOKENS,
     DEFAULT_USER_PROFILE_BUDGET_TOKENS,
     renderM0,
-    renderM1,
     renderMemoryBlockV2,
     renderMemoryLineV2,
     stripMemoryMuralBlock,
@@ -189,8 +137,6 @@ export {
     trimUserMemoriesToBudget,
     trimWorkspaceMemoriesToBudgetV2,
 } from "./region-render";
-
-import { renderUserProfileContent, USER_PROFILE_DESCRIPTION } from "./user-profile-render";
 
 export interface PreparedCompartmentInjection {
     block: string;
@@ -1022,9 +968,10 @@ function getMaxCompartmentSeq(db: Database, sessionId: string): number {
     ).get(sessionId);
     // -1 for an empty session, the real max sequence (>= 0) otherwise. The -1
     // sentinel is < 0 so it is distinct from the first real compartment (seq 0):
-    // renderM1's readNewCompartments filters `sequence > maxSeq`, so an empty m[0]
-    // baseline (maxCompartmentSeq = -1) includes the first compartment (seq 0) in
-    // m[1]. New compartments are an m[1] delta, never a mustMaterialize trigger.
+    // the volatile segment's readNewCompartments filters `sequence > maxSeq`, so
+    // an empty baseline (maxCompartmentSeq = -1) includes the first compartment
+    // (seq 0) in the delta. New compartments are delta-class, never a
+    // mustMaterialize trigger.
     return numberFromRow(row, "s");
 }
 function getMaxMemoryId(
@@ -1461,7 +1408,7 @@ export function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers
  *
  * `mustMaterialize` returns true ONLY for HARD. New compartments and additive
  * user-profile/memory changes are deliberately NOT triggers — they are m[1]
- * deltas (see renderM1) and must never mutate the m[0] baseline. That is the
+ * deltas (see the volatile segment, region-volatile.ts) and must never mutate the m[0] baseline. That is the
  * whole point of the m[0]=frozen-prefix / m[1]=volatile-delta split: a routine
  * historian publish must keep the Anthropic prompt-cache prefix intact.
  */
@@ -1666,7 +1613,7 @@ export function mustMaterialize(args: {
     // would miss the workspace→single transition: a cached union m[0] whose
     // session just left its workspace would fall through to the integer-epoch
     // compare and keep rendering the stale union if a membership bump were
-    // missed. Mirrors renderM1's soft-refresh gate and Pi's mustMaterializePi.
+    // missed. Mirrors the volatile segment's workspace gate and Pi's mustMaterializePi.
     if (
         current.workspaceFingerprint !== null ||
         (args.state.cachedM0WorkspaceFingerprint ?? null) !== null
@@ -1678,14 +1625,15 @@ export function mustMaterialize(args: {
         return { value: true, reason: "project_memory_epoch" };
     }
     // NOTE: project_user_profile_version is deliberately NOT a trigger. Additive
-    // user-profile promotions surface in m[1] via renderM1's <new-user-profile>
-    // delta (version-watermark), exactly like new compartments and memories. A
+    // user-profile promotions surface via the volatile segment's
+    // <new-user-profile> delta (version-watermark), exactly like new
+    // compartments and memories. A
     // version change must not fold m[0]; the delta reconciles into m[0] on the
     // next HARD fold. Destructive profile edits route through the same delta plus
     // the project_memory_epoch path for external (dashboard) mutations.
     //
     // NOTE: max_compartment_seq is deliberately NOT a trigger. New compartments
-    // are the canonical m[1] delta (renderM1 -> readNewCompartments WHERE
+    // are the canonical delta class (volatile segment -> readNewCompartments WHERE
     // sequence > cachedM0Seq). Folding m[0] on every historian publish would bust
     // the prompt-cache prefix on a routine background publish — the exact bug the
     // m[0]/m[1] split exists to prevent. They fold into m[0] only on a HARD bust.
@@ -1699,11 +1647,10 @@ export function mustMaterialize(args: {
     // are part of m[0], but docs-only edits must not evict the cached
     // prefix; materializeM0 reads fresh docs whenever a natural HARD fold
     // happens and stores that hash with the bytes it actually rendered. On
-    // the region lane the docs hash IS a rotation trigger
-    // (DELTA_TRIGGER_FIELDS) — but only via the boundary-permission-gated
-    // promotion comparator, whose current side is the live canonical hash
-    // (currentRegionMarkersForPromotion, §25); it never originates a bust
-    // there either.
+    // the region lane the docs hash is not a trigger either (Unit 2 Task 3):
+    // the docs delta rides the volatile segment and the panel converges at
+    // the next legitimate fold (DELTA_TRIGGER_FIELDS is empty; the demotion
+    // laws fence a re-add).
     if (args.state.cachedM0MaxMutationId !== current.maxMutationId) {
         return withToolSetHashComparison({ value: true, reason: "max_mutation_id" });
     }
@@ -1910,8 +1857,11 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     const renderedMemoryIds = region0.renderedMemoryIds;
     options.beforePhase3ForTest?.();
 
-    let m1Text = M1_EMPTY_PLACEHOLDER;
-    let m1Bytes = Buffer.from(m1Text, "utf8");
+    // Region era: the fold owns no m[1] bytes. The volatile segment carries
+    // the delta class beside the region (Unit 2 Step 2), so the result keeps
+    // the field for shape stability and reports it empty.
+    const m1Text = "";
+    const m1Bytes = Buffer.alloc(0);
     let persistedBaselineEnd: string | null = null;
     try {
         options.db.exec("BEGIN IMMEDIATE");
@@ -1996,15 +1946,29 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             throw new MaterializeContentionError({ reason: "snapshot changed before Phase 3" });
         }
 
-        const region1 = renderRegionM1({
+        // Unit 2 Step 2: the region is the four panels only. The delta half
+        // that used to be concatenated here (renderRegionM1) is carried by the
+        // volatile segment beside the region; the fold owns that segment too,
+        // rendered against its own marker capture in the same transaction —
+        // the region row, its markers, and the segment never diverge
+        // (same-transaction coherence; persistFoldRow clears the stale row,
+        // this fold re-renders the fresh one). The accounting is re-derived
+        // from the two renders: panel ids ∪ volatile ids (ctx_search's
+        // hide-already-visible filter reads session_meta.memory_block_ids).
+        const volatileRender = renderRegionVolatile(
             options,
-            workspace,
-            snapshotMarkers,
-            renderedMemoryIds,
-        });
-        m1Text = region1.m1Text;
-        m1Bytes = region1.m1Bytes;
-        const visibleMemoryIds = region1.visibleMemoryIds;
+            {
+                maxMemoryId: snapshotMarkers.maxMemoryId,
+                maxCompartmentSeq: snapshotMarkers.maxCompartmentSeq,
+                maxMemoryMutationId: snapshotMarkers.maxMemoryMutationId,
+                projectUserProfileVersion: snapshotMarkers.projectUserProfileVersion,
+                projectDocsHash: snapshotMarkers.projectDocsHash,
+                materializedAt: snapshotMarkers.materializedAt,
+                renderedMemoryIds,
+            },
+            docs,
+        );
+        const visibleMemoryIds = [...new Set([...renderedMemoryIds, ...volatileRender.memoryIds])];
 
         const foldMarkers = regionMarkersFromSnapshot(snapshotMarkers);
         const persistFoldRow = (m0Payload: Buffer, m1Payload: Buffer | null) => {
@@ -2039,11 +2003,12 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             });
         };
         {
-            // The boundary assembles the panels once and installs the sentinel
-            // region row atomically with the marker capture. The empty/m1
-            // placeholder text still flows through, so a content-less session
-            // keeps the never-empty region floor via the placeholder blocks.
-            const regionText = renderRegionBody(m0Text, m1Text);
+            // The boundary assembles the four panels once and installs the
+            // sentinel region row atomically with the marker capture. The
+            // never-empty floor is the panels' own (renderRegionM0), and the
+            // delta side has no placeholder of its own since Unit 2 — the
+            // volatile segment is simply empty (cleared with the fold row).
+            const regionText = m0Text;
             let installedBlob: Buffer | null = null;
             const rotated = executeSystemRegionRotation(
                 options.db,
@@ -2066,6 +2031,16 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             // head rendering it replaced.
             m0Bytes = installedBlob;
         }
+        // The fold's fresh volatile row, after the fold-row clear ran inside
+        // persistFoldRow: the segment names this region's materialized_at, so
+        // the serve pairing (watermark == cached_m0_materialized_at) holds from
+        // the commit onward. Empty text clears the row (the absorbed state).
+        writeRegionVolatile(
+            options.db,
+            options.sessionId,
+            volatileRender.text,
+            snapshotMarkers.materializedAt,
+        );
 
         // v2 path persists the rendered-memory identity itself. `memory_block_ids`
         // / `memory_block_count` are otherwise written ONLY by the dead legacy v1
@@ -2269,9 +2244,8 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
  * serve zero session context; rendering fresh (un-persisted) keeps the frozen
  * panels present for this pass while the next pass re-materializes and
  * rotates. Uses a plain read (no BEGIN IMMEDIATE) since we are explicitly NOT
- * persisting; the bytes are the same producer as the fold (renderRegionM0 +
- * renderRegionM1 + renderRegionBody), sentinel-encoded so the serving reader
- * accepts them.
+ * persisting; the bytes are the same producer as the fold (renderRegionM0 —
+ * the four panels), sentinel-encoded so the serving reader accepts them.
  */
 function renderFreshRegionNonPersisted(options: M0M1RenderOptions): {
     m0Bytes: Buffer;
@@ -2348,14 +2322,11 @@ function renderFreshRegionNonPersisted(options: M0M1RenderOptions): {
         userMemories,
         workspace,
     });
-    const delta = renderRegionM1({
-        options,
-        workspace,
-        snapshotMarkers,
-        renderedMemoryIds: panel.renderedMemoryIds,
-    });
+    // Unit 2 Step 2: same producer as the fold — four panels only, no delta
+    // half. The volatile segment is stored separately and never synthesized
+    // here (its bytes are re-derived only on bust-lane recomputation).
     return {
-        m0Bytes: encodeSystemRegionRow(renderRegionBody(panel.m0Text, delta.m1Text)),
+        m0Bytes: encodeSystemRegionRow(panel.m0Text),
         snapshotMarkers,
         renderedMemoryIds: panel.renderedMemoryIds,
     };

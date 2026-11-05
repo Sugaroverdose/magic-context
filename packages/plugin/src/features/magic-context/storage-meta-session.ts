@@ -51,6 +51,8 @@ const SESSION_META_FALLBACK_SELECTS: Partial<
     cached_m0_tool_set_hash: "NULL AS cached_m0_tool_set_hash",
     cached_m0_model_key: "NULL AS cached_m0_model_key",
     cached_m0_project_identity: "NULL AS cached_m0_project_identity",
+    region_volatile_bytes: "NULL AS region_volatile_bytes",
+    region_volatile_watermark: "0 AS region_volatile_watermark",
     last_observed_model_key: "NULL AS last_observed_model_key",
     upgrade_reminded_at: "NULL AS upgrade_reminded_at",
     upgrade_reminder_last_sent_at: "NULL AS upgrade_reminder_last_sent_at",
@@ -140,7 +142,7 @@ export function updateSessionMeta(
             setClauses.push(`${column} = ?`);
             values.push(NULL_BIND_META_KEYS.has(key) ? null : "");
         } else if (
-            (key === "cachedM0Bytes" || key === "cachedM1Bytes") &&
+            (key === "cachedM0Bytes" || key === "cachedM1Bytes" || key === "regionVolatileBytes") &&
             value instanceof Uint8Array
         ) {
             setClauses.push(`${column} = ?`);

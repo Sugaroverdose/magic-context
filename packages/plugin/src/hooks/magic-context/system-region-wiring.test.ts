@@ -9,6 +9,7 @@ import { isSystemRegionLane } from "../../config/system-region-lane";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { bumpProjectUserProfileVersion } from "../../features/magic-context/storage-project-state";
 import {
     decideSystemRegionRotation,
     type RegionMarkers,
@@ -236,17 +237,18 @@ describe("system-region wiring: rotation promotion (L3/L4)", () => {
         expect(
             regionRotationPromotion({ ...base, currentMarkers: live({ projectMemoryEpoch: 2 }) }),
         ).toEqual({ promote: true, reason: "project_memory_epoch" });
-        // m[1]-delta fields promote on the boundary: region mode has no m[1],
-        // so these are the fields whose change re-rendered m[1] on bust passes.
+        // Unit 2 Task 3 demotion: the delta-class fields never promote, even
+        // with the boundary permission — they ride the volatile segment
+        // (per-field live-writer laws in the demotion block below).
         expect(
             regionRotationPromotion({ ...base, currentMarkers: live({ maxMemoryId: 13 }) }),
-        ).toEqual({ promote: true, reason: "max_memory_id" });
-        // Without the boundary they never promote (ride-only, L4).
+        ).toEqual({ promote: false, reason: null });
+        // Without the boundary, content triggers never promote either (ride-only, L4).
         expect(
             regionRotationPromotion({
                 ...base,
                 boundaryPermission: false,
-                currentMarkers: live({ maxMemoryId: 13 }),
+                currentMarkers: live({ projectMemoryEpoch: 2 }),
             }),
         ).toEqual({ promote: false, reason: null });
     });
@@ -564,8 +566,41 @@ describe("system-region capability lane (flag deletion)", () => {
 // materializeM0's docs.canonicalHash) against the current side produced by
 // readCurrentM0SnapshotMarkers — which LEGITIMATELY hardcodes
 // projectDocsHash: "" (head-lane placeholder: the HARD renderer replaces it
-// before persist). projectDocsHash is a DELTA_TRIGGER_FIELDS member, so on
-// a real projectDirectory the pair could never be equal: every
+// before persist). While projectDocsHash was still a compared member, on a
+// real projectDirectory the pair could never be equal: every
+function docsDir(): string {
+    const dir = createTestTempDirFromPath(join(tmpdir(), "region-docs-"));
+    writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\nfrozen panel doc.\n");
+    writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nmap.\n");
+    return dir;
+}
+
+function installedRegion(dir: string): { db: Database; state: M0M1State } {
+    const db = makeDb();
+    const messages: MessageLike[] = [
+        { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "hi" }] },
+    ];
+    injectM0M1({
+        db,
+        sessionId: SESSION_ID,
+        state: freshState(db),
+        projectPath: PROJECT_PATH,
+        projectDirectory: dir,
+        messages,
+        isCacheBustingPass: true,
+        systemRegion: { enabled: true, reason: "hard_fold" },
+    } as never);
+    return { db, state: freshState(db) };
+}
+
+const foldDueArgsFor = (db: Database, state: M0M1State, dir: string) => ({
+    db,
+    sessionId: SESSION_ID,
+    state,
+    projectPath: PROJECT_PATH,
+    projectDirectory: dir,
+});
+
 // boundary-permission pass rotated with reason=project_docs_hash,
 // executed=true, byte-identical region, forever — and each fake bust drove
 // the LKG drop chain (chain B). The laws below compose currentMarkers
@@ -573,39 +608,6 @@ describe("system-region capability lane (flag deletion)", () => {
 // (Fix A's shared helper), never a hand-shaped live({}) fixture — the
 // shape that hid the defect for 11 rounds.
 describe("system-region wiring: promotion comparator convergence (storm, Fix A)", () => {
-    function docsDir(): string {
-        const dir = createTestTempDirFromPath(join(tmpdir(), "region-docs-"));
-        writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\nfrozen panel doc.\n");
-        writeFileSync(join(dir, "STRUCTURE.md"), "# Structure\n\nmap.\n");
-        return dir;
-    }
-
-    function installedRegion(dir: string): { db: Database; state: M0M1State } {
-        const db = makeDb();
-        const messages: MessageLike[] = [
-            { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "hi" }] },
-        ];
-        injectM0M1({
-            db,
-            sessionId: SESSION_ID,
-            state: freshState(db),
-            projectPath: PROJECT_PATH,
-            projectDirectory: dir,
-            messages,
-            isCacheBustingPass: true,
-            systemRegion: { enabled: true, reason: "hard_fold" },
-        } as never);
-        return { db, state: freshState(db) };
-    }
-
-    const foldDueArgsFor = (db: Database, state: M0M1State, dir: string) => ({
-        db,
-        sessionId: SESSION_ID,
-        state,
-        projectPath: PROJECT_PATH,
-        projectDirectory: dir,
-    });
-
     it("a warm boundary pass with unchanged docs must NOT promote (production composition)", () => {
         const dir = docsDir();
         try {
@@ -671,10 +673,16 @@ describe("system-region wiring: promotion comparator convergence (storm, Fix A)"
         }
     });
 
-    it("control: a docs edit DOES promote the rotation (the trigger keeps its bite)", () => {
-        // Anti-overcorrection: Fix A must not deaden the trigger — edit
-        // ARCHITECTURE.md on disk and the boundary pass must rotate with
-        // reason=project_docs_hash.
+    it("a docs edit never promotes: the docs delta rides the volatile segment (Task 3 demotion)", () => {
+        // Re-expressed from the Fix C control law (which pinned
+        // reason=project_docs_hash promotion). Fix A's production composition
+        // still matters — with the DELTA arm emptied, the docs hash must not
+        // rotate the region on ANY pass; the ARCHITECTURE/STRUCTURE panel
+        // converges at the next legitimate fold (owner ruling: docs are a
+        // scheduled component, not the harness). The live canonical hash keeps
+        // the pair CONVERGED at folds (no placeholder forever) — pinned by the
+        // unchanged-docs law above and the absorb-on-fold law in
+        // region-volatile.test.ts.
         const dir = docsDir();
         try {
             const { db, state } = installedRegion(dir);
@@ -692,8 +700,7 @@ describe("system-region wiring: promotion comparator convergence (storm, Fix A)"
                 currentMarkers: currentRegionMarkersForPromotion(foldDueArgsFor(db, state, dir)),
                 historyBudgetTokens: 40000,
             });
-            expect(promotion.promote).toBe(true);
-            expect(promotion.reason).toBe("project_docs_hash");
+            expect(promotion).toEqual({ promote: false, reason: null });
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }
@@ -799,5 +806,115 @@ describe("system-region wiring: promotion comparator convergence (storm, Fix A)"
         expect(phase).toMatch(
             /boundaryPermission,\s*\n\s*forceBand: emergencyDropEligible && boundaryPermission/,
         );
+    });
+});
+
+describe("system-region wiring: delta-class fields are demoted to the volatile carrier (Unit 2 Task 3)", () => {
+    // Owner ruling (region-only migration Task 3): the only bust deciders are
+    // the window manager (scheduler folds) and the harness (system hash).
+    // Memories, compartments, profile, and docs only SCHEDULE their changes
+    // onto the volatile segment — a live bump of any DELTA field on a warm
+    // quiescent session must never rotate the region, and the segment shows
+    // the delta instead. Red-first per field: real writers, production
+    // promotion composition (the shared helper), boundary permission granted.
+    function promotionAfterBump(
+        dir: string,
+        bump: (db: Database) => void,
+    ): {
+        promotion: { promote: boolean; reason: string | null };
+        regionBefore: string | null;
+        db: Database;
+        dir: string;
+    } {
+        const { db, state } = installedRegion(dir);
+        const regionBefore = readSystemRegion(db, SESSION_ID);
+        expect(regionBefore).not.toBeNull();
+        bump(db);
+        const captured = state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+        expect(captured).not.toBeNull();
+        const promotion = regionRotationPromotion({
+            systemRegionLane: true,
+            freezeM0M1: false,
+            foldDue: false,
+            boundaryPermission: true,
+            forceBand: false,
+            storedRegion: regionBefore,
+            capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+            currentMarkers: currentRegionMarkersForPromotion(foldDueArgsFor(db, state, dir)),
+            historyBudgetTokens: 40000,
+        });
+        return { promotion, regionBefore, db, dir };
+    }
+
+    const expectNoRotation = (t: ReturnType<typeof promotionAfterBump>) => {
+        expect(t.promotion).toEqual({ promote: false, reason: null });
+        // Zero rotation: the stored region is byte-identical after the pass.
+        expect(readSystemRegion(t.db, SESSION_ID)).toBe(t.regionBefore);
+    };
+
+    it("a real memory insert (maxMemoryId bump) never rotates on a boundary pass", () => {
+        const dir = docsDir();
+        try {
+            expectNoRotation(
+                promotionAfterBump(dir, (db) => {
+                    insertMemory(db, {
+                        projectPath: PROJECT_PATH,
+                        category: "CONSTRAINTS",
+                        content: "delta demotion sighting: new memory after install",
+                    });
+                }),
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("a published compartment (maxCompartmentSeq bump) never rotates on a boundary pass", () => {
+        const dir = docsDir();
+        try {
+            expectNoRotation(
+                promotionAfterBump(dir, (db) => {
+                    const maxSeq = (
+                        db
+                            .prepare(
+                                "SELECT COALESCE(MAX(sequence), -1) AS m FROM compartments WHERE session_id = ?",
+                            )
+                            .get(SESSION_ID) as { m: number }
+                    ).m;
+                    db.prepare(
+                        `INSERT INTO compartments (session_id, sequence, start_message, end_message, start_message_id, end_message_id, title, content, importance, created_at)
+                         VALUES (?, ?, 1, 2, 'msg_a', 'msg_b', 'post-install compartment', 'post-install compartment sighting', 5, 1)`,
+                    ).run(SESSION_ID, maxSeq + 1);
+                }),
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("a user-profile version bump (profileVersion) never rotates on a boundary pass", () => {
+        const dir = docsDir();
+        try {
+            expectNoRotation(
+                promotionAfterBump(dir, (db) => {
+                    bumpProjectUserProfileVersion(db);
+                }),
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("a docs edit on disk (projectDocsHash) never rotates on a boundary pass", () => {
+        const dir = docsDir();
+        try {
+            expectNoRotation(
+                promotionAfterBump(dir, () => {
+                    writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\nedited doc.\n");
+                }),
+            );
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 });

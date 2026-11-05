@@ -85,11 +85,18 @@ silently.
   (model/system-hash/TTL/host-compaction), the content arms (`project_memory_epoch`,
   `max_mutation_id`, `max_memory_mutation_id`, `upgrade_state`, `compartment_render_epoch`,
   `mural_enabled`, `render_budget_identity`, `memory_render_epoch`, `rendered_budgets`),
-  the bust-gated delta-trigger class (`max_memory_id`, `max_compartment_seq`,
-  `profile_version`, `project_docs_hash` — rotation triggers here, m[1] refreshers on
-  the head lane), and the pressure arm (`force_band` only — the pending-growth class
+  and the pressure arm (`force_band` only — the pending-growth class
   was deleted, §25.3); the install
-  arms (`first_render`, `missing_markers`) belong to the fold lane. Every arm of the
+  arms (`first_render`, `missing_markers`) belong to the fold lane. The former
+  bust-gated delta-trigger class (`max_memory_id`, `max_compartment_seq`,
+  `profile_version`, `project_docs_hash`) is demoted outright (Unit 2 Task 3):
+  these changes ride the volatile segment (region-volatile.ts) and are absorbed
+  on folds — they rotate the region on no pass, and the fence list above has no
+  entry for them (an attempted re-add reddens the per-field demotion laws). The
+  scheduled-delta replacement is `fold_request`: consuming a queued fold intent
+  (the volatile growth backstop's request, a historian publish, or the wrapup
+  operator rotation) promotes the fold — the queue is the schedule, consumption
+  on a pass that already holds the bust permission is the boundary (L0). Every arm of the
   decision requires the single per-pass bust permission (A3) — an anonymous bust, or a
   rotation claimed on a non-busting pass, is not type-expressible. Obsoletes: scattered
   bust guards. Tests: rotation rows assert the receipt names its reason and that no arm
@@ -269,12 +276,17 @@ Pressure backstop:
 The four head-lane m[1]-delta fields — a new compartment sequence,
 `project_user_profile_version`, `maxMemoryId`, project-docs hash drift — are deliberate
 non-triggers of the m[0] HARD fold on the HEAD lane (they re-rendered m[1] there). In
-region mode there is no m[1] to ride, so they keep their exact role by changing shape:
-they are the bust-permission-gated DELTA triggers (`DELTA_TRIGGER_FIELDS`) — they rotate
-the region on a pass that is already busting, never originate a bust themselves, and
-without them new memories, compartments, profile additions, and docs edits would never
-surface at all (the round-2 discovery). Their freshness ceiling is the boundary
-permission itself, with the force band as the pressure guarantee (§25.3). What stays a true non-trigger everywhere: the tool-set hash
+region mode they had a transitional life as bust-permission-gated DELTA triggers
+(`DELTA_TRIGGER_FIELDS` — they rotated the region only on a pass that was already
+busting, never originating a bust). Unit 2 Task 3 demotes them outright: `
+`DELTA_TRIGGER_FIELDS` is now EMPTY, these changes ride the volatile segment
+(`region-volatile.ts`) between folds and are absorbed into the panels on the next
+legitimate fold (their surface freshness is the bust-lane recompute, with the growth
+backstop — §Unit 2 — requesting a fold when the segment grows past a head-era arm).
+The fields remain RegionMarkers members as the fence anchor: the per-field demotion
+laws (system-region-wiring.test.ts, live-writer form; system-region-rotation.test.ts,
+unit form) each bump the real store and demand silence from the comparator, so
+re-adding an entry reddens CI with a planted-rogue witness per field. What stays a true non-trigger everywhere: the tool-set hash
 (process-global, false positives; `:1853-1856`).
 
 No new user-facing rotation trigger is designed. The operator's rotation trigger is
@@ -309,6 +321,7 @@ throws).
 
 ```rotation-reasons
 hard_fold
+fold_request
 first_render
 missing_markers
 region_first_install
@@ -331,10 +344,6 @@ mural_enabled
 render_budget_identity
 memory_render_epoch
 rendered_budgets
-max_memory_id
-max_compartment_seq
-profile_version
-project_docs_hash
 force_band
 render_config
 ```

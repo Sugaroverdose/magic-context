@@ -21,6 +21,7 @@ import {
     thinkingBindingRecoveryFrozenId,
 } from "../../features/magic-context/storage-meta-persisted";
 import * as coordinateRebase from "../../features/magic-context/store-generation-rebase";
+import { readSystemRegion } from "../../features/magic-context/system-region";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";
@@ -32,7 +33,6 @@ import * as modeTransition from "./compaction-off-transition";
 import { DegradedPassRefusalError } from "./degraded-pass-refusal";
 import * as staleReduce from "./drop-stale-reduce-calls";
 import * as injectCompartments from "./inject-compartments";
-import { readSystemRegion } from "../../features/magic-context/system-region";
 import { dropSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import * as noteNudger from "./note-nudger";
 import { STORAGE_BUSY_MESSAGE } from "./storage-busy-refusal";
@@ -485,7 +485,7 @@ describe("a pass that falls back to the launch directory", () => {
 
         // The host lookup fails: the launch directory is another project.
         hostDirectory = undefined;
-        const fallback = await pass();
+        const _fallback = await pass();
         expect(m0m1(sessionId)).toBe(frozen);
         expect(getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash ?? "").toBe(
             frozenSystemHash,

@@ -48,6 +48,8 @@ export interface SessionMetaRow {
     cached_m0_tool_set_hash: string | null;
     cached_m0_model_key: string | null;
     cached_m0_project_identity: string | null;
+    region_volatile_bytes: Buffer | Uint8Array | null;
+    region_volatile_watermark: number | null;
     last_observed_model_key: string | null;
     last_usage_context_limit: number | null;
     prior_boundary_ordinal: number | null;
@@ -106,6 +108,8 @@ export const SESSION_META_SELECT_COLUMNS = [
     "cached_m0_tool_set_hash",
     "cached_m0_model_key",
     "cached_m0_project_identity",
+    "region_volatile_bytes",
+    "region_volatile_watermark",
     "last_observed_model_key",
     "last_usage_context_limit",
     "prior_boundary_ordinal",
@@ -163,6 +167,8 @@ export const META_COLUMNS: Record<string, string> = {
     cachedM0ToolSetHash: "cached_m0_tool_set_hash",
     cachedM0ModelKey: "cached_m0_model_key",
     cachedM0ProjectIdentity: "cached_m0_project_identity",
+    regionVolatileBytes: "region_volatile_bytes",
+    regionVolatileWatermark: "region_volatile_watermark",
     lastObservedModelKey: "last_observed_model_key",
     lastUsageContextLimit: "last_usage_context_limit",
     priorBoundaryOrdinal: "prior_boundary_ordinal",
@@ -193,6 +199,7 @@ function ensureSessionFactsVersionColumn(db: Database): void {
 
 export const NULL_BIND_META_KEYS = new Set([
     "cachedM0Bytes",
+    "regionVolatileBytes",
     "cachedM0MuralDataUrl",
     "cachedM0MuralHash",
     "cachedM1Bytes",
@@ -289,6 +296,8 @@ export function isSessionMetaRow(row: unknown): row is SessionMetaRow {
         isStringOrNull(r.cached_m0_tool_set_hash) &&
         isStringOrNull(r.cached_m0_model_key) &&
         isStringOrNull(r.cached_m0_project_identity) &&
+        isBlobOrNull(r.region_volatile_bytes) &&
+        isNumberOrNull(r.region_volatile_watermark) &&
         isStringOrNull(r.last_observed_model_key) &&
         isNumberOrNull(r.last_usage_context_limit) &&
         isNumberOrNull(r.prior_boundary_ordinal) &&
@@ -342,6 +351,8 @@ export function getDefaultSessionMeta(sessionId: string): SessionMeta {
         cachedM0MaxMemoryMutationId: null,
         cachedM0ProjectDocsHash: null,
         cachedM0MaterializedAt: null,
+        regionVolatileBytes: null,
+        regionVolatileWatermark: 0,
         cachedM0SessionFactsVersion: null,
         cachedM0UpgradeState: null,
         cachedM0SystemHash: null,
@@ -466,6 +477,8 @@ export function toSessionMeta(row: SessionMetaRow): SessionMeta {
         cachedM0MaxMemoryMutationId: numOrNull(row.cached_m0_max_memory_mutation_id),
         cachedM0ProjectDocsHash: stringOrNull(row.cached_m0_project_docs_hash),
         cachedM0MaterializedAt: numOrNull(row.cached_m0_materialized_at),
+        regionVolatileBytes: toBufferOrNull(row.region_volatile_bytes),
+        regionVolatileWatermark: numOrZero(row.region_volatile_watermark),
         cachedM0SessionFactsVersion: numOrNull(row.cached_m0_session_facts_version),
         cachedM0UpgradeState: stringOrNull(row.cached_m0_upgrade_state),
         cachedM0SystemHash: stringOrNull(row.cached_m0_system_hash),
@@ -536,7 +549,9 @@ export function persistCachedM0(
             cached_m0_system_hash = ?,
             cached_m0_tool_set_hash = ?,
             cached_m0_model_key = ?,
-            cached_m0_project_identity = ?
+            cached_m0_project_identity = ?,
+            region_volatile_bytes = NULL,
+            region_volatile_watermark = ?
          WHERE session_id = ?`,
     ).run(
         Buffer.from(payload.m0Bytes),
@@ -558,8 +573,39 @@ export function persistCachedM0(
         payload.toolSetHash ?? "",
         payload.modelKey ? piModelRefToCanonical(payload.modelKey) : "",
         payload.projectIdentity ?? null,
+        payload.materializedAt,
         sessionId,
     );
+}
+
+/**
+ * Unit 2 volatile segment accessors (region-only migration Task 1) — the
+ * sanctioned write surface for `region_volatile_bytes`/`region_volatile_watermark`.
+ * The watermark is the `cached_m0_materialized_at` of the region row the bytes
+ * were rendered against; the serve path refuses a segment whose watermark
+ * does not name the currently served region. Writers: the bust-lane recompute
+ * (region-volatile.ts) and the fold row (persistCachedM0 above, which absorbs
+ * the segment); pinned by the L0 producer census.
+ */
+export function writeRegionVolatile(
+    db: Database,
+    sessionId: string,
+    text: string,
+    watermark: number,
+): void {
+    ensureSessionMetaRow(db, sessionId);
+    db.prepare(
+        "UPDATE session_meta SET region_volatile_bytes = ?, region_volatile_watermark = ? WHERE session_id = ?",
+    ).run(text.length > 0 ? Buffer.from(text, "utf8") : null, watermark, sessionId);
+}
+
+export function readRegionVolatile(db: Database, sessionId: string): Buffer | null {
+    const row = db
+        .prepare("SELECT region_volatile_bytes FROM session_meta WHERE session_id = ?")
+        .get(sessionId) as { region_volatile_bytes: Buffer | Uint8Array | null } | undefined;
+    const value = row?.region_volatile_bytes;
+    if (value === null || value === undefined) return null;
+    return value instanceof Buffer ? value : Buffer.from(value);
 }
 
 export function clearCachedM0M1(db: Database, sessionId: string, reason: string): void {

@@ -34,6 +34,7 @@ import { dirname, join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { readSystemRegion } from "../../features/magic-context/system-region";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
@@ -48,10 +49,9 @@ import {
     resetPrefixTrimFallbackState,
     snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
-import { readSystemRegion } from "../../features/magic-context/system-region";
-import { regionRotationPromotion } from "./transform-postprocess-phase";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import type { MessageLike } from "./tag-messages";
+import { regionRotationPromotion } from "./transform-postprocess-phase";
 
 const SESSION_ID = "ses_issue538_reanchor";
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -192,7 +192,8 @@ describe("issue 538 claim 3: the two paths read one array in sequence", () => {
                         injectDocs: true,
                     }),
                 });
-                if (promotion.promote && promotion.reason) forceMaterializeReason = promotion.reason;
+                if (promotion.promote && promotion.reason)
+                    forceMaterializeReason = promotion.reason;
             }
             const delivered = injectM0M1({
                 db,

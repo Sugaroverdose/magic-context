@@ -9,11 +9,12 @@ import { initializeDatabase } from "../../features/magic-context/storage-db";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage-meta-session";
 import { Database } from "../../shared/sqlite";
 import { renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
-import { readCurrentM0SnapshotMarkers, renderM0, renderM1 } from "./inject-compartments";
+import { readCurrentM0SnapshotMarkers, renderM0 } from "./inject-compartments";
 import { countCompartmentsNeedingUpgrade } from "./legacy-compartments";
 import { persistFilteredNoise } from "./persist-filtered-noise";
 import { readSessionChunk, setRawMessageProvider } from "./read-session-chunk";
 import { renderSessionReferencesBlock } from "./reference-retrieval";
+import { renderRegionVolatile } from "./region-volatile";
 
 it("noise markers render no m0/m1 bytes and do not affect decay, references or upgrades", () => {
     const db = new Database(":memory:");
@@ -71,7 +72,12 @@ it("noise markers render no m0/m1 bytes and do not affect decay, references or u
             });
         expect(m0(after)).toBe(m0(before));
         expect(
-            renderM1({ db, sessionId, state: getOrCreateSessionMeta(db, sessionId) }, markers),
+            // Unit 2 Step 3: the delta half reaches the wire only through the
+            // volatile segment (the m[1] renderers died behind it).
+            renderRegionVolatile(
+                { db, sessionId, state: getOrCreateSessionMeta(db, sessionId) } as never,
+                { ...markers, renderedMemoryIds: [] },
+            ).text,
         ).not.toContain("new-compartments");
         expect(renderSessionReferencesBlock([...before, ...Array(8).fill(marker)])).toBe(
             renderSessionReferencesBlock(before),

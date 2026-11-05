@@ -710,6 +710,21 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
             ).toEqual([{ name: "lkg_slot_chunks" }, { name: "session_replay_decisions" }]);
             populateModuleOwnedRows(db, version, state);
             return;
+        case 95:
+            if (!state.armed) throw new Error(`migration v${version} reached an unarmed store`);
+            // Region-only Task 1: the volatile segment columns land beside the
+            // frozen region columns on the populated session_meta row.
+            expect(
+                (
+                    db.prepare("PRAGMA table_info(session_meta)").all() as Array<{
+                        name: string;
+                    }>
+                ).map((column) => column.name),
+            ).toEqual(
+                expect.arrayContaining(["region_volatile_bytes", "region_volatile_watermark"]),
+            );
+            populateModuleOwnedRows(db, version, state);
+            return;
         default:
             throw new Error(`populateForVersion has no arm for migration v${version}`);
     }

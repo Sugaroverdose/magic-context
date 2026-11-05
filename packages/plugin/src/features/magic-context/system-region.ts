@@ -228,13 +228,10 @@ export function clearSystemRegionsByProjectIdentity(
  * The marker set captured at the last rotation, mirroring the `cached_m0_*`
  * columns. Rotation eligibility is a pure comparison of the current store
  * markers against this snapshot; the comparison list is the content-trigger
- * half of the `mustMaterialize` set; the deliberate non-triggers
- * (compartment sequence, profile version, memory watermark) are absent by
- * construction — new history and new memories are deltas, not boundaries.
- * The docs hash IS a compared member (DELTA_TRIGGER_FIELDS): its current
- * side must carry the live canonical hash (§25); like every compared
- * field, it never originates a bust — it rides the next boundary
- * permission.
+ * half of the `mustMaterialize` set. The delta-class fields (compartment
+ * sequence, profile version, memory watermark, docs hash) are NOT compared
+ * members: they ride the volatile segment and are absorbed on folds
+ * (DELTA_TRIGGER_FIELDS, empty by owner ruling).
  */
 export interface RegionMarkers {
     projectMemoryEpoch: number;
@@ -270,18 +267,20 @@ const CONTENT_TRIGGER_FIELDS: ReadonlyArray<readonly [keyof RegionMarkers, strin
 ];
 
 /**
- * The head-lane m[1]-delta fields. They are deliberate non-triggers of the
- * m[0] HARD fold because they used to re-render m[1] on every cache-busting
- * pass; region mode has no m[1], so that role transfers to a rotation trigger
- * gated on the bust permission — they surface on exactly the passes where
- * m[1] used to refresh, and never originate a bust of their own.
+ * The delta-class fields — EMPTY by owner ruling (region-only Task 3).
+ * Cheapness came from placement behind the cached prefix, not from boundary
+ * timing: delta-class content (new memories, published compartments, profile
+ * promotions, docs edits) rides the volatile segment (region-volatile.ts)
+ * and is absorbed on folds. These fields are retained in RegionMarkers as
+ * the fence anchor: re-adding an entry here must go red on the per-field
+ * production-composition demotion laws (system-region-wiring.test.ts) —
+ * they bump the live store through real writers and pin the promotion call
+ * site's composition, so a re-added trigger cannot survive a CI pass
+ * unnoticed. The only bust deciders are the window manager (scheduler
+ * folds) and the harness (system hash); everything else schedules changes
+ * onto the volatile segment.
  */
-const DELTA_TRIGGER_FIELDS: ReadonlyArray<readonly [keyof RegionMarkers, string]> = [
-    ["maxMemoryId", "max_memory_id"],
-    ["maxCompartmentSeq", "max_compartment_seq"],
-    ["profileVersion", "profile_version"],
-    ["projectDocsHash", "project_docs_hash"],
-];
+const DELTA_TRIGGER_FIELDS: ReadonlyArray<readonly [keyof RegionMarkers, string]> = [];
 
 export interface SystemRegionRotationDecision {
     rotate: boolean;
@@ -329,8 +328,12 @@ export function decideSystemRegionRotation(
     if (args.forceBand) return { rotate: true, reason: "force_band" };
     // The pending-growth arm is deleted (§25.3): it received the absolute
     // stored-region size as if it were an un-folded delta, storming every
-    // large-region session on every boundary pass. Growth is measured by
-    // the DELTA_TRIGGER_FIELDS comparison above.
+    // large-region session on every boundary pass. Since Unit 2 the delta
+    // class is carried by the volatile segment (region-volatile.ts) and
+    // growth is a fold REQUEST queued onto the named boundary (Task 1
+    // Step 4b) — never a rotation decided here; DELTA_TRIGGER_FIELDS is
+    // empty by owner ruling, its loop above stays only as the extension
+    // point shape.
     return { rotate: false, reason: "none" };
 }
 

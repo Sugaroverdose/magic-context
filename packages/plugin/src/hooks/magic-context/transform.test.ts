@@ -2468,9 +2468,7 @@ describe("createTransform", () => {
         // tagged); the baseline lands in the region store.
         expect(messages).toHaveLength(1);
         expect(text(messages[0], 0)).toContain("hello");
-        const { readSystemRegion } = await import(
-            "../../features/magic-context/system-region"
-        );
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
         expect(readSystemRegion(db, "ses-m0m1-first")).not.toBeNull();
     });
 
@@ -2529,9 +2527,7 @@ describe("createTransform", () => {
         // appends the region bytes after the host system bytes); the
         // conversation array stays head-free.
         expect(messages).toHaveLength(1);
-        const { readSystemRegion } = await import(
-            "../../features/magic-context/system-region"
-        );
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
         const region = readSystemRegion(db, "ses-memory") ?? "";
         expect(region).toContain("<project-memory>");
         expect(region).toContain("Always use Bun");

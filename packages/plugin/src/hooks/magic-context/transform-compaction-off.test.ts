@@ -24,7 +24,6 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { replaceAllCompartments } from "../../features/magic-context/compartment-storage";
 import { insertMemory } from "../../features/magic-context/memory";
-import { readSystemRegion } from "../../features/magic-context/system-region";
 import {
     __resetProjectIdentityForTests,
     resolveProjectIdentity,
@@ -50,6 +49,7 @@ import {
     getOverflowState,
     setCompactionModeRecord,
 } from "../../features/magic-context/storage-meta-persisted";
+import { readSystemRegion } from "../../features/magic-context/system-region";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { createMessagesTransformHandler } from "../../plugin/messages-transform";

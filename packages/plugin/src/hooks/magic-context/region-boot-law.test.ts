@@ -40,6 +40,7 @@ import { join } from "node:path";
 import { insertMemory } from "../../features/magic-context/memory/storage-memory";
 import { computeHardCacheExpired, createScheduler } from "../../features/magic-context/scheduler";
 import {
+    bumpProjectMemoryEpoch,
     closeDatabase,
     getOrCreateSessionMeta,
     openDatabase,
@@ -60,6 +61,7 @@ import {
     regionMarkersFromSnapshot,
     snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
+import { recomputeRegionVolatileSegment, serveRegionVolatile } from "./region-volatile";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
 import type { MessageLike } from "./tag-messages";
 import { regionRotationPromotion } from "./transform-postprocess-phase";
@@ -299,14 +301,25 @@ describe("region boot law: cold boot is a replay, not a fold", () => {
                 reason: null,
             });
 
-            // Control (comparator bite, warm): the same production
-            // composition on a boundary pass with an edited docs file MUST
-            // promote — the quiescent decline above is marker equality,
-            // not a deadened comparator.
+            // Docs edits never promote (Task 3 demotion): with the boundary
+            // permission and an edited docs file the composition stays
+            // silent — the panel converges at the next legitimate fold.
             writeFileSync(join(dir, "ARCHITECTURE.md"), "# Architecture\n\nchanged doc.\n");
             expect(bootPromotion(bootDb, dir, true)).toEqual({
+                promote: false,
+                reason: null,
+            });
+            // Control (comparator bite, warm): the same production
+            // composition on a boundary pass with a genuine content trigger
+            // MUST promote — the quiescent decline above is marker equality,
+            // not a deadened comparator. (Unit 2 Task 3: the docs hash was
+            // the original bite operand; it is demoted to the volatile
+            // carrier, so the bite control uses the dashboard epoch — a
+            // surviving compared member.)
+            bumpProjectMemoryEpoch(bootDb, PROJECT_PATH);
+            expect(bootPromotion(bootDb, dir, true)).toEqual({
                 promote: true,
-                reason: "project_docs_hash",
+                reason: "project_memory_epoch",
             });
             // Control (boot-gate bite): the same stale manifest never
             // promotes without boundary permission — the ride-only gate
@@ -440,6 +453,139 @@ describe("region boot law: cold boot is a replay, not a fold", () => {
             });
             expect(armed.value).toBe(true);
             expect(armed.reason).toBe("ttl_idle");
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+});
+
+/**
+ * Unit 2 Step 2 — the region is four panels only.
+ *
+ * The delta half (m[1]-era content) must be gone from the region bytes: the
+ * region carries the frozen panels and nothing else, and every delta class is
+ * reachable ONLY through the volatile segment. Red-first for the Step 2
+ * lift: before the lift the region body still ends with the delta half, so
+ * the "region has no delta block" assertion fails.
+ */
+describe("region four-panel-only contract (Unit 2 Step 2)", () => {
+    it("the installed region carries no delta block and no never-empty placeholder tail", async () => {
+        const dir = docsDir();
+        try {
+            useTempDataHome("region-four-panel-");
+            const db = openDatabase();
+            getOrCreateSessionMeta(db, SESSION_ID);
+            insertMemory(db, {
+                projectPath: PROJECT_PATH,
+                category: "ARCHITECTURE",
+                content: "four panel memory",
+            });
+            freezeReduce(SESSION_ID);
+            const handler = buildHandler();
+            await pass(handler.handler, SESSION_ID, "Base host prompt");
+            const state = getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State;
+            injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory: dir,
+                injectDocs: true,
+                messages: [
+                    { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "hi" }] },
+                ] as MessageLike[],
+                isCacheBustingPass: true,
+                systemRegion: { enabled: true, reason: "hard_fold" },
+                hardSignals: bootHardSignals(state),
+            } as never);
+
+            const region = readSystemRegion(db, SESSION_ID);
+            expect(region).not.toBeNull();
+            // Panels survive.
+            expect(region!).toContain("<project-docs>");
+            expect(region!).toContain("<project-memory>");
+            expect(region!).toContain("four panel memory");
+            // The delta half is gone: no since-block, no placeholder floor, no
+            // delta-only blocks.
+            expect(region!).not.toContain("<session-history-since>");
+            expect(region!).not.toContain("(no new content since last materialization)");
+            expect(region!).not.toContain("<new-compartments>");
+            expect(region!).not.toContain("<new-memories>");
+            expect(region!).not.toContain("<memory-updates>");
+            expect(region!).not.toContain("<new-user-profile>");
+            // Byte-exact tail: the region ends with the last panel's close tag,
+            // i.e. nothing was concatenated after the panels.
+            expect(region!.endsWith("</project-memory>")).toBe(true);
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
+    });
+
+    it("the delta half moved to volatile, not dropped: post-fold memory surfaces via the segment", async () => {
+        const dir = docsDir();
+        try {
+            useTempDataHome("region-delta-moved-");
+            const db = openDatabase();
+            getOrCreateSessionMeta(db, SESSION_ID);
+            insertMemory(db, {
+                projectPath: PROJECT_PATH,
+                category: "ARCHITECTURE",
+                content: "baseline panel memory",
+            });
+            freezeReduce(SESSION_ID);
+            const handler = buildHandler();
+            await pass(handler.handler, SESSION_ID, "Base host prompt");
+            const state = getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State;
+            injectM0M1({
+                db,
+                sessionId: SESSION_ID,
+                state,
+                projectPath: PROJECT_PATH,
+                projectDirectory: dir,
+                injectDocs: true,
+                messages: [
+                    { info: { id: "u1", role: "user" }, parts: [{ type: "text", text: "hi" }] },
+                ] as MessageLike[],
+                isCacheBustingPass: true,
+                systemRegion: { enabled: true, reason: "hard_fold" },
+                hardSignals: bootHardSignals(state),
+            } as never);
+            const regionBefore = readSystemRegion(db, SESSION_ID)!;
+
+            // A memory written AFTER the fold is delta-class: it must reach the
+            // wire through the volatile segment, never through the region.
+            insertMemory(db, {
+                projectPath: PROJECT_PATH,
+                category: "CONSTRAINTS",
+                content: "post fold delta memory",
+            });
+            const meta = getOrCreateSessionMeta(db, SESSION_ID);
+            const rendered = recomputeRegionVolatileSegment({
+                db,
+                sessionId: SESSION_ID,
+                meta,
+                options: {
+                    db,
+                    sessionId: SESSION_ID,
+                    state: meta as unknown as M0M1State,
+                    projectPath: PROJECT_PATH,
+                    projectDirectory: dir,
+                    injectDocs: true,
+                    isCacheBustingPass: true,
+                } as never,
+            });
+            expect(rendered).not.toBeNull();
+            expect(rendered!.text).toContain("post fold delta memory");
+            expect(rendered!.text).toContain("<session-history-since>");
+            // The segment is stored, and serving it requires the watermark to
+            // name the region row it was rendered against.
+            expect(serveRegionVolatile(getOrCreateSessionMeta(db, SESSION_ID))).toContain(
+                "post fold delta memory",
+            );
+            const served = await pass(handler.handler, SESSION_ID, "Base host prompt");
+            expect(served).toContain("post fold delta memory");
+            // The region bytes did not move: the delta never re-enters them.
+            expect(readSystemRegion(db, SESSION_ID)).toBe(regionBefore);
         } finally {
             rmSync(dir, { recursive: true, force: true });
         }

@@ -2,61 +2,36 @@
 // (design §25.1, assembly-v2 Unit 1 Step 2). Moved verbatim from
 // inject-compartments.ts: the compartment/memory/user-profile renderers, their
 // trims and budgets, the render-side m[0]/m[1] primitives, and the shared
-// marker/state types they consume. The region grammar lives in ONE place here
-// (renderRegionBody); the transform never invents wire bytes, it only asks
-// this module to render them.
+// marker/state types they consume. The region is the four panels the
+// renderRegionM0 composition assembles (Unit 2 Step 2); the delta class rides
+// the volatile segment in region-volatile.ts. The transform never invents wire
+// bytes, it only asks this module to render them.
 
 import { Buffer } from "node:buffer";
 import { MEMORY_MURAL_BLOCK } from "../../agents/magic-context-prompt";
 import {
-    buildCompartmentBlock,
     type Compartment,
-    type CompartmentDateRanges,
     escapeXmlAttr,
     escapeXmlContent,
-    getCompartments,
-    getLastCompartmentEndMessageId,
-    isPartialCompartmentEnd,
     type SessionFact,
 } from "../../features/magic-context/compartment-storage";
-import {
-    CATEGORY_PRIORITY,
-    V2_MEMORY_CATEGORIES,
-} from "../../features/magic-context/memory/constants";
+import { V2_MEMORY_CATEGORIES } from "../../features/magic-context/memory/constants";
 import { compareMemorySelectionPriority } from "../../features/magic-context/memory/memory-selection";
-import {
-    getMaxMemoryIdForProjects,
-    getMemoriesByProject,
-    getMemoriesByProjects,
-} from "../../features/magic-context/memory/storage-memory";
 import type { Memory } from "../../features/magic-context/memory/types";
 import { resolveMuralWire } from "../../features/magic-context/mural/render-trigger";
 import type { MuralWireOptions } from "../../features/magic-context/mural/resolve-mural";
-import { isNoContentCompartment } from "../../features/magic-context/no-content-compartment";
 import {
     GLOBAL_USER_PROFILE_PROJECT_PATH,
-    getMaxM0MutationId,
-    getMaxMemoryMutationId,
-    getMaxMemoryMutationIdForProjects,
     getMemoryMutationsForRender,
     getMemoryMutationsForRenderByProjects,
     getProjectState,
     MEMORY_VISIBILITY_MUTATION_CATEGORY,
-    readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
-import {
-    executeSystemRegionRotation,
-    isSystemRegionBytes,
-    type RegionMarkers,
-    readSystemRegion,
-    sanitizeReceiptOperand,
-} from "../../features/magic-context/system-region";
 import {
     getActiveUserMemories,
     type UserMemory,
 } from "../../features/magic-context/user-memory/storage-user-memory";
 import {
-    computeWorkspaceEpochFingerprint,
     expandWorkspaceIdentitySetWithAliases,
     resolveStoredPathWorkspaceIdentity,
     resolveWorkspaceIdentitySet,
@@ -64,29 +39,10 @@ import {
     sourceNameForMemory,
     type WorkspaceIdentitySet,
 } from "../../features/magic-context/workspaces";
-import { BoundedSessionMap } from "../../shared/bounded-session-map";
-import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 import type { Database, Statement as PreparedStatement } from "../../shared/sqlite";
-import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
-import {
-    MARKER_SUMMARY_TEXT,
-    reconcileForkOrphanedCompactionMarkers,
-} from "./compaction-marker-manager";
-import {
-    COMPARTMENT_RENDER_EPOCH,
-    decodeCachedM0UpgradeIdentity,
-    encodeCachedM0UpgradeIdentity,
-    MEMORY_RENDER_FORMAT_EPOCH,
-    PROFILE_RENDER_EPOCH,
-    renderBudgetIdentityChanged,
-    renderedBudgetShrinkReason,
-    renderedBudgetSnapshot,
-} from "./compartment-render-epoch";
-import { extractM0Block, renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
+import { extractM0Block, renderDecayedCompartments } from "./decay-render";
 import { historyLocalBudget } from "./decision-calibration";
-import { isHostRenderedSystemMessage } from "./host-served-rows";
-import { compareRawSessionMessageOrder, resolveHostServedBoundaryId } from "./read-session-chunk";
 import { getMessageTimesFromOpenCodeDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -320,9 +276,6 @@ export const DEFAULT_USER_PROFILE_BUDGET_TOKENS = 4_000;
 export const MAX_FORCED_MEMORIES_PER_DELTA = 10;
 
 export const M0_EMPTY_BODY = "<session-history></session-history>";
-
-export const M1_EMPTY_PLACEHOLDER =
-    "<session-history-since>(no new content since last materialization)</session-history-since>";
 
 export interface WorkspaceRenderContext {
     identities: string[];
@@ -982,155 +935,6 @@ export function renderMemoryUpdatesBlock(args: {
     };
 }
 
-export interface RenderM1Result {
-    text: string;
-    memoryUpdateCount: number;
-    renderedMemoryIds: number[];
-}
-
-export function renderM1WithMetadata(
-    options: M0M1RenderOptions,
-    markers: M0SnapshotMarkers,
-    renderedMemoryIds: readonly number[],
-): RenderM1Result {
-    if (!markers || markers.maxCompartmentSeq === undefined) {
-        throw new RenderM1InvalidMarkersError(options.sessionId);
-    }
-
-    const blocks: string[] = [];
-    const workspace = resolveWorkspaceRenderContext({
-        db: options.db,
-        projectPath: options.projectPath,
-        workspaceIdentitySet: options.workspaceIdentitySet,
-    });
-
-    const eligibleMemories = options.projectPath
-        ? workspace.isWorkspaced
-            ? getMemoriesByProjects(
-                  options.db,
-                  workspace.expandedIdentities,
-                  ["active", "permanent"],
-                  markers.materializedAt,
-                  workspace.ownIdentities,
-                  workspace.shareCategories,
-              )
-            : getMemoriesByProject(
-                  options.db,
-                  options.projectPath,
-                  ["active", "permanent"],
-                  markers.materializedAt,
-              )
-        : [];
-    const eligibleMemoryIds = new Set(eligibleMemories.map((memory) => memory.id));
-    const memoryUpdates = renderMemoryUpdatesBlock({
-        db: options.db,
-        projectPath: options.projectPath,
-        workspace,
-        afterId: markers.maxMemoryMutationId,
-        renderedMemoryIds,
-        eligibleMemoryIds,
-    });
-    if (memoryUpdates.block) blocks.push(memoryUpdates.block);
-
-    const newCompartments = withCompartmentDates(
-        options.db,
-        options.sessionId,
-        readNewCompartments(options.db, options.sessionId, markers.maxCompartmentSeq).filter(
-            (c) => !isNoContentCompartment(c),
-        ),
-        options.temporalAwareness,
-    );
-    if (newCompartments.length > 0) {
-        blocks.push(
-            `<new-compartments>\n${newCompartments
-                .map((compartment) => renderCompartmentAtTier(compartment, 1))
-                .join("\n\n")}\n</new-compartments>`,
-        );
-    }
-
-    const forcedMemoryIds = new Set(memoryUpdates.forcedMemoryIds);
-    const newMemories = eligibleMemories.filter(
-        (memory) => memory.id > markers.maxMemoryId && !forcedMemoryIds.has(memory.id),
-    );
-    const newMemoryRenderOptions: MemoryRenderOptions = {
-        sourceNameByMemoryId: sourceNamesForMemories({
-            memories: eligibleMemories,
-            projectPath: options.projectPath,
-            workspace,
-        }),
-    };
-    const trimmedNewMemories = trimMemoriesToBudgetV2(
-        options.sessionId,
-        newMemories,
-        Math.max(
-            1,
-            Math.floor(
-                (options.memoryInjectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS) * 0.25,
-            ),
-        ),
-        newMemoryRenderOptions,
-    ).renderOrder;
-    const deltaMemories = [
-        ...trimmedNewMemories,
-        ...eligibleMemories.filter((memory) => forcedMemoryIds.has(memory.id)),
-    ];
-    const newMemoriesBlock = renderMemoryBlockV2(
-        deltaMemories,
-        "new-memories",
-        newMemoryRenderOptions,
-    );
-    if (newMemoriesBlock) blocks.push(newMemoriesBlock);
-
-    const currentUserProfileVersion = getGlobalUserProfileVersion(options.db);
-    if (
-        options.memoryEnabled !== false &&
-        currentUserProfileVersion !== markers.projectUserProfileVersion
-    ) {
-        const profileBlock = renderUserProfileBlock(
-            trimUserMemoriesToBudget(
-                safeGetActiveUserMemories(options.db),
-                Math.max(
-                    1,
-                    Math.floor(
-                        (options.userProfileBudgetTokens ?? DEFAULT_USER_PROFILE_BUDGET_TOKENS) *
-                            0.25,
-                    ),
-                ),
-            ),
-            "new-user-profile",
-        );
-        if (profileBlock) blocks.push(profileBlock);
-    }
-
-    // v2 faithful facts: session_facts is retired as a render source. Fresh
-    // facts reach the agent as promoted memories via the new-memories block
-    // above (maxMemoryId watermark), not via a <session_facts> delta here.
-
-    const renderedNewMemoryIds = newMemoriesBlock
-        ? trimmedNewMemories.map((memory) => memory.id)
-        : [];
-    if (blocks.length === 0) {
-        return {
-            text: M1_EMPTY_PLACEHOLDER,
-            memoryUpdateCount: memoryUpdates.count,
-            renderedMemoryIds: renderedNewMemoryIds,
-        };
-    }
-    return {
-        text: `<session-history-since>\n${blocks.join("\n")}\n</session-history-since>`,
-        memoryUpdateCount: memoryUpdates.count,
-        renderedMemoryIds: renderedNewMemoryIds,
-    };
-}
-
-export function renderM1(
-    options: M0M1RenderOptions,
-    markers: M0SnapshotMarkers,
-    renderedMemoryIds: readonly number[] = [],
-): string {
-    return renderM1WithMetadata(options, markers, renderedMemoryIds).text;
-}
-
 /**
  * A native OpenCode compaction (`/compact` or automatic) heading the live window.
  * OpenCode then serves [compaction request, summary, retained tail, newer rows]
@@ -1308,41 +1112,6 @@ export function renderRegionM0(args: {
 }
 
 /**
- * The region delta half (m[1] side), extracted verbatim from the materializeM0
- * fold transaction: the delta render plus the visible-memory identity the
- * fold persists alongside the bytes.
- */
-export function renderRegionM1(args: {
-    options: M0M1RenderOptions;
-    workspace: WorkspaceRenderContext;
-    snapshotMarkers: M0SnapshotMarkers;
-    renderedMemoryIds: readonly number[];
-}) {
-    const m1Render = renderM1WithMetadata(
-        {
-            ...args.options,
-            workspaceIdentitySet: {
-                identities: args.workspace.identities,
-                namesByIdentity: args.workspace.namesByIdentity,
-            },
-        },
-        args.snapshotMarkers,
-        args.renderedMemoryIds,
-    );
-    const m1Text = m1Render.text;
-    const visibleMemoryIds = [
-        ...new Set([...args.renderedMemoryIds, ...m1Render.renderedMemoryIds]),
-    ];
-    return { m1Text, m1Bytes: Buffer.from(m1Text, "utf8"), visibleMemoryIds };
-}
-
-/**
- * THE region grammar (design §25.1): the frozen system-region body is the
- * panel text and the delta text joined by a blank line. This is the only
- * place that composes the bytes the rotation installs — the transform and
- * the fold never join region halves themselves.
- */
-/**
  * The mural PNG carriage, region form (census "Mural carriage group" /
  * design §11 disposition): the frozen region carries the `<memory-mural>`
  * legend inside its bytes, and the image rides beside it as a synthetic user
@@ -1371,8 +1140,4 @@ export function buildRegionMuralMessage(args: {
         },
         parts: [{ type: "file", mime: "image/png", url: dataUrl }],
     };
-}
-
-export function renderRegionBody(m0Text: string, m1Text: string): string {
-    return `${m0Text}\n\n${m1Text}`;
 }
