@@ -1147,3 +1147,25 @@ Historian admission reads primary/fallback windows from the live Pi/OMP model re
 The full Pi suite initially reported 1,193 pass / 3 skip / 31 fail. The affected 344-test groups subsequently reported 340 pass / 4 fail, and the four remaining nested-historian cases passed after their mock window observations were supplied. The environment-only OMP/home and smart-note checks passed without product changes. Pi typecheck passed. No second full suite was run, as requested. Exact commands and counts are committed under `docs/reports/tokenizer-calibration-gates/`.
 
 Tail-hygiene parity is active. Persisted `last_nudge_undropped` and `last_nudge_level.postReduceGraceBaselineU` convert once at the stamped bust; `growthThreshold` is derived from calibrated T. No SQL column, migration, sidecar or fence change was added.
+
+## 37. Volatile delta carriage is a Pi codec copy (Unit 7, carry-forward B)
+
+| Aspect | Pi shape |
+| --- | --- |
+| Carrier | `region-volatile-pi.ts` mirrors the plugin's Unit 2 volatile segment: the fold writes region = m[0] baseline only and lands the delta segment in the same BEGIN IMMEDIATE (`inject-compartments-pi.ts` `materializeM0Pi` region branch, mirroring plugin `inject-compartments.ts`); the serve appends the watermark-guarded segment after the region bytes in `processSystemPromptForCache` (hash still covers host bytes only); the bust lane (`runPipeline`) recomputes it under the plugin's four demotion-gap closures (request only schedules; the rewrite widens the ONE mutation permission; contention-exhausted passes skip; a pass whose fold executed skips — the fold-row absorb already ran). |
+| Codec boundary | Pi COPIES the carrier API (`decodeRegionVolatileBytes`, `serveRegionVolatilePi`, `evaluateRegionVolatileBackstop`, `recomputeRegionVolatileSegmentPi`) and imports nothing from the plugin's `hooks/magic-context/region-volatile.ts` (Task 5, adoption precedent); the shared `writeRegionVolatile` accessor in `storage-meta-shared.ts` stays the single write surface for both harnesses (one `context.db`). Holder censuses pin the Pi entry names on both sides. |
+| Delta producer | The plugin's volatile render is its own renderer (`renderRegionVolatile`, watermark-typed). Pi re-points the head-era m[1] renderer: `renderM1PiVolatileSegment` drives `renderM1PiWithMetadata` through a `Pick`-typed watermark (`PiVolatileWatermark`), so the compiler pins the render's inputs to the five cached-marker fields; empty renders `""` (the volatile has no placeholder duty — plugin parity). |
+| Content classes | Both harnesses carry memory-updates, post-capture compartments, overflow/new memories and the user-profile delta. PLUGIN-ONLY: the docs delta block (`renderDocsDeltaBlock`) — see §38. |
+| Growth backstop | Same three arms (update count > 40; volatile/region token ratio past 15% with a 500-token region floor; absolute cap past 20% of the history budget), same request-only semantics: `onFoldRequest` schedules onto Pi's deferred materialization queue and the scheduler decides when the fold rides. |
+
+## 38. Demoted triggers and the docs delta (Unit 7)
+
+| Aspect | Pi shape |
+| --- | --- |
+| Fold triggers | `mustMaterializePi`'s region arm demotes the same delta classes as the plugin's `mustMaterialize`: new compartments, profile version, maxMemoryId, docs hash, session facts never originate a HARD fold. The fence is behavioral (`system-region-pi-fold.test.ts` demotion law) plus the shared emptied `DELTA_TRIGGER_FIELDS` table. |
+| Docs hash | PLUGIN: docs edits ride the volatile segment until the next fold absorbs them (Unit 2 Task 3 demoted docs everywhere). PI: the volatile producer has no docs class, so a docs edit surfaces through the next fold's fresh docs read; the promotion comparator's live-current-side docs composition remains wired but the shared table it consults is empty, so docs rotate the region on no pass either. Deliberate divergence — Pi docs deltas wait for the next natural HARD fold rather than riding a segment. |
+| ctx_reduce/ctx_expand | Tag-era on Pi, ruled FINAL (census carry-forward C): Pi's ctx_expand has no `ctx_handles`/withdraw capability, so adopting the v2 handles contract would pin a law claiming a contract Pi does not serve. |
+
+## 39. Boot replay on the region lane (Unit 7)
+
+Pi's boot/serve path performs zero region computation: `before_agent_start` decodes the stored region verbatim after the composed host prompt (`processSystemPromptForCache`) and appends the volatile segment only when its watermark names the served row. No fold runs at boot; a head-row or absent region folds once as an install on the first context pass (`region_first_install`), and the LKG slot carries no panel bytes — it is region-orthogonal and replays byte-identically across rotations (D10/L6). Boot replay for the panels is the serve site's decode; the head-era `prepareCachedM0M1PiReplay` boot prefix has no successor because there is no array-side prefix to replay.
