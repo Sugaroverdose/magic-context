@@ -485,23 +485,128 @@ describe("system-region L0: per-actor producer census", () => {
         expect(walkedVolatileZone).toBeGreaterThanOrEqual(3);
         expect(offenders).toEqual([]);
 
-        // Entry-point closure (#2713 holder-set form): the sanctioned write
-        // entries may only be invoked from their named production holders —
-        // the accessor's own definition, the bust-lane recompute entry, and
-        // the fold row (materializeM0's boundary transaction).
-        const writers = filesUsing(/\bwriteRegionVolatile\s*\(/);
-        expect(writers).toEqual([
-            "features/magic-context/storage-meta-shared.ts",
-            "hooks/magic-context/inject-compartments.ts",
-            "hooks/magic-context/region-volatile.ts",
-        ]);
-        const recomputers = filesUsing(/\brecomputeRegionVolatileSegment\s*\(/);
-        // Definition (region-volatile.ts) + the ONLY production call site: the
-        // bust lane in the postprocess phase. Any other caller reddens.
-        expect(recomputers).toEqual([
-            "hooks/magic-context/region-volatile.ts",
-            "hooks/magic-context/transform-postprocess-phase.ts",
-        ]);
+        // Entry-point closure (#2713 holder-set form, G1 shape from the
+        // persistCachedM0 census): (callers ∪ bare-identifier-holders)
+        // compared against blessed sets. The callee-with-parens regex alone
+        // is blind to `import { writeRegionVolatile as w }; w(...)` — the
+        // aliased call lands in the sanctioned accessor so no downstream
+        // census reddens — so ANY occurrence of the entry name outside its
+        // definition file must name its holder file, whatever the syntax.
+        const entryHolders = (name: string, definition: string, extraRoots: EntryRoots = []) => {
+            const bare = new RegExp(`\\b${name}\\b`);
+            const call = new RegExp(`\\b${name}\\s*\\(`);
+            const holders: string[] = [];
+            const callers: string[] = [];
+            for (const { rel, full } of zoneFiles(extraRoots)) {
+                if (rel === definition) continue;
+                const text = readFileSync(full, "utf8");
+                if (!bare.test(text)) continue;
+                holders.push(rel);
+                if (call.test(text)) callers.push(rel);
+            }
+            return { holders: holders.sort(), callers: callers.sort() };
+        };
+        const VOLATILE_ENTRIES = [
+            {
+                name: "writeRegionVolatile",
+                definition: "features/magic-context/storage-meta-shared.ts",
+                blessedHolders: [
+                    "hooks/magic-context/inject-compartments.ts",
+                    "hooks/magic-context/region-volatile.ts",
+                ],
+            },
+            {
+                name: "recomputeRegionVolatileSegment",
+                definition: "hooks/magic-context/region-volatile.ts",
+                blessedHolders: ["hooks/magic-context/transform-postprocess-phase.ts"],
+            },
+            {
+                name: "serveRegionVolatile",
+                definition: "hooks/magic-context/region-volatile.ts",
+                blessedHolders: ["hooks/magic-context/system-prompt-hash.ts"],
+            },
+            {
+                name: "decodeRegionVolatileBytes",
+                definition: "hooks/magic-context/region-volatile.ts",
+                blessedHolders: [],
+            },
+        ] as const;
+        type EntryRoots = ReadonlyArray<{ dir: string; prefix: string }>;
+        for (const entry of VOLATILE_ENTRIES) {
+            const census = entryHolders(entry.name, entry.definition);
+            // Holders is the superset that closes the alias/rebind blind
+            // class; callers must equal it — a holder that only names the
+            // entry without calling it (barrel-style re-export) would need
+            // its own adjudication here.
+            expect(census.holders).toEqual([...entry.blessedHolders].sort());
+            expect(census.callers).toEqual([...entry.blessedHolders].sort());
+        }
+    });
+
+    it("control: aliased-import rogues on every volatile entry redden the holder censuses", () => {
+        // Mechanism attack on the holder property, in a temp root (no
+        // production tree is written): one import-alias rogue per entry.
+        // Each plant must surface as an unblessed holder name, and each must
+        // carry the old-shape proof — the canonical name is never followed
+        // by its call paren, so the pre-fix callee-only census was blind to
+        // exactly this file. Removal regreens (no residue).
+        const dir = createTestTempDirFromPath(join(tmpdir(), "mc-volatile-plant-"));
+        const plants: Array<[string, string, string, string]> = [
+            [
+                "rogue_alias_write.ts",
+                "writeRegionVolatile",
+                "features/magic-context/storage-meta-shared.ts",
+                'import { writeRegionVolatile as w } from "x";\nw(db, "s", "", 1);\n',
+            ],
+            [
+                "rogue_alias_recompute.ts",
+                "recomputeRegionVolatileSegment",
+                "hooks/magic-context/region-volatile.ts",
+                'import { recomputeRegionVolatileSegment as r } from "x";\nr({ db, sessionId, meta, options });\n',
+            ],
+            [
+                "rogue_alias_serve.ts",
+                "serveRegionVolatile",
+                "hooks/magic-context/region-volatile.ts",
+                'import { serveRegionVolatile as sv } from "x";\nreturn sv(meta);\n',
+            ],
+            [
+                "rogue_alias_decode.ts",
+                "decodeRegionVolatileBytes",
+                "hooks/magic-context/region-volatile.ts",
+                'import { decodeRegionVolatileBytes as d } from "x";\nreturn d(meta.regionVolatileBytes);\n',
+            ],
+        ];
+        const entryHolders = (
+            name: string,
+            definition: string,
+            extraRoots: ReadonlyArray<{ dir: string; prefix: string }> = [],
+        ) => {
+            const bare = new RegExp(`\\b${name}\\b`);
+            const holders: string[] = [];
+            for (const { rel, full } of zoneFiles(extraRoots)) {
+                if (rel === definition) continue;
+                if (bare.test(readFileSync(full, "utf8"))) holders.push(rel);
+            }
+            return holders;
+        };
+        try {
+            for (const [fileName, name, definition, body] of plants) {
+                writeFileSync(join(dir, fileName), body);
+                const holders = entryHolders(name, definition, [{ dir, prefix: "planted/" }]);
+                expect(holders).toContain(`planted/${fileName}`);
+                // Old-shape proof: the callee-with-parens census the law
+                // carried pre-fix would never have listed this file.
+                expect(
+                    new RegExp(`\\b${name}\\s*\\(`).test(
+                        readFileSync(join(dir, fileName), "utf8"),
+                    ),
+                ).toBe(false);
+                rmSync(join(dir, fileName), { force: true });
+            }
+        } finally {
+            rmSync(dir, { recursive: true, force: true });
+        }
     });
 
     it("the serve site appends volatile only behind a served region and never hashes it (Unit 2 L0)", () => {
@@ -509,17 +614,11 @@ describe("system-region L0: per-actor producer census", () => {
         // reader — serveRegionVolatile (decode + epoch guard, defined in
         // region-volatile.ts) — whose only production caller is the Step 2.5b
         // append site (system-prompt-hash.ts). The codec itself stays private
-        // to the carrier module. The append site's hashed surface stays
-        // hostContent-only (the hash call must not see the volatile text; it
-        // is minted from output.system AFTER appends only for the host slice,
-        // pinned by the Step 3 hash of hostContent).
-        const decoders = filesUsing(/\bdecodeRegionVolatileBytes\b/);
-        expect(decoders).toEqual(["hooks/magic-context/region-volatile.ts"]);
-        const servers = filesUsing(/\bserveRegionVolatile\s*\(/);
-        expect(servers).toEqual([
-            "hooks/magic-context/region-volatile.ts",
-            "hooks/magic-context/system-prompt-hash.ts",
-        ]);
+        // to the carrier module. Holder censuses for both entries live in the
+        // volatile-column law above (#2713 form). The append site's hashed
+        // surface stays hostContent-only (the hash call must not see the
+        // volatile text; it is minted from output.system AFTER appends only
+        // for the host slice, pinned by the Step 3 hash of hostContent).
         const hashSite = readFileSync(
             join(SRC_ROOT, "hooks/magic-context/system-prompt-hash.ts"),
             "utf8",
