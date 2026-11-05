@@ -108,9 +108,11 @@ import {
 } from "./final-wire-token-estimate";
 import type { LiveModelBySession } from "./hook-handlers";
 import {
+    buildRegionMuralMessage,
     capturePrefixTrimSourceOrder,
     findHostCompactionWindow,
     type HostCompactionWindow,
+    hasServableRegion,
     mustMaterialize,
     type PreparedCompartmentInjection,
     prepareCompartmentInjection,
@@ -658,6 +660,17 @@ export function resolveTransformHostSeams(
     };
 }
 
+/** The persisted mural is present and belongs to a region this process can
+ *  serve: the legend ships inside the region bytes, so a vision-unsupported
+ *  rotation (no mural rendered) leaves the columns empty and nothing rides. */
+function muralCarriageWanted(sessionMeta: {
+    cachedM0MuralDataUrl?: string | null;
+    snapshotMarkers?: { muralEnabled?: boolean | null } | null;
+}): boolean {
+    if (!sessionMeta.cachedM0MuralDataUrl) return false;
+    return sessionMeta.snapshotMarkers?.muralEnabled !== false;
+}
+
 export function createTransform(deps: TransformDeps) {
     const host = resolveTransformHostSeams(deps);
     const loadedSessions = new Set<string>();
@@ -1095,20 +1108,19 @@ export function createTransform(deps: TransformDeps) {
         // pair was itself rendered with the launch directory.
         const freezeM0M1 =
             sessionDirectoryFellBack &&
-            sessionMeta.cachedM0Bytes != null &&
-            sessionMeta.cachedM1Bytes != null &&
+            hasServableRegion(db, sessionId) &&
             (() => {
                 try {
                     return hasRecordedSessionProjectIdentity(db, sessionId);
                 } catch {
-                    // Unknown: keep the frozen pair rather than risk a rebuild.
+                    // Unknown: keep the frozen region rather than risk a rebuild.
                     return true;
                 }
             })();
         if (freezeM0M1) {
             sessionLog(
                 sessionId,
-                "session directory unresolved; replaying the frozen m[0]/m[1] and deferring any rebuild",
+                "session directory unresolved; replaying the frozen region and deferring any rebuild",
             );
         }
         const compartmentDirectory = sessionDirectory;
@@ -2486,7 +2498,7 @@ export function createTransform(deps: TransformDeps) {
                 historyBudgetTokens,
                 historyBudgetPolicyIdentity: historyPolicyIdentity,
                 hardSignals: m0HardSignals,
-                systemRegionMode: deps.systemRegionLane === true && !compactionOff,
+                systemRegionMode: deps.systemRegionLane === true,
             }).value;
         const protectionCacheBustingPass =
             !compactionOff &&
@@ -2613,7 +2625,10 @@ export function createTransform(deps: TransformDeps) {
             schedulerDecision,
             schedulerDeferReason,
             fullFeatureMode,
-            systemRegionLane: deps.systemRegionLane === true,
+            // The frozen system-region lane is an install-time capability with
+            // one exception: compaction-off installs keep the head carriage by
+            // the host-managed-window contract (config/system-region-lane.ts).
+            systemRegionLane: deps.systemRegionLane === true && !compactionOff,
             compactionOff,
             canRunCompartments,
             awaitedCompartmentRun,
@@ -3183,6 +3198,25 @@ export function createTransform(deps: TransformDeps) {
             } catch (error) {
                 sessionLog(sessionId, "nudge evaluation/CAS failed (ignored):", error);
             }
+        }
+
+        // Mural carriage (census "Mural carriage group"): the frozen region
+        // carries the <memory-mural> legend; the PNG rides beside it as a
+        // synthetic image message, emitted only while a servable region
+        // exists so the legend and the image always travel together. The part
+        // is a pure function of the persisted mural columns — replay-identical
+        // per rotation, never re-derived from mutated content.
+        if (
+            deps.systemRegionLane === true &&
+            !compactionOff &&
+            hasServableRegion(db, sessionId) &&
+            muralCarriageWanted(sessionMeta)
+        ) {
+            const muralMessage = buildRegionMuralMessage({
+                muralDataUrl: sessionMeta.cachedM0MuralDataUrl,
+                muralHash: sessionMeta.cachedM0MuralHash,
+            });
+            if (muralMessage) messages.unshift(muralMessage);
         }
 
         const elapsed = (performance.now() - startTime).toFixed(1);

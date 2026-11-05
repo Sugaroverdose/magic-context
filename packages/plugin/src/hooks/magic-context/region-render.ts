@@ -238,7 +238,11 @@ export interface M0M1RenderOptions {
      */
     onFoldCommit?: (
         db: Database,
-        rendered: { m0Bytes: Buffer; m1Bytes: Buffer; muralDataUrl: string | null },
+        rendered: {
+            m0Bytes: Buffer;
+            m1Bytes: Buffer | null;
+            muralDataUrl: string | null;
+        },
     ) => void;
     /**
      * Frozen system-region residency (§3, frozen-system-region-residency design):
@@ -257,8 +261,6 @@ export interface M0M1RenderOptions {
 export interface PrefixTrimSourceOrder {
     /** Stable IDs in the exact order supplied by the host before this transform mutates the array. */
     messageIds: readonly string[];
-    /** ID-less synthetic users are valid only as one contiguous leading block. */
-    syntheticHeadCount: number;
     invalidReason: string | null;
 }
 
@@ -1340,6 +1342,37 @@ export function renderRegionM1(args: {
  * place that composes the bytes the rotation installs — the transform and
  * the fold never join region halves themselves.
  */
+/**
+ * The mural PNG carriage, region form (census "Mural carriage group" /
+ * design §11 disposition): the frozen region carries the `<memory-mural>`
+ * legend inside its bytes, and the image rides beside it as a synthetic user
+ * message. The part is a pure function of the persisted mural columns —
+ * replay-identical per rotation, never re-derived from mutated content, and
+ * emitted only while a servable region exists so legend and image travel
+ * together. The `image/png` mint lives here, in the region panel surface,
+ * beside the block constant that declares the MIME.
+ */
+export function buildRegionMuralMessage(args: {
+    muralDataUrl?: string | null;
+    muralHash?: string | null;
+}): {
+    info: { id: string; role: "user"; time: { created: number }; synthetic: true };
+    parts: unknown[];
+} | null {
+    const dataUrl = args.muralDataUrl;
+    if (!dataUrl) return null;
+    const hash = args.muralHash ?? "";
+    return {
+        info: {
+            id: `mc-mural-${hash}`,
+            role: "user",
+            time: { created: 0 },
+            synthetic: true,
+        },
+        parts: [{ type: "file", mime: "image/png", url: dataUrl }],
+    };
+}
+
 export function renderRegionBody(m0Text: string, m1Text: string): string {
     return `${m0Text}\n\n${m1Text}`;
 }

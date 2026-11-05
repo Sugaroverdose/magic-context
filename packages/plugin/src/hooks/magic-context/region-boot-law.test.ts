@@ -7,10 +7,10 @@
  * restore-only-boot-pass.ts — cold boot → replay, zero fold — in the
  * region-era receipt vocabulary of InjectM0M1Result. That file does not
  * exist on v2; this law is new and its receipts are read from
- * prepareCachedM0M1Replay, never from the assembly file's vocabulary.
+ * prepareRegionReplay, never from the assembly file's vocabulary.
  *
  * Spec §10 pass-level gap (disclosed): this law drives the named
- * production entries — prepareCachedM0M1Replay, the promotion call-site
+ * production entries — prepareRegionReplay, the promotion call-site
  * composition (regionRotationPromotion + currentRegionMarkersForPromotion
  * per #2710/#2715: markers come only from the production readers, the
  * scheduler decision only from the production scheduler), mustMaterialize
@@ -56,7 +56,7 @@ import {
     injectM0M1,
     type M0M1State,
     mustMaterialize,
-    prepareCachedM0M1Replay,
+    prepareRegionReplay,
     regionMarkersFromSnapshot,
     snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
@@ -242,7 +242,7 @@ describe("region boot law: cold boot is a replay, not a fold", () => {
 
             // Receipt 2: the named replay entry serves the stored row as a
             // cache_hit — no rematerialization, no head carriage, no m[1].
-            const replay = prepareCachedM0M1Replay(bootDb, SESSION_ID, true);
+            const replay = prepareRegionReplay(bootDb, SESSION_ID);
             expect(replay).toBeDefined();
             expect(replay!.injected).toBe(true);
             expect(replay!.m0RematerializedThisPass).toBe(false);
@@ -376,7 +376,7 @@ describe("region boot law: cold boot is a replay, not a fold", () => {
             );
             expect(schedulerDecision).toBe("execute");
 
-            const replay = prepareCachedM0M1Replay(bootDb, SESSION_ID, true);
+            const replay = prepareRegionReplay(bootDb, SESSION_ID);
             expect(replay!.decision).toEqual({ value: false, reason: "cache_hit" });
             expect(replay!.m0RematerializedThisPass).toBe(false);
 

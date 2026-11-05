@@ -32,7 +32,12 @@ import {
     type M0HardSignals,
     type M0M1State,
     resetPrefixTrimFallbackState,
+    currentRegionMarkersForPromotion,
+    regionMarkersFromSnapshot,
+    snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
+import { decodeSystemRegionRow, readSystemRegion } from "../../features/magic-context/system-region";
+import { regionRotationPromotion } from "./transform-postprocess-phase";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import type { MessageLike } from "./tag-messages";
 
@@ -143,6 +148,9 @@ function servePass(
     boundary: string,
     isCacheBustingPass: boolean,
 ): InjectM0M1Result {
+    // Region era: the fold transaction is the only writer of the baseline
+    // boundary; the host window is re-supplied fresh each pass by the host, so
+    // the state is read fresh as well.
     return injectM0M1({
         db,
         sessionId: SESSION_ID,
@@ -169,7 +177,7 @@ describe("prefix trim with a boundary absent from the live window", () => {
         const priced = liveWindow(25, 40);
         const pricedResult = servePass(db, priced, boundary, true);
         expect(pricedResult.prefixTrimStatus).toBe("boundary-precedes-window");
-        expect(ids(priced)).toEqual([undefined, ...ids(liveWindow(25, 40))]);
+        expect(ids(priced)).toEqual(ids(liveWindow(25, 40)));
 
         // Priced -> defer: the defer pass over the same window replays the
         // priced bytes exactly.
@@ -199,7 +207,7 @@ describe("prefix trim with a boundary absent from the live window", () => {
         for (const busting of [false, true, false]) {
             const live = liveWindow(5, 30, [12]);
             expect(servePass(db, live, boundary, busting).prefixTrimStatus).toBe("refused");
-            expect(ids(live)).toEqual([undefined, ...ids(liveWindow(5, 30, [12]))]);
+            expect(ids(live)).toEqual(ids(liveWindow(5, 30, [12])));
             served.push(live);
         }
         expect(new Set(served.map(sha)).size).toBe(1);
@@ -233,7 +241,7 @@ describe("prefix trim with a boundary absent from the live window", () => {
             expect(servePass(db, live, "msg_deleted_boundary", busting).prefixTrimStatus).toBe(
                 "refused",
             );
-            expect(ids(live)).toEqual([undefined, ...ids(liveWindow(1, 30))]);
+            expect(ids(live)).toEqual(ids(liveWindow(1, 30)));
         }
     });
 
@@ -245,7 +253,7 @@ describe("prefix trim with a boundary absent from the live window", () => {
         for (const busting of [false, true, false]) {
             const live = liveWindow(1, 20);
             expect(servePass(db, live, boundary, busting).prefixTrimStatus).toBe("refused");
-            expect(ids(live)).toEqual([undefined, ...ids(liveWindow(1, 20))]);
+            expect(ids(live)).toEqual(ids(liveWindow(1, 20)));
         }
     });
 
@@ -254,7 +262,7 @@ describe("prefix trim with a boundary absent from the live window", () => {
         const db = contextDb();
         const live = liveWindow(1, 20);
         expect(servePass(db, live, idOf(6), false).prefixTrimStatus).toBe("applied");
-        expect(ids(live)).toEqual([undefined, ...ids(liveWindow(7, 20))]);
+        expect(ids(live)).toEqual(ids(liveWindow(7, 20)));
     });
 });
 
@@ -283,7 +291,11 @@ describe("recovery from a boundary missing inside the window", () => {
             join(tmpdir(), "mc-prefix-trim-recovery-"),
         );
         tempDirs.push(projectDirectory);
-        const run = (messages: MessageLike[], isCacheBustingPass: boolean) =>
+        const run = (
+            messages: MessageLike[],
+            isCacheBustingPass: boolean,
+            forceMaterializeReason?: string,
+        ) =>
             injectM0M1({
                 db,
                 sessionId: SESSION_ID,
@@ -294,9 +306,11 @@ describe("recovery from a boundary missing inside the window", () => {
                 historyBudgetTokens: 98_000,
                 isCacheBustingPass,
                 hardSignals,
+                forceMaterializeReason,
             });
 
-        // Baseline: compartment A ends at row 4 and is materialized into m[0]/m[1].
+        // Baseline: compartment A is folded into the region; the covered-prefix
+        // boundary names row 4 and the trim applies (window still holds row 4).
         appendCompartments(db, SESSION_ID, [compartment(1, 1, 4, "Alpha")]);
         const first = liveWindow(1, 20);
         const firstResult = run(first, true);
@@ -304,7 +318,8 @@ describe("recovery from a boundary missing inside the window", () => {
         expect(firstResult.prefixTrimStatus).toBe("applied");
 
         // Compartment B (rows 5..10) is published; the baseline still names
-        // row 4, and the live array has lost row 4.
+        // row 4, and the live array has lost row 4. A defer pass must NOT
+        // advance: it replays the frozen boundary and refuses (row 4 gone).
         appendCompartments(db, SESSION_ID, [compartment(2, 5, 10, "Bravo")]);
         const degraded = liveWindow(1, 20, [4]);
         const degradedResult = run(degraded, false);
@@ -312,13 +327,48 @@ describe("recovery from a boundary missing inside the window", () => {
         expect(degradedResult.prefixTrimStatus).toBe("refused");
         expect(ids(degraded).slice(-19)).toEqual(ids(liveWindow(1, 20, [4])));
 
-        // The next cache-busting pass refreshes m[1] and its baseline to B's end,
-        // which is in the window, so the ordinary id trim applies.
+        // Region era: a published history delta reaches the wire through the
+        // production rotation-promotion composition — the predicate that turns
+        // a named boundary into the rotation transaction. A maxCompartmentSeq
+        // delta is a DELTA_TRIGGER_FIELD, so the bust-gated promotion names
+        // this pass the fold; the fold persists the committed boundary
+        // in-transaction (names B's end, in the window), and the ordinary id
+        // trim applies. The delta bytes are inside the region (no m[1]).
+        const promotionState = getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State;
+        const foldDueArgs = {
+            db,
+            sessionId: SESSION_ID,
+            state: promotionState,
+            projectPath: "/tmp/mc-prefix-trim-recovery",
+            projectDirectory,
+            injectDocs: true,
+        };
+        const captured =
+            promotionState.snapshotMarkers ?? snapshotMarkersFromCachedM0(promotionState);
+        const promotion = regionRotationPromotion({
+            systemRegionLane: true,
+            freezeM0M1: false,
+            foldDue: false,
+            boundaryPermission: true,
+            forceBand: false,
+            storedRegion: readSystemRegion(db, SESSION_ID),
+            capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+            currentMarkers: currentRegionMarkersForPromotion(foldDueArgs),
+        });
+        expect(promotion.promote).toBe(true);
+        // The delta that moved between the captured fold and the store is the
+        // compartment publish; the predicate may name an earlier-compared
+        // field first, so the witness is the vocabulary, not one literal.
+        expect(promotion.reason).not.toBeNull();
+
         const healed = liveWindow(1, 20, [4]);
-        const healedResult = run(healed, true);
+        const healedResult = run(healed, true, promotion.reason ?? undefined);
         expect(healedResult.preparedTrimBoundaryId).toBe(idOf(10));
         expect(healedResult.prefixTrimStatus).toBe("applied");
-        expect(healedResult.m1Text ?? "").toContain("Bravo");
+        const healedRegion = healedResult.m0Bytes
+            ? decodeSystemRegionRow(healedResult.m0Bytes)
+            : null;
+        expect(typeof healedRegion === "string" && healedRegion.includes("Bravo")).toBe(true);
         expect(ids(healed).filter((id) => id !== undefined)).toEqual(ids(liveWindow(11, 20)));
     });
 });

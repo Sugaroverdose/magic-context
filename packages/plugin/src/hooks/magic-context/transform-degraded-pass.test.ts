@@ -32,6 +32,7 @@ import * as modeTransition from "./compaction-off-transition";
 import { DegradedPassRefusalError } from "./degraded-pass-refusal";
 import * as staleReduce from "./drop-stale-reduce-calls";
 import * as injectCompartments from "./inject-compartments";
+import { readSystemRegion } from "../../features/magic-context/system-region";
 import { dropSlot, getSlot, resetLkgSlotsForTest } from "./lkg-slot";
 import * as noteNudger from "./note-nudger";
 import { STORAGE_BUSY_MESSAGE } from "./storage-busy-refusal";
@@ -431,8 +432,10 @@ describe("a pass that falls back to the launch directory", () => {
         } as unknown as PluginContext["client"];
     }
 
-    function m0m1(messages: Message[]): string {
-        return JSON.stringify(messages.filter((message) => message.info.syntheticHead === true));
+    // Headless carriage: the frozen baseline is the stored region row, not
+    // synthetic messages on the wire.
+    function m0m1(sessionId: string): string {
+        return readSystemRegion(openDatabase(), sessionId) ?? "[]";
     }
 
     it("replays the frozen m[0]/m[1] when it would otherwise rebuild, and a resolved pass rebuilds", async () => {
@@ -469,10 +472,10 @@ describe("a pass that falls back to the launch directory", () => {
             return messages;
         };
 
-        // Resolved first render freezes an m[0]/m[1] pair for the session's
-        // own directory.
-        const first = await pass();
-        const frozen = m0m1(first);
+        // Resolved first render installs the region for the session's own
+        // directory.
+        await pass();
+        const frozen = m0m1(sessionId);
         expect(frozen).not.toBe("[]");
         const frozenSystemHash = getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash ?? "";
 
@@ -483,7 +486,7 @@ describe("a pass that falls back to the launch directory", () => {
         // The host lookup fails: the launch directory is another project.
         hostDirectory = undefined;
         const fallback = await pass();
-        expect(m0m1(fallback)).toBe(frozen);
+        expect(m0m1(sessionId)).toBe(frozen);
         expect(getOrCreateSessionMeta(db, sessionId).cachedM0SystemHash ?? "").toBe(
             frozenSystemHash,
         );
@@ -602,7 +605,7 @@ describe("the served-request size guard", () => {
         const messages = oversized(sessionId);
         await transform({}, { messages });
         expect(JSON.stringify(messages)).toContain("BULKY-TOOL-OUTPUT");
-        expect(messages.some((message) => message.info.syntheticHead === true)).toBe(true);
+        expect(readSystemRegion(openDatabase(), sessionId)).not.toBeNull();
     }, 30_000);
 
     it("serves a pass over the context limit whose only degradation is an auto-search timeout", async () => {

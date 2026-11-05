@@ -45,6 +45,7 @@ import {
     insertTag,
     markWhitespaceAssistantTagInert,
 } from "../../features/magic-context/storage-tags";
+import { readSystemRegion } from "../../features/magic-context/system-region";
 import { createTagger } from "../../features/magic-context/tagger";
 import type { ContextUsage } from "../../features/magic-context/types";
 import { canConsumeDeferredOnThisPass } from "./cache-busting-signals";
@@ -1422,6 +1423,7 @@ it.each([
         protectedTokens: 1,
         client: testClient,
         directory: testDirectory,
+        systemRegionLane: true,
     });
     const raw = (): TestMessage[] => [
         ...buildSimpleMessages(sessionId),
@@ -1487,7 +1489,12 @@ it.each([
         decision = "execute";
         const passN = raw();
         await transform({}, { messages: passN });
-        expect(JSON.stringify(passN.slice(0, 2))).toContain("PUBLISHED_A");
+        // Region era: the published history ships inside the frozen system
+        // region (appended to the host system bytes at serve), never as wire
+        // heads. The bust rotated the region to carry PUBLISHED_A…
+        expect(readSystemRegion(db, sessionId) ?? "").toContain("PUBLISHED_A");
+        // …and the head carriage is gone: no synthetic rows were prepended.
+        expect(JSON.stringify(passN.slice(0, 2))).not.toContain("<session-history>");
         expect(getPendingOps(db, sessionId)).toHaveLength(0);
         expect(JSON.stringify(passN)).not.toContain("old payload");
         lift();
@@ -1497,11 +1504,14 @@ it.each([
         const replay = raw();
         await transform({}, { messages: replay });
         expect(JSON.stringify(replay)).toBe(JSON.stringify(passN));
-        expect(JSON.stringify(replay)).not.toContain("PUBLISHED_B");
+        // The defer pass must not advance the baseline: PUBLISHED_B waits for
+        // the next bust (the ride-only invariant, region form).
+        expect(readSystemRegion(db, sessionId) ?? "").not.toContain("PUBLISHED_B");
         decision = "execute";
         const nextBust = raw();
         await transform({}, { messages: nextBust });
-        expect(JSON.stringify(nextBust.slice(0, 2))).toContain("PUBLISHED_B");
+        // The deferred publish rotates the region on the next bust pass.
+        expect(readSystemRegion(db, sessionId) ?? "").toContain("PUBLISHED_B");
     } finally {
         lift();
     }
@@ -1541,6 +1551,7 @@ it("contention replays the complete transform including the persisted raw bounda
         protectedTokens: 1,
         client: testClient,
         directory: testDirectory,
+        systemRegionLane: true,
     });
     const raw = (): TestMessage[] => [
         ...buildSimpleMessages(sessionId),
@@ -1618,7 +1629,10 @@ it("contention replays the complete transform including the persisted raw bounda
         contend = false;
         const delivered = raw();
         await transform({}, { messages: delivered });
-        expect(JSON.stringify(delivered.slice(0, 2))).toContain("PUBLISHED_A");
+        // Region era: the healed fold lands the published history in the
+        // frozen region (the raw boundary it covers ships with the region's
+        // manifest); the wire carries no heads.
+        expect(readSystemRegion(db, sessionId) ?? "").toContain("PUBLISHED_A");
         expect(JSON.stringify(delivered)).not.toContain("old output");
         decision = "defer";
         const replay = raw();

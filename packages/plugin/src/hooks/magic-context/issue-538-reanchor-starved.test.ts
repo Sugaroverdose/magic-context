@@ -38,13 +38,18 @@ import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     clearInjectionCache,
+    currentRegionMarkersForPromotion,
     type InjectM0M1Result,
     injectM0M1,
     type M0HardSignals,
     type M0M1State,
     prepareCompartmentInjection,
+    regionMarkersFromSnapshot,
     resetPrefixTrimFallbackState,
+    snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
+import { readSystemRegion } from "../../features/magic-context/system-region";
+import { regionRotationPromotion } from "./transform-postprocess-phase";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import type { MessageLike } from "./tag-messages";
 
@@ -163,16 +168,44 @@ describe("issue 538 claim 3: the two paths read one array in sequence", () => {
         // then m[0]/m[1] delivery on the same, already-cut array.
         const pass = (messages: MessageLike[], isCacheBusting: boolean) => {
             const prepared = prepareCompartmentInjection(db, SESSION_ID, messages, isCacheBusting);
+            const state = getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State;
+            // Region era: the published-history advance rides the rotation
+            // promotion (transform-postprocess-phase) — the fold due at a bust
+            // boundary turns the pass into the rotation transaction.
+            let forceMaterializeReason: string | undefined;
+            if (isCacheBusting && readSystemRegion(db, SESSION_ID) !== null) {
+                const captured = state.snapshotMarkers ?? snapshotMarkersFromCachedM0(state);
+                const promotion = regionRotationPromotion({
+                    systemRegionLane: true,
+                    freezeM0M1: false,
+                    foldDue: false,
+                    boundaryPermission: true,
+                    forceBand: false,
+                    storedRegion: readSystemRegion(db, SESSION_ID),
+                    capturedMarkers: captured ? regionMarkersFromSnapshot(captured) : null,
+                    currentMarkers: currentRegionMarkersForPromotion({
+                        db,
+                        sessionId: SESSION_ID,
+                        state,
+                        projectPath: "/tmp/mc-issue538",
+                        projectDirectory,
+                        injectDocs: true,
+                    }),
+                });
+                if (promotion.promote && promotion.reason) forceMaterializeReason = promotion.reason;
+            }
             const delivered = injectM0M1({
                 db,
                 sessionId: SESSION_ID,
                 messages,
-                state: getOrCreateSessionMeta(db, SESSION_ID) as unknown as M0M1State,
+                state,
                 projectPath: "/tmp/mc-issue538",
                 projectDirectory,
                 historyBudgetTokens: 98_000,
                 isCacheBustingPass: isCacheBusting,
                 hardSignals,
+                systemRegion: isCacheBusting ? { enabled: true, reason: "hard_fold" } : undefined,
+                forceMaterializeReason,
             });
             return { prepared, delivered };
         };

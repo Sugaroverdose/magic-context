@@ -2463,13 +2463,15 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then
-        expect(messages).toHaveLength(3);
-        expect(text(messages[0], 0)).toBe("<session-history></session-history>");
-        expect(text(messages[1], 0)).toBe(
-            "<session-history-since>(no new content since last materialization)</session-history-since>",
+        //#then — region era: history ships as the frozen system region, not
+        // as synthetic heads. The conversation stays byte-untouched (one row,
+        // tagged); the baseline lands in the region store.
+        expect(messages).toHaveLength(1);
+        expect(text(messages[0], 0)).toContain("hello");
+        const { readSystemRegion } = await import(
+            "../../features/magic-context/system-region"
         );
-        expect(text(messages[2], 0)).toContain("hello");
+        expect(readSystemRegion(db, "ses-m0m1-first")).not.toBeNull();
     });
 
     it("injects project memory inside session-history when compartments exist", async () => {
@@ -2522,13 +2524,19 @@ describe("createTransform", () => {
         //#when
         await transform({}, { messages });
 
-        //#then — memory block appears inside session-history alongside compartments
-        const injected = text(messages[0]!, 0);
-        expect(injected).toContain("<session-history>");
-        expect(injected).toContain("<project-memory>");
-        expect(injected).toContain("Always use Bun");
+        //#then — region era: the memory block and the decay-rendered
+        // compartment ship inside the frozen system region (the serving path
+        // appends the region bytes after the host system bytes); the
+        // conversation array stays head-free.
+        expect(messages).toHaveLength(1);
+        const { readSystemRegion } = await import(
+            "../../features/magic-context/system-region"
+        );
+        const region = readSystemRegion(db, "ses-memory") ?? "";
+        expect(region).toContain("<project-memory>");
+        expect(region).toContain("Always use Bun");
         // A legacy compartment without a U: line decays to a title-only heading.
-        expect(injected).toMatch(/## \d+-\d+ · Setup/);
+        expect(region).toMatch(/## \d+-\d+ · Setup/);
     });
 
     it("skips project memory injection for subagent sessions", async () => {

@@ -38,6 +38,8 @@ import {
     readProjectDocsCanonical,
 } from "../../features/magic-context/storage";
 import {
+    decodeSystemRegionRow,
+    encodeSystemRegionRow,
     executeSystemRegionRotation,
     isSystemRegionBytes,
     type RegionMarkers,
@@ -174,6 +176,7 @@ export type {
     WorkspaceRenderContext,
 } from "./region-render";
 export {
+    buildRegionMuralMessage,
     DEFAULT_HISTORY_BUDGET_TOKENS,
     DEFAULT_MEMORY_BUDGET_TOKENS,
     DEFAULT_USER_PROFILE_BUDGET_TOKENS,
@@ -972,6 +975,11 @@ export interface MaterializeM0Result {
     m1Text: string;
     snapshotMarkers: M0SnapshotMarkers;
     renderedMemoryIds: number[];
+    /** The covered-prefix boundary this fold persisted in-transaction (the
+     *  committed newest covered end). The fold busts regardless of whether the
+     *  region bytes change, so the trim is allowed to follow this value on the
+     *  fold pass; law B6 pins it to the same SQL as readCommittedBaselineEnd. */
+    baselineEndMessageId: string | null;
 }
 
 export class MaterializeContentionError extends Error {
@@ -1019,7 +1027,6 @@ function getMaxCompartmentSeq(db: Database, sessionId: string): number {
     // m[1]. New compartments are an m[1] delta, never a mustMaterialize trigger.
     return numberFromRow(row, "s");
 }
-
 function getMaxMemoryId(
     db: Database,
     projectPath: string | undefined,
@@ -1488,20 +1495,21 @@ export function mustMaterialize(args: {
     systemRegionMode?: boolean;
 }): MaterializeDecision {
     if (!args.state.cachedM0Bytes) return { value: true, reason: "first_render" };
-    const regionMode = args.systemRegionMode === true;
-    if (!regionMode && isSentinelRegionRow(toBuffer(args.state.cachedM0Bytes))) {
-        // Cross-lane discrimination: a region row is never head content. A
-        // head-lane reader treats it as absent and the next fold rebuilds
-        // head-era bytes (the region is derived state, self-healing).
-        return { value: true, reason: "first_render" };
-    }
-    if (!args.state.cachedM1Bytes && !regionMode) {
-        return { value: true, reason: "cached_m1_missing" };
-    }
-    if (regionMode && readSystemRegion(args.db, args.sessionId) === null) {
-        // A row the region reader cannot serve (legacy head bytes or absent)
-        // is replaced by the next boundary fold; the reader contract (R11)
-        // guarantees those bytes were never served as a region.
+    // Region era (assembly-v2 Unit 1 Step 3): the sentinel region row is the
+    // only legitimate baseline state, on every reader. A row the region
+    // reader cannot serve (legacy head bytes or a corrupt sentinel) folds
+    // once to install a proper region; the reader contract (R11) guarantees
+    // those bytes were never served as a region. The head-era cross-lane
+    // first_render discrimination and the cached_m1_missing arm are retired
+    // with the head carriage: a region row carries no m[1] by design.
+    // The row in memory is the last served state; a poison applied after the
+    // state read (a sibling forging head bytes) must fold too, or the bust
+    // lane would reuse it on the wire.
+    if (
+        !args.state.cachedM0Bytes ||
+        !isSentinelRegionRow(toBuffer(args.state.cachedM0Bytes)) ||
+        readSystemRegion(args.db, args.sessionId) === null
+    ) {
         return { value: true, reason: "region_first_install" };
     }
     const hard = args.hardSignals ?? EMPTY_HARD_SIGNALS;
@@ -1537,10 +1545,15 @@ export function mustMaterialize(args: {
     // Null components are legacy rows encoded before mural/budget joined the
     // identity: adopt silently (the values persist on the next natural HARD)
     // rather than folding the whole fleet once at upgrade. Only a real change
-    // against a RECORDED component triggers.
+    // against a RECORDED component triggers. The same legacy adoption covers a
+    // flag a caller never supplied: in region mode the fold's freeze persists
+    // on the stored row, so an absent current flag means "not observed this
+    // pass", not "switched off" — firing it would re-fold with the mural
+    // stripped on every flag-less pass.
     if (
         cachedUpgradeIdentity.muralEnabled !== null &&
-        cachedUpgradeIdentity.muralEnabled !== current.muralEnabled
+        cachedUpgradeIdentity.muralEnabled !== current.muralEnabled &&
+        !(args.systemRegionMode === true && args.muralEnabled === undefined)
     ) {
         return {
             value: true,
@@ -1895,12 +1908,21 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
     const frozenMuralDataUrl = region0.frozenMuralDataUrl;
     const frozenMuralHash = region0.frozenMuralHash;
     const renderedMemoryIds = region0.renderedMemoryIds;
-    compartments = region0.datedCompartments;
     options.beforePhase3ForTest?.();
 
     let m1Text = M1_EMPTY_PLACEHOLDER;
     let m1Bytes = Buffer.from(m1Text, "utf8");
-    options.db.exec("BEGIN IMMEDIATE");
+    let persistedBaselineEnd: string | null = null;
+    try {
+        options.db.exec("BEGIN IMMEDIATE");
+    } catch (error) {
+        if ((error as { code?: string }).code === "SQLITE_BUSY") {
+            throw new MaterializeContentionError({
+                reason: "lock contention before Phase 3",
+            });
+        }
+        throw error;
+    }
     const transactionStartedAt = performance.now();
     try {
         const currentWorkspace = resolveWorkspaceRenderContext({
@@ -2016,10 +2038,9 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
                 projectIdentity: snapshotMarkers.projectIdentity,
             });
         };
-        if (options.systemRegion?.enabled === true) {
-            // Region mode: the boundary assembles the panels once and installs
-            // the sentinel region row in place of the head bytes, atomically
-            // with the marker capture the head fold performs. The empty/m1
+        {
+            // The boundary assembles the panels once and installs the sentinel
+            // region row atomically with the marker capture. The empty/m1
             // placeholder text still flows through, so a content-less session
             // keeps the never-empty region floor via the placeholder blocks.
             const regionText = renderRegionBody(m0Text, m1Text);
@@ -2027,7 +2048,7 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             const rotated = executeSystemRegionRotation(
                 options.db,
                 options.sessionId,
-                options.systemRegion.reason,
+                options.systemRegion?.reason ?? "hard_fold",
                 regionText,
                 foldMarkers,
                 (regionBlob) => {
@@ -2044,8 +2065,6 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
             // fold-bust predicate must see what left this transaction, not the
             // head rendering it replaced.
             m0Bytes = installedBlob;
-        } else {
-            persistFoldRow(m0Bytes, m1Bytes);
         }
 
         // v2 path persists the rendered-memory identity itself. `memory_block_ids`
@@ -2069,7 +2088,37 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         // so a compartment published after this materialize keeps its raw
         // messages in the tail until an exec pass folds it into m[1]. Same
         // transaction as the m[0] snapshot so bytes and boundary never diverge.
-        const baselineEndMessageId = lastCompartmentBoundaryId(compartments);
+        // Same-transaction coherence law: the persisted boundary must name the
+        // newest coverage of the region being persisted. The committed read
+        // (inside the fold transaction, so serialized against every publisher)
+        // is the authority: when the panel render lagged a sibling publish
+        // (the compartment read froze before the commit), the boundary carries
+        // the newest row so bytes and boundary never diverge; an older value
+        // would re-expose summarized rows on the next cold trim.
+        // Same-transaction coherence law: the persisted boundary must name the
+        // newest coverage in the store at commit time. The read happens inside
+        // the fold transaction, so it serializes with every publisher; the
+        // panel render above is the Phase-1 snapshot and may lag a sibling
+        // publish. Bytes and boundary never diverge.
+        const committedEnd = options.compactionOff
+            ? null
+            : ((
+                  options.db
+                      .prepare(
+                          "SELECT end_message_id FROM compartments WHERE session_id = ? AND rebase_status != 'unresolved' AND end_message_id IS NOT NULL AND end_message_id != '' ORDER BY sequence DESC LIMIT 1",
+                      )
+                      .get(options.sessionId) as { end_message_id: string | null } | undefined
+              )?.end_message_id ?? null);
+        let baselineEndMessageId = committedEnd ?? lastCompartmentBoundaryId(compartments);
+        if (baselineEndMessageId === null) {
+            const stored = options.db
+                .prepare(
+                    "SELECT cached_m0_last_baseline_end_message_id AS b FROM session_meta WHERE session_id = ?",
+                )
+                .get(options.sessionId) as { b: string | null } | undefined;
+            baselineEndMessageId = stored?.b ?? null;
+        }
+        persistedBaselineEnd = baselineEndMessageId;
         options.db
             .prepare(
                 "UPDATE session_meta SET cached_m0_last_baseline_end_message_id = ? WHERE session_id = ?",
@@ -2078,7 +2127,11 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
 
         options.onFoldCommit?.(options.db, {
             m0Bytes,
-            m1Bytes,
+            // The region era serves no synthetic m[1]: the fold persisted the
+            // region row with m1 null. The bust predicate must compare what
+            // left this transaction on the wire, not the pre-region-render
+            // placeholder it replaced.
+            m1Bytes: null,
             muralDataUrl: frozenMuralDataUrl ?? null,
         });
 
@@ -2095,7 +2148,15 @@ export function materializeM0(options: M0M1RenderOptions): MaterializeM0Result {
         throw error;
     }
 
-    return { m0Bytes, m0Text, m1Bytes, m1Text, snapshotMarkers, renderedMemoryIds };
+    return {
+        m0Bytes,
+        m0Text,
+        m1Bytes,
+        m1Text,
+        snapshotMarkers,
+        renderedMemoryIds,
+        baselineEndMessageId: persistedBaselineEnd,
+    };
 }
 
 export function materializeWithRetry(
@@ -2105,7 +2166,8 @@ export function materializeWithRetry(
     let lastError: MaterializeContentionError | null = null;
     for (let attempt = 0; attempt < maxRetries; attempt++) {
         try {
-            return materializeM0(options);
+            const r = materializeM0(options);
+            return r;
         } catch (error) {
             if (!(error instanceof MaterializeContentionError)) throw error;
             lastError = error;
@@ -2115,11 +2177,6 @@ export function materializeWithRetry(
         retries: maxRetries,
         reason: lastError?.reason ?? "m[0] materialization contention exhausted",
     });
-}
-
-function decodeM0Bytes(bytes: Buffer | Uint8Array | null): string | null {
-    if (!bytes) return null;
-    return Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength).toString("utf8");
 }
 
 interface CachedM0M1Row {
@@ -2158,17 +2215,6 @@ function bufferEqualsNullable(
 ): boolean {
     if (left === null || right === null) return left === right;
     return toBuffer(left).equals(toBuffer(right));
-}
-
-function parseMemoryBlockIds(raw: string | null): number[] {
-    if (!raw) return [];
-    try {
-        const parsed = JSON.parse(raw) as unknown;
-        if (!Array.isArray(parsed)) return [];
-        return parsed.filter((value): value is number => typeof value === "number");
-    } catch {
-        return [];
-    }
 }
 
 /**
@@ -2214,234 +2260,20 @@ function readCachedM0M1Row(db: Database, sessionId: string): CachedM0M1Row | nul
         .get(sessionId) as CachedM0M1Row | null;
 }
 
-function markersFromCachedRow(row: CachedM0M1Row): M0SnapshotMarkers | null {
-    if (!row.cached_m0_bytes) return null;
-    const cachedUpgradeIdentity = decodeCachedM0UpgradeIdentity(row.cached_m0_upgrade_state);
-    if (row.cached_m0_project_memory_epoch === null) return null;
-    if (row.cached_m0_project_user_profile_version === null) return null;
-    if (row.cached_m0_max_compartment_seq === null) return null;
-    if (row.cached_m0_max_memory_id === null) return null;
-    if (row.cached_m0_max_mutation_id === null) return null;
-    if (row.cached_m0_max_memory_mutation_id === null) return null;
-    if (row.cached_m0_session_facts_version === null) return null;
-    return {
-        projectMemoryEpoch: row.cached_m0_project_memory_epoch,
-        workspaceFingerprint: row.cached_m0_workspace_fingerprint,
-        projectUserProfileVersion: row.cached_m0_project_user_profile_version,
-        maxCompartmentSeq: row.cached_m0_max_compartment_seq,
-        maxMemoryId: row.cached_m0_max_memory_id,
-        maxMutationId: row.cached_m0_max_mutation_id,
-        maxMemoryMutationId: row.cached_m0_max_memory_mutation_id,
-        projectDocsHash: row.cached_m0_project_docs_hash ?? "",
-        materializedAt: row.cached_m0_materialized_at ?? 0,
-        sessionFactsVersion: row.cached_m0_session_facts_version,
-        upgradeState: cachedUpgradeIdentity.upgradeState,
-        compartmentRenderEpoch: cachedUpgradeIdentity.compartmentRenderEpoch,
-        memoryRenderEpoch: cachedUpgradeIdentity.memoryRenderEpoch,
-        profileRenderEpoch: cachedUpgradeIdentity.profileRenderEpoch ?? "",
-        systemHash: row.cached_m0_system_hash ?? "",
-        toolSetHash: row.cached_m0_tool_set_hash ?? "",
-        modelKey: row.cached_m0_model_key ?? "",
-        projectIdentity: row.cached_m0_project_identity ?? null,
-        muralHash: row.cached_m0_mural_hash ?? null,
-        muralEnabled: cachedUpgradeIdentity.muralEnabled,
-        renderBudgetIdentity: cachedUpgradeIdentity.renderBudgetIdentity,
-        renderedBudgets: cachedUpgradeIdentity.renderedBudgets,
-    };
-}
-
-function cachedRowMatchesState(row: CachedM0M1Row, state: M0M1State): boolean {
-    return (
-        bufferEqualsNullable(row.cached_m0_bytes, state.cachedM0Bytes) &&
-        (row.cached_m0_mural_data_url ?? null) === (state.cachedM0MuralDataUrl ?? null) &&
-        (row.cached_m0_mural_hash ?? null) === (state.cachedM0MuralHash ?? null) &&
-        row.cached_m0_project_memory_epoch === state.cachedM0ProjectMemoryEpoch &&
-        (row.cached_m0_workspace_fingerprint ?? null) ===
-            (state.cachedM0WorkspaceFingerprint ?? null) &&
-        row.cached_m0_project_user_profile_version === state.cachedM0ProjectUserProfileVersion &&
-        row.cached_m0_max_compartment_seq === state.cachedM0MaxCompartmentSeq &&
-        row.cached_m0_max_memory_id === state.cachedM0MaxMemoryId &&
-        row.cached_m0_max_mutation_id === state.cachedM0MaxMutationId &&
-        row.cached_m0_max_memory_mutation_id === state.cachedM0MaxMemoryMutationId &&
-        // Project-docs hash is inert for CAS decisions: byte-different m[0] rows
-        // fail the buffer compare above, while hash-only drift with identical bytes
-        // must still refresh m[1] against the current cached prefix.
-        row.cached_m0_materialized_at === state.cachedM0MaterializedAt &&
-        row.cached_m0_session_facts_version === state.cachedM0SessionFactsVersion &&
-        (row.cached_m0_upgrade_state ?? null) === (state.cachedM0UpgradeState ?? null) &&
-        (row.cached_m0_system_hash ?? "") === (state.cachedM0SystemHash ?? "") &&
-        (row.cached_m0_tool_set_hash ?? "") === (state.cachedM0ToolSetHash ?? "") &&
-        piModelRefToCanonical(row.cached_m0_model_key ?? "") ===
-            piModelRefToCanonical(state.cachedM0ModelKey ?? "") &&
-        (row.cached_m0_project_identity ?? null) === (state.cachedM0ProjectIdentity ?? null)
-    );
-}
-
-function applyCachedRowToState(state: M0M1State, row: CachedM0M1Row): void {
-    const markers = markersFromCachedRow(row);
-    if (!row.cached_m0_bytes || !row.cached_m1_bytes || !markers) {
-        throw new RenderM1InvalidMarkersError(state.sessionId);
-    }
-    state.cachedM0Bytes = toBuffer(row.cached_m0_bytes);
-    state.cachedM0MuralDataUrl = row.cached_m0_mural_data_url ?? null;
-    state.cachedM0MuralHash = row.cached_m0_mural_hash ?? null;
-    state.cachedM1Bytes = toBuffer(row.cached_m1_bytes);
-    state.cachedM0ProjectMemoryEpoch = markers.projectMemoryEpoch;
-    state.cachedM0WorkspaceFingerprint = markers.workspaceFingerprint;
-    state.cachedM0ProjectUserProfileVersion = markers.projectUserProfileVersion;
-    state.cachedM0MaxCompartmentSeq = markers.maxCompartmentSeq;
-    state.cachedM0MaxMemoryId = markers.maxMemoryId;
-    state.cachedM0MaxMutationId = markers.maxMutationId;
-    state.cachedM0MaxMemoryMutationId = markers.maxMemoryMutationId;
-    state.cachedM0ProjectDocsHash = markers.projectDocsHash;
-    state.cachedM0MaterializedAt = markers.materializedAt;
-    state.cachedM0SessionFactsVersion = markers.sessionFactsVersion;
-    state.cachedM0UpgradeState = encodeCachedM0UpgradeIdentity(
-        markers.upgradeState,
-        markers.compartmentRenderEpoch,
-        markers.muralEnabled,
-        markers.renderBudgetIdentity,
-        markers.memoryRenderEpoch,
-        markers.renderedBudgets ?? null,
-    );
-    state.cachedM0SystemHash = markers.systemHash;
-    state.cachedM0ToolSetHash = markers.toolSetHash;
-    state.cachedM0ModelKey = markers.modelKey;
-    state.cachedM0ProjectIdentity = markers.projectIdentity;
-    state.snapshotMarkers = markers;
-}
-
-function replayCachedM1(state: M0M1State): string {
-    if (!state.cachedM1Bytes) {
-        throw new RenderM1InvalidMarkersError(state.sessionId);
-    }
-    return decodeM0Bytes(state.cachedM1Bytes) ?? M1_EMPTY_PLACEHOLDER;
-}
-
-function softRefreshCachedM1(options: M0M1RenderOptions): RenderM1Result {
-    options.db.exec("BEGIN IMMEDIATE");
-    const transactionStartedAt = performance.now();
-    try {
-        const row = readCachedM0M1Row(options.db, options.sessionId);
-        if (!row || !cachedRowMatchesState(row, options.state)) {
-            options.db.exec("ROLLBACK");
-            // Post-ROLLBACK fallback read is intentionally NOT wrapped in a
-            // transaction: readCachedM0M1Row is a SINGLE atomic SELECT, so
-            // SQLite guarantees m0/m1/markers all come from the same committed
-            // row — a torn cross-column read is impossible. If another sibling
-            // commits between ROLLBACK and this read we simply adopt that newer
-            // (still self-consistent) row, which is correct. Wrapping a single
-            // SELECT in BEGIN/COMMIT would add write-lock contention on this hot
-            // path (every cache-busting pass) for zero consistency gain.
-            const sibling = readCachedM0M1Row(options.db, options.sessionId);
-            if (!sibling) throw new RenderM1InvalidMarkersError(options.sessionId);
-            applyCachedRowToState(options.state, sibling);
-            return {
-                text: replayCachedM1(options.state),
-                memoryUpdateCount: 0,
-                renderedMemoryIds: [],
-            };
-        }
-
-        const markers = markersFromCachedRow(row);
-        if (!markers) throw new RenderM1InvalidMarkersError(options.sessionId);
-        const persistedVisibleIds = parseMemoryBlockIds(row.memory_block_ids);
-        // The snapshot watermark separates m[0] ids from post-snapshot m[1] ids,
-        // allowing each soft refresh to replace (rather than accumulate) m[1].
-        const renderedM0Ids = persistedVisibleIds.filter((id) => id <= markers.maxMemoryId);
-        const rendered = renderM1WithMetadata({ ...options }, markers, renderedM0Ids);
-        const visibleMemoryIds = [...new Set([...renderedM0Ids, ...rendered.renderedMemoryIds])];
-        const m1Bytes = Buffer.from(rendered.text, "utf8");
-        // Advance the persisted baseline boundary too: soft-refresh re-renders
-        // m[1] to cover every compartment up to the latest, so the boundary the
-        // cached summary covers moves forward with it. Keeping it in sync here is
-        // what lets a later cold post-restart defer pass trim correctly.
-        const baselineEndMessageId = getLastCompartmentEndMessageId(options.db, options.sessionId);
-        options.db
-            .prepare(
-                `UPDATE session_meta
-                    SET cached_m1_bytes = ?,
-                        cached_m0_last_baseline_end_message_id = ?,
-                        memory_block_count = ?,
-                        memory_block_ids = ?
-                  WHERE session_id = ?`,
-            )
-            .run(
-                m1Bytes,
-                baselineEndMessageId,
-                visibleMemoryIds.length,
-                JSON.stringify(visibleMemoryIds),
-                options.sessionId,
-            );
-        options.db.exec("COMMIT");
-        logSlowWriteTransaction("opencode_soft_refresh_cache", transactionStartedAt);
-        options.state.cachedM1Bytes = m1Bytes;
-        options.state.snapshotMarkers = markers;
-        return rendered;
-    } catch (error) {
-        try {
-            options.db.exec("ROLLBACK");
-        } catch {
-            // already rolled back
-        }
-        throw error;
-    }
-}
-
-function prependM0M1Messages(
-    sessionId: string,
-    messages: MessageLike[],
-    m0Text: string,
-    m1Text: string,
-    mural?: { enabled: boolean; supportsVision: boolean; dataUrl?: string },
-): number {
-    // `syntheticHead` identifies the injected m0 and m1 message positions for
-    // marker placement; `synthetic: true` marks their parts as injected context,
-    // not real user turns.
-    // OpenCode's `toModelMessagesEffect` filters on `ignored` (NOT `synthetic`),
-    // so the blocks STILL reach the model — but its title-generation gate
-    // (`ensureTitle`) counts a message as a real user turn only when not every
-    // part is synthetic, and skips titling unless exactly one real user message
-    // exists. Without the part-level `synthetic` flag, m[0]+m[1] add two
-    // phantom user turns on the first message and permanently suppress the
-    // session's auto-title (issue #129). Must NOT use `ignored` here — that
-    // would strip the history
-    // injection from the real model call.
-    const muralImage =
-        mural?.enabled && mural.supportsVision && mural.dataUrl
-            ? { type: "file", mime: "image/png", url: mural.dataUrl, synthetic: true }
-            : null;
-    messages.unshift(
-        {
-            info: { role: "user", sessionID: sessionId, syntheticHead: true },
-            parts: [
-                {
-                    type: "text",
-                    text: m0Text.length > 0 ? m0Text : M0_EMPTY_BODY,
-                    synthetic: true,
-                },
-                ...(muralImage ? [muralImage] : []),
-            ],
-        },
-        {
-            info: { role: "user", sessionID: sessionId, syntheticHead: true },
-            parts: [{ type: "text", text: m1Text, synthetic: true }],
-        },
-    );
-    return 2;
-}
-
 /**
- * Render a fresh m[0] from current DB state WITHOUT persisting it or taking the
- * materialize lock. Last-resort fallback for injectM0M1 when materialization
- * loses the lock (contention exhausted) AND there is no cached baseline to reuse
- * — e.g. the cache was cleared this pass by a history refresh and then a sibling
- * process held the lock. Dropping injection would send the model zero session
- * history; rendering fresh (un-cached) keeps history present for this pass while
- * the next pass re-materializes and persists. Mirrors Pi's renderM0Pi fallback.
- * Uses a plain read (no BEGIN IMMEDIATE) since we are explicitly NOT persisting.
+ * Render a fresh region from current DB state WITHOUT persisting it or taking
+ * the materialize lock. Last-resort fallback for the region replay when
+ * materialization loses the lock (contention exhausted) AND there is no
+ * cached region to reuse — e.g. the row was cleared this pass by a history
+ * refresh and then a sibling process held the lock. Dropping the region would
+ * serve zero session context; rendering fresh (un-persisted) keeps the frozen
+ * panels present for this pass while the next pass re-materializes and
+ * rotates. Uses a plain read (no BEGIN IMMEDIATE) since we are explicitly NOT
+ * persisting; the bytes are the same producer as the fold (renderRegionM0 +
+ * renderRegionM1 + renderRegionBody), sentinel-encoded so the serving reader
+ * accepts them.
  */
-function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
+function renderFreshRegionNonPersisted(options: M0M1RenderOptions): {
     m0Bytes: Buffer;
     snapshotMarkers: M0SnapshotMarkers;
     renderedMemoryIds: number[];
@@ -2472,111 +2304,60 @@ function renderFreshM0NonPersisted(options: M0M1RenderOptions): {
     });
     const docs = readProjectDocsForM0(projectDirectory ?? "", options.injectDocs);
     snapshotMarkers.projectDocsHash = docs.canonicalHash;
-    // CACHE STABILITY: materializedAt feeds the m[1] memory-expiry cutoff
-    // (renderM1). It MUST be stable across consecutive fallback passes, or two
+    // CACHE STABILITY: materializedAt feeds the delta render's memory-expiry
+    // cutoff. It MUST be stable across consecutive fallback passes, or two
     // defer passes that straddle a memory's expires_at would render different
-    // m[1] bytes with zero DB mutation. Never use live Date.now() here. Reuse
-    // the last persisted materialization timestamp; if none exists (cache fully
+    // bytes with zero DB mutation. Never use live Date.now() here. Reuse the
+    // last persisted materialization timestamp; if none exists (cache fully
     // cleared this pass), use 0 (stable: renders all memories with no expiry
-    // filtering, deterministic across passes — matches Pi fallback).
-    snapshotMarkers.materializedAt = options.state.cachedM0MaterializedAt ?? 0;
+    // filtering, deterministic across passes).
+    const materializedAt = options.state.cachedM0MaterializedAt ?? 0;
+    snapshotMarkers.materializedAt = materializedAt;
     // Compaction-off renders through the zero-compartment path here too.
     const compartments = options.compactionOff
         ? []
-        : withCompartmentDates(
-              options.db,
-              options.sessionId,
-              readM0Compartments(options.db, options.sessionId),
-              options.temporalAwareness,
-          );
-    // Use the SAME frozen cutoff for the baseline memory read as m[1] does, so a
-    // memory crossing expires_at between two fallback passes can't shift the m[0]
-    // baseline bytes either (live Date.now() default would reintroduce drift).
+        : readM0Compartments(options.db, options.sessionId);
+    // Use the SAME frozen cutoff for the baseline memory read as the delta
+    // does, so a memory crossing expires_at between two fallback passes
+    // cannot shift the panel bytes either.
     const memories = projectPath
         ? workspace.isWorkspaced
             ? getMemoriesByProjects(
                   options.db,
                   workspace.expandedIdentities,
                   ["active", "permanent"],
-                  snapshotMarkers.materializedAt,
+                  materializedAt,
                   workspace.ownIdentities,
                   workspace.shareCategories,
               )
-            : getMemoriesByProject(
-                  options.db,
-                  projectPath,
-                  ["active", "permanent"],
-                  snapshotMarkers.materializedAt,
-              )
+            : getMemoriesByProject(options.db, projectPath, ["active", "permanent"], materializedAt)
         : [];
     const userMemories =
         options.memoryEnabled === false ? [] : safeGetActiveUserMemories(options.db);
-    const memoryBudget = options.memoryInjectionBudgetTokens ?? DEFAULT_MEMORY_BUDGET_TOKENS;
-    const memoryRenderOptions: MemoryRenderOptions = {
-        sourceNameByMemoryId: sourceNamesForMemories({
-            memories,
-            projectPath,
-            workspace,
-        }),
-    };
-    const trimmed = workspace.isWorkspaced
-        ? trimWorkspaceMemoriesToBudgetV2(
-              options.sessionId,
-              memories,
-              memoryBudget,
-              workspace,
-              memoryRenderOptions,
-          )
-        : trimMemoriesToBudgetV2(options.sessionId, memories, memoryBudget);
-    const budget = historyLocalBudget(
-        options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS,
-        snapshotMarkers.modelKey,
-    );
-    const mural =
-        options.memoryEnabled === false
-            ? undefined
-            : (options.mural ??
-              resolveMuralForM0(options, projectPath, snapshotMarkers.modelKey, memoryBudget));
-    let decayPressureMultiplier = 1;
-    let m0Text = renderM0({
-        projectDocs: docs.renderedBlock,
-        userProfileBaseline: userMemories,
-        compartments,
-        memories: trimmed.renderOrder,
-        facts: [],
-        memoryRenderOptions,
-        historyBudgetTokens: budget,
-        userProfileBudgetTokens: options.userProfileBudgetTokens,
-        decayPressureMultiplier,
-        mural,
-    });
-    let attempts = 0;
-    while (budget > 0 && historySliceTokens(m0Text) > budget * 1.05 && attempts < 3) {
-        decayPressureMultiplier *= 1.15;
-        m0Text = renderM0({
-            projectDocs: docs.renderedBlock,
-            userProfileBaseline: userMemories,
-            compartments,
-            memories: trimmed.renderOrder,
-            facts: [],
-            memoryRenderOptions,
-            historyBudgetTokens: budget,
-            userProfileBudgetTokens: options.userProfileBudgetTokens,
-            decayPressureMultiplier,
-            mural,
-        });
-        attempts += 1;
-    }
-    if (m0Text.length === 0) m0Text = M0_EMPTY_BODY;
-    options.state.cachedM0MuralDataUrl =
-        mural?.enabled && mural.supportsVision ? (mural.dataUrl ?? null) : null;
-    options.state.cachedM0MuralHash =
-        mural?.enabled && mural.supportsVision ? (mural.contentHash ?? null) : null;
-    snapshotMarkers.muralHash = options.state.cachedM0MuralHash;
-    return {
-        m0Bytes: Buffer.from(m0Text, "utf8"),
+    const panel = renderRegionM0({
+        db: options.db,
+        sessionId: options.sessionId,
+        projectPath,
+        options,
+        docs,
         snapshotMarkers,
-        renderedMemoryIds: trimmed.renderOrder.map((memory) => memory.id),
+        foldMaterializedAt: materializedAt,
+        compartments,
+        facts: [],
+        memories,
+        userMemories,
+        workspace,
+    });
+    const delta = renderRegionM1({
+        options,
+        workspace,
+        snapshotMarkers,
+        renderedMemoryIds: panel.renderedMemoryIds,
+    });
+    return {
+        m0Bytes: encodeSystemRegionRow(renderRegionBody(panel.m0Text, delta.m1Text)),
+        snapshotMarkers,
+        renderedMemoryIds: panel.renderedMemoryIds,
     };
 }
 
@@ -2796,17 +2577,6 @@ function classifyAbsentBoundary(
     return "refused";
 }
 
-function isSyntheticPrefixHead(message: MessageLike): boolean {
-    if (
-        message.info.id !== undefined ||
-        message.info.role !== "user" ||
-        message.parts.length === 0
-    ) {
-        return false;
-    }
-    return message.parts.every((part) => (part as { synthetic?: boolean }).synthetic === true);
-}
-
 /**
  * Freeze the host's source order before tag replay and tool pruning mutate the live array.
  * The IDs are evidence only: delivery trims surviving live objects and never restores old parts.
@@ -2816,8 +2586,6 @@ export function capturePrefixTrimSourceOrder(
 ): PrefixTrimSourceOrder {
     const messageIds: string[] = [];
     const seen = new Set<string>();
-    let syntheticHeadCount = 0;
-    let sawPersistedRow = false;
     let invalidReason: string | null = null;
 
     for (const [index, message] of messages.entries()) {
@@ -2827,14 +2595,12 @@ export function capturePrefixTrimSourceOrder(
         // places them by their persisted neighbours.
         if (isHostRenderedSystemMessage(message)) continue;
         if (typeof id !== "string" || id.length === 0) {
-            if (!sawPersistedRow && isSyntheticPrefixHead(message)) {
-                syntheticHeadCount += 1;
-                continue;
-            }
-            invalidReason = `source message at index ${index} has no stable id outside the synthetic head`;
+            // Headless carriage: Magic Context splices no synthetic heads. An
+            // id-less row here is a foreign/stray row, not our content — the
+            // whole source order is refused and the window is served intact.
+            invalidReason = `source message at index ${index} has no stable id`;
             break;
         }
-        sawPersistedRow = true;
         if (seen.has(id)) {
             invalidReason = `source message id ${id} appears more than once`;
             break;
@@ -2845,7 +2611,6 @@ export function capturePrefixTrimSourceOrder(
 
     return Object.freeze({
         messageIds: Object.freeze(messageIds),
-        syntheticHeadCount,
         invalidReason,
     });
 }
@@ -2887,7 +2652,6 @@ function trimToPreparedPrefix(
                     status = refuse("boundary absent from immutable source order");
                 } else {
                     let lastSourcePosition = -1;
-                    let sawPersistedRow = false;
                     let liveOrderError: string | null = null;
                     const retained: MessageLike[] = [];
                     for (const [index, message] of options.messages.entries()) {
@@ -2900,11 +2664,9 @@ function trimToPreparedPrefix(
                             continue;
                         }
                         if (typeof id !== "string" || id.length === 0) {
-                            if (!sawPersistedRow && isSyntheticPrefixHead(message)) continue;
-                            liveOrderError = `live message at index ${index} has no stable id outside the synthetic head`;
+                            liveOrderError = `live message at index ${index} has no stable id`;
                             break;
                         }
-                        sawPersistedRow = true;
                         const position = sourcePosition.get(id);
                         if (position === undefined) {
                             liveOrderError = `live message ${id} is absent from immutable source order`;
@@ -2952,28 +2714,60 @@ function trimToPreparedPrefix(
     return status;
 }
 
-/** Capture a complete persisted pair and its boundary before a fallible preflight. */
-export function prepareCachedM0M1Replay(
+/** The newest covered end in the store — the boundary a rotation advances the
+ *  baseline to. The same expression the fold persists in-transaction; law B6
+ *  pins the two textually. `undefined` (vs null) distinguishes "no rows". */
+export function readCommittedBaselineEnd(
     db: Database,
     sessionId: string,
-    regionLane = false,
+): string | null | undefined {
+    const row = db
+        .prepare(
+            "SELECT end_message_id FROM compartments WHERE session_id = ? AND rebase_status != 'unresolved' AND end_message_id IS NOT NULL AND end_message_id != '' ORDER BY sequence DESC LIMIT 1",
+        )
+        .get(sessionId) as { end_message_id: string | null } | undefined;
+    return row ? (row.end_message_id ?? null) : undefined;
+}
+
+/**
+ * Capture the persisted region row and its covered-prefix boundary before a
+ * fallible preflight. This is the region-era replay entry (it replaces the
+ * head-era pair replay): a sentinel-valid region row answers as a cache-hit
+ * with zero heads on the wire — the panels serve inside system[0]
+ * (system-prompt-hash.ts), the array carries no synthetic messages. An
+ * unservable row (legacy head bytes, corrupt sentinel) is `undefined`: the
+ * next boundary fold installs a region (reader contract R11 — those bytes
+ * were never served as a region).
+ *
+ * The region row stores no boundary column: the boundary is DERIVED from the
+ * committed compartments (the newest covered end), which is what the fold
+ * persists inside its transaction. A bust pass that arrives while a sibling
+ * publish has already advanced that committed boundary replays with the
+ * advanced value: the covered-prefix trim is window bookkeeping, not region
+ * bytes — every message it removes was already summarized into the persisted
+ * region — so the trim follows the committed coverage without rotating the
+ * panels. The panels themselves stay frozen until a rotation-boundary
+ * predicate fires (GLM R3: baseline advances ride rotation boundaries).
+ * `allowAdvancedBoundary` admits exactly the bust lane (the post-fold
+ * re-freeze and the bust-preflight replay); defer passes keep the
+ * freeze-time value and replay byte-identical.
+ */
+export function prepareRegionReplay(
+    db: Database,
+    sessionId: string,
+    allowAdvancedBoundary = false,
 ): InjectM0M1Result | undefined {
     const row = readCachedM0M1Row(db, sessionId);
     if (!row?.cached_m0_bytes) return undefined;
     const m0Bytes = toBuffer(row.cached_m0_bytes);
-    const regionReplay = isSentinelRegionRow(m0Bytes);
-    if (regionReplay && !regionLane) return undefined;
-    const rawM1 = row.cached_m1_bytes;
-    if (!regionReplay && !rawM1) return undefined;
-    const m1Text = regionReplay || !rawM1 ? "" : toBuffer(rawM1).toString("utf8");
-    const mural = row.cached_m0_mural_data_url
-        ? { enabled: true, supportsVision: true, dataUrl: row.cached_m0_mural_data_url }
-        : undefined;
-    const m0Text = mural
-        ? m0Bytes.toString("utf8")
-        : stripMemoryMuralBlock(m0Bytes.toString("utf8"));
-    const preparedMessages: MessageLike[] = [];
-    if (!regionReplay) prependM0M1Messages(sessionId, preparedMessages, m0Text, m1Text, mural);
+    if (!isSentinelRegionRow(m0Bytes) || decodeSystemRegionRow(m0Bytes) === null) {
+        return undefined;
+    }
+    let boundary = row.cached_m0_last_baseline_end_message_id;
+    if (allowAdvancedBoundary) {
+        const committed = readCommittedBaselineEnd(db, sessionId);
+        if (committed !== undefined) boundary = committed;
+    }
     return {
         injected: true,
         prependedMessageCount: 0,
@@ -2981,48 +2775,67 @@ export function prepareCachedM0M1Replay(
         materializationContentionRetryExhausted: true,
         decision: { value: false, reason: "cache_hit" },
         m0Bytes,
-        m1Text,
-        preparedMessages,
-        preparedTrimBoundaryId: row.cached_m0_last_baseline_end_message_id,
+        m1Text: "",
+        preparedMessages: [],
+        preparedTrimBoundaryId: boundary,
     };
+}
+
+/** True when the persisted row is a region the serving reader can decode. */
+export function hasServableRegion(db: Database, sessionId: string): boolean {
+    return prepareRegionReplay(db, sessionId) !== undefined;
 }
 
 function isSentinelRegionRow(bytes: Buffer | Uint8Array): boolean {
     return isSystemRegionBytes(bytes);
 }
 
-export function hasCompleteCachedM0M1(
-    db: Database,
-    sessionId: string,
-    regionLane = false,
-): boolean {
-    const row = db
-        .prepare("SELECT cached_m0_bytes, cached_m1_bytes FROM session_meta WHERE session_id = ?")
-        .get(sessionId) as {
-        cached_m0_bytes: Uint8Array | null;
-        cached_m1_bytes: Uint8Array | null;
-    } | null;
-    if (!row?.cached_m0_bytes || row.cached_m0_bytes.byteLength === 0) return false;
-    // A region row legitimately has no m[1]: the region is the complete served
-    // prefix; completeness is decided by the reader contract, not by columns.
-    if (isSentinelRegionRow(row.cached_m0_bytes)) return regionLane;
-    return row.cached_m1_bytes !== null && row.cached_m1_bytes.byteLength > 0;
-}
-
 export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
-    const prepared = options.preparedPrefix;
-    if (prepared?.preparedMessages) {
-        const head = prepared.preparedMessages;
-        let prefixTrimStatus: PrefixTrimStatus = "not-attempted";
-        if (options.messages) {
-            prefixTrimStatus = trimToPreparedPrefix(options, prepared);
-            options.messages.unshift(...structuredClone(head));
-        }
+    const offKnowledgeFold = options.compactionOff === true && options.messages === undefined;
+    if (options.compactionOff === true && !offKnowledgeFold) {
+        // Headless carriage: the lane splices no synthetic heads. Compaction-off
+        // serves the additive knowledge surface through the region row (the
+        // off-wire knowledge fold above runs the zero-compartment path in
+        // materializeM0); the message array is left untouched.
         return {
-            ...prepared,
-            prependedMessageCount: options.messages ? head.length : 0,
-            prefixTrimStatus,
+            injected: false,
+            prependedMessageCount: 0,
+            m0RematerializedThisPass: false,
+            materializationContentionRetryExhausted: false,
+            decision: { value: false, reason: null },
+            m0Bytes: null,
+            m1Text: "",
+            preparedMessages: [],
+            preparedTrimBoundaryId: null,
         };
+    }
+    const prepared = options.preparedPrefix;
+    if (prepared) {
+        // The freeze is only legitimate while the store still matches it: a
+        // sibling that published compartments (or queued a structural
+        // mutation) after the freeze must send this pass through the fold,
+        // not replay a prefix whose baseline boundary has gone stale.
+        const frozenStoreCoherent =
+            prepared.m0RematerializedThisPass ||
+            prepared.materializationContentionRetryExhausted ||
+            ((getMaxCompartmentSeq(options.db, options.sessionId) ?? -1) ===
+                (options.state.snapshotMarkers?.maxCompartmentSeq ??
+                    options.state.cachedM0MaxCompartmentSeq ??
+                    -1) &&
+                (getMaxM0MutationId(options.db, options.sessionId) ?? 0) ===
+                    (options.state.snapshotMarkers?.maxMutationId ??
+                        options.state.cachedM0MaxMutationId ??
+                        0));
+        if (frozenStoreCoherent) {
+            const prefixTrimStatus = options.messages
+                ? trimToPreparedPrefix(options, prepared)
+                : "not-attempted";
+            return {
+                ...prepared,
+                prependedMessageCount: 0,
+                prefixTrimStatus,
+            };
+        }
     }
     hydrateCachedM0Mural(options.db, options.sessionId, options.state);
     if (!options.workspaceIdentitySet && options.projectPath) {
@@ -3042,10 +2855,6 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
     };
     if (options.state.isSubagent && !options.compactionOff) return skipped;
 
-    const completePairAtEntry =
-        options.state.cachedM0Bytes != null && options.state.cachedM1Bytes != null;
-    let contentionReplayBoundary = options.contentionFallbackPrefix?.preparedTrimBoundaryId ?? null;
-
     const decisionFromCompare = mustMaterialize({
         db: options.db,
         sessionId: options.sessionId,
@@ -3060,253 +2869,96 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
         memoryInjectionBudgetTokens: options.memoryInjectionBudgetTokens,
         historyBudgetTokens: options.historyBudgetTokens,
         historyBudgetPolicyIdentity: options.historyBudgetPolicyIdentity,
-        systemRegionMode: options.systemRegion?.enabled === true,
+        systemRegionMode: true,
     });
     const decision: MaterializeDecision = options.forceMaterializeReason
         ? { value: true, reason: options.forceMaterializeReason }
         : decisionFromCompare;
-    const regionMode = options.systemRegion?.enabled === true;
     let rematerialized = false;
     let contentionExhausted = false;
-    let freshFallbackRenderedMemoryIds: number[] | null = null;
-    let m1Render: RenderM1Result | null = null;
+    let foldedBoundary: string | null | undefined;
 
     if (decision.value) {
         try {
             const materialized = materializeWithRetry(options);
-            applyMarkersToState(
-                options.state,
-                materialized.m0Bytes,
-                materialized.snapshotMarkers,
-                regionMode ? undefined : materialized.m1Bytes,
-            );
-            if (regionMode) {
-                // Region rows carry no m[1]: the delta lives inside the region
-                // and reconciles at the next rotation.
-                options.state.cachedM1Bytes = null;
-            } else {
-                m1Render = {
-                    text: materialized.m1Text,
-                    memoryUpdateCount: 0,
-                    renderedMemoryIds: [],
-                };
-            }
+            // Region rows carry no m[1]: the delta lives inside the region and
+            // reconciles at the next rotation.
+            applyMarkersToState(options.state, materialized.m0Bytes, materialized.snapshotMarkers);
+            options.state.cachedM1Bytes = null;
+            foldedBoundary = materialized.baselineEndMessageId;
             rematerialized = true;
         } catch (error) {
             if (!(error instanceof MaterializeContentionError)) throw error;
-            // A complete process-local pair is the prefix this pass previously
-            // served. Never replace it with a sibling row written during preflight.
-            // Partial state may recover from the preflight's immutable snapshot; only
-            // direct callers without one need a single live row read, whose boundary
-            // is retained with the same bytes.
-            if (!options.allowFreshContentionFallback && !completePairAtEntry) {
-                const captured = options.contentionFallbackPrefix;
-                if (captured?.m0Bytes && captured.m1Text !== null) {
-                    options.state.cachedM0Bytes = Buffer.from(captured.m0Bytes);
-                    options.state.cachedM1Bytes = Buffer.from(captured.m1Text, "utf8");
-                } else {
-                    const persisted = readCachedM0M1Row(options.db, options.sessionId);
-                    if (persisted?.cached_m0_bytes && persisted.cached_m1_bytes) {
-                        applyCachedRowToState(options.state, persisted);
-                        contentionReplayBoundary = persisted.cached_m0_last_baseline_end_message_id;
-                    }
-                }
-            }
+            // Preferred fallback: reuse the bytes this process already served
+            // (frozen for the pass). A sibling process mutated state
+            // mid-rotation; serving the slightly stale region this pass is
+            // correct and the next pass retries.
             if (
                 options.state.cachedM0Bytes &&
-                options.state.cachedM1Bytes &&
+                decodeSystemRegionRow(options.state.cachedM0Bytes) !== null &&
                 !options.allowFreshContentionFallback
             ) {
-                // Preferred fallback: reuse the cached baseline. A sibling process
-                // mutated state mid-materialization; serving the slightly stale
-                // cached m[0]/m[1] pair this pass is correct and the next pass retries.
-                // Require BOTH byte buffers: reusing m[0] alone would later hit
-                // replayCachedM1 with no m[1] and throw RenderM1InvalidMarkersError
-                // (which propagates out and drops injection entirely). The
-                // partial-cache state (m[0] set, m[1] null) is reachable after a
-                // prior fresh-fallback pass set in-memory m[0] without persisting
-                // m[1]; in that case fall through to the fresh-render branch below,
-                // which renders a complete m[0]/m[1] pair.
-                contentionExhausted = true;
                 options.state.snapshotMarkers =
                     options.state.snapshotMarkers ?? snapshotMarkersFromCachedM0(options.state);
-                sessionLog(
-                    options.sessionId,
-                    `m[0] materialization contention exhausted after ${error.retries} retries; reusing cached m[0]/m[1]`,
-                );
-            } else {
-                // No complete cached pair exists, or force/emergency explicitly
-                // permits fresh recovery bytes. Both are known busts before the
-                // reduction gates; the chosen pair is frozen for final delivery.
-                const fresh = renderFreshM0NonPersisted(options);
-                options.state.cachedM0Bytes = fresh.m0Bytes;
-                options.state.snapshotMarkers = fresh.snapshotMarkers;
-                freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
                 contentionExhausted = true;
                 sessionLog(
                     options.sessionId,
-                    `m[0] materialization contention exhausted after ${error.retries} retries with no cached fallback; rendered fresh non-persisted m[0]/m[1]`,
+                    `m[0] materialization contention exhausted after ${error.retries} retries; reusing cached region`,
+                );
+            } else {
+                // No process-local bytes exist (or force/emergency explicitly
+                // permits fresh recovery bytes). Prefer the persisted sentinel
+                // row; only when none exists render a fresh non-persisted
+                // region — this pass is already a known bust.
+                const persisted = prepareRegionReplay(options.db, options.sessionId);
+                if (persisted?.m0Bytes && !options.allowFreshContentionFallback) {
+                    options.state.cachedM0Bytes = Buffer.from(persisted.m0Bytes);
+                    options.state.snapshotMarkers =
+                        options.state.snapshotMarkers ?? snapshotMarkersFromCachedM0(options.state);
+                } else {
+                    const fresh = renderFreshRegionNonPersisted(options);
+                    options.state.cachedM0Bytes = fresh.m0Bytes;
+                    options.state.snapshotMarkers = fresh.snapshotMarkers;
+                }
+                contentionExhausted = true;
+                sessionLog(
+                    options.sessionId,
+                    `m[0] materialization contention exhausted after ${error.retries} retries with no cached fallback; rendered fresh non-persisted region`,
                 );
             }
         }
     } else {
         options.state.snapshotMarkers =
             options.state.snapshotMarkers ?? snapshotMarkersFromCachedM0(options.state);
+        if (!options.state.cachedM0Bytes) {
+            const persisted = prepareRegionReplay(options.db, options.sessionId);
+            if (persisted?.m0Bytes) options.state.cachedM0Bytes = Buffer.from(persisted.m0Bytes);
+        }
     }
 
-    if (!options.state.cachedM0Bytes || !options.state.snapshotMarkers) {
+    if (
+        !options.state.cachedM0Bytes ||
+        !options.state.snapshotMarkers ||
+        decodeSystemRegionRow(options.state.cachedM0Bytes) === null
+    ) {
+        // Nothing servable exists (pre-first-fold boot with a lost lock, or a
+        // row the reader contract refuses). A pass that reached this point was
+        // already priced as a bust; serving the host-only prompt keeps the
+        // wire honest — the next pass re-materializes.
         throw new RenderM1InvalidMarkersError(options.sessionId);
     }
 
-    let m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
-    let m1Text: string;
-    let memoryUpdateCount = 0;
-    let m1Recomputed = m1Render !== null;
-
-    if (regionMode) {
-        // No array-side m[1]: panel deltas rotate through the region at the
-        // next boundary. Nothing here may write or re-render cached m[1].
-        m1Text = "";
-    } else if (m1Render) {
-        m1Text = m1Render.text;
-        memoryUpdateCount = m1Render.memoryUpdateCount;
-    } else if (contentionExhausted && freshFallbackRenderedMemoryIds) {
-        const freshM1 = renderM1WithMetadata(
-            { ...options },
-            options.state.snapshotMarkers,
-            freshFallbackRenderedMemoryIds,
-        );
-        m1Text = freshM1.text;
-        memoryUpdateCount = freshM1.memoryUpdateCount;
-        m1Recomputed = true;
-    } else if (contentionExhausted) {
-        m1Text = replayCachedM1(options.state);
-    } else if (options.isCacheBustingPass) {
-        try {
-            const refreshed = softRefreshCachedM1(options);
-            m1Text = refreshed.text;
-            memoryUpdateCount = refreshed.memoryUpdateCount;
-            m1Recomputed = true;
-            m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
-        } catch (error) {
-            if (!options.allowFreshContentionFallback) throw error;
-            // Force recovery cannot depend on winning the soft-refresh write lock.
-            const fresh = renderFreshM0NonPersisted(options);
-            options.state.cachedM0Bytes = fresh.m0Bytes;
-            options.state.snapshotMarkers = fresh.snapshotMarkers;
-            freshFallbackRenderedMemoryIds = fresh.renderedMemoryIds;
-            const delta = renderM1WithMetadata(
-                options,
-                fresh.snapshotMarkers,
-                fresh.renderedMemoryIds,
-            );
-            m0Text = fresh.m0Bytes.toString("utf8");
-            m1Text = delta.text;
-            memoryUpdateCount = delta.memoryUpdateCount;
-            m1Recomputed = true;
-            contentionExhausted = true;
-        }
-    } else {
-        m1Text = replayCachedM1(options.state);
-    }
-
-    // Pressure backstop refold: the "or we have to due to pressures" half of the
-    // m[0]/m[1] contract. When NO HARD bust (TTL/system/tools/model) has arrived
-    // but the volatile m[1] delta has grown large, fold it into m[0] (re-run
-    // decay, reset m[1]) so a marathon active session can't grow m[1] unbounded.
-    // Runs only on cache-busting passes where m[1] was freshly recomputed; defer
-    // passes replay persisted bytes and must never live-read/refold.
-    //
-    // Three independent triggers (any one folds):
-    //   1. memoryUpdateCount > 40 — supersede-delta drift (size-independent).
-    //   2. m[1]/m[0] SIZE RATIO — m[1] grew past 15% of the m[0] baseline. Gated
-    //      by M0_DRIFT_RATIO_FLOOR so a tiny early m[0] (M0_EMPTY_BODY ~35 chars)
-    //      doesn't make 15% trivially exceeded and refold every pass.
-    //   3. m[1] ABSOLUTE CAP — when m[0] is small the ratio test is suppressed, so
-    //      m[1] could otherwise grow without bound. Fold once m[1] alone exceeds a
-    //      fixed share of the history budget, independent of m[0] size. estimateTokens
-    //      here is fine: this whole branch is rare (cache-busting + m1Recomputed).
-    // Small-m[0] floor in TOKENS (not chars): below this the ratio test is
-    // suppressed because a small m[0] makes the 15% ratio trivially exceeded.
-    const M0_DRIFT_RATIO_FLOOR_TOKENS = 500;
-    const M1_DRIFT_RATIO = 0.15;
-    const M1_ABSOLUTE_CAP_RATIO = 0.2;
-    const m1AbsoluteBudget =
-        (options.historyBudgetTokens ?? DEFAULT_HISTORY_BUDGET_TOKENS) * M1_ABSOLUTE_CAP_RATIO;
-    // Token counts (NOT char lengths): the documented intent is "m[1] exceeds
-    // ~15% of m[0] tokens". XML-heavy / non-Latin content makes char length
-    // diverge sharply from token count, so the ratio must compare tokens on both
-    // sides. Computed once; this branch is rare (cache-busting + m1Recomputed).
-    const m1HasContent = m1Text !== M1_EMPTY_PLACEHOLDER;
-    const m1Tokens = m1HasContent ? estimateTokens(m1Text) : 0;
-    const m0Tokens = estimateTokens(m0Text);
-    const m1OverAbsoluteCap = m1HasContent && m1Tokens > m1AbsoluteBudget;
-    if (
-        !rematerialized &&
-        !contentionExhausted &&
-        m1Recomputed &&
-        options.isCacheBustingPass &&
-        (memoryUpdateCount > 40 ||
-            m1OverAbsoluteCap ||
-            (m1HasContent &&
-                m0Tokens >= M0_DRIFT_RATIO_FLOOR_TOKENS &&
-                m1Tokens > m0Tokens * M1_DRIFT_RATIO))
-    ) {
-        try {
-            const refolded = materializeWithRetry(options);
-            applyMarkersToState(
-                options.state,
-                refolded.m0Bytes,
-                refolded.snapshotMarkers,
-                refolded.m1Bytes,
-            );
-            rematerialized = true;
-            m0Text = decodeM0Bytes(options.state.cachedM0Bytes) ?? M0_EMPTY_BODY;
-            m1Text = refolded.m1Text;
-        } catch (error) {
-            // Contention during the drift refold is non-fatal: keep the current
-            // (un-refolded) m[0]/m[1]; the next pass retries the fold.
-            if (!(error instanceof MaterializeContentionError)) throw error;
-        }
-    }
-
-    // Legacy rows can contain the marker without the new persisted image. Omitting
-    // an image part already changes provider-visible multipart bytes, so also remove
-    // the now-false textual reference rather than claiming an image follows.
-    if (!options.state.cachedM0MuralDataUrl) {
-        m0Text = stripMemoryMuralBlock(m0Text);
-    }
-
+    // Coherence law: a fold that ran this pass persists its boundary inside
+    // the fold transaction, so the fold's own in-transaction value is
+    // authoritative for a folded pass (no post-COMMIT re-read). When no fold
+    // ran, the persisted row's boundary governs (the replay path froze the
+    // same value at freeze time); a missing value falls back to it too.
+    const persistedBoundary = readCachedBaselineState(options.db, options.sessionId).boundary;
     const preparedTrimBoundaryId = options.compactionOff
         ? null
-        : contentionExhausted && freshFallbackRenderedMemoryIds !== null
-          ? ((
-                options.db
-                    .prepare(
-                        "SELECT end_message_id FROM compartments WHERE session_id = ? AND sequence <= ? ORDER BY sequence DESC LIMIT 1",
-                    )
-                    .get(options.sessionId, options.state.snapshotMarkers.maxCompartmentSeq) as {
-                    end_message_id: string;
-                } | null
-            )?.end_message_id ?? null)
-          : contentionExhausted
-            ? contentionReplayBoundary
-            : readCachedBaselineState(options.db, options.sessionId).boundary;
-    const preparedMessages: MessageLike[] = [];
-    const muralForWire = options.state.cachedM0MuralDataUrl
-        ? {
-              enabled: true,
-              supportsVision: true,
-              dataUrl: options.state.cachedM0MuralDataUrl,
-              contentHash: options.state.cachedM0MuralHash ?? undefined,
-          }
-        : undefined;
-    // Region mode serves the panels inside system[0]; the array carries no
-    // heads. The covered-prefix trim still applies — summarized messages stay
-    // out of the wire either way.
-    let prependedMessageCount = regionMode
-        ? 0
-        : prependM0M1Messages(options.sessionId, preparedMessages, m0Text, m1Text, muralForWire);
+        : rematerialized
+          ? (foldedBoundary ?? persistedBoundary)
+          : (prepared?.preparedTrimBoundaryId ?? persistedBoundary);
     let prefixTrimStatus: PrefixTrimStatus = "not-attempted";
     if (options.messages) {
         prefixTrimStatus = trimToPreparedPrefix(options, {
@@ -3314,18 +2966,17 @@ export function injectM0M1(options: M0M1RenderOptions): InjectM0M1Result {
             materializationContentionRetryExhausted: contentionExhausted,
             preparedTrimBoundaryId,
         });
-        if (!regionMode) options.messages.unshift(...structuredClone(preparedMessages));
-    } else prependedMessageCount = 0;
+    }
 
     return {
         injected: true,
-        prependedMessageCount,
+        prependedMessageCount: 0,
         m0RematerializedThisPass: rematerialized,
         materializationContentionRetryExhausted: contentionExhausted,
         decision,
         m0Bytes: options.state.cachedM0Bytes,
-        m1Text,
-        preparedMessages,
+        m1Text: "",
+        preparedMessages: [],
         preparedTrimBoundaryId,
         prefixTrimStatus,
     };

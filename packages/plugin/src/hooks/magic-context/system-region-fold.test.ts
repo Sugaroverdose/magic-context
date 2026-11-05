@@ -110,9 +110,16 @@ describe("system-region fold: materialization boundary installs the region", () 
         ).toBe(true);
     });
 
-    it("gate off (control): today's head bytes persist unchanged, no sentinel, no receipt", () => {
+    it("store writes happen only at the boundary: reads and marker probes persist no bytes (control)", () => {
+        // Region era: every materializeM0 IS a boundary (the gate-off head lane
+        // was deleted in Unit 1 Step 3). The surviving control property: the
+        // reader and marker probes never write — only the boundary transaction
+        // installs a region, exactly one rotation receipt per fold.
         const db = makeDb();
         seedPanels(db);
+        expect(readSystemRegion(db, SESSION_ID)).toBeNull();
+        expect(row(db).cached_m0_bytes).toBeNull();
+        expect(lines.some((line) => line.includes("system-region rotation"))).toBe(false);
         const result = materializeM0({
             db,
             sessionId: SESSION_ID,
@@ -121,13 +128,18 @@ describe("system-region fold: materialization boundary installs the region", () 
             projectDirectory: "",
         });
         const stored = row(db);
-        const m0 = Buffer.from(stored.cached_m0_bytes!).toString("utf8");
-        expect(m0).toBe(result.m0Text);
-        expect(m0).not.toContain(SYSTEM_REGION_SENTINEL);
-        expect(Buffer.from(stored.cached_m1_bytes!).toString("utf8")).toBe(result.m1Text);
-        expect(lines.some((line) => line.includes("system-region rotation"))).toBe(false);
-        // And the honest reader says: this is not a region.
-        expect(readSystemRegion(db, SESSION_ID)).toBeNull();
+        expect(Buffer.from(stored.cached_m0_bytes!).toString("utf8")).toContain(
+            SYSTEM_REGION_SENTINEL,
+        );
+        expect(stored.cached_m1_bytes).toBeNull();
+        expect(readSystemRegion(db, SESSION_ID)).toBe(
+            `${result.m0Text}
+
+${result.m1Text}`,
+        );
+        expect(
+            lines.filter((line) => line.includes("system-region rotation:")).length,
+        ).toBe(1);
     });
 
     it("R11 boot law: a legacy raw row is never served, and the next gated fold replaces it with the region", () => {

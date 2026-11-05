@@ -1,6 +1,5 @@
 import { getSlot } from "./lkg-slot";
 import type { MessageLike } from "./transform-operations";
-import { isSyntheticHeadMessage } from "./transform-postprocess-phase";
 
 /**
  * The m[0] body of the last output the module served for this session.
@@ -19,6 +18,16 @@ import { isSyntheticHeadMessage } from "./transform-postprocess-phase";
  * shape this function does not recognise — and the caller is told so rather than
  * handed a guess.
  */
+function moduleHeadShape(message: MessageLike): boolean {
+    // Shape check for the module's own baseline head inside a durable replay
+    // slot (id-less user message, all-synthetic parts). The TS lane splices no
+    // synthetic heads; this reader only ever inspects module output.
+    if (message.info.id !== undefined) return false;
+    if (message.info.role !== "user") return false;
+    if (message.parts.length === 0) return false;
+    return message.parts.every((part) => (part as { synthetic?: boolean }).synthetic === true);
+}
+
 export function servedModuleM0Text(
     sessionId: string,
     readSlot: typeof getSlot = getSlot,
@@ -34,7 +43,7 @@ export function servedModuleM0Text(
     if (!Array.isArray(prefix) || prefix.length === 0) return null;
     const head = prefix[0] as MessageLike | undefined;
     if (!head || typeof head !== "object" || !head.info || !Array.isArray(head.parts)) return null;
-    if (!isSyntheticHeadMessage(head)) return null;
+    if (!moduleHeadShape(head)) return null;
     // m[0] carries its body in the first text part; a mural image, when one is
     // rendered, follows it in the same message.
     const text = head.parts.find((part) => (part as { type?: unknown }).type === "text") as

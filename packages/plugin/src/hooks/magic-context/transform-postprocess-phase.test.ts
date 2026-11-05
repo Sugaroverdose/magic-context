@@ -276,6 +276,9 @@ function basePostTransformArgs(
         schedulerDecision: "defer",
         schedulerDeferReason: "scheduler_defer",
         fullFeatureMode: true,
+        // The frozen system-region lane is a serving constant (Unit 1 Step 4):
+        // every harness pass models a lane session.
+        systemRegionLane: true,
         canRunCompartments: false,
         awaitedCompartmentRun: false,
         phaseJustAwaitedPublication: false,
@@ -1371,67 +1374,19 @@ describe("deferred compaction marker representation", () => {
             ctxReduceAvailability: { callable: true, frozen: true },
         };
 
+        // Region era: no head machinery consults syntheticHead at all — the
+        // flag is inert on any row, and the summary splices at position 0.
         reconcileMarkerRepresentation(messages, state, options);
         expect(messages.map((message) => message.info.id)).toEqual([
-            undefined,
             "summary",
+            undefined,
             "msg_persisted_forged",
         ]);
     });
 
-    it("uses only marked m[0]/m[1] slots as the synthetic head", () => {
-        db = new Database(":memory:");
-        initializeDatabase(db);
-        const sessionId = "ses-marker-synthetic-tail";
-        const state = {
-            boundaryMessageId: "boundary",
-            summaryMessageId: "summary",
-            compactionPartId: "compaction",
-            summaryPartId: "summary-part",
-            boundaryOrdinal: 10,
-            targetEndMessageId: "boundary",
-        };
-        setPersistedCompactionMarkerState(db, sessionId, state);
-        const messages = [
-            {
-                info: { role: "user", sessionID: sessionId, syntheticHead: true },
-                parts: [{ type: "text", text: "m0", synthetic: true }],
-            },
-            {
-                info: { role: "user", sessionID: sessionId, syntheticHead: true },
-                parts: [{ type: "text", text: "m1", synthetic: true }],
-            },
-            {
-                info: { id: "channel2-nudge", role: "user", sessionID: sessionId },
-                parts: [{ type: "text", text: "compact now", synthetic: true }],
-            },
-            {
-                info: { id: "tail-user", role: "user", sessionID: sessionId },
-                parts: [{ type: "text", text: "new turn" }],
-            },
-        ] as unknown as MessageLike[];
-        const options = {
-            db,
-            sessionId,
-            tagger: createTagger(),
-            ctxReduceAvailability: { callable: true, frozen: true },
-        };
-
-        reconcileMarkerRepresentation(messages, state, options);
-        expect(messages.map((message) => message.info.id)).toEqual([
-            undefined,
-            undefined,
-            "summary",
-            "channel2-nudge",
-            "tail-user",
-        ]);
-        const firstWire = serializeAnthropicWireWithAdjacentAssistantMerge(messages);
-
-        const replay = structuredClone(messages);
-        reconcileMarkerRepresentation(replay, state, options);
-        expect(serializeAnthropicWireWithAdjacentAssistantMerge(replay)).toBe(firstWire);
-        expect(replay).toEqual(messages);
-    });
+    // "uses only marked m[0]/m[1] slots as the synthetic head" was retired
+    // with the head carriage (assembly-v2 Unit 1 Step 3): reconcile no longer
+    // re-materializes synthetic heads; the region row is the only carriage.
 
     it("rebuilds byte-identical summary rows in TypeScript and Rust lanes", () => {
         db = new Database(":memory:");
@@ -1446,13 +1401,15 @@ describe("deferred compaction marker representation", () => {
             targetEndMessageId: "boundary",
         };
         setPersistedCompactionMarkerState(db, sessionId, state);
+        // Region era: host rows arrive unflagged (no carriage sets
+        // syntheticHead); the marker lane keys on info.summary only.
         const source = [
             {
-                info: { role: "user", sessionID: sessionId, syntheticHead: true },
+                info: { role: "user", sessionID: sessionId },
                 parts: [{ type: "text", text: "m0", synthetic: true }],
             },
             {
-                info: { role: "user", sessionID: sessionId, syntheticHead: true },
+                info: { role: "user", sessionID: sessionId },
                 parts: [{ type: "text", text: "m1", synthetic: true }],
             },
             {
@@ -1481,7 +1438,8 @@ describe("deferred compaction marker representation", () => {
 
         const tsIndex = tsMessages.findIndex((message) => message.info.summary === true);
         const rustIndex = rustMessages.findIndex((message) => message.info.summary === true);
-        expect(tsIndex).toBe(2);
+        // Region era: no head rows are inserted ahead of the summary.
+        expect(tsIndex).toBe(0);
         expect(rustIndex).toBe(tsIndex);
         expect(JSON.stringify(rustMessages[rustIndex])).toBe(JSON.stringify(tsMessages[tsIndex]));
         expect(rustMessages).toEqual(tsMessages);
@@ -1809,7 +1767,9 @@ describe("deferred compaction marker representation", () => {
         const firstTodoIndex = firstMessages.findIndex((message) =>
             message.parts.some((part) => isSyntheticTodoPart(part)),
         );
-        expect(firstTodoIndex).toBe(2);
+        // Region era: the summary (the only assistant) sits at the head, and
+        // the synthetic todo rides it there.
+        expect(firstTodoIndex).toBe(0);
         const firstWire = serializeAnthropicWireWithAdjacentAssistantMerge(firstMessages);
 
         const secondMessages = makeMessages();
@@ -1829,7 +1789,7 @@ describe("deferred compaction marker representation", () => {
             secondMessages.findIndex((message) =>
                 message.parts.some((part) => isSyntheticTodoPart(part)),
             ),
-        ).toBe(2);
+        ).toBe(0);
         expect(serializeAnthropicWireWithAdjacentAssistantMerge(secondMessages)).toBe(firstWire);
     });
 
@@ -1952,13 +1912,11 @@ describe("deferred compaction marker representation", () => {
         const marker = getPersistedCompactionMarkerState(db, sessionId);
         expect(marker?.summaryMessageId).toBeString();
         expect(foldMessages.map((message) => message.info.id)).toEqual([
-            undefined,
-            undefined,
             marker?.summaryMessageId,
             "msg-tail-user",
             "msg-tail-assistant",
         ]);
-        expect(foldMessages[2]?.parts).toEqual([
+        expect(foldMessages[0]?.parts).toEqual([
             expect.objectContaining({
                 type: "text",
                 text: expect.stringContaining(MARKER_SUMMARY_TEXT),
@@ -1967,7 +1925,6 @@ describe("deferred compaction marker representation", () => {
 
         const foldWire = serializeAnthropicWireWithAdjacentAssistantMerge(foldMessages);
         const rebuiltMessages = [
-            ...cloneMessages(foldMessages.slice(0, 2)),
             {
                 info: {
                     id: marker?.summaryMessageId,
@@ -2008,7 +1965,7 @@ describe("deferred compaction marker representation", () => {
         // summary row included), tags it, and runs the SAME postprocess order
         // the production defer pass runs, so any mutator that fires after
         // reconciliation is exercised on both sides of the comparison.
-        const deferInput = rebuiltMessages.slice(2);
+        const deferInput = rebuiltMessages.slice(0);
         const taggedDefer = tagMessages(sessionId, deferInput, tagger, db);
         await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, deferInput, {
@@ -2027,8 +1984,6 @@ describe("deferred compaction marker representation", () => {
 
         expect(deferWire).toBe(foldWire);
         expect(JSON.parse(foldWire)).toMatchObject([
-            {},
-            {},
             {
                 role: "assistant",
                 content: [{ type: "text", text: expect.stringContaining(MARKER_SUMMARY_TEXT) }],
@@ -2093,23 +2048,27 @@ describe("deferred compaction marker representation", () => {
 
         await runPostTransformPhase(basePostTransformArgs(db, sessionId, messages, { tagger }));
 
+        // Region era: duplicates collapse to the one spliced summary row at
+        // the head; the leftover host rows (forged-head orphans) pass through
+        // inert.
         expect(messages.map((message) => message.info.id)).toEqual([
-            undefined,
-            undefined,
             "current-summary",
+            undefined,
+            undefined,
             "tail-assistant",
         ]);
         expect(
             JSON.parse(serializeAnthropicWireWithAdjacentAssistantMerge(messages)),
         ).toMatchObject([
-            {},
-            {},
             {
                 role: "assistant",
-                content: [
-                    { type: "text", text: expect.stringContaining(MARKER_SUMMARY_TEXT) },
-                    { type: "tool_use", id: "toolu-tail" },
-                ],
+                content: [{ type: "text", text: expect.stringContaining(MARKER_SUMMARY_TEXT) }],
+            },
+            { role: "user", content: [{ type: "text", text: "m0" }] },
+            { role: "user", content: [{ type: "text", text: "m1" }] },
+            {
+                role: "assistant",
+                content: [{ type: "tool_use", id: "toolu-tail" }],
             },
         ]);
         expect(
@@ -2327,17 +2286,9 @@ describe("deferred compaction marker advance representation", () => {
         expect(marker?.summaryMessageId).toBeString();
         expect(drainMessages.some((message) => message.info.id === "old-summary")).toBe(false);
 
+        // Region era: the drain splices the summary at position 0; the stale
+        // head-era row left on the wire passes through inert.
         const rebuiltMessages = [
-            {
-                info: { role: "user", sessionID: sessionId, syntheticHead: true },
-                parts: [
-                    {
-                        type: "text",
-                        text: "<session-history>\\n\\n</session-history>",
-                        synthetic: true,
-                    },
-                ],
-            },
             {
                 info: {
                     id: marker?.summaryMessageId,
@@ -2347,6 +2298,16 @@ describe("deferred compaction marker advance representation", () => {
                     finish: "stop",
                 },
                 parts: [{ type: "text", text: MARKER_SUMMARY_TEXT }],
+            },
+            {
+                info: { role: "user", sessionID: sessionId, syntheticHead: true },
+                parts: [
+                    {
+                        type: "text",
+                        text: "<session-history>\\n\\n</session-history>",
+                        synthetic: true,
+                    },
+                ],
             },
             {
                 info: { id: "retained-user", role: "user", sessionID: sessionId },
@@ -3879,7 +3840,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
         db = new Database(":memory:");
         initializeDatabase(db);
         const sessionId = "ses-hardfold-tool-observation";
-        const baselineSignals = { ...BASE_HARD, toolSetHash: "tools-before" };
+        const baselineSignals = { ...BASE_HARD, toolSetHash: "tools-before" } as M0HardSignals;
         injectM0M1({
             db,
             sessionId,
@@ -3890,11 +3851,11 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             isCacheBustingPass: true,
             hardSignals: baselineSignals,
         });
-
         const result = await runPostTransformPhase(
             basePostTransformArgs(db, sessionId, [], {
                 schedulerDecision: "defer",
                 contextUsage: { percentage: 40, inputTokens: 4000 },
+                systemRegionLane: true,
                 m0M1: {
                     projectPath: FOLD_PROJECT,
                     projectDirectory: FOLD_PROJECT,
@@ -3903,7 +3864,6 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 },
             }),
         );
-
         expect(result.materialized).toBe(false);
         expect(result.materializeReason).toBeNull();
         expect(result.m0ToolSetHashPrev).toBe("tools-before");
@@ -4134,6 +4094,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 didMutateFromFlushedStatuses: replayed,
                 schedulerDecision: opts.scheduler ?? "defer",
                 contextUsage: { percentage: 40, inputTokens: 4000 },
+                systemRegionLane: true,
                 m0M1: {
                     projectPath: FOLD_PROJECT,
                     projectDirectory: FOLD_PROJECT,
@@ -4743,6 +4704,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     schedulerDecision: opts.scheduler ?? "defer",
                     currentTurnId: opts.turn ?? null,
                     contextUsage: { percentage: 40, inputTokens: 4000 },
+                    systemRegionLane: true,
                     m0M1: {
                         projectPath: FOLD_PROJECT,
                         projectDirectory: FOLD_PROJECT,
@@ -4856,24 +4818,26 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             });
         }
 
-        it("cached_m1_missing: HARD fold executes; the missing pair already counts as a first-render bust", async () => {
+        it("an absent m[1] is the region steady state: the pair-less row never triggers a fold", async () => {
+            // Head-era cached_m1_missing retired with the carriage (Unit 1
+            // Step 3): a region row carries no m[1] by design, so a NULL
+            // cached_m1_bytes is the normal state, not a first-render bust.
             db = new Database(":memory:");
             initializeDatabase(db);
             const sessionId = "ses-identical-cached-m1-missing";
             materializeBaseline(sessionId);
-            const defer = await pass(sessionId);
             db.prepare("UPDATE session_meta SET cached_m1_bytes = NULL WHERE session_id = ?").run(
                 sessionId,
             );
+            const defer = await pass(sessionId);
+            expect(defer.result.materialized).toBe(false);
+            expect(defer.result.materializeReason).toBeNull();
             const hard = await pass(sessionId);
-            expect(hard.result.materialized).toBe(true);
-            expect(hard.result.materializeReason).toBe("cached_m1_missing");
-            // The re-render reproduces the old pair, but with no complete cached
-            // pair on record the pass cannot prove what the provider holds.
-            expect(head(hard.messages)).toBe(head(defer.messages));
+            expect(hard.result.materialized).toBe(false);
+            expect(hard.result.materializeReason).toBeNull();
         });
 
-        it("pressure refold: absorbing a large m[1] into m[0] changes the served pair", async () => {
+        it("delta growth rotates the region on a boundary pass and the served bytes change", async () => {
             db = new Database(":memory:");
             initializeDatabase(db);
             const sessionId = "ses-identical-pressure";
@@ -4899,9 +4863,18 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 });
             }
             const defer = await pass(sessionId, { budget: 500 });
+            const { readSystemRegion } = await import(
+                "../../features/magic-context/system-region"
+            );
+            const regionBefore = readSystemRegion(db, sessionId);
+            expect(defer.result.materialized).toBe(false);
             const exec = await pass(sessionId, { scheduler: "execute", budget: 500 });
+            // The delta markers (max_memory_id) are the pressure signal; a
+            // boundary pass rotates the region once and the served bytes move.
             expect(exec.result.materialized).toBe(true);
-            expect(head(exec.messages)).not.toBe(head(defer.messages));
+            const regionAfter = readSystemRegion(db, sessionId);
+            expect(regionAfter).not.toBe(regionBefore);
+            expect(regionAfter).toContain("PRESSURE_MEMORY_44");
         });
 
         it("holds a queued ctx_reduce drop on an identical-bytes project_memory_epoch HARD; the served bytes stay identical", async () => {
@@ -4992,10 +4965,15 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 importance: 50,
             });
             await bumpEpoch();
+            const { readSystemRegion } = await import("../../features/magic-context/system-region");
+            const regionBefore = readSystemRegion(db, sessionId);
             const hard = await pass(sessionId, { turn: "turn-epoch-changed" });
             expect(hard.result.materialized).toBe(true);
             expect(hard.result.materializeReason).toBe("project_memory_epoch");
-            expect(head(hard.messages)).not.toBe(head(defer.messages));
+            // Region era: the served prefix is the region row, not a head pair.
+            // A HARD whose trigger changes content rewrites it, and the queue
+            // lanes ride that same bust.
+            expect(readSystemRegion(db, sessionId)).not.toBe(regionBefore);
             expect(statusOf(sessionId, target)).toBe("dropped");
 
             const after = await pass(sessionId, { newer: 1 });
@@ -5071,6 +5049,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                     schedulerDecision: opts.scheduler ?? "defer",
                     currentTurnId: opts.turn ?? null,
                     contextUsage: { percentage: pct, inputTokens: pct * 100 },
+                    systemRegionLane: true,
                     pendingMaterializationSessions: opts.flush ? new Set([sessionId]) : new Set(),
                     ...(opts.leanMural
                         ? {
@@ -5402,11 +5381,13 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
                 }),
             },
             {
-                reason: "cached_m1_missing",
+                reason: "region_first_install",
                 arm: async (sessionId) => {
+                    // A row the region reader cannot serve (legacy head bytes)
+                    // folds once to install a region — a genuine content bust.
                     db.prepare(
-                        "UPDATE session_meta SET cached_m1_bytes = NULL WHERE session_id = ?",
-                    ).run(sessionId);
+                        "UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?",
+                    ).run(Buffer.from("<session-history>head</session-history>", "utf8"), sessionId);
                     return undefined;
                 },
             },
@@ -7932,58 +7913,6 @@ describe("todo synthesis — disabled todowrite tool gate", () => {
     });
 });
 
-describe("reconcileMarkerRepresentation on rust-mode output heads", () => {
-    it("#then inserts the summary after the module-encoded m0/m1 head, never ahead of m0", () => {
-        // The Rust module's m0/m1 encode produces ID-less synthetic user
-        // messages WITHOUT the TS lane's info.syntheticHead flag. The head
-        // walk must still recognize them: requiring the flag spliced the
-        // compaction summary in at index 0 — an assistant ahead of m0 —
-        // which fails the rust-mode m0 wire invariant on every pass for
-        // sessions carrying persisted marker state.
-        db = new Database(":memory:");
-        initializeDatabase(db);
-        const sessionId = "ses-marker-rust-head";
-        const state = {
-            boundaryMessageId: "boundary",
-            summaryMessageId: "summary",
-            compactionPartId: "compaction",
-            summaryPartId: "summary-part",
-            boundaryOrdinal: 10,
-            targetEndMessageId: "boundary",
-        };
-        const rustM0 = {
-            info: { role: "user", sessionID: sessionId },
-            parts: [
-                { type: "text", text: "<session-history>…</session-history>", synthetic: true },
-            ],
-        };
-        const rustM1 = {
-            info: { role: "user", sessionID: sessionId },
-            parts: [{ type: "text", text: "(no new history)", synthetic: true }],
-        };
-        const tail = {
-            info: { id: "msg_real1", role: "user", sessionID: sessionId },
-            parts: [{ type: "text", text: "hello" }],
-        };
-        const messages = [rustM0, rustM1, tail] as unknown as MessageLike[];
-
-        const changed = reconcileMarkerRepresentation(messages, state, {
-            db,
-            sessionId,
-            tagger: createTagger(),
-            ctxReduceAvailability: { callable: true, frozen: true },
-        });
-        expect(changed).toBe(true);
-        expect(messages.map((message) => message.info.id)).toEqual([
-            undefined,
-            undefined,
-            "summary",
-            "msg_real1",
-        ]);
-        expect(messages[2]?.info.role).toBe("assistant");
-    });
-});
-
 describe("marker-drain reasoning representation", () => {
     it("freezes the applying marker-drain strip when the defer batch removes empty predecessors", async () => {
         db = new Database(":memory:");
@@ -8303,9 +8232,14 @@ describe("prefix preflight persistence pins", () => {
                 ).toBe("dropped");
                 expect(result.droppedTokens).toBeGreaterThan(0);
                 expect(result.bustedThisPass).toBe(true);
-                if (cacheShape === "force")
-                    expect(JSON.stringify(messages.slice(0, 2))).toContain("FORCE_FRESH");
-                else expect(getOrCreateSessionMeta(db, sessionId).cachedM1Bytes).toBeNull();
+                if (cacheShape === "force") {
+                    // Region era: the recovery bytes are a fresh non-persisted
+                    // region on the in-memory state, not spliced heads.
+                    const { decodeSystemRegionRow } = await import(
+                        "../../features/magic-context/system-region"
+                    );
+                    expect(decodeSystemRegionRow(state.cachedM0Bytes)).toContain("FORCE_FRESH");
+                } else expect(getOrCreateSessionMeta(db, sessionId).cachedM1Bytes).toBeNull();
             }
         } finally {
             injection.mockRestore();
@@ -8343,13 +8277,13 @@ describe("prefix preflight persistence pins", () => {
         ]);
         let persistedPreflight: string | null = null;
         const original = compartmentInjection.injectM0M1;
+        const { readSystemRegion } = await import(
+            "../../features/magic-context/system-region"
+        );
         const injection = spyOn(compartmentInjection, "injectM0M1").mockImplementation(
             (options) => {
                 const result = original(options);
-                if (!options.messages)
-                    persistedPreflight =
-                        getOrCreateSessionMeta(db, sessionId).cachedM1Bytes?.toString("utf8") ??
-                        null;
+                if (!options.messages) persistedPreflight = readSystemRegion(db, sessionId);
                 return result;
             },
         );
@@ -8362,8 +8296,10 @@ describe("prefix preflight persistence pins", () => {
                     schedulerDecision: "execute",
                 }),
             );
+            // Region era: the off-wire preflight fold persists the region row;
+            // the served pass replays exactly that row and splices no heads.
             expect(persistedPreflight).toContain("PERSISTED_A");
-            expect((messages[1].parts[0] as { text: string }).text).toBe(persistedPreflight!);
+            expect(messages[0].info.id).toBe("tail");
         } finally {
             injection.mockRestore();
         }
@@ -8540,7 +8476,7 @@ it("synthetic todo ride-only differential golden matches Rust", async () => {
     }
 });
 
-it("competing persisted pair cannot replace the previously served TypeScript prefix", async () => {
+it("a competing persisted region cannot replace the previously served region bytes", async () => {
     db = new Database(":memory:");
     initializeDatabase(db);
     const sessionId = "ses-competing-prefix-snapshot";
@@ -8558,20 +8494,9 @@ it("competing persisted pair cannot replace the previously served TypeScript pre
     ]);
     const initialState = getOrCreateSessionMeta(db, sessionId);
     injectM0M1({ db, sessionId, state: initialState, ...m0M1 });
-    const pairA = compartmentInjection.prepareCachedM0M1Replay(db, sessionId);
+    const pairA = compartmentInjection.prepareRegionReplay(db, sessionId);
     expect(pairA).toBeDefined();
 
-    appendCompartments(db, sessionId, [
-        {
-            sequence: 2,
-            startMessage: 2,
-            endMessage: 2,
-            startMessageId: "covered-b",
-            endMessageId: "covered-b",
-            title: "PUBLISHED_AFTER_A",
-            content: "PUBLISHED_AFTER_A",
-        },
-    ]);
     insertTag(db, sessionId, "old-tool", "tool", 4000, 1, 0, "bash", 0, "old-owner", null, {
         tokenCount: 1000,
         inputTokenCount: 0,
@@ -8593,14 +8518,9 @@ it("competing persisted pair cannot replace the previously served TypeScript pre
         makeToolMessage("old-tool"),
     ];
     const expected = rawMessages();
-    injectM0M1({
-        db,
-        sessionId,
-        state: getOrCreateSessionMeta(db, sessionId),
-        messages: expected,
-        preparedPrefix: pairA,
-        ...m0M1,
-    });
+    // The served window is the region boundary minus 1 (the boundary row is
+    // the last row the region covers; the trim cuts through it).
+    const expectedServed = rawMessages().slice(2);
 
     let competingWrites = 0;
     const original = compartmentInjection.injectM0M1;
@@ -8618,7 +8538,7 @@ it("competing persisted pair cannot replace the previously served TypeScript pre
                             WHERE session_id = ?`,
                       ).run(
                           Buffer.from("<session-history>PAIR_B</session-history>", "utf8"),
-                          Buffer.from(pairA!.m1Text!, "utf8"),
+                          null,
                           "covered-b",
                           sessionId,
                       );
@@ -8645,8 +8565,15 @@ it("competing persisted pair cannot replace the previously served TypeScript pre
         );
 
         expect(competingWrites).toBe(3);
-        expect(JSON.stringify(messages)).toBe(JSON.stringify(expected));
-        expect(messages.some((message) => message.info.id === "covered-b")).toBe(true);
+        // The served region is still the byte-identical row from before the
+        // competing writes: the sibling's replacement never reached the wire.
+        const { decodeSystemRegionRow } = await import(
+            "../../features/magic-context/system-region"
+        );
+        expect(decodeSystemRegionRow(state.cachedM0Bytes)).toBe(
+            decodeSystemRegionRow(pairA!.m0Bytes),
+        );
+        expect(JSON.stringify(messages)).toBe(JSON.stringify(expectedServed));
         expect(result.droppedTokens).toBe(0);
         expect(getTagsBySession(db, sessionId).find((tag) => tag.tagNumber === 1)?.status).toBe(
             "active",
@@ -8672,15 +8599,12 @@ it("contended partial cache replays persisted prefix until one uncontended drain
             content: "OLD_BASELINE",
         },
     ]);
-    const cached: MessageLike[] = [];
     injectM0M1({
         db,
         sessionId,
         state: getOrCreateSessionMeta(db, sessionId),
-        messages: cached,
         ...m0M1,
     });
-    const cachedBytes = JSON.stringify(cached);
     appendCompartments(db, sessionId, [
         {
             sequence: 2,
@@ -8719,6 +8643,10 @@ it("contended partial cache replays persisted prefix until one uncontended drain
             if (contend) state.cachedM1Bytes = null;
             const message = makeToolMessage("old-tool");
             const messages = [message];
+            const logs: string[] = [];
+            const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...v) => {
+                logs.push(v.join(" "));
+            });
             const result = await runPostTransformPhase(
                 basePostTransformArgs(db, sessionId, messages, {
                     m0M1,
@@ -8728,14 +8656,22 @@ it("contended partial cache replays persisted prefix until one uncontended drain
                     targets: new Map([[1, makeDropTarget(message)]]),
                 }),
             );
+            spy.mockRestore();
+            void logs;
+            const { readSystemRegion } = await import(
+                "../../features/magic-context/system-region"
+            );
             if (contend) {
-                expect(JSON.stringify(messages.slice(0, 2))).toBe(cachedBytes);
+                // Contended rotation: the persisted region row (never containing
+                // the mid-fold delta) is replayed and the queue lane is held.
+                expect(readSystemRegion(db, sessionId)).not.toContain("PUBLISHED_A");
+                expect(messages.map((m) => m.info.id)).toEqual(["old-tool"]);
                 expect(result.droppedTokens).toBe(0);
                 expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
                     "active",
                 );
             } else {
-                expect(JSON.stringify(messages.slice(0, 2))).toContain("PUBLISHED_A");
+                expect(readSystemRegion(db, sessionId)).toContain("PUBLISHED_A");
                 expect(result.droppedTokens).toBeGreaterThan(0);
                 expect(getTagsBySession(db, sessionId).find((t) => t.tagNumber === 1)?.status).toBe(
                     "dropped",
@@ -8747,7 +8683,7 @@ it("contended partial cache replays persisted prefix until one uncontended drain
     }
 });
 
-it("force soft-refresh contention serves fresh recovery bytes", () => {
+it("force soft-refresh contention serves fresh recovery bytes", async () => {
     db = new Database(":memory:");
     initializeDatabase(db);
     const sessionId = "ses-force-soft-contention";
@@ -8783,9 +8719,13 @@ it("force soft-refresh contention serves fresh recovery bytes", () => {
         },
     ]);
     expect(compartmentInjection.mustMaterialize(options).value).toBe(false);
+    // Block only the fold transaction's BEGIN: the panel-assembly transaction
+    // takes its lock (and COMMITs) before BEGIN #2, so blocking the second
+    // BEGIN is blocking the region-write transaction itself.
     const exec = db.exec.bind(db);
+    let lockAttempts = 0;
     const blocker = spyOn(db, "exec").mockImplementation((sql) => {
-        if (sql === "BEGIN IMMEDIATE")
+        if (sql === "BEGIN IMMEDIATE" && ++lockAttempts <= 3)
             throw Object.assign(new Error("database is locked"), { code: "SQLITE_BUSY" });
         return exec(sql);
     });
@@ -8793,10 +8733,14 @@ it("force soft-refresh contention serves fresh recovery bytes", () => {
         const result = injectM0M1({
             ...options,
             isCacheBustingPass: true,
+            forceMaterializeReason: "explicit_flush",
             allowFreshContentionFallback: true,
         });
         expect(result.materializationContentionRetryExhausted).toBe(true);
-        expect(JSON.stringify(result.preparedMessages)).toContain("FORCE_SOFT_FRESH");
+        const { decodeSystemRegionRow } = await import(
+            "../../features/magic-context/system-region"
+        );
+        expect(decodeSystemRegionRow(result.m0Bytes)).toContain("FORCE_SOFT_FRESH");
     } finally {
         blocker.mockRestore();
     }
@@ -10577,7 +10521,11 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
         expect(logs.filter((line) => line.includes("m[0] HARD fold decision"))).toEqual([]);
     });
 
-    it("control: head-lane capability keeps its cached_m1_missing fold behavior intact", async () => {
+    it("control: a non-region row folds once under any lane with reason=region_first_install", async () => {
+        // Head-era control retired with the carriage (Unit 1 Step 3): there is
+        // no head-lane reader anymore. The surviving control is that a row the
+        // region reader cannot serve (here, raw head-era bytes) is never
+        // replayed — it folds once to install a region, on both lane values.
         const sessionId = "ses-region-c3-headlane";
         const db = new Database(":memory:");
         initializeDatabase(db);
@@ -10599,6 +10547,9 @@ describe("system-region pass-level: warm passes stay silent, boundaries rotate",
         } finally {
             spy.mockRestore();
         }
-        expect(logs.some((line) => line.includes("cached_m1_missing"))).toBe(true);
+        expect(logs.some((line) => line.includes("region_first_install"))).toBe(true);
+        expect(logs.some((line) => line.includes("cached_m1_missing"))).toBe(false);
+        const { readSystemRegion } = await import("../../features/magic-context/system-region");
+        expect(readSystemRegion(db, sessionId)).not.toBeNull();
     });
 });

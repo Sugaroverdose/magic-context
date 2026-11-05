@@ -140,13 +140,16 @@ function markerServeWire(
     sessionId: string,
     state: PersistedCompactionMarkerState,
 ): string {
+    // Region era: the carriage is gone, so host rows never arrive flagged;
+    // unflagged rows are the faithful wire input. The marker lane must be
+    // flag-indifferent (it keys on info.summary only).
     const messages = [
         {
-            info: { role: "user", sessionID: sessionId, syntheticHead: true },
+            info: { role: "user", sessionID: sessionId },
             parts: [{ type: "text", text: "m0", synthetic: true }],
         },
         {
-            info: { role: "user", sessionID: sessionId, syntheticHead: true },
+            info: { role: "user", sessionID: sessionId },
             parts: [{ type: "text", text: "m1", synthetic: true }],
         },
         {
