@@ -466,6 +466,57 @@ describe("prepareCompartmentInjection — empty compartments fallback", () => {
         expect(firstPart.text).toContain("test directive");
         expect(firstPart.text).toContain("original");
     });
+
+    // R11 recognition, Unit 4 (coordinator split item C): the head-merge
+    // decision must treat every shape v2's OWN whole-message sentinel mints
+    // as an absent head. sentinel.ts makeSentinel (:203) writes text:"" and
+    // makeWholeMessageSentinel (:231) writes "[dropped]" on non-empty routes;
+    // merging the block onto either strands the head bytes with a "\n\n"
+    // seam (or a block-prefixed "" that reads as a real turn). The
+    // "[content omitted]" and "..." shapes are NOT included: they have no v2
+    // mint (Unit 5 FPE ruling re-owns any trigger — census addendum).
+    it('prepends instead of merging onto an emptied head (sentinel text:"")', () => {
+        db = makeDb();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "USER_DIRECTIVES",
+            content: "directive empty-head",
+        });
+        const messages: MessageLike[] = [userMessage("m1", "")];
+        const prepared = prepareCompartmentInjection(db, SESSION_ID, messages, true, PROJECT_PATH);
+        expect(prepared).not.toBeNull();
+        if (!prepared) return;
+
+        renderCompartmentInjection(SESSION_ID, messages, prepared);
+
+        // A fresh synthetic head is prepended; the emptied row is untouched.
+        const headText = (messages[0].parts[0] as { text: string }).text;
+        expect(headText.startsWith("<session-history>")).toBe(true);
+        expect(headText).toContain("directive empty-head");
+        const emptied = messages[1]?.parts[0] as { text: string } | undefined;
+        expect(emptied?.text).toBe("");
+    });
+
+    it("prepends instead of merging onto a bare [dropped] head (whole-message filler)", () => {
+        db = makeDb();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "USER_DIRECTIVES",
+            content: "directive filler-head",
+        });
+        const messages: MessageLike[] = [userMessage("m1", "[dropped]")];
+        const prepared = prepareCompartmentInjection(db, SESSION_ID, messages, true, PROJECT_PATH);
+        expect(prepared).not.toBeNull();
+        if (!prepared) return;
+
+        renderCompartmentInjection(SESSION_ID, messages, prepared);
+
+        const headText = (messages[0].parts[0] as { text: string }).text;
+        expect(headText.startsWith("<session-history>")).toBe(true);
+        expect(headText).toContain("directive filler-head");
+        const filler = messages[1]?.parts[0] as { text: string } | undefined;
+        expect(filler?.text).toBe("[dropped]");
+    });
 });
 
 describe("prepareCompartmentInjection — cross-database cache isolation", () => {

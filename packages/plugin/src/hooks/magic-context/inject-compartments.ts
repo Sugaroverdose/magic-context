@@ -903,7 +903,15 @@ function findFirstTextPart(parts: unknown[]): { type: string; text: string } | n
 }
 
 function isDroppedPlaceholder(text: string): boolean {
-    return /^\[dropped §\d+§\]$/.test(text.trim());
+    // Unit 4 (coordinator split item C): recognize every head shape v2's OWN
+    // sentinel mints — the emptied form (sentinel.ts makeSentinel writes
+    // text:"") and the whole-message filler (makeWholeMessageSentinel writes
+    // "[dropped]" on routes without modelAcceptsEmptyContent), beside the
+    // canonical tagged placeholder. The empty match must come first: without
+    // it the join path would prepend the block plus "\n\n" onto an emptied
+    // head. "[content omitted]" and "..." are deliberately absent — no v2
+    // minter (die-unless-U5-restores-mint, census addendum).
+    return /^(?:|\[dropped(?: §\d+§)?\])$/.test(text.trim());
 }
 
 const EMPTY_HARD_SIGNALS: M0HardSignals = {
