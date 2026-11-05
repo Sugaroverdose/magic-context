@@ -10,7 +10,6 @@ import {
     replaceAllCompartmentState,
 } from "../../features/magic-context/compartment-storage";
 import { archiveExpiredMemories } from "../../features/magic-context/dreamer/expire-memories";
-import { readRegionVolatile } from "../../features/magic-context/storage-meta-shared";
 import { acquireLeaseWithAcquisition } from "../../features/magic-context/dreamer/lease";
 import { leaseKeyFor } from "../../features/magic-context/dreamer/task-registry";
 import {
@@ -32,12 +31,12 @@ import {
     setProjectState,
 } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import { readRegionVolatile } from "../../features/magic-context/storage-meta-shared";
 import {
     readSystemRegion,
     SYSTEM_REGION_SENTINEL,
     writeSystemRegion,
 } from "../../features/magic-context/system-region";
-import { RenderM1InvalidMarkersError } from "./region-render";
 import { insertUserMemory } from "../../features/magic-context/user-memory/storage-user-memory";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
@@ -65,8 +64,9 @@ import {
     renderMemoryLineV2,
     trimMemoriesToBudgetV2,
 } from "./inject-compartments";
-import { renderRegionVolatile } from "./region-volatile";
 import { withRawMessageProvider } from "./read-session-chunk";
+import { RenderM1InvalidMarkersError } from "./region-render";
+import { renderRegionVolatile } from "./region-volatile";
 
 /**
  * Unit 2 Step 3: the m[1] delta renderers (renderM1 / renderM1WithMetadata /
@@ -88,6 +88,7 @@ function deltaText(
 ): string {
     return renderRegionVolatile(options, { ...markers, renderedMemoryIds }).text;
 }
+
 import { closeReadOnlySessionDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -906,10 +907,7 @@ describe("prepared prefix source-order trimming", () => {
         );
 
         expect(result.prefixTrimStatus).toBe("applied");
-        expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
-            "instruction row",
-            "after",
-        ]);
+        expect(live.map((entry) => entry.parts[0]?.text)).toEqual(["instruction row", "after"]);
     });
 
     it("orders id-less host system messages by their persisted neighbours", () => {
@@ -937,10 +935,7 @@ describe("prepared prefix source-order trimming", () => {
         );
 
         expect(result.prefixTrimStatus).toBe("applied");
-        expect(live.map((entry) => entry.parts[0]?.text)).toEqual([
-            "instruction row",
-            "after",
-        ]);
+        expect(live.map((entry) => entry.parts[0]?.text)).toEqual(["instruction row", "after"]);
     });
 
     it("still refuses an unserved boundary when no served row stands for it", () => {
@@ -1718,9 +1713,10 @@ describe("m[0]/m[1] materialization", () => {
         });
         // Headless era: age only the upgrade identity — the region row stays
         // servable, so the stale-epoch arm (not the install arm) decides.
-        db.prepare(
-            "UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?",
-        ).run("ready", SESSION_ID);
+        db.prepare("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?").run(
+            "ready",
+            SESSION_ID,
+        );
         const state = readStateFromMeta();
 
         expect(
@@ -1822,10 +1818,12 @@ describe("m[0]/m[1] materialization", () => {
         const oldM0 = Buffer.from(
             `${SYSTEM_REGION_SENTINEL}<session-history></session-history>\n\n${renderMemoryBlockV2([oldMemory])}`,
         );
-        writeSystemRegion(db, SESSION_ID, oldM0.subarray(SYSTEM_REGION_SENTINEL.length).toString("utf8"));
-        db.prepare(
-            "UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?",
-        ).run(
+        writeSystemRegion(
+            db,
+            SESSION_ID,
+            oldM0.subarray(SYSTEM_REGION_SENTINEL.length).toString("utf8"),
+        );
+        db.prepare("UPDATE session_meta SET cached_m0_upgrade_state = ? WHERE session_id = ?").run(
             encodeCachedM0UpgradeIdentity(
                 "ready",
                 COMPARTMENT_RENDER_EPOCH,
@@ -2695,7 +2693,7 @@ describe("m[0]/m[1] materialization", () => {
         db = makeDb();
         const projectDirectory = makeProjectDir();
         let m1OnlyId = 0;
-        const materialized = materializeM0({
+        const _materialized = materializeM0({
             db,
             sessionId: SESSION_ID,
             state: readStateFromMeta(),
@@ -3115,9 +3113,10 @@ describe("m[0]/m[1] materialization", () => {
         // Poison row: the durable row holds head-era bytes the region reader
         // refuses. A bust pass must fold (region_first_install), rotate, and
         // serve a real region — the poisoned bytes can never ride the wire.
-        db
-            .prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?")
-            .run(Buffer.from("<session-history>stale</session-history>", "utf8"), SESSION_ID);
+        db.prepare("UPDATE session_meta SET cached_m0_bytes = ? WHERE session_id = ?").run(
+            Buffer.from("<session-history>stale</session-history>", "utf8"),
+            SESSION_ID,
+        );
         const result = injectM0M1({
             db,
             sessionId: SESSION_ID,
@@ -4086,9 +4085,9 @@ describe("m[0]/m[1] materialization", () => {
         // volatile row it persists is rendered against the capture — with the
         // mutations absorbed into the panels, no <memory-updates> survive.
         expect(reconciled.m1Text).toBe("");
-        expect(
-            readRegionVolatile(db, SESSION_ID)?.toString("utf8") ?? "",
-        ).not.toContain("<memory-updates>");
+        expect(readRegionVolatile(db, SESSION_ID)?.toString("utf8") ?? "").not.toContain(
+            "<memory-updates>",
+        );
     });
 
     it("keeps an archived memory frozen in the region until rotation removes it", () => {

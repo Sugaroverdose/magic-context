@@ -496,7 +496,7 @@ describe("absent-boundary prefix trim: source-order branch", () => {
     function sourceOrderFor(messages: readonly MessageLike[]): PrefixTrimSourceOrder {
         return {
             messageIds: messages.map((message) => message.info.id as string),
-                invalidReason: null,
+            invalidReason: null,
         };
     }
 

@@ -33,7 +33,6 @@ import {
     currentRegionMarkersForPromotion,
     injectM0M1,
     type M0HardSignals,
-    type M0M1State,
     regionMarkersFromSnapshot,
     snapshotMarkersFromCachedM0,
 } from "./inject-compartments";

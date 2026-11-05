@@ -44,7 +44,6 @@
 
 import { describe, expect, it } from "bun:test";
 import { rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
 import { createTestTempDir } from "../../shared/test-temp-dir";
 

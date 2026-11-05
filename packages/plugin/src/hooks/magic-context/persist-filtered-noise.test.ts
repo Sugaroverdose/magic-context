@@ -10,11 +10,11 @@ import { getOrCreateSessionMeta } from "../../features/magic-context/storage-met
 import { Database } from "../../shared/sqlite";
 import { renderCompartmentAtTier, renderDecayedCompartments } from "./decay-render";
 import { readCurrentM0SnapshotMarkers, renderM0 } from "./inject-compartments";
-import { renderRegionVolatile } from "./region-volatile";
 import { countCompartmentsNeedingUpgrade } from "./legacy-compartments";
 import { persistFilteredNoise } from "./persist-filtered-noise";
 import { readSessionChunk, setRawMessageProvider } from "./read-session-chunk";
 import { renderSessionReferencesBlock } from "./reference-retrieval";
+import { renderRegionVolatile } from "./region-volatile";
 
 it("noise markers render no m0/m1 bytes and do not affect decay, references or upgrades", () => {
     const db = new Database(":memory:");

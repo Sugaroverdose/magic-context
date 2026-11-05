@@ -720,7 +720,9 @@ function populateForVersion(db: DatabaseType, version: number, state: ReplayStat
                         name: string;
                     }>
                 ).map((column) => column.name),
-            ).toEqual(expect.arrayContaining(["region_volatile_bytes", "region_volatile_watermark"]));
+            ).toEqual(
+                expect.arrayContaining(["region_volatile_bytes", "region_volatile_watermark"]),
+            );
             populateModuleOwnedRows(db, version, state);
             return;
         default:

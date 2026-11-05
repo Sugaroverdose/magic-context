@@ -5381,7 +5381,7 @@ describe("executed m[0] hard-fold folds the execute pass in", () => {
             const spy = spyOn(loggerModule, "sessionLog").mockImplementation((_id, ...v) => {
                 logs.push(v.join(" "));
             });
-            let exec;
+            let exec: Awaited<ReturnType<typeof pass>>;
             try {
                 exec = await pass(sessionId, { scheduler: "execute", turn: "t-exec" });
             } finally {

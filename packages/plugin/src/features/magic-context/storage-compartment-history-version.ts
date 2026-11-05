@@ -88,7 +88,10 @@ export function installCompartmentHistoryVersions(db: Database): void {
         const expected = definitions(db);
         const installed = installedDefinitions(db);
         if (matches(expected, installed)) return;
-        const table = expected[0]!;
+        const table = expected[0];
+        if (!table) {
+            throw new Error("compartment_history_versions: empty definition set");
+        }
         const existingTable = installed.get(`table:${table.name}`);
         if (existingTable !== undefined && existingTable !== table.sql) {
             throw new Error(

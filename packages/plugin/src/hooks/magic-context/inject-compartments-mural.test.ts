@@ -17,7 +17,6 @@ import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
     buildRegionMuralMessage,
     currentRegionMarkersForPromotion,
-    hasServableRegion,
     hydrateCachedM0Mural,
     injectM0M1,
     type M0M1State,
@@ -148,7 +147,10 @@ function carriageImage(db: Database, messages: MessageLike[]): string | undefine
 
 /** The transform's defer-pass lane: the frozen region replays byte-identical
  *  from the store (prepareRegionReplay), and the carriage rides beside it. */
-function productionDeferPass(db: Database, messages: MessageLike[]): ReturnType<typeof injectM0M1> {
+function productionDeferPass(
+    db: Database,
+    _messages: MessageLike[],
+): ReturnType<typeof injectM0M1> {
     const replay = prepareRegionReplay(db, SESSION_ID);
     if (replay) {
         // No carriage here: the mint is the transform tail (transform.ts

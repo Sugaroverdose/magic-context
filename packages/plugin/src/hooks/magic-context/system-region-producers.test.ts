@@ -598,9 +598,7 @@ describe("system-region L0: per-actor producer census", () => {
                 // Old-shape proof: the callee-with-parens census the law
                 // carried pre-fix would never have listed this file.
                 expect(
-                    new RegExp(`\\b${name}\\s*\\(`).test(
-                        readFileSync(join(dir, fileName), "utf8"),
-                    ),
+                    new RegExp(`\\b${name}\\s*\\(`).test(readFileSync(join(dir, fileName), "utf8")),
                 ).toBe(false);
                 rmSync(join(dir, fileName), { force: true });
             }

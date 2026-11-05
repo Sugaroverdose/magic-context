@@ -24,22 +24,25 @@ import { dirname, join } from "node:path";
 import { appendCompartments } from "../../features/magic-context/compartment-storage";
 import { getOrCreateSessionMeta } from "../../features/magic-context/storage";
 import { initializeDatabase } from "../../features/magic-context/storage-db";
+import {
+    decodeSystemRegionRow,
+    readSystemRegion,
+} from "../../features/magic-context/system-region";
 import { Database } from "../../shared/sqlite";
 import { closeQuietly } from "../../shared/sqlite-helpers";
 import {
+    currentRegionMarkersForPromotion,
     type InjectM0M1Result,
     injectM0M1,
     type M0HardSignals,
     type M0M1State,
-    resetPrefixTrimFallbackState,
-    currentRegionMarkersForPromotion,
     regionMarkersFromSnapshot,
+    resetPrefixTrimFallbackState,
     snapshotMarkersFromCachedM0,
 } from "./inject-compartments";
-import { decodeSystemRegionRow, readSystemRegion } from "../../features/magic-context/system-region";
-import { regionRotationPromotion } from "./transform-postprocess-phase";
 import { closeReadOnlySessionDb } from "./read-session-db";
 import type { MessageLike } from "./tag-messages";
+import { regionRotationPromotion } from "./transform-postprocess-phase";
 
 const SESSION_ID = "ses_prefix_trim_absent";
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
