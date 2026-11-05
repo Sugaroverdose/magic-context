@@ -61,12 +61,33 @@ import {
     readCurrentM0SnapshotMarkers,
     renderCompartmentInjection,
     renderHistorianMemoryBlock,
-    renderM1,
     renderMemoryBlockV2,
     renderMemoryLineV2,
     trimMemoriesToBudgetV2,
 } from "./inject-compartments";
+import { renderRegionVolatile } from "./region-volatile";
 import { withRawMessageProvider } from "./read-session-chunk";
+
+/**
+ * Unit 2 Step 3: the m[1] delta renderers (renderM1 / renderM1WithMetadata /
+ * renderRegionM1) died behind their successor — the volatile segment carrier.
+ * The delta laws drive renderRegionVolatile directly; this adapter only maps
+ * the old (markers, renderedMemoryIds) call shape onto the watermark.
+ */
+function deltaText(
+    options: Parameters<typeof materializeM0>[0],
+    markers: {
+        maxMemoryId: number;
+        maxCompartmentSeq: number;
+        maxMemoryMutationId: number;
+        projectUserProfileVersion: number;
+        projectDocsHash: string;
+        materializedAt: number;
+    },
+    renderedMemoryIds: readonly number[] = [],
+): string {
+    return renderRegionVolatile(options, { ...markers, renderedMemoryIds }).text;
+}
 import { closeReadOnlySessionDb } from "./read-session-db";
 import { estimateTokens } from "./read-session-formatting";
 import type { MessageLike } from "./tag-messages";
@@ -721,7 +742,7 @@ describe("user-profile baseline and delta rendering", () => {
                 systemRegionMode: true,
             }),
         ).toEqual({ value: false, reason: null });
-        const delta = renderM1(
+        const delta = deltaText(
             { ...options, state: readStateFromMeta() },
             baseline.snapshotMarkers,
             baseline.renderedMemoryIds,
@@ -1963,7 +1984,8 @@ describe("m[0]/m[1] materialization", () => {
 
     it("mustMaterialize does NOT materialize m[0] on a new compartment (it rides m[1])", () => {
         // Taxonomy invariant: a new compartment is a SOFT delta that surfaces in
-        // m[1] via renderM1's <new-compartments> (sequence > cachedM0Seq). It must
+        // the wire via the volatile segment's <new-compartments> (sequence >
+        // cachedM0Seq). It must
         // NEVER fold m[0] — folding on every historian publish busts the prompt-
         // cache prefix on a routine background publish, the exact bug the m[0]/m[1]
         // split exists to prevent. New compartments fold into m[0] only on a HARD
@@ -2154,7 +2176,7 @@ describe("m[0]/m[1] materialization", () => {
     it("mustMaterialize does NOT materialize m[0] on the FIRST compartment (sequence 0)", () => {
         // The first compartment (sequence 0) is also a SOFT m[1] delta — the
         // EMPTY_MAX_COMPARTMENT_SEQ=-1 sentinel makes readNewCompartments(-1)
-        // include seq 0, so renderM1 surfaces it. mustMaterialize must NOT fold it
+        // include seq 0, so the volatile segment surfaces it. mustMaterialize must NOT fold it
         // into m[0]; that happens on the next HARD bust.
         db = makeDb();
         const projectDirectory = makeProjectDir();
@@ -3767,7 +3789,7 @@ describe("m[0]/m[1] materialization", () => {
                     );
                 }
                 fixture.mutate(caseDb, source, targets);
-                const m1 = renderM1(
+                const m1 = deltaText(
                     {
                         db: caseDb,
                         sessionId: SESSION_ID,
@@ -3854,7 +3876,7 @@ describe("m[0]/m[1] materialization", () => {
             supersededById: terminal.id,
         });
 
-        const m1 = renderM1(
+        const m1 = deltaText(
             {
                 db,
                 sessionId: SESSION_ID,
@@ -3910,7 +3932,7 @@ describe("m[0]/m[1] materialization", () => {
             projectPath: PROJECT_PATH,
             memoryInjectionBudgetTokens: 8_000,
         };
-        const grant = renderM1(options, markers, [ownMemory.id]);
+        const grant = deltaText(options, markers, [ownMemory.id]);
         expect(grant).toContain("foreign visibility memory below watermark");
         expect(grant.match(new RegExp(`^#${foreignMemory.id}(?:\\s|\\[|:)`, "gm"))?.length).toBe(1);
 
@@ -3921,7 +3943,7 @@ describe("m[0]/m[1] materialization", () => {
             targetMemoryId: foreignMemory.id,
             category: "__mc_visibility__",
         });
-        const revoke = renderM1(options, { ...markers, maxMemoryMutationId: grantMutation.id }, [
+        const revoke = deltaText(options, { ...markers, maxMemoryMutationId: grantMutation.id }, [
             foreignMemory.id,
             ownMemory.id,
         ]);
@@ -3986,7 +4008,7 @@ describe("m[0]/m[1] materialization", () => {
             queuedAt: 11,
         });
 
-        const firstDefer = renderM1(
+        const firstDefer = deltaText(
             {
                 db,
                 sessionId: SESSION_ID,
@@ -4037,7 +4059,7 @@ describe("m[0]/m[1] materialization", () => {
             queuedAt: 30,
         });
 
-        const secondDefer = renderM1(
+        const secondDefer = deltaText(
             {
                 db,
                 sessionId: SESSION_ID,
@@ -4060,7 +4082,13 @@ describe("m[0]/m[1] materialization", () => {
             memoryInjectionBudgetTokens: 8_000,
         });
         expect(block(reconciled.m0Text, "project-memory")).toBe(fixture.reconciled_m0);
-        expect(reconciled.m1Text).not.toContain("<memory-updates>");
+        // Region era (Unit 2 Step 2/3): the fold owns no m[1] bytes and the
+        // volatile row it persists is rendered against the capture — with the
+        // mutations absorbed into the panels, no <memory-updates> survive.
+        expect(reconciled.m1Text).toBe("");
+        expect(
+            readRegionVolatile(db, SESSION_ID)?.toString("utf8") ?? "",
+        ).not.toContain("<memory-updates>");
     });
 
     it("keeps an archived memory frozen in the region until rotation removes it", () => {
@@ -4235,7 +4263,7 @@ describe("m[0]/m[1] materialization", () => {
             queuedAt: 10,
         });
 
-        const m1 = renderM1(
+        const m1 = deltaText(
             {
                 db,
                 sessionId: SESSION_ID,

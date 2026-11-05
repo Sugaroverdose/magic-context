@@ -113,7 +113,6 @@ import type {
     MemoryRenderOptions,
     PrefixTrimSourceOrder,
     PrefixTrimStatus,
-    RenderM1Result,
     TrimMemoriesResultV2,
     WorkspaceRenderContext,
 } from "./region-render";
@@ -138,8 +137,6 @@ import {
     readM0Compartments,
     readNewCompartments,
     renderM0,
-    renderM1,
-    renderM1WithMetadata,
     renderMemoryBlockV2,
     renderMemoryLineV2,
     renderMemoryUpdatesBlock,
@@ -170,7 +167,6 @@ export type {
     MemoryRenderOptions,
     PrefixTrimSourceOrder,
     PrefixTrimStatus,
-    RenderM1Result,
     TrimMemoriesResultV2,
     WorkspaceRenderContext,
 } from "./region-render";
@@ -180,7 +176,6 @@ export {
     DEFAULT_MEMORY_BUDGET_TOKENS,
     DEFAULT_USER_PROFILE_BUDGET_TOKENS,
     renderM0,
-    renderM1,
     renderMemoryBlockV2,
     renderMemoryLineV2,
     stripMemoryMuralBlock,
@@ -1021,9 +1016,10 @@ function getMaxCompartmentSeq(db: Database, sessionId: string): number {
     ).get(sessionId);
     // -1 for an empty session, the real max sequence (>= 0) otherwise. The -1
     // sentinel is < 0 so it is distinct from the first real compartment (seq 0):
-    // renderM1's readNewCompartments filters `sequence > maxSeq`, so an empty m[0]
-    // baseline (maxCompartmentSeq = -1) includes the first compartment (seq 0) in
-    // m[1]. New compartments are an m[1] delta, never a mustMaterialize trigger.
+    // the volatile segment's readNewCompartments filters `sequence > maxSeq`, so
+    // an empty baseline (maxCompartmentSeq = -1) includes the first compartment
+    // (seq 0) in the delta. New compartments are delta-class, never a
+    // mustMaterialize trigger.
     return numberFromRow(row, "s");
 }
 function getMaxMemoryId(
@@ -1460,7 +1456,7 @@ export function snapshotMarkersFromCachedM0(state: M0M1State): M0SnapshotMarkers
  *
  * `mustMaterialize` returns true ONLY for HARD. New compartments and additive
  * user-profile/memory changes are deliberately NOT triggers — they are m[1]
- * deltas (see renderM1) and must never mutate the m[0] baseline. That is the
+ * deltas (see the volatile segment, region-volatile.ts) and must never mutate the m[0] baseline. That is the
  * whole point of the m[0]=frozen-prefix / m[1]=volatile-delta split: a routine
  * historian publish must keep the Anthropic prompt-cache prefix intact.
  */
@@ -1665,7 +1661,7 @@ export function mustMaterialize(args: {
     // would miss the workspace→single transition: a cached union m[0] whose
     // session just left its workspace would fall through to the integer-epoch
     // compare and keep rendering the stale union if a membership bump were
-    // missed. Mirrors renderM1's soft-refresh gate and Pi's mustMaterializePi.
+    // missed. Mirrors the volatile segment's workspace gate and Pi's mustMaterializePi.
     if (
         current.workspaceFingerprint !== null ||
         (args.state.cachedM0WorkspaceFingerprint ?? null) !== null
@@ -1677,14 +1673,15 @@ export function mustMaterialize(args: {
         return { value: true, reason: "project_memory_epoch" };
     }
     // NOTE: project_user_profile_version is deliberately NOT a trigger. Additive
-    // user-profile promotions surface in m[1] via renderM1's <new-user-profile>
-    // delta (version-watermark), exactly like new compartments and memories. A
+    // user-profile promotions surface via the volatile segment's
+    // <new-user-profile> delta (version-watermark), exactly like new
+    // compartments and memories. A
     // version change must not fold m[0]; the delta reconciles into m[0] on the
     // next HARD fold. Destructive profile edits route through the same delta plus
     // the project_memory_epoch path for external (dashboard) mutations.
     //
     // NOTE: max_compartment_seq is deliberately NOT a trigger. New compartments
-    // are the canonical m[1] delta (renderM1 -> readNewCompartments WHERE
+    // are the canonical delta class (volatile segment -> readNewCompartments WHERE
     // sequence > cachedM0Seq). Folding m[0] on every historian publish would bust
     // the prompt-cache prefix on a routine background publish — the exact bug the
     // m[0]/m[1] split exists to prevent. They fold into m[0] only on a HARD bust.

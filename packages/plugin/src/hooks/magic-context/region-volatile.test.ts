@@ -31,7 +31,10 @@ import {
     readProjectDocsCanonical,
     updateSessionMeta,
 } from "../../features/magic-context/storage";
-import { writeRegionVolatile } from "../../features/magic-context/storage-meta-shared";
+import {
+    readRegionVolatile,
+    writeRegionVolatile,
+} from "../../features/magic-context/storage-meta-shared";
 import { encodeSystemRegionRow } from "../../features/magic-context/system-region";
 import { createTestTempDirFromPath } from "../../shared/test-temp-dir";
 import {
@@ -47,10 +50,13 @@ import {
 import { getGlobalUserProfileVersion } from "./region-render";
 import {
     type RegionVolatileWatermark,
+    recomputeRegionVolatileSegment,
     renderRegionVolatile,
     serveRegionVolatile,
 } from "./region-volatile";
 import { createSystemPromptHashHandler } from "./system-prompt-hash";
+import { getVisibleMemoryIds, materializeM0 } from "./inject-compartments";
+import { unifiedSearch } from "../../features/magic-context/search";
 
 const tempDirs: string[] = [];
 const originalXdgDataHome = process.env.XDG_DATA_HOME;
@@ -251,11 +257,15 @@ describe("region-volatile: store and serve (replay-only)", () => {
     it("serveRegionVolatile decodes stored bytes verbatim — a live mutation after capture does not move the serve", () => {
         const { seeded, window } = freshSeed();
         const meta = getOrCreateSessionMeta(seeded.db, window.sessionId);
+        const installedAt = 1_700_000_000_000;
+        seeded.db
+            .prepare("UPDATE session_meta SET cached_m0_materialized_at = ? WHERE session_id = ?")
+            .run(installedAt, window.sessionId);
         writeRegionVolatile(
             seeded.db,
             window.sessionId,
             "<session-history-since>frozen volatile bytes</session-history-since>",
-            meta.cachedM0MaterializedAt ?? 0,
+            installedAt,
         );
         // A memory lands AFTER the volatile capture.
         insertMemory(seeded.db, {
@@ -264,7 +274,7 @@ describe("region-volatile: store and serve (replay-only)", () => {
             content: "late mutation must not reach the serve",
             sourceType: "historian",
         });
-        expect(serveRegionVolatile(seeded.db, window.sessionId)).toBe(
+        expect(serveRegionVolatile(getOrCreateSessionMeta(seeded.db, window.sessionId))).toBe(
             "<session-history-since>frozen volatile bytes</session-history-since>",
         );
     });
@@ -275,7 +285,7 @@ describe("region-volatile: store and serve (replay-only)", () => {
         writeRegionVolatile(seeded.db, window.sessionId, "", 111);
         const meta = getOrCreateSessionMeta(seeded.db, window.sessionId);
         expect(meta.regionVolatileBytes).toBeNull();
-        expect(serveRegionVolatile(seeded.db, window.sessionId)).toBeNull();
+        expect(serveRegionVolatile(meta)).toBeNull();
     });
 });
 
@@ -384,5 +394,79 @@ describe("region-volatile: the serve path appends volatile after the region byte
         expect(second).toContain("tail bytes v2");
         const meta = getOrCreateSessionMeta(openDatabase(), SESSION);
         expect(meta.systemPromptHash).toBe(hashBefore);
+    });
+});
+
+describe("region-volatile: memory_block accounting feeds the ctx_search hide-filter", () => {
+    it("re-derives session_meta.memory_block_ids from region + volatile renders — deletion of the m[1] renderers must not silently drop the accounting (Unit 2 Step 3 net)", async () => {
+        const { seeded, window } = freshSeed();
+        const db = seeded.db;
+        const fold = materializeM0({
+            db,
+            sessionId: window.sessionId,
+            state: getOrCreateSessionMeta(db, window.sessionId),
+            projectPath: window.identity,
+            projectDirectory: seeded.docsDir,
+            injectDocs: true,
+            memoryInjectionBudgetTokens: 4000,
+            historyBudgetTokens: 30000,
+            isCacheBustingPass: true,
+            systemRegion: { enabled: true, reason: "first_render" },
+        } as never);
+        expect(fold.snapshotMarkers).not.toBeNull();
+        // A delta-class memory arriving after the capture: its id is beyond
+        // the captured watermark, so it can only reach the wire through the
+        // volatile segment, on the bust-lane recompute.
+        const deltaMemory = insertMemory(db, {
+            projectPath: window.identity,
+            category: "ARCHITECTURE",
+            content: "VolDeltaToken carried by volatile",
+            sourceType: "historian",
+        });
+        const meta = getOrCreateSessionMeta(db, window.sessionId);
+        const rendered = recomputeRegionVolatileSegment({
+            db,
+            sessionId: window.sessionId,
+            meta,
+            options: buildRenderOptions(window, seeded),
+        });
+        expect(rendered?.text).toContain("VolDeltaToken");
+        expect(readRegionVolatile(db, window.sessionId)?.toString("utf8")).toContain(
+            "VolDeltaToken",
+        );
+        // A memory that never reaches any render: invisible to the filter.
+        const hiddenMemory = insertMemory(db, {
+            projectPath: window.identity,
+            category: "ARCHITECTURE",
+            content: "VolHiddenToken rendered by nobody",
+            sourceType: "historian",
+        });
+
+        // The production reader ctx_search uses (tools.ts:134 getVisibleMemoryIds).
+        const visible = getVisibleMemoryIds(db, window.sessionId);
+        expect(visible).not.toBeNull();
+        expect(visible!.has(deltaMemory.id)).toBe(true); // volatile-carried
+        expect(visible!.has(hiddenMemory.id)).toBe(false); // never rendered
+        for (const id of fold.renderedMemoryIds) expect(visible!.has(id)).toBe(true);
+
+        const results = await unifiedSearch(
+            db,
+            window.sessionId,
+            window.identity,
+            "VolDeltaToken VolHiddenToken",
+            {
+                memoryEnabled: true,
+                embeddingEnabled: false,
+                sources: ["memory"],
+                visibleMemoryIds: visible ?? undefined,
+                countRetrievals: false,
+                measurementDisabled: true,
+            },
+        );
+        const ids = results
+            .filter((result) => result.source === "memory")
+            .map((result) => result.memoryId);
+        expect(ids).toContain(hiddenMemory.id);
+        expect(ids).not.toContain(deltaMemory.id);
     });
 });

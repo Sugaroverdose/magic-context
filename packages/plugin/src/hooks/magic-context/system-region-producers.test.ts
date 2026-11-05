@@ -454,8 +454,10 @@ describe("system-region L0: per-actor producer census", () => {
         // L0 single-writer law for the Task-1 carriage: the two region_volatile
         // columns are written ONLY by the sanctioned accessors in
         // storage-meta-shared.ts (writeRegionVolatile + the fold-row absorb in
-        // persistCachedM0) and read as raw SQL only by the serve decode in
-        // region-volatile.ts. A wire-affecting write outside these named
+        // persistCachedM0) and named in schema/migration surfaces. The fold
+        // (inject-compartments.ts) and the bust-lane recompute
+        // (region-volatile.ts) go through the accessor — raw column SQL in
+        // either file reddens here. A wire-affecting write outside the named
         // actors fails here, not in production.
         const ALLOWED: ReadonlyMap<string, string> = new Map([
             ["features/magic-context/storage-db.ts", "fresh DDL + ensureColumn (schema)"],
@@ -467,14 +469,6 @@ describe("system-region L0: per-actor producer census", () => {
             [
                 "features/magic-context/storage-meta-session.ts",
                 "typed projection + column-safe fallback selects (read surface only)",
-            ],
-            [
-                "hooks/magic-context/region-volatile.ts",
-                "read-only serve decode (SELECT region_volatile_bytes) + codec",
-            ],
-            [
-                "hooks/magic-context/inject-compartments.ts",
-                "fold row: the boundary transaction writes the volatile segment it renders against the region capture (same-transaction coherence)",
             ],
         ]);
         const offenders: string[] = [];
@@ -511,14 +505,18 @@ describe("system-region L0: per-actor producer census", () => {
     });
 
     it("the serve site appends volatile only behind a served region and never hashes it (Unit 2 L0)", () => {
-        // Property: decodeRegionVolatileBytes has exactly two production
-        // readers — the codec owner (region-volatile.ts) and the Step 2.5b
-        // append site (system-prompt-hash.ts) — and the append site's hashed
-        // surface stays hostContent-only (the hash call must not see the
-        // volatile text; it is minted from output.system AFTER appends only
-        // for the host slice, pinned by the Step 3 hash of hostContent).
-        const readers = filesUsing(/\bdecodeRegionVolatileBytes\b/);
-        expect(readers).toEqual([
+        // Property: the volatile bytes reach the wire through exactly one
+        // reader — serveRegionVolatile (decode + epoch guard, defined in
+        // region-volatile.ts) — whose only production caller is the Step 2.5b
+        // append site (system-prompt-hash.ts). The codec itself stays private
+        // to the carrier module. The append site's hashed surface stays
+        // hostContent-only (the hash call must not see the volatile text; it
+        // is minted from output.system AFTER appends only for the host slice,
+        // pinned by the Step 3 hash of hostContent).
+        const decoders = filesUsing(/\bdecodeRegionVolatileBytes\b/);
+        expect(decoders).toEqual(["hooks/magic-context/region-volatile.ts"]);
+        const servers = filesUsing(/\bserveRegionVolatile\s*\(/);
+        expect(servers).toEqual([
             "hooks/magic-context/region-volatile.ts",
             "hooks/magic-context/system-prompt-hash.ts",
         ]);

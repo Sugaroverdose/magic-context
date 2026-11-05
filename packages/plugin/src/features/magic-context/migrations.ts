@@ -3212,13 +3212,16 @@ export const MIGRATIONS: Migration[] = [
             // rides a per-session volatile segment served after the region
             // bytes; the watermark names the region row (materializedAt) the
             // bytes were rendered against so a stale segment is never served.
-            ensureColumn(db, "session_meta", "region_volatile_bytes", "BLOB");
-            ensureColumn(
-                db,
-                "session_meta",
-                "region_volatile_watermark",
-                "INTEGER NOT NULL DEFAULT 0",
-            );
+            // Sparse databases without the table skip (v22 precedent).
+            if (tableExists(db, "session_meta")) {
+                ensureColumn(db, "session_meta", "region_volatile_bytes", "BLOB");
+                ensureColumn(
+                    db,
+                    "session_meta",
+                    "region_volatile_watermark",
+                    "INTEGER NOT NULL DEFAULT 0",
+                );
+            }
         },
     },
 ];

@@ -567,7 +567,9 @@ describe("region four-panel-only contract (Unit 2 Step 2)", () => {
             expect(rendered!.text).toContain("<session-history-since>");
             // The segment is stored, and serving it requires the watermark to
             // name the region row it was rendered against.
-            expect(serveRegionVolatile(db, SESSION_ID)).toContain("post fold delta memory");
+            expect(
+                serveRegionVolatile(getOrCreateSessionMeta(db, SESSION_ID)),
+            ).toContain("post fold delta memory");
             const served = await pass(handler.handler, SESSION_ID, "Base host prompt");
             expect(served).toContain("post fold delta memory");
             // The region bytes did not move: the delta never re-enters them.

@@ -143,7 +143,6 @@ export function renderRegionVolatile(
     }
 
     const forcedMemoryIds = new Set(memoryUpdates.forcedMemoryIds);
-    const regionRendered = new Set(watermark.renderedMemoryIds);
     const newMemories = eligibleMemories.filter(
         (memory) => memory.id > watermark.maxMemoryId && !forcedMemoryIds.has(memory.id),
     );
@@ -168,7 +167,7 @@ export function renderRegionVolatile(
     // The overflow set beyond the frozen region panel: memories newer than the
     // capture that never reached the region's project-memory block.
     const deltaMemories = [
-        ...trimmedNewMemories.filter((memory) => !regionRendered.has(memory.id)),
+        ...trimmedNewMemories,
         ...eligibleMemories.filter((memory) => forcedMemoryIds.has(memory.id)),
     ];
     // Deduped identity of the memories this segment renders, for the
@@ -249,16 +248,22 @@ export function decodeRegionVolatileBytes(
 }
 
 /**
- * Serve-side decode: stored bytes verbatim, zero computation, zero live
- * reads beyond the row itself. The epoch guard (a segment must name the
- * region row it was rendered against) lives at the append site, which
- * already holds the session meta.
+ * THE production serve reader (Unit 2 Task 1 contract): decode of persisted
+ * bytes plus the epoch guard — a segment is servable only when its watermark
+ * names the region row being served (an older segment is refused). Called
+ * from the serve site with the session meta it already loaded: stored bytes
+ * verbatim, zero computation, zero live reads beyond the row. The fold and
+ * the bust-lane recompute are the only writers; this is the only reader.
  */
-export function serveRegionVolatile(db: Database, sessionId: string): string | null {
-    const row = db
-        .prepare("SELECT region_volatile_bytes FROM session_meta WHERE session_id = ?")
-        .get(sessionId) as { region_volatile_bytes: Buffer | Uint8Array | null } | undefined;
-    return decodeRegionVolatileBytes(row?.region_volatile_bytes);
+export function serveRegionVolatile(meta: SessionMeta): string | null {
+    if (
+        meta.regionVolatileWatermark === null ||
+        meta.cachedM0MaterializedAt === null ||
+        meta.regionVolatileWatermark !== meta.cachedM0MaterializedAt
+    ) {
+        return null;
+    }
+    return decodeRegionVolatileBytes(meta.regionVolatileBytes);
 }
 
 function readMemoryBlockIds(db: Database, sessionId: string): number[] {
@@ -304,6 +309,20 @@ export function recomputeRegionVolatileSegment(args: {
     const stored = decodeRegionVolatileBytes(meta.regionVolatileBytes);
     if (rendered.text === (stored ?? "")) return null;
     writeRegionVolatile(db, sessionId, rendered.text, meta.cachedM0MaterializedAt);
+    // Hide-filter accounting: the ctx_search hard filter (tools.ts
+    // getVisibleMemoryIds) must hide everything the wire shows. The fold owns
+    // the exact re-derivation (panel ids ∪ fold-volatile ids); the bust-lane
+    // recompute only grows the set for the current region epoch — merged
+    // volatile ids become stale-excess at most until the next fold, which
+    // rewrites the row wholesale.
+    if (rendered.memoryIds.length > 0) {
+        const prior = new Set(readMemoryBlockIds(db, sessionId));
+        for (const id of rendered.memoryIds) prior.add(id);
+        const ids = [...prior].sort((left, right) => left - right);
+        db.prepare(
+            "UPDATE session_meta SET memory_block_count = ?, memory_block_ids = ? WHERE session_id = ?",
+        ).run(ids.length, JSON.stringify(ids), sessionId);
+    }
     sessionLog(
         sessionId,
         `region-volatile recomputed bytes=${rendered.text.length} updates=${rendered.memoryUpdateCount} compartments=${rendered.compartmentCount}`,

@@ -24,7 +24,7 @@ import {
     spawnAgentFromOpenCodeDb,
 } from "./ctx-reduce-availability";
 import { estimateTokens } from "./read-session-formatting";
-import { decodeRegionVolatileBytes } from "./region-volatile";
+import { serveRegionVolatile } from "./region-volatile";
 
 const MAGIC_CONTEXT_MARKER = "## Magic Context";
 const SYSTEM_PROMPT_GUIDANCE_SEPARATOR = "\n\n";
@@ -508,14 +508,8 @@ export function createSystemPromptHashHandler(deps: {
                 // served — a segment rendered against an older region is
                 // refused. Pure decode from the session meta already loaded;
                 // recomputation happens on the bust lane, never here.
-                const volatileText = decodeRegionVolatileBytes(
-                    sessionMetaEarly.regionVolatileBytes,
-                );
-                if (
-                    volatileText !== null &&
-                    sessionMetaEarly.regionVolatileWatermark ===
-                        sessionMetaEarly.cachedM0MaterializedAt
-                ) {
+                const volatileText = serveRegionVolatile(sessionMetaEarly);
+                if (volatileText !== null) {
                     output.system[0] = `${output.system[0]}${SYSTEM_PROMPT_GUIDANCE_SEPARATOR}${volatileText}`;
                 }
             }
