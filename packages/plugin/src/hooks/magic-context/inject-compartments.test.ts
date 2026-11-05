@@ -69,10 +69,12 @@ import { RenderM1InvalidMarkersError } from "./region-render";
 import { renderRegionVolatile } from "./region-volatile";
 
 /**
- * Unit 2 Step 3: the m[1] delta renderers (renderM1 / renderM1WithMetadata /
- * renderRegionM1) died behind their successor — the volatile segment carrier.
- * The delta laws drive renderRegionVolatile directly; this adapter only maps
- * the old (markers, renderedMemoryIds) call shape onto the watermark.
+ * Unit 2 Step 3: the three m[1] delta renderers died behind their successor
+ * — the volatile segment carrier. The delta laws drive renderRegionVolatile
+ * directly; this adapter only maps the old (markers, renderedMemoryIds) call
+ * shape onto the watermark. (The renderer names are not spelled out here:
+ * the carriage deletion census pins that vocabulary dead repo-wide, prose
+ * included.)
  */
 function deltaText(
     options: Parameters<typeof materializeM0>[0],

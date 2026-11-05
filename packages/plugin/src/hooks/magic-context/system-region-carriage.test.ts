@@ -236,20 +236,27 @@ describe("carriage deletion census: plugin test tree is re-expressed", () => {
         "syntheticHeadCount",
         "isSyntheticHeadMessage",
         "isSyntheticPrefixHead",
-        // Unit 2 Task 3: the delta placeholder died with the m[1] renderers.
+        // Unit 2 Task 3: the delta placeholder and the two delta renderers
+        // died with the m[1] pipeline (round-2 R4: they had been in neither
+        // census catalog).
         "M1_EMPTY_PLACEHOLDER",
+        "renderM1",
+        "renderM1WithMetadata",
     ]) {
         it(`${symbol}: zero test references`, () => {
             expect(holders(tests, new RegExp(`\\b${symbol}\\b`))).toEqual([]);
         });
     }
 
-    it("M1_EMPTY_PLACEHOLDER: zero production references (export stays dead)", () => {
-        // The export died in Unit 2 Task 3; the test-tree census above
-        // cannot see a re-introduced DEFINITION (it scans .test.ts and
-        // excludes this file), so the production tree is scanned too.
-        expect(holders(scan(false), /\bM1_EMPTY_PLACEHOLDER\b/)).toEqual([]);
-    });
+    for (const symbol of ["M1_EMPTY_PLACEHOLDER", "renderM1", "renderM1WithMetadata"]) {
+        it(`${symbol}: zero production references (export stays dead)`, () => {
+            // The test-tree census above cannot see a re-introduced
+            // DEFINITION (it scans .test.ts and excludes this file), so the
+            // production tree is scanned too; the committed plant loop below
+            // proves these scans bite on a smuggled export.
+            expect(holders(scan(false), new RegExp(`\\b${symbol}\\b`))).toEqual([]);
+        });
+    }
 
     it("syntheticHead fixtures survive only as adjudicated stray-host witnesses", () => {
         // Re-expression, not deletion: the tail-hygiene and prefix-trim laws
@@ -330,6 +337,28 @@ describe("carriage deletion census: planted rogues bite (controls)", () => {
                 pattern: /mime:\s*"image\/png"/,
                 file: "rogue_mural.ts",
                 body: 'const part = { type: "file", mime: "image/png", url: "x" }; export { part };',
+            },
+            // Round-2 R4: the delta-pipeline vocabulary must bite in the
+            // committed loop, not just in a disclosed run-then-delete control.
+            // \brenderM1\b is case- and boundary-exact: it does not match
+            // RenderM1InvalidMarkersError (live) nor the longer renderer name.
+            {
+                name: "M1_EMPTY_PLACEHOLDER",
+                pattern: /\bM1_EMPTY_PLACEHOLDER\b/,
+                file: "rogue_m1_placeholder.ts",
+                body: 'export const M1_EMPTY_PLACEHOLDER = "<session-history-since/>";',
+            },
+            {
+                name: "renderM1",
+                pattern: /\brenderM1\b/,
+                file: "rogue_render_m1.ts",
+                body: "export function renderM1() { return ''; }",
+            },
+            {
+                name: "renderM1WithMetadata",
+                pattern: /\brenderM1WithMetadata\b/,
+                file: "rogue_render_m1_meta.ts",
+                body: "export function renderM1WithMetadata() { return { text: '' }; }",
             },
         ];
         const dir = createTestTempDir("mc-carriage-rogue-").dir;
