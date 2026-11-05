@@ -10,6 +10,7 @@
 import { describe, expect, it } from "bun:test";
 import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join, relative } from "node:path";
+import ts from "typescript";
 import { CATEGORY_PRIORITY } from "../../features/magic-context/memory/constants";
 import { createTestTempDir } from "../../shared/test-temp-dir";
 import { buildCompartmentAgentPrompt, HISTORIAN_TRANSCRIPT_GUARD } from "./compartment-prompt";
@@ -337,10 +338,65 @@ describe("W7-fence: sanitizer guarded set == builder-emitted wrapper set (two-wa
         return found;
     }
 
-    function assertFenceEquality(emitted: Set<string>, literals: readonly string[]): void {
-        // Two-way: a builder tag outside the constant is undefended; a constant
-        // entry no builder emits is a dead guard string.
-        const missing = [...emitted].filter((t) => !literals.includes(t));
+    // A helper-only scanner sees `historianWrapperOpen("x")` but is blind to a
+    // raw string-literal emission `... + "<rogue_raw>"`: such a tag never enters
+    // `emitted`, so both fence directions stay green while a pasted `</rogue_raw>`
+    // survives undefanged — the exact collision the lock exists to prevent. This
+    // pass collects the tag from every string-literal whose ENTIRE content is a
+    // wrapper tag, via the TypeScript AST (comments never enter the AST; generics
+    // like `Set<string>` and multi-line prompt-schema prose are string tokens, not
+    // whole-tag tokens, so they are correctly excluded — a raw source regex would
+    // flag both, 20+ false "emissions").
+    const BUILDER_TAG_LITERAL = /^<\/?([a-z_][a-z0-9_-]*)\/?>$/;
+    function scanBuilderEmittedTagLiterals(sources: string[]): Set<string> {
+        const found = new Set<string>();
+        for (const [i, source] of sources.entries()) {
+            const sf = ts.createSourceFile(`builder-${i}.ts`, source, ts.ScriptTarget.Latest, true);
+            const visit = (node: ts.Node) => {
+                if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) {
+                    const m = node.text.match(BUILDER_TAG_LITERAL);
+                    if (m?.[1]) found.add(m[1]);
+                }
+                ts.forEachChild(node, visit);
+            };
+            visit(sf);
+        }
+        return found;
+    }
+
+    // Builder-emitted wrapper tags that are DELIBERATELY outside the defang set —
+    // not transcript-paste boundaries, so a forged `</tag>` cannot reach them. Each
+    // entry names the reason it is safe, so the non-defang decision is explicit in
+    // the record rather than emergent from a call-shape-only scanner. A new raw
+    // emission that is neither guarded nor listed here reddens the fence (see the
+    // A2 committed rogue witness).
+    const NON_DEFANG_BUILDER_TAG_LITERALS: ReadonlyMap<string, string> = new Map([
+        [
+            "draft",
+            "buildHistorianEditorPrompt wraps the historian's own model-produced XML draft, never raw transcript paste.",
+        ],
+        [
+            "compartment",
+            "reference-retrieval serializes already-parsed compartments; tier content is XML-escaped via escapeXmlContent (stricter than defang on that path).",
+        ],
+        ["p4", "same serialized-compartment tier tag; content escaped by escapeXmlContent."],
+    ]);
+
+    function assertFenceEquality(
+        emitted: Set<string>,
+        literals: readonly string[],
+        rawEmitted: Set<string> = new Set(),
+    ): void {
+        // Two-way: a builder tag outside the constant (and outside the justified
+        // non-defang allowlist) is undefended — the missing direction, now fed by
+        // BOTH helper calls and raw string-literal emissions; a constant entry no
+        // builder HELPER call emits is a dead guard string — the dead direction,
+        // still helper-driven (an orphan constant is a dead guard, per the loop
+        // record).
+        const all = new Set([...emitted, ...rawEmitted]);
+        const missing = [...all].filter(
+            (t) => !literals.includes(t) && !NON_DEFANG_BUILDER_TAG_LITERALS.has(t),
+        );
         const dead = literals.filter((t) => !emitted.has(t));
         expect({ missing, dead }).toEqual({ missing: [], dead: [] });
     }
@@ -349,7 +405,11 @@ describe("W7-fence: sanitizer guarded set == builder-emitted wrapper set (two-wa
         const tsSources = BUILDER_TS_FILES.map((file) =>
             readFileSync(join(REPO_ROOT, file), "utf8"),
         );
-        assertFenceEquality(scanBuilderEmittedTags(tsSources), HISTORIAN_WRAPPER_LITERAL_TAGS);
+        assertFenceEquality(
+            scanBuilderEmittedTags(tsSources),
+            HISTORIAN_WRAPPER_LITERAL_TAGS,
+            scanBuilderEmittedTagLiterals(tsSources),
+        );
     });
 
     // Rust twin deferred on v2: historian_prompt.rs / boundary.rs /
@@ -364,7 +424,11 @@ describe("W7-fence: sanitizer guarded set == builder-emitted wrapper set (two-wa
         const rsSources = BUILDER_RS_FILES.map((file) =>
             readFileSync(join(REPO_ROOT, file), "utf8"),
         );
-        assertFenceEquality(scanBuilderEmittedTags(rsSources), HISTORIAN_WRAPPER_LITERAL_TAGS);
+        assertFenceEquality(
+            scanBuilderEmittedTags(rsSources),
+            HISTORIAN_WRAPPER_LITERAL_TAGS,
+            scanBuilderEmittedTagLiterals(rsSources),
+        );
     });
 
     it("the category part is loop-emitted from the shared category constant on both lanes", () => {
@@ -416,6 +480,39 @@ describe("W7-fence: sanitizer guarded set == builder-emitted wrapper set (two-wa
                 HISTORIAN_WRAPPER_LITERAL_TAGS,
             ),
         ).toThrow();
+    });
+
+    it("control: a raw string-literal emission of an unguarded tag reddens the missing direction (A2)", () => {
+        // Reviewer variant 4: helper calls all intact, PLUS one extra wrapper tag
+        // emitted as a bare string literal. A call-shape-only scanner is blind to it
+        // (the gate's fourth green), so a pasted `</rogue_raw>` would survive
+        // undefanged. The AST whole-string-literal pass closes it.
+        const variant4 =
+            HISTORIAN_WRAPPER_LITERAL_TAGS.map(
+                (t) =>
+                    `parts.push(historianWrapperOpen("${t}")); parts.push(historianWrapperClose("${t}"));`,
+            ).join("\n") + `\nconst extra = "body " + "<rogue_raw>" + body + "</rogue_raw>";\n`;
+
+        // The gap the amendment closes: the helper scanner never sees the raw tag.
+        const helper = scanBuilderEmittedTags([variant4]);
+        expect(helper).not.toContain("rogue_raw");
+        // Helper-only fence stays GREEN — the evade, now impossible.
+        expect(() => assertFenceEquality(helper, HISTORIAN_WRAPPER_LITERAL_TAGS)).not.toThrow();
+
+        // The AST pass catches it; the missing direction then fires.
+        const raw = scanBuilderEmittedTagLiterals([variant4]);
+        expect(raw).toContain("rogue_raw");
+        expect(() => assertFenceEquality(helper, HISTORIAN_WRAPPER_LITERAL_TAGS, raw)).toThrow();
+
+        // Green control: the three real non-defang builder literals are exactly the
+        // allowlist — minimal and complete; any fourth raw tag would have to be
+        // listed with a reason or it reddens the fence above.
+        const realRaw = [
+            ...scanBuilderEmittedTagLiterals(
+                BUILDER_TS_FILES.map((file) => readFileSync(join(REPO_ROOT, file), "utf8")),
+            ),
+        ].sort();
+        expect(realRaw).toEqual(["compartment", "draft", "p4"]);
     });
 });
 
