@@ -88,6 +88,13 @@ export interface MockResponse {
     /** Optional model name echoed back in the response. Defaults to request's model. */
     model?: string;
     /**
+     * Exact provider message id for the scripted answer (Anthropic messages
+     * path). The oracle scripts per-agent queues with a per-agent
+     * `mockRequestId` prefix so each served response is deterministic and
+     * attributed to its agent.
+     */
+    mockRequestId?: string;
+    /**
      * Return an error response instead of an assistant message.
      * Use this to simulate provider-side failures like context overflow,
      * rate limits, and auth errors. The harness emits an Anthropic-shaped
@@ -111,6 +118,11 @@ export interface CapturedRequest {
     rawBody?: string;
     /** Set when the mock has finished producing the response for this request. */
     responseCompletedAt?: number;
+    /**
+     * Per-agent mockRequestId queue that served this request (oracle unit 2's
+     * classifier queue-prefix lane). Absent when a global script/default served it.
+     */
+    servedByQueue?: string;
     method: string;
     path: string;
     headers: Record<string, string>;
@@ -121,6 +133,29 @@ export interface CapturedRequest {
         tools?: unknown;
         [k: string]: unknown;
     };
+}
+
+/**
+ * A per-agent scripted queue: requests whose body.model matches `model` are
+ * served from this queue and recorded with `prefix` as their serving queue.
+ * When the scripted list runs out the queue's defaultResponse serves; when
+ * neither exists the request falls through to the global chain and carries no
+ * queue attribution.
+ */
+export interface MockAgentQueue {
+    /** Per-agent mockRequestId prefix — recorded on the capture and used for response ids. */
+    prefix: string;
+    /** The agent's distinct mock model id (matches body.model). */
+    model: string;
+    responses: MockResponse[];
+    defaultResponse?: MockResponse;
+}
+
+interface MockAgentQueueState {
+    prefix: string;
+    model: string;
+    responses: MockResponse[];
+    defaultResponse?: MockResponse;
 }
 
 export interface MockServerOptions {
@@ -148,6 +183,7 @@ export class MockProvider {
     private captured: CapturedRequest[] = [];
     private defaultResponse: MockResponse | null = null;
     private matchers: RequestMatcher[] = [];
+    private agentQueues: MockAgentQueueState[] = [];
     private misses = 0;
 
     async start(options: MockServerOptions = {}): Promise<{ port: number; baseURL: string }> {
@@ -194,6 +230,44 @@ export class MockProvider {
         this.matchers.push(matcher);
     }
 
+    /**
+     * Register per-agent scripted queues (oracle unit 2). Responses without an
+     * explicit mockRequestId get the deterministic per-agent prefix id
+     * (`${prefix}-${n}`), so every served response names its agent. Prefixes
+     * and models must be unique — a collapsed queue would mis-attribute a class.
+     */
+    scriptAgentQueues(queues: MockAgentQueue[]): void {
+        const prefixes = new Set<string>();
+        const models = new Set<string>();
+        this.agentQueues = queues.map((queue) => {
+            if (!queue.prefix.trim()) throw new Error("mock agent queue: empty prefix");
+            if (!queue.model.trim()) throw new Error(`mock agent queue ${queue.prefix}: empty model`);
+            if (prefixes.has(queue.prefix))
+                throw new Error(`mock agent queue: duplicate prefix ${queue.prefix}`);
+            if (models.has(queue.model))
+                throw new Error(`mock agent queue: duplicate model ${queue.model}`);
+            prefixes.add(queue.prefix);
+            models.add(queue.model);
+            return {
+                prefix: queue.prefix,
+                model: queue.model,
+                responses: queue.responses.map((response, index) => ({
+                    ...response,
+                    mockRequestId: response.mockRequestId ?? `${queue.prefix}-${index + 1}`,
+                })),
+                ...(queue.defaultResponse
+                    ? {
+                          defaultResponse: {
+                              ...queue.defaultResponse,
+                              mockRequestId:
+                                  queue.defaultResponse.mockRequestId ?? `${queue.prefix}-default`,
+                          },
+                      }
+                    : {}),
+            };
+        });
+    }
+
     /** All captured requests, in order. */
     requests(): CapturedRequest[] {
         return [...this.captured];
@@ -204,12 +278,13 @@ export class MockProvider {
         return this.captured[this.captured.length - 1] ?? null;
     }
 
-    /** Clear queue, captured requests, matchers, and default response. */
+    /** Clear queue, captured requests, matchers, agent queues, and default response. */
     reset(): void {
         this.responses = [];
         this.captured = [];
         this.defaultResponse = null;
         this.matchers = [];
+        this.agentQueues = [];
     }
 
     private async handle(req: Request): Promise<Response> {
@@ -256,6 +331,20 @@ export class MockProvider {
             };
             this.captured.push(captured);
 
+            // Per-agent queue routing (oracle unit 2): the agent's distinct model id
+            // selects its scripted queue, and the serving prefix is recorded on the
+            // capture for the classifier's queue-prefix lane. An exhausted queue
+            // without a default falls through to the global chain unattributed.
+            let queueResponse: MockResponse | null = null;
+            const agentQueue = this.agentQueues.find((entry) => entry.model === body.model);
+            if (agentQueue) {
+                const served = agentQueue.responses.shift() ?? agentQueue.defaultResponse ?? null;
+                if (served) {
+                    queueResponse = served;
+                    captured.servedByQueue = agentQueue.prefix;
+                }
+            }
+
             // Matcher routing: first-match-wins. Matchers can return tailored
             // responses based on request body (e.g. slow down historian calls).
             let matcherResponse: MockResponse | null = null;
@@ -266,7 +355,8 @@ export class MockProvider {
                     break;
                 }
             }
-            const scripted = matcherResponse ?? this.responses.shift() ?? this.defaultResponse;
+            const scripted =
+                queueResponse ?? matcherResponse ?? this.responses.shift() ?? this.defaultResponse;
             if (!scripted) {
                 return new Response(
                     JSON.stringify({
@@ -337,7 +427,8 @@ export class MockProvider {
             }
 
             const wantsStream = body.stream === true;
-            const messageId = `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
+            const messageId =
+                scripted.mockRequestId ?? `msg_${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;
 
             if (wantsStream) {
                 // Emit a minimal but complete Anthropic messages SSE sequence.

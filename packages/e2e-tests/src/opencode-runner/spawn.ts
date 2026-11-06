@@ -116,6 +116,25 @@ export interface SpawnOptions {
     /** Override the mock model's context token limit. Default 200000. */
     modelContextLimit?: number;
     /**
+     * Register additional models on the mock provider without pinning any
+     * agent to them — the differential oracle's per-agent mock model ids are
+     * registered here so every request class has a body.model the classifier
+     * can name. Default: none.
+     */
+    extraMockModels?: Array<{ id: string; contextLimit?: number }>;
+    /**
+     * Model id for OpenCode's `small_model` lane (title generation). Defaults
+     * to the primary mock model; when set it must be a registered mock model,
+     * so title traffic carries a distinct model key for the oracle classifier.
+     */
+    smallModelID?: string;
+    /**
+     * Pin the historian/dreamer hidden agents to distinct registered mock model
+     * ids instead of the host model (`pinMockAgents` keeps children on the host
+     * model by default, which collapses the classifier's model lane).
+     */
+    mockAgentModels?: { historian?: string; dreamer?: string };
+    /**
      * Register a second model on the mock provider and pin the historian to it,
      * so a scenario can keep a small window on the session model while the
      * historian gets a window large enough to hold its prompt, as it does for
@@ -331,6 +350,14 @@ function writeConfigs(
             ...(withHistorianModel && historianModel
                 ? { [historianModel.id]: mockModel(historianModel.id, historianModel.contextLimit) }
                 : {}),
+            ...(withHistorianModel
+                ? Object.fromEntries(
+                      (opts.extraMockModels ?? []).map((model) => [
+                          model.id,
+                          mockModel(model.id, model.contextLimit ?? 200000),
+                      ]),
+                  )
+                : {}),
         },
     });
 
@@ -366,7 +393,43 @@ function writeConfigs(
     // providers absent from the fixture, including automatic small-model calls.
     opencodeConfig.enabled_providers = Object.keys(registeredProviders);
     opencodeConfig.model = `${mockProviderID}/${mockModelID}`;
-    opencodeConfig.small_model = `${mockProviderID}/${mockModelID}`;
+    // Every oracle per-agent model must be registered on the primary mock
+    // provider — an unregistered small_model or agent model would boot-error
+    // late and obscurely, so fail here naming the offender.
+    const registeredMockModelIDs = new Set<string>([
+        mockModelID,
+        ...(historianModel ? [historianModel.id] : []),
+        ...(opts.extraMockModels ?? []).map((model) => model.id),
+    ]);
+    const smallModelID = opts.smallModelID ?? mockModelID;
+    if (!registeredMockModelIDs.has(smallModelID)) {
+        throw new Error(
+            `spawnOpencode: smallModelID ${smallModelID} is not a registered mock model ` +
+                `(registered: ${[...registeredMockModelIDs].join(", ")})`,
+        );
+    }
+    opencodeConfig.small_model = `${mockProviderID}/${smallModelID}`;
+    const mockAgentModels: { historian?: string; dreamer?: string } = {};
+    if (historianModel) mockAgentModels.historian = `${mockProviderID}/${historianModel.id}`;
+    for (const name of ["historian", "dreamer"] as const) {
+        const requested = opts.mockAgentModels?.[name];
+        if (!requested) continue;
+        if (!registeredMockModelIDs.has(requested)) {
+            throw new Error(
+                `spawnOpencode: mockAgentModels.${name} names unregistered mock model ${requested} ` +
+                    `(registered: ${[...registeredMockModelIDs].join(", ")})`,
+            );
+        }
+        const qualified = `${mockProviderID}/${requested}`;
+        const pinned = mockAgentModels[name];
+        if (pinned !== undefined && pinned !== qualified) {
+            throw new Error(
+                `spawnOpencode: mockAgentModels.${name} (${qualified}) conflicts with the ` +
+                    `historianMockModel pin (${pinned})`,
+            );
+        }
+        mockAgentModels[name] = qualified;
+    }
 
     // magic-context defaults tuned for fast triggering in tests. This is the
     // USER-tier config: thresholds live here because project-tier thresholds are
@@ -385,7 +448,7 @@ function writeConfigs(
             opts.magicContextConfig,
             `${mockProviderID}/${mockModelID}`,
             "opencode",
-            historianModel ? { historian: `${mockProviderID}/${historianModel.id}` } : {},
+            mockAgentModels,
         ),
     };
     if (opts.userSubcConnectionFile) {
