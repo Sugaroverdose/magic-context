@@ -11,6 +11,7 @@ import type { PendingOp, TagEntry } from "../../features/magic-context/types";
 import { sessionLog } from "../../shared/logger";
 import { logSlowWriteTransaction } from "../../shared/write-transaction-timing";
 import type { DroppedTokenReduction } from "./dropped-token-estimate";
+import { MESSAGE_DROP_PLACEHOLDER, routeAcceptsEmptyDroppedMessage } from "./sentinel";
 import type { TagTarget } from "./tag-messages";
 import type { ToolDropResult } from "./tool-drop-target";
 import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
@@ -49,37 +50,38 @@ import { SKELETON_REAL_INPUT_MAX_BYTES } from "./tool-input-size";
  */
 export const RECENT_TOOL_SKELETON_WINDOW = 20;
 
-// ONE canonical placeholder for every non-tool (message) drop that needs a
-// filler, on every path, every pass. It is a PURE function of tagId — it reads
-// NO message content, role, or window state. That is the whole point: any
-// version that derived bytes from the current (already-mutated) content
-// re-derived a DIFFERENT placeholder across passes (e.g. `[dropped §N§]` on
-// one pass, `[truncated §N§]\n…` on the next), which on a defer pass changes a
-// tail message's bytes and busts the entire prompt-cache prefix after it. This
-// exact divergence caused repeated cache catastrophes. The bytes here are
-// byte-identical to heuristic-cleanup.ts's `[dropped §${n}§]`, so the two drop
-// paths can never disagree. (We deliberately dropped the old user-text preview
-// variant — a minor nicety that was the sole source of the instability.)
-//
-// This lane mints ONLY the canonical placeholder. A whole-message drop here
-// stays non-empty so the placeholder-strip lane (strip-content.ts) still
-// recognises it by the `[dropped` prefix and records the removal for a
-// byte-identical replay — the recording is what makes the removal stable.
-// The provider-gated empty (`""`) is a STATION concern and lives in
-// `makeWholeMessageSentinel`, which is where a route that truly accepts empty
-// dropped content collapses the sentinel. Feeding `""` through this lane instead
-// would collide with that lane's own idempotency guard (`isSentinel`) and drop
-// the removal off the record.
-//
-// R11 (Unit 5): the frozen `drop_mode` on the tag is the whole answer on a
-// replay — the current route is never consulted (a mid-session route change
-// must not rewrite already-served bytes). A stored `message_empty` (a legacy
-// row) renders empty; every fresh drop freezes `message_filler` (placeholder).
-// The lineage's `[content omitted]` variant is not shipped (census addendum
-// Unit 5), consistent with ARCHITECTURE invariant 2.
-export function buildReplacementContent(tagId: number, frozen?: TagEntry["dropMode"]): string {
-    if (frozen) return frozen === "message_empty" ? "" : `[dropped \u00a7${tagId}\u00a7]`;
-    return `[dropped \u00a7${tagId}\u00a7]`;
+// ONE canonical placeholder for every non-tool (message) drop, on every path,
+// every pass. Constant bytes — it reads NO message content, role, tag number,
+// or window state. That is the whole point: any version that derived bytes from
+// the current (already-mutated) content re-derived a DIFFERENT placeholder across
+// passes (e.g. `[dropped §N§]` on one pass, `[truncated §N§]\n…` on the next),
+// which on a defer pass changes a tail message's bytes and busts the entire
+// prompt-cache prefix after it. This exact divergence caused repeated cache
+// catastrophes. The numeral shape is gone on this branch: the released-tag
+// pattern must not be a permanently resident string in the transcript. The
+// message placeholder is a distinct constant from the tool-result slot: the
+// slot is empty (nothing to imitate), while message text cannot be emptied on
+// non-Anthropic routes, so it keeps a constant non-empty bracketed filler.
+// It must NOT be WHOLE_MESSAGE_PLACEHOLDER_TEXT: that is the
+// post-neutralization sentinel, and isSentinel would pre-skip these messages
+// out of the persisted neutralization set. heuristic-cleanup.ts calls this
+// function, so the two drop paths can never disagree.
+export function buildReplacementContent(
+    _tagId: number,
+    frozen?: TagEntry["dropMode"],
+    providerID?: string,
+    role?: string,
+): string {
+    // R11: the shape is decided once, at apply, and frozen on the tag.
+    // A defined `frozen` value is a replay — the stored mode is the whole
+    // answer, the current route is never consulted (a mid-session route
+    // change must not rewrite already-served bytes). Only a fresh drop
+    // (no frozen mode yet) asks the route gate; the gate is role-aware
+    // because the filtering adapter would erase an emptied user anchor.
+    if (frozen) return frozen === "message_empty" ? "" : MESSAGE_DROP_PLACEHOLDER;
+    return routeAcceptsEmptyDroppedMessage(providerID, role ?? "assistant")
+        ? ""
+        : MESSAGE_DROP_PLACEHOLDER;
 }
 
 export interface NewToolDropOutcome {
@@ -92,7 +94,7 @@ export interface NewToolDropOutcome {
  * Apply a NEW drop of a tool call under the real-or-absent rule and report
  * the mode to persist:
  *  1. inside the newest-call window with a small input: keep the call with its
- *     real arguments, output -> "" (`skeleton_real`);
+ *     real arguments, output -> `[dropped §N§]` (`skeleton_real`);
  *  2. otherwise the source decides: a model stamp erases the call and its
  *     result (`erased`); the sweeper takes the bash-only carrier (`full`),
  *     and every other sweeper tool keeps real arguments with the output gone
@@ -358,6 +360,9 @@ export function applyPendingOperations(
     onTagReduced?: (reduction: DroppedTokenReduction) => void,
     /** Reports why selected operations did or did not change the visible payload. */
     onBatchComplete?: (diagnostics: PendingOperationBatchDiagnostics) => void,
+    /** Route for the R11 message-drop shape decision; only fresh drops
+     * consult it — every later pass replays the mode frozen on the tag. */
+    providerID?: string,
 ): boolean {
     let didMutateMessage = false;
     let diagnostics: PendingOperationBatchDiagnostics | undefined;
@@ -520,12 +525,12 @@ export function applyPendingOperations(
                         shouldPersistDrop = true;
                     }
                 } else if (target) {
-                    // Whole-message drop: this lane mints the canonical
-                    // placeholder only (see buildReplacementContent). The
-                    // removal is recorded by the placeholder-strip lane for a
-                    // byte-identical replay; the provider-gated empty is a
-                    // station concern (makeWholeMessageSentinel), not here.
-                    const replacement = buildReplacementContent(pendingOp.tagId);
+                    const replacement = buildReplacementContent(
+                        pendingOp.tagId,
+                        undefined,
+                        providerID,
+                        target.message?.info?.role,
+                    );
                     messageDropMode = replacement === "" ? "message_empty" : "message_filler";
                     const priorContent = target.getContent?.();
                     const changed = target.setContent(replacement);
@@ -654,8 +659,7 @@ export function applyFlushedStatuses(
                 }
             } else if (target) {
                 // Replay reads the frozen shape; pre-R11 rows carry the
-                // schema default and keep the canonical filler they were
-                // served with (invariant 2's single placeholder string).
+                // schema default and keep the filler they were served with.
                 const changed = target.setContent(
                     buildReplacementContent(tag.tagNumber, tag.dropMode),
                 );
