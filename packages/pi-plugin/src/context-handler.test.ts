@@ -633,7 +633,12 @@ describe("persisted Pi text identity vectors", () => {
 			const seed = createPiTranscript(seedMessages, sessionId, ["entry-m"]);
 			tagTranscript(sessionId, seed, tagger, db);
 			seed.commit();
-			expect(textOf(seedMessages[0])).toBe("§1§ A§2§ B");
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectation pinned the prefix-era state. v1 ref:
+			// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:639.
+			// Sibling-rebind identity is pinned by the plan assertions below.
+			expect(textOf(seedMessages[0])).toBe("AB");
 
 			const survivorMessages = [twoTextMessage("B")];
 			const survivor = createPiTranscript(survivorMessages, sessionId, [
@@ -660,7 +665,11 @@ describe("persisted Pi text identity vectors", () => {
 					content: Array<{ type: string; text?: string }>;
 				}
 			).content;
-			expect(survivorContent[0]?.text).toBe("§3§ B");
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectation pinned the prefix-era state. v1 ref:
+			// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:666.
+			expect(survivorContent[0]?.text).toBe("B");
 			expect(survivorContent[0]?.text?.startsWith("§1§")).toBe(false);
 			const rows = db
 				.prepare(
@@ -809,7 +818,13 @@ describe("Pi fallback tag adoption", () => {
 				entryFingerprintByMessageId: fallbackFingerprints,
 			});
 			fallbackTranscript.commit();
-			expect(textOf(fallbackMessages[0])).toBe("§1§ hello");
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectation pinned the prefix-era state. v1 ref:
+			// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:815.
+			// The §N§ identity this law names is the tag number, pinned by the
+			// getTag assertion below — not wire bytes.
+			expect(textOf(fallbackMessages[0])).toBe("hello");
 			expect(tagger.getTag(sessionId, `${fallbackId}:p0`, "message")).toBe(1);
 
 			// Next pass starts with a data_version-only cache hit after the tagger's
@@ -839,7 +854,11 @@ describe("Pi fallback tag adoption", () => {
 				entryFingerprintByMessageId: realFingerprints,
 			});
 			realTranscript.commit();
-			expect(textOf(realMessages[0])).toBe("§1§ hello");
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectation pinned the prefix-era state. v1 ref:
+			// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:845.
+			expect(textOf(realMessages[0])).toBe("hello");
 
 			// A later data_version-only cache hit must not resurrect the old alias.
 			tagger.initFromDb(sessionId, db);
@@ -907,7 +926,13 @@ describe("Pi fallback tag adoption", () => {
 			});
 			transcript.commit();
 			expect(getTagsBySession(db, sessionId)).toHaveLength(1);
-			expect(textOf(messages[0])).toBe("§7§ raced message");
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectation pinned the prefix-era state. v1 ref:
+			// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:913.
+			// The racing real-id §7§ identity is pinned by the readTagRow and
+			// getTag assertions above — not wire bytes.
+			expect(textOf(messages[0])).toBe("raced message");
 		} finally {
 			closeQuietly(siblingDb);
 			closeQuietly(db);
@@ -1307,7 +1332,13 @@ describe("Pi fallback tag adoption", () => {
 				entryFingerprintByMessageId: new Map([[realId, fingerprint]]),
 			});
 			transcript.commit();
-			expect(textOf(nextPass[0])).toBe("§71§ hello");
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectation pinned the prefix-era state. v1 ref:
+			// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:1313.
+			// The stable real-id §71§ identity is pinned by the readTagRow and
+			// getTag assertions above — not wire bytes.
+			expect(textOf(nextPass[0])).toBe("hello");
 		} finally {
 			closeQuietly(db);
 		}
@@ -1797,9 +1828,14 @@ describe("registerPiContextHandler", () => {
 			expect(toolArguments(3).filePath).toBe("/tmp/edit.ts");
 			expect(String(toolArguments(3).oldString)).toEndWith("...[truncated]");
 			expect(textOf(output[4])).toBe(editSentinel);
-			expect(textOf(output[5])).toBe(
-				`§${activeText.tagNumber}§ keep this active`,
-			);
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectation pinned the prefix-era state. v1 ref:
+			// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:1810.
+			// Surgical-only: the v1 block renders an older drop era
+			// ([content omitted], length 8) — the [dropped §N§]/length-6
+			// contract above stays the current pin; only message bytes move.
+			expect(textOf(output[5])).toBe("keep this active");
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
@@ -2023,9 +2059,14 @@ describe("registerPiContextHandler", () => {
 				fakeContext("ses-context") as never,
 			);
 
-			expect(textOf(result.messages[0] as never)).toMatch(/^§1§ hello/);
-			expect(textOf(result.messages[1] as never)).toMatch(/^§2§ answer/);
-			expect(textOf(result.messages[2] as never)).toMatch(/^§3§ tool output/);
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectations pinned the prefix-era state. v1 refs:
+			// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:2033-2035.
+			// Tag registration below still pins that tagging ran.
+			expect(textOf(result.messages[0] as never)).toBe("hello");
+			expect(textOf(result.messages[1] as never)).toBe("answer");
+			expect(textOf(result.messages[2] as never)).toBe("tool output");
 			expect(
 				getTagsBySession(db, "ses-context").map((tag) => tag.type),
 			).toEqual(["message", "message", "tool", "message"]);
@@ -3159,9 +3200,13 @@ describe("registerPiContextHandler", () => {
 			}
 		}
 
+		// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+		// (stratum port 9f10a1181 removed the materialized §N§ prefixes); the
+		// prefixed expectation pinned the prefix-era state. v1 ref:
+		// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:3251.
 		await expect(runProviderScenario("openai")).resolves.toEqual({
 			reduceStatus: "active",
-			replayedToolResult: "§3§ reduced old tags",
+			replayedToolResult: "reduced old tags",
 		});
 		await expect(runProviderScenario("anthropic", "openai")).resolves.toEqual({
 			reduceStatus: "dropped",
