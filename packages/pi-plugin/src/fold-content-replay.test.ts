@@ -118,7 +118,13 @@ describe("Pi fold content replay", () => {
 				textOf(m as never).includes("+9h 30m"),
 			);
 			expect(reminder).toBeDefined();
-			expect(textOf(reminder as never)).toMatch(/^§\d+§ <!-- \+9h 30m -->$/);
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectation pinned the prefix-era state. v1 ref:
+			// 9c1520810:packages/pi-plugin/src/fold-content-replay.test.ts:121
+			// — content persists raw; the tag prefix is a registry construct,
+			// never baked.
+			expect(textOf(reminder as never)).toMatch(/^<!-- \+9h 30m -->$/);
 			expect(textOf(reminder as never)).not.toContain("BACKGROUND BASH");
 			updateSessionMeta(db, sessionId, {
 				lastResponseTime: Date.now(),
@@ -273,8 +279,15 @@ describe("Pi fold content replay", () => {
 			// Region lane (Unit 7): no synthetic heads — the raw index shifts
 			// forward by the two deleted head slots.
 			const preDeployReminder = textOf(preDeploy.messages[1] as never);
-			expect(preDeployReminder).toMatch(/^§\d+§ <!-- \+10h 30m -->$/);
-			expect(preDeployReminder).toHaveLength(24);
+			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
+			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
+			// the prefixed expectation + length-24 (17-char marker + 7-byte
+			// prefix) pinned the prefix-era state. v1 refs:
+			// 9c1520810:packages/pi-plugin/src/fold-content-replay.test.ts:274-275
+			// — marker-only wire. Surgical-only: the Unit-7 messages[1] index
+			// adaptation above stays; v1's messages[3] is its synthetic-head era.
+			expect(preDeployReminder).toMatch(/^<!-- \+10h 30m -->$/);
+			expect(preDeployReminder).toHaveLength(17);
 			const tag = getTagsBySession(db, sessionId).find(
 				(candidate) => candidate.messageId === "legacy-reminder:p0",
 			);
