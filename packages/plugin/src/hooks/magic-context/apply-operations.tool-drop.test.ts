@@ -488,11 +488,7 @@ describe("apply operations for tool drops", () => {
         expect(didMutate).toBe(true);
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", messageTagId!)?.status).toBe("dropped");
-        // v2 keeps the canonical `[dropped §N§]` filler (invariant 2), not the
-        // lineage's numeral-evicted constant — census Unit 5 disposition.
-        expect(messages[2]?.parts).toEqual([
-            { type: "text", text: `[dropped \u00a7${messageTagId}§]` },
-        ]);
+        expect(messages[2]?.parts).toEqual([{ type: "text", text: "[content omitted]" }]);
     });
 
     it("treats missing tool call as absent and finalizes pending drop", () => {
@@ -796,10 +792,9 @@ describe("apply operations for tool drops", () => {
             expect(getTagById(db, "ses-1", userMsgTagId!)?.status).toBe("dropped");
 
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            // ONE canonical placeholder per tag, pure function of tag id (v2
-            // keeps the numeral: ARCHITECTURE invariant 2; the lineage's
-            // `[content omitted]` numeral-eviction is not shipped — census U5).
-            expect(text).toBe(`[dropped \u00a7${userMsgTagId}§]`);
+            // ONE canonical placeholder — byte-identical regardless of role/content
+            // so it can never flip across passes and bust the prompt cache.
+            expect(text).toBe("[content omitted]");
         });
 
         it("preserves user message shell when flushed dropped status is re-applied", () => {
@@ -831,9 +826,9 @@ describe("apply operations for tool drops", () => {
 
             expect(didMutate).toBe(true);
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            // Flushed-status replay produces the SAME placeholder bytes as the
-            // execute-pass drop — pure function of tag id, no flip across passes.
-            expect(text).toBe(`[dropped \u00a7${userMsgTagId}§]`);
+            // Flushed-status replay produces the SAME canonical placeholder as the
+            // execute-pass drop — byte-identical, no flip across passes.
+            expect(text).toBe("[content omitted]");
         });
 
         it("keeps the full drop as the constant placeholder for assistant messages (no regression)", () => {
@@ -859,9 +854,7 @@ describe("apply operations for tool drops", () => {
             const didMutate = applyPendingOperations("ses-1", db, targets, new Set());
 
             expect(didMutate).toBe(true);
-            expect(messages[1]?.parts).toEqual([
-                { type: "text", text: `[dropped \u00a7${asstMsgTagId}§]` },
-            ]);
+            expect(messages[1]?.parts).toEqual([{ type: "text", text: "[content omitted]" }]);
         });
 
         it("a short user message also drops to the canonical constant placeholder", () => {
@@ -886,7 +879,7 @@ describe("apply operations for tool drops", () => {
             applyPendingOperations("ses-1", db, targets, new Set());
 
             const text = (messages[0]?.parts[0] as { text: string }).text;
-            expect(text).toBe(`[dropped \u00a7${userMsgTagId}§]`);
+            expect(text).toBe("[content omitted]");
         });
     });
 });

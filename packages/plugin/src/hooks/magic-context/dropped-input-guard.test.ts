@@ -14,20 +14,25 @@ import {
 
 const blockedInputs: Array<[string, unknown]> = [
     ["tagged drop sentinel", { command: "[dropped §431§]" }],
+    ["legacy five-character truncation", { command: "which...[truncated]" }],
     ["new dropped marker object", { dropped: "[dropped §431§]" }],
 ];
 
-// Unit 4 (coordinator split item D): the three legacy arms — five-character
-// "...[truncated]" copies, "[3 items]", "[object]" — died with the pre-upgrade
-// session class. v2 is clean-room: no v2 code path mints those shapes into
-// model-copyable transcript bytes (the same sentinel string in
-// module-state-sync's edit-marker SEED payload is internal canonical JSON,
-// never a rendered part; pi's "…[truncated]" uses a Unicode ellipsis and
-// stderr bytes), so recognizing them only refuses legitimate content.
+// Drop-shape doctrine restore (2026-11-06, owner ruling "ONLY m[0,1] placement
+// was allowed to drift"; the five-character `...[truncated]` arm re-joined
+// blockedInputs above): the Unit 4 split-item-D premise that "no v2 code path
+// mints those shapes" is falsified for the truncation copy — edit-marker.ts is
+// byte-identical to 9c1520810 and LIVE: tag-transcript.ts editMarker() →
+// applyEditMarkerToInput renders `${clamp}...[truncated]` into model-visible
+// tool-input bytes on the edit_marker drop mode, exactly as base does, so a
+// model copy of it is a copy of a live minted shape and must be refused.
+// The two arms that stay dead are genuinely never minted by base OR v2 (no v1
+// production site renders "[object]" or "[N items]" — rg-verified; they were
+// pre-upgrade wire archaeology): census "Dead tag-strip family removal
+// (#2812)" + Unit 4 addendum.
 const notBlockedInputs: Array<[string, unknown]> = [
-    ["five-character truncation copy (no v2 minter)", { command: "which...[truncated]" }],
-    ["array-summary-shaped string (no v2 minter)", { files: "[3 items]" }],
-    ["object-summary-shaped string (no v2 minter)", { metadata: "[object]" }],
+    ["array-summary-shaped string (no base or v2 minter)", { files: "[3 items]" }],
+    ["object-summary-shaped string (no base or v2 minter)", { metadata: "[object]" }],
 ];
 
 const bashSchema = {
@@ -56,7 +61,7 @@ describe("dropped input execution guard", () => {
     it("walks nested input without mistaking explanatory prose for a placeholder", () => {
         expect(
             containsDroppedInputPlaceholder({ nested: [{ value: "abcde...[truncated]" }] }),
-        ).toBe(false);
+        ).toBe(true);
         expect(
             containsDroppedInputPlaceholder({
                 content: "The log used ...[truncated] before the final retry.",
@@ -231,22 +236,21 @@ describe("consecutive dropped input refusals", () => {
 });
 
 // Unit 4 dead-arm census (coordinator split item D, #2780 committed-rogue
-// form): the pre-upgrade recognition arms stay dead in the production file.
-// The census laws match the arm texts against the production source string
-// directly — that is the bite: a re-added arm reddens its law on the real
-// tree. The witness loop verifies each law's needle by re-injecting the arm
-// text into an in-memory clone of the source and requiring the same
-// containment check to fire — it proves the needle can observe the arm
-// (a needle matching nothing is not a census), not a separate detector run.
+// form) — narrowed 2026-11-06 by the drop-shape doctrine restore: the
+// five-character `...[truncated]` matcher rejoined production (edit-marker.ts
+// live-mints that exact shape into model-visible edit_marker tool input, base
+// behavior; see the blockedInputs note above), leaving only the two arms that
+// NEITHER base nor v2 ever mints. The census laws match the arm texts against
+// the production source string directly — that is the bite: a re-added arm
+// reddens its law on the real tree. The witness loop verifies each law's
+// needle by re-injecting the arm text into an in-memory clone of the source
+// and requiring the same containment check to fire — it proves the needle can
+// observe the arm (a needle matching nothing is not a census), not a separate
+// detector run.
 describe("dropped-input-guard dead-arm census", () => {
     const source = readFileSync(new URL("./dropped-input-guard.ts", import.meta.url), "utf8");
 
     const deadArms: Array<[string, string, string]> = [
-        [
-            "five-character truncation matcher",
-            "\\[truncated\\]$/",
-            "const LEGACY = /^[\\s\\S]{0,5}\\.\\.\\.\\[truncated\\]$/;",
-        ],
         ["object-summary arm", '=== "[object]"', 'value === "[object]" ||'],
         ["array-summary arm", "\\d+ items\\]", "/^\\[\\d+ items\\]$/.test(value) ||"],
     ];
@@ -263,5 +267,13 @@ describe("dropped-input-guard dead-arm census", () => {
 
     it("the canonical tagged-placeholder matcher survives", () => {
         expect(source.includes('startsWith("[dropped \u00a7")')).toBe(true);
+    });
+
+    it("the restored five-character truncation matcher survives", () => {
+        // Drop-shape doctrine restore (2026-11-06): edit_marker mints the
+        // shape via edit-marker.ts TRUNCATION_SENTINEL on both trees, so the
+        // recognizer arm must live in production — this is the base form
+        // (9c1520810 dropped-input-guard.ts:8, :22).
+        expect(source.includes("LEGACY_TRUNCATED_VALUE.test(value)")).toBe(true);
     });
 });
