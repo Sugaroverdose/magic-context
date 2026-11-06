@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { readdirSync, readFileSync } from "node:fs";
+import { basename, join } from "node:path";
 import {
 	ORACLE_WIRE_WHITELIST,
 	canonicalizeProviderBody,
@@ -23,6 +23,63 @@ import {
  *    block; deleting the record reddens this file.
  */
 const NORMALIZATION_SOURCE = readFileSync(join(import.meta.dir, "normalization.ts"), "utf8");
+
+/**
+ * The live compare homes since the unit-2 leg-runner extraction (8fec40801):
+ * every canonicalizeProviderBody call must live in one of these files and pair
+ * with committedWhitelistNames(). The set is ENFORCED, not decorative: the
+ * census walks the whole oracle area and any call site in a non-enumerated
+ * file is an offender (control plant (b) witnesses exactly that).
+ */
+const COMPARE_FILES: readonly string[] = [
+	join(import.meta.dir, "../../../tests/oracle-determinism.test.ts"),
+	join(import.meta.dir, "../classify/leg-runner.ts"),
+];
+/** The committed table path: definition + its own law (self-references). */
+const TABLE_PATH_NAMES: readonly string[] = ["normalization.ts", "normalization-law.test.ts"];
+
+function walkOracleArea(): string[] {
+	const files: string[] = [];
+	const walk = (dir: string): void => {
+		for (const dirent of readdirSync(dir, { withFileTypes: true })) {
+			const path = join(dir, dirent.name);
+			if (dirent.isDirectory()) walk(path);
+			else if (dirent.isFile() && dirent.name.endsWith(".ts")) files.push(path);
+		}
+	};
+	walk(join(import.meta.dir, ".."));
+	const testsDir = join(import.meta.dir, "../../../tests");
+	for (const name of readdirSync(testsDir)) {
+		if (/^oracle-.*\.test\.ts$/.test(name)) files.push(join(testsDir, name));
+	}
+	return files;
+}
+
+/** Census over source texts (parameterized so committed control plants can drive it). */
+function censusCompareFiles(sources: Map<string, string>): { offenders: string[]; totalCalls: number } {
+	const offenders: string[] = [];
+	let totalCalls = 0;
+	for (const [file, source] of sources) {
+		if (TABLE_PATH_NAMES.includes(basename(file))) continue;
+		if (source.includes("ORACLE_WIRE_WHITELIST")) {
+			offenders.push(`${file}: consumes ORACLE_WIRE_WHITELIST outside the committed table path`);
+		}
+		const calls = source.match(/canonicalizeProviderBody\s*\(/g) ?? [];
+		if (calls.length === 0) continue;
+		if (!COMPARE_FILES.includes(file)) {
+			offenders.push(`${file}: canonicalizeProviderBody call site in a non-enumerated oracle file`);
+			continue;
+		}
+		const paired = source.match(/canonicalizeProviderBody\s*\([^\n]*committedWhitelistNames\(\)/g) ?? [];
+		if (paired.length !== calls.length) {
+			offenders.push(
+				`${file}: ${calls.length} canonicalizeProviderBody call sites, only ${paired.length} paired with committedWhitelistNames()`,
+			);
+		}
+		totalCalls += calls.length;
+	}
+	return { offenders, totalCalls };
+}
 
 describe("oracle whitelist law", () => {
 	it("hygiene: every committed rule names its producer and reason", () => {
@@ -73,20 +130,42 @@ describe("oracle whitelist law", () => {
 		expect(firstDiffByte("abc", "abc")).toBeNull();
 	});
 
-	it("N3: the compare site consumes only committedWhitelistNames()", () => {
-		const compareSource = readFileSync(
-			join(import.meta.dir, "../../../tests/oracle-determinism.test.ts"),
-			"utf8",
+	it("N3: every canonicalizeProviderBody call site is an enumerated compare file paired with committedWhitelistNames()", () => {
+		const area = walkOracleArea();
+		// Membership floors: both enumerated compare homes exist in the walked
+		// area — a moved-away file reddens by name, not silently zero.
+		for (const file of COMPARE_FILES) expect(area).toContain(file);
+		const sources = new Map(area.map((file) => [file, readFileSync(file, "utf8")]));
+		const { offenders, totalCalls } = censusCompareFiles(sources);
+		expect(offenders).toEqual([]);
+		expect(totalCalls).toBeGreaterThan(0);
+	});
+
+	it("N3 control plants (committed witnesses): unpaired call in a compare file and any call in a non-enumerated oracle file both redden the census", () => {
+		const area = walkOracleArea();
+		const sources = new Map(area.map((f) => [f, readFileSync(f, "utf8")]));
+		const baseline = censusCompareFiles(sources);
+		expect(baseline.offenders).toEqual([]);
+
+		// (a) the leg-runner compare call without the committedWhitelistNames arg.
+		const legRunnerPath = join(import.meta.dir, "../classify/leg-runner.ts");
+		const legRunner = readFileSync(legRunnerPath, "utf8");
+		const unpaired = legRunner.replace(
+			"canonicalizeProviderBody(raw, committedWhitelistNames())",
+			'canonicalizeProviderBody(raw, ["silent-addition-rogue"])',
 		);
-		// No second rule-name source at the compare site: the committed table is
-		// reached only through committedWhitelistNames().
-		expect(compareSource).not.toContain("ORACLE_WIRE_WHITELIST");
-		const callSites = compareSource.match(/canonicalizeProviderBody\s*\(/g) ?? [];
-		const pairedWithCommitted = compareSource.match(
-			/canonicalizeProviderBody\s*\([^\n]*committedWhitelistNames\(\)/g,
-		) ?? [];
-		expect(callSites.length).toBeGreaterThan(0);
-		expect(pairedWithCommitted.length).toBe(callSites.length);
+		expect(unpaired).not.toBe(legRunner); // the plant must actually land
+		const plantA = censusCompareFiles(new Map([...sources, [legRunnerPath, unpaired]]));
+		expect(plantA.offenders.join("\n")).toContain("paired with committedWhitelistNames()");
+
+		// (b) a call planted in an oracle file the set does not enumerate: the
+		// census reddens on set membership, proving the set is enforced.
+		const comparePath = join(import.meta.dir, "../classify/compare.ts");
+		expect(area).toContain(comparePath);
+		expect(COMPARE_FILES).not.toContain(comparePath);
+		const plantedCompare = `${readFileSync(comparePath, "utf8")}\nexport const rogueCompare = (raw: string): string => canonicalizeProviderBody(raw, committedWhitelistNames());\n`;
+		const plantB = censusCompareFiles(new Map([...sources, [comparePath, plantedCompare]]));
+		expect(plantB.offenders.join("\n")).toContain("non-enumerated oracle file");
 	});
 
 	it("N2: the unpatched-surface obligations remain recorded in source", () => {
