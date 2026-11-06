@@ -440,9 +440,7 @@ describe("apply operations for tool drops", () => {
         expect(didMutate).toBe(false);
         expect(getPendingOps(db, "ses-1")).toHaveLength(1);
         expect(getTagById(db, "ses-1", messageTagId!)?.status).toBe("active");
-        // v2 keeps the §N§ tag prefix on un-dropped text (assembly-side strip
-        // is not this branch's behavior).
-        expect(messages[4]?.parts).toEqual([{ type: "text", text: "§5§ five" }]);
+        expect(messages[4]?.parts).toEqual([{ type: "text", text: "five" }]);
     });
 
     it("applies deferred pending drops once they leave the protected range", () => {
@@ -767,7 +765,7 @@ describe("apply operations for tool drops", () => {
         expect(didMutate).toBe(false);
         expect(getPendingOps(db, "ses-1")).toHaveLength(0);
         expect(getTagById(db, "ses-1", messageTagId!)?.status).toBe("compacted");
-        expect(messages[1]?.parts).toEqual([{ type: "text", text: "§2§ reduce me later" }]);
+        expect(messages[1]?.parts).toEqual([{ type: "text", text: "reduce me later" }]);
     });
 
     describe("role-aware message drops (canonical constant placeholder)", () => {

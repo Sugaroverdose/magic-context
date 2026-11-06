@@ -396,8 +396,8 @@ describe("tagTranscript tool aggregation", () => {
         expect(newTag).toBeDefined();
         expect(oldTag).not.toBe(newTag);
         expect(reused.targets.size).toBe(2);
-        expect(reusedParts.oldResult.getText()).toBe(`§${oldTag}§ old result`);
-        expect(reusedParts.newResult.getText()).toBe(`§${newTag}§ new result`);
+        expect(reusedParts.oldResult.getText()).toBe("old result");
+        expect(reusedParts.newResult.getText()).toBe("new result");
         expect(reuseDb.byteSizeUpdates).toEqual([]);
     });
 
@@ -444,7 +444,7 @@ describe("tagTranscript tool aggregation", () => {
         );
 
         const tag = tagger.getToolTag("session-late-result", callId, "assistant-owner");
-        expect(result.getText()).toBe(`§${tag}§ late output`);
+        expect(result.getText()).toBe("late output");
         expect(db.byteSizeUpdates.some((update) => update.tagNumber === tag)).toBe(true);
     });
 
