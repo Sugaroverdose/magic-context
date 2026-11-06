@@ -3210,7 +3210,18 @@ describe("registerPiContextHandler", () => {
 		});
 		await expect(runProviderScenario("anthropic", "openai")).resolves.toEqual({
 			reduceStatus: "dropped",
-			replayedToolResult: "",
+			// Drop-era re-pin (2026-11-06, N2): with sweeper provenance restored
+			// at the stale ctx_reduce arm (v1 9c1520810 heuristic-cleanup-pi.ts:499,
+			// 3430b4ead), the non-bash released pair replays skeleton_real and the
+			// result slot takes the canonical placeholder (tag-transcript.ts
+			// skeletonReal :1126-1142) — v1's same law at
+			// 9c1520810:context-handler.test.ts:3251 pinned "" because v1's
+			// tag-transcript minted TOOL_RELEASED_SENTINEL there (:1136-1142),
+			// declined by the v2 canonical-placeholder ruling (census Unit-8
+			// addendum note). Same class as the census row-108 dropped-only-replay
+			// precedent. The gate this law exists to pin — active under openai,
+			// dropped under anthropic, byte-stable replay — is unchanged.
+			replayedToolResult: "[dropped §3§]",
 		});
 	});
 

@@ -497,7 +497,18 @@ describe("applyPiHeuristicCleanup", () => {
 				}
 			).content.find((p) => p.type === "toolCall")!;
 			expect(Object.keys(reducedCall.arguments!)).toEqual([]);
-			expect(textOf(replayed[2] as never)).toBe("");
+			// Surgical drop-era exception (2026-11-06, same class as the census
+			// row-108 dropped-only-replay precedent): v1 @ 9c1520810 replays the
+			// released slot as "" (this law at :500, minted by v1
+			// tag-transcript.ts skeletonReal :1136-1142 with
+			// TOOL_RELEASED_SENTINEL); the current v2 drop contract mints the
+			// canonical placeholder there (tag-transcript.ts skeletonReal
+			// :1126-1142, :1132) — ruled in the census Unit-8 addendum note
+			// ("v2 declines both carrier and sentinel in those paths and mints
+			// only the canonical placeholder"). The sweeper shape this law
+			// exists to pin is the args-stay half above, which holds on both
+			// trees.
+			expect(textOf(replayed[2] as never)).toBe("[dropped §3§]");
 		} finally {
 			closeQuietly(db);
 		}
