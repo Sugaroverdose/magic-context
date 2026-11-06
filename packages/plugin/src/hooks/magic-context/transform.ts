@@ -2146,12 +2146,6 @@ export function createTransform(deps: TransformDeps) {
                 // the identical live-wire floor.
                 deps.tagger.initFromDb(sessionId, db, taggerFloor);
                 logTransformTiming(sessionId, "tag.initFromDb", tInitFromDb);
-                // Skip §N§ prefix injection only when ctx_reduce is unavailable in
-                // this session's tool allow-list. Subagents with the tool DO get
-                // prefixes now — they self-manage tool bloat. DB tag records are
-                // maintained either way so heuristics and drops continue to work;
-                // only the agent-visible prefix is gated.
-                const skipPrefixInjection = !ctxReduceCallable;
                 // History preparation trims a prefix before the compaction marker is
                 // written later in this pass. OpenCode uses that new marker to build
                 // the next request, where rows hidden only from this transform can
@@ -2171,7 +2165,6 @@ export function createTransform(deps: TransformDeps) {
                     ? true
                     : createPreAdoptionToolSweepResolver(db, sessionId);
                 const result = tagMessages(sessionId, messagesForTagging, deps.tagger, db, {
-                    skipPrefixInjection,
                     scopedToolSweep,
                     servedMessages: messages,
                 });

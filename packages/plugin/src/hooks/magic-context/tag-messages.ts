@@ -251,13 +251,6 @@ export interface ThinkingLikePart {
 
 export type MessageLike = { info: MessageInfo; parts: unknown[] };
 
-export interface TagNormalizationTarget {
-    tagNumber: number;
-    message: MessageLike;
-    part: unknown;
-    field: "text" | "tool_state_output" | "tool_result_content";
-}
-
 export type TagTarget = {
     /** Non-mutating count of current and replacement token-bearing fields for a planned drop. */
     measureReclaim?: (skeleton: boolean) => {
@@ -333,8 +326,6 @@ export interface TagMessagesResult {
     hasRecentReduceCall: boolean;
     /** Whether recent assistant messages contain git commit hash patterns */
     hasRecentCommit: boolean;
-    /** Exact part references that received a Magic Context tag prefix while tagMessages processed them. */
-    normalizationTargets: TagNormalizationTarget[];
 }
 
 function collectRelevantSourceTagIds(
@@ -448,15 +439,6 @@ function extractToolTagMetadata(part: unknown): {
 
 export interface TagMessagesOptions {
     /**
-     * When true, skip injecting §N§ prefix into message text/tool output parts.
-     * DB-level tag records are still created normally — this flag only affects
-     * whether the agent-visible part content gets the tag prefix. Used when
-     * the session's tool allow-list denies ctx_reduce so agents don't see tag
-     * markers they can't act on. Cache-safe: the availability verdict is frozen
-     * per session, so message shape stays stable.
-     */
-    skipPrefixInjection?: boolean;
-    /**
      * Prune only tool-drop owners; callers enable this after persisting
      * cache-safe session adoption. A resolver defers the choice to finalize
      * time, where both candidate arrays are known (see
@@ -501,10 +483,8 @@ export function tagMessages(
     db: ContextDatabase,
     options: TagMessagesOptions = {},
 ): TagMessagesResult {
-    const skipPrefixInjection = options.skipPrefixInjection === true;
     const onToolOwnerFallbackLookup = options.onToolOwnerFallbackLookup;
     const targets = new Map<number, TagTarget>();
-    const normalizationTargets: TagNormalizationTarget[] = [];
     const reasoningByMessage = new Map<MessageLike, ThinkingLikePart[]>();
     const messageTagNumbers = new Map<MessageLike, number>();
     // v3.3.1 Layer C: keys are composite `<ownerMsgId>\x00<callId>`,
@@ -876,8 +856,8 @@ export function tagMessages(
                         null,
                         0,
                         null,
-                        // Lazy: only fires on fresh insert. textPart.text is still the
-                        // pre-prefix source here (prependTag runs after assign).
+                        // Lazy: only fires on fresh insert. textPart.text is
+                        // still the source the wire carries.
                         () => ({
                             tokenCount: estimateTextTagTokenCount(stripTagPrefix(textPart.text)),
                             inputTokenCount: null,
@@ -908,15 +888,6 @@ export function tagMessages(
                     message,
                     Math.max(messageTagNumbers.get(message) ?? 0, tagId),
                 );
-                if (!skipPrefixInjection) {
-                    // ctx_reduce v1: no materialized wire prefix; target still registered.
-                    normalizationTargets.push({
-                        tagNumber: tagId,
-                        message,
-                        part: textPart,
-                        field: "text",
-                    });
-                }
                 targets.set(tagId, {
                     message,
                     textPrefix: "",
@@ -1002,15 +973,6 @@ export function tagMessages(
                     message,
                     Math.max(messageTagNumbers.get(message) ?? 0, tagId),
                 );
-                if (!skipPrefixInjection) {
-                    // ctx_reduce v1: no materialized wire prefix; target still registered.
-                    normalizationTargets.push({
-                        tagNumber: tagId,
-                        message,
-                        part: toolPart,
-                        field: "tool_state_output",
-                    });
-                }
                 toolTagByCallId.set(compositeKey, tagId);
                 if (thinkingParts.length > 0 && !toolThinkingByCallId.has(compositeKey)) {
                     toolThinkingByCallId.set(compositeKey, thinkingParts);
@@ -1127,6 +1089,5 @@ export function tagMessages(
         batch,
         hasRecentReduceCall,
         hasRecentCommit: commitDetected,
-        normalizationTargets,
     };
 }

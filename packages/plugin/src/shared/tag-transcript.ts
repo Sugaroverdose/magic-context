@@ -42,7 +42,8 @@
  *   - `Tagger` (DB-backed counter + assignment store).
  *   - `applyPendingOperations` (operates on `Map<number, TagTarget>`).
  *   - `applyFlushedStatuses` (same).
- *   - Tag prefix primitives (`prependTag`, `stripTagPrefix`, `byteSize`).
+ *   - Tag prefix primitives (`stripTagPrefix`, `stripWellFormedLeadingTagPrefix`,
+ *     `byteSize`).
  */
 
 import { createHash } from "node:crypto";
