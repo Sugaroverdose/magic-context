@@ -17,6 +17,7 @@ import {
     contextUsagePassSnapshot,
     loadContextUsage,
     resolveUnknownUsageFromWireEstimate,
+    seedPersistedUsageAtBoot,
 } from "./transform-context-state";
 
 const tempDirs: string[] = [];
@@ -332,5 +333,58 @@ describe("computeHardCacheExpired finite boundary parity", () => {
         const ttl = 5 * 60 * 1000;
         expect(computeHardCacheExpired("5m", now - ttl, now)).toBe(false);
         expect(computeHardCacheExpired("5m", now - ttl - 1, now)).toBe(true);
+    });
+});
+
+describe("seedPersistedUsageAtBoot", () => {
+    it("seeds a cold boot from the persisted provider usage instead of the usable-hard estimate", () => {
+        expect(
+            seedPersistedUsageAtBoot({
+                persistedUsage: {
+                    usage: { percentage: 62, inputTokens: 142_095 },
+                    updatedAt: Date.now(),
+                    lastObservedModelKey: "ninfer:qwen3.8-27b",
+                    lastUsageContextLimit: 262_144,
+                },
+                currentModelKey: "ninfer:qwen3.8-27b",
+            }),
+        ).toEqual({ percentage: 62, inputTokens: 142_095 });
+    });
+
+    it("returns null without a persisted record so the estimate path still runs on a first pass", () => {
+        expect(
+            seedPersistedUsageAtBoot({
+                persistedUsage: null,
+                currentModelKey: "ninfer:qwen3.8-27b",
+            }),
+        ).toBeNull();
+    });
+
+    it("returns null across a model switch because the persisted percentage is model-bound", () => {
+        expect(
+            seedPersistedUsageAtBoot({
+                persistedUsage: {
+                    usage: { percentage: 62, inputTokens: 142_095 },
+                    updatedAt: Date.now(),
+                    lastObservedModelKey: "ninfer:qwen3.8-27b",
+                    lastUsageContextLimit: 262_144,
+                },
+                currentModelKey: "openai:gpt-4o",
+            }),
+        ).toBeNull();
+    });
+
+    it("seeds when the persisted record carries no model key", () => {
+        expect(
+            seedPersistedUsageAtBoot({
+                persistedUsage: {
+                    usage: { percentage: 40, inputTokens: 80_000 },
+                    updatedAt: Date.now(),
+                    lastObservedModelKey: "",
+                    lastUsageContextLimit: 262_144,
+                },
+                currentModelKey: "ninfer:qwen3.8-27b",
+            }),
+        ).toEqual({ percentage: 40, inputTokens: 80_000 });
     });
 });
