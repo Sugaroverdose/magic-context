@@ -8,7 +8,8 @@
  * isMagicContextInternalAgent, "Literal substrings (not fuzzy)") pin the host
  * title frame and the historian/dreamer identity frames; the dreamer list adds
  * the retrospective opener. The law file re-checks every marker against the
- * plugin production source, so a prompt edit reddens the law, not a live run.
+ * plugin production source — a presence-only text law: wholesale marker
+ * removal reddens it; an edit that preserves the literal does not.
  */
 import {
 	buildClassifierPolicy,

@@ -125,13 +125,16 @@ describe("oracle unit 2: classified live capture (OC1 legs)", () => {
 			// Scope honesty: for historian/dreamer/internal-completion this is a
 			// compared fact — the internals are disabled in the leg config, so a
 			// regression that re-enables them lands in the capture and reddens.
-			// For embedding the zero is STRUCTURAL SILENCE, not a compared fact:
-			// the mock never captures /embeddings (server.ts matches only
-			// messages/responses/chat-completions) and the default embedding
-			// provider runs local in-process, so no embedding request can reach
-			// this wire under any plugin regression. What IS mechanically verified
-			// for embedding: it is in the classifier class vocabulary and marked
-			// disabled in the committed policy — asserted below.
+			// For embedding the zero is STRUCTURAL SILENCE on its native path,
+			// not a compared fact: the mock captures only the
+			// messages/responses/chat-completions paths (server.ts matches) and
+			// the default embedding provider runs local in-process, so an
+			// embedding call on /embeddings can never appear here. Scoped
+			// counter-case: a misrouted embedding call POSTing to /v1/messages
+			// WOULD be captured — it would classify by model/queue and become a
+			// compared fact (or an unclassified throw). What IS mechanically
+			// verified for embedding: it is in the classifier class vocabulary
+			// and marked disabled in the committed policy — asserted below.
 			expect(ORACLE_REQUEST_CLASSES).toContain("embedding");
 			expect(ORACLE_DISABLED_INTERNAL_CLASSES).toContain("embedding");
 			assertDisabledClassesAbsent(legOne, legTwo, ORACLE_DISABLED_INTERNAL_CLASSES);

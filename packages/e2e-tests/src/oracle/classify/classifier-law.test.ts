@@ -200,15 +200,17 @@ describe("oracle unit 2: request classifier plants", () => {
 			walk(pluginSrc);
 			return text;
 		})();
-		// Exact guarantee: every committed marker is still PRESENT SOMEWHERE in
-		// the concatenated plugin production source. Wholesale removal of a marker
-		// trips this law; relocation of a marker between plugin producer files does
-		// NOT (the mechanism is `productionText.includes(marker)` over the whole
-		// tree — the title frame occurs in ~10 prompt files, so producer identity
-		// is deliberately not pinned here). The live-capture classification
-		// (oracle-classified-capture.test.ts) is the tripwire for what this text
-		// law cannot see: a marker that survives in an inert string while the real
-		// prompt stops carrying it.
+		// Presence-only text law: every committed marker must still appear
+		// somewhere in the concatenated plugin production source. Wholesale
+		// removal of a marker trips it; relocation between producer files does
+		// not, and neither does a producer that stops carrying the marker while
+		// the literal survives in any other string. NO live assertion currently
+		// covers marker truth: classifyOracleRequest returns on the model/queue
+		// lanes before the marker scan (classifier.ts:129-130), and the live
+		// capture registers every class's model and queue, so the marker lane is
+		// never exercised on the wire. Known gap, recorded here deliberately: if
+		// a marker's producer stops carrying it while the literal survives
+		// anywhere, nothing in unit 2 reddens.
 		for (const cls of ["title", "historian", "dreamer"] as const) {
 			const markers = ORACLE_SYSTEM_PROMPT_MARKERS[cls] ?? [];
 			expect(markers.length).toBeGreaterThan(0);
