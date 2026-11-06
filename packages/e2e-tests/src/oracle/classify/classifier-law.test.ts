@@ -119,7 +119,7 @@ describe("oracle unit 2: request classifier plants", () => {
 				}),
 				POLICY,
 			),
-		).toThrow(/ambigui/);
+		).toThrow(/ambigu/);
 	});
 
 	it("plant: two class markers in one system prompt is ambiguity, not first-match", () => {
@@ -132,7 +132,7 @@ describe("oracle unit 2: request classifier plants", () => {
 				}),
 				POLICY,
 			),
-		).toThrow(/ambigui/);
+		).toThrow(/ambigu/);
 	});
 
 	it("policy hygiene: off-vocabulary classes and empty markers redden at build time", () => {
