@@ -1138,6 +1138,9 @@ export function buildRegionMuralMessage(args: {
             time: { created: 0 },
             synthetic: true,
         },
-        parts: [{ type: "file", mime: "image/png", url: dataUrl }],
+        // Part-level synthetic: the host's ensureTitle gate reads the part
+        // flag, not the message-level one (issue #129; 9c1520810 base site
+        // inject-compartments.ts:3469 carries it).
+        parts: [{ type: "file", mime: "image/png", url: dataUrl, synthetic: true }],
     };
 }
