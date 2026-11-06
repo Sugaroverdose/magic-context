@@ -9,13 +9,15 @@
  * setHarness("pi") died with "harness already locked to "omp"".
  *
  * These laws are the planted-rogue witnesses: removing (or loosening) the
- * TEST_RUNNER_ENTRY_PATTERN exclusion in pi-harness-kind.ts reddens them.
+ * TEST_RUNNER_ENTRY_PATTERN exclusion in pi-harness-kind.ts reddens them;
+ * the symlink-alias rows specifically pin the realpath leg (deleting only
+ * that leg reddens them while the requestedPath rows stay green).
  * The real-host controls pin the boundary — the exclusion is by filename
  * shape, never by location, so detection through the very same dev tree
  * still works for non-test-shaped host entries.
  */
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PI_IMAGE_NAMES } from "@magic-context/core/shared/pi-executable";
@@ -92,6 +94,32 @@ function defectTree(entryFileName: string, hostPackageName?: string): string {
 	return entry;
 }
 
+/**
+ * Symlink-alias tree: argv[1] is `install/alias.js` (requestedPath is NOT
+ * test-shaped) whose realpath resolves to `install/index.test.ts` (the
+ * executing test file). Only the realpath leg of the exclusion can catch
+ * this shape; deleting just that leg reddens these rows. `realHost` is a
+ * non-test-shaped sibling proving the same tree still detects a real host.
+ */
+function defectTreeWithSymlink(hostPackageName?: string): {
+	alias: string;
+	realHost: string;
+} {
+	const root = temporaryRoot();
+	const install = join(root, "install");
+	mkdirSync(install, { recursive: true });
+	writeJson(join(root, "package.json"), {
+		name: hostPackageName ?? "package-under-test",
+	});
+	writeEsmOnlyOmpUtils(join(root, "node_modules"));
+	writeFileSync(join(install, "index.test.ts"), "// executing test file\n");
+	const alias = join(install, "alias.js");
+	symlinkSync("index.test.ts", alias);
+	const realHost = join(install, "real-host.js");
+	writeFileSync(realHost, "// real host entry\n");
+	return { alias, realHost };
+}
+
 beforeEach(() => {
 	__setPiHarnessKindForTesting(undefined);
 	process.title = "magic-context-test";
@@ -160,6 +188,40 @@ describe("LAW: test-runner-shaped argv[1] contributes no host entry", () => {
 			via: "package-name",
 		});
 	});
+
+	it("symlink alias of the executing test file contributes no host entry (app-name rung)", async () => {
+		process.argv[1] = defectTreeWithSymlink().alias;
+		expect(await resolvePiHarnessDetection()).toEqual({
+			kind: "pi",
+			via: "default",
+		});
+	});
+
+	it("symlink alias of the executing test file contributes no host entry (package-name rung)", async () => {
+		process.argv[1] = defectTreeWithSymlink("@oh-my-pi/pi-coding-agent").alias;
+		expect(await resolvePiHarnessDetection()).toEqual({
+			kind: "pi",
+			via: "default",
+		});
+	});
+
+	it("real-host control: the symlink tree still detects omp via app-name for real-host.js", async () => {
+		process.argv[1] = defectTreeWithSymlink().realHost;
+		expect(await resolvePiHarnessDetection()).toEqual({
+			kind: "omp",
+			via: "app-name",
+		});
+	});
+
+	it("real-host control: the symlink host-package tree still detects omp via package-name for real-host.js", async () => {
+		process.argv[1] = defectTreeWithSymlink(
+			"@oh-my-pi/pi-coding-agent",
+		).realHost;
+		expect(await resolvePiHarnessDetection()).toEqual({
+			kind: "omp",
+			via: "package-name",
+		});
+	});
 });
 
 describe("LAW: the detection slot cannot be populated from *.test.ts-shaped paths", () => {
@@ -175,10 +237,35 @@ describe("LAW: the detection slot cannot be populated from *.test.ts-shaped path
 		expect(detectionSlot()).toBeUndefined();
 	});
 
-	it("executable vocabulary and the test-artifact shape are disjoint (no argv[1] can be both)", () => {
+	it("no Pi image name is test-shaped (static vocabulary census; one-directional: it cannot catch a loosened entry exclusion)", () => {
 		const testShape = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
 		for (const imageName of PI_IMAGE_NAMES) {
 			expect(testShape.test(imageName)).toBe(false);
 		}
+	});
+
+	// Documented fall-through of the shape exclusion (measured, not wished):
+	// a host bin that happens to be named like a test artifact is never
+	// admitted as a host entry — the omp evidence in the enclosing tree is
+	// ignored and detection falls through to the default. This is the
+	// accepted trade-off of the argv-shape predicate: real OMP/Pi hosts
+	// launch bin/entry files, never *.test.* names.
+	it("documented fall-through: a test-shaped host bin in an otherwise-omp tree is not admitted (app-name evidence ignored)", async () => {
+		process.argv[1] = defectTree("real-host.test.js");
+		expect(await resolvePiHarnessDetection()).toEqual({
+			kind: "pi",
+			via: "default",
+		});
+	});
+
+	it("documented fall-through: a test-shaped host bin inside a real host package is not admitted (package-name evidence ignored)", async () => {
+		process.argv[1] = defectTree(
+			"real-host.test.js",
+			"@oh-my-pi/pi-coding-agent",
+		);
+		expect(await resolvePiHarnessDetection()).toEqual({
+			kind: "pi",
+			via: "default",
+		});
 	});
 });
