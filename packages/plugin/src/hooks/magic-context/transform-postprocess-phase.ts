@@ -2457,12 +2457,14 @@ export async function runPostTransformPhase(
                 `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${formatPendingOpsDepth()}, context=${args.contextUsage.percentage.toFixed(1)}%`,
             );
             const tApply = performance.now();
-            // System-origin rows wait for a byte-change event; model stamps
-            // release on this pass under the current permission.
-            // Frozen-base adaptation of 347e503cd: this base's pending-op
-            // vocabulary is a single 'drop' operation (readPendingOps ignores
-            // anything else), so there is no system-origin class to filter by —
-            // the whole queue rides the byte-change permission or waits.
+            // Dual pending-op vocabulary on this build: 'drop' = model
+            // ctx_reduce stamps, 'auto_drop' = system-origin (compartment
+            // runner queue; storage-ops toPendingOp accepts both, types.ts
+            // PendingOp). The classes differ at APPLY — system rows render
+            // the sweeper shape (apply-operations source gate, synthetic ||
+            // auto_drop) — not in ride permission: frozen-base adaptation of
+            // 347e503cd keeps the queue all-or-nothing (#2641), so the whole
+            // queue rides the byte-change permission or waits.
             const opsToApply = systemReclaimAllowed ? pendingOps : [];
             if (opsToApply.length !== pendingOps.length) {
                 sessionLog(

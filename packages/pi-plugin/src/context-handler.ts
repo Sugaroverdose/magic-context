@@ -6104,10 +6104,14 @@ async function runPipeline(args: RunPipelineArgs): Promise<RunPipelineResult> {
 		const pendingDecisionLog = `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${pendingOpsDepth === null ? "not loaded (deferred pass)" : pendingOpsDepth} context=${args.contextUsage.percentage.toFixed(1)}%`;
 		sessionLog(args.sessionId, pendingDecisionLog);
 		pendingDecisionLogObserverForTests?.(pendingDecisionLog);
-		// Frozen-base adaptation of 347e503cd: this base's pending-op
-		// vocabulary is a single 'drop' operation, so there is no
-		// system-origin class to filter by — the whole queue rides the
-		// byte-change permission or waits.
+		// Dual pending-op vocabulary on this build: 'drop' = model stamps,
+		// 'auto_drop' = system-origin (the Pi historian queues auto_drop via
+		// the core compartment-runner-drop-queue). The classes differ at
+		// APPLY — system rows render the sweeper shape (apply-operations
+		// source gate, synthetic || auto_drop) — not in ride permission:
+		// frozen-base adaptation of 347e503cd keeps the queue all-or-nothing
+		// (#2641), so the whole queue rides the byte-change permission or
+		// waits.
 		const opsToApply = systemReclaimAllowed ? pendingOps : [];
 		if (opsToApply.length !== pendingOps.length) {
 			sessionLog(
