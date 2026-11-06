@@ -301,6 +301,28 @@ describe("m[0] mural image fold (on-demand render → wire)", () => {
         }
     });
 
+    it("carries the part-level synthetic flag on the mural file part", () => {
+        // The host's title gate (ensureTitle) reads the PART-level flag, not
+        // the message-level one: without it the mural adds a phantom user
+        // turn and permanently suppresses the session auto-title (issue #129).
+        // 9c1520810:inject-compartments.ts:3469 — the base carriage mints
+        // `{ type: "file", mime: "image/png", url, synthetic: true }`.
+        const message = buildRegionMuralMessage({
+            muralDataUrl: FAKE_MURAL_DATA_URL,
+            muralHash: "part-synthetic-129",
+        });
+        expect(message).not.toBeNull();
+        expect(message?.info.synthetic).toBe(true);
+        expect(message?.parts).toEqual([
+            {
+                type: "file",
+                mime: "image/png",
+                url: FAKE_MURAL_DATA_URL,
+                synthetic: true,
+            },
+        ]);
+    });
+
     it("lets a new mural ride the next natural HARD instead of triggering one", () => {
         const db = makeDb();
         try {
