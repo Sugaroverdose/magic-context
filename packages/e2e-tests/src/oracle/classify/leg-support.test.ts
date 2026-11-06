@@ -208,13 +208,15 @@ describe("fail-closed request filter (compared artifact completeness)", () => {
 		expect(() =>
 			requestsOf([fakeCapture("POST", "/v1/messages"), fakeCapture("POST", "/v1/responses")]),
 		).toThrow("/v1/responses");
-		expect(() => requestsOf([fakeCapture("POST", "/v1/responses")])).toThrow("1");
+		expect(() => requestsOf([fakeCapture("POST", "/v1/responses")])).toThrow(
+			"1 captured request(s)",
+		);
 		expect(() =>
 			requestsOf([
 				fakeCapture("POST", "/v1/responses"),
 				fakeCapture("POST", "/chat/completions"),
 			]),
-		).toThrow("2");
+		).toThrow("2 captured request(s)");
 		// Non-POST on a compared path is also off-set.
 		expect(() => requestsOf([fakeCapture("GET", "/v1/messages")])).toThrow("GET /v1/messages");
 	});

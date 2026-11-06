@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
 	ORACLE_WIRE_WHITELIST,
@@ -44,6 +44,12 @@ const TABLE_PATH_FILES: readonly string[] = [
 	join(import.meta.dir, "normalization-law.test.ts"),
 ];
 
+/** Dedicated dir for the C2b shadow-file plant, hermetically owned by that test. */
+const C2B_FIXTURE_DIR = join(import.meta.dir, "../classify/__c2b_fixture__");
+// Pre-clean: a kill between the plant's write and its finally-cleanup must
+// never leave a file that poisons a later N3 run.
+rmSync(C2B_FIXTURE_DIR, { recursive: true, force: true });
+
 function walkOracleArea(): string[] {
 	const files: string[] = [];
 	const walk = (dir: string): void => {
@@ -61,6 +67,20 @@ function walkOracleArea(): string[] {
 	return files;
 }
 
+/** Index of the paren closing the one at openAt, or -1 when unbalanced. */
+function balancedClose(source: string, openAt: number): number {
+	let depth = 0;
+	for (let i = openAt; i < source.length; i += 1) {
+		const ch = source[i];
+		if (ch === "(") depth += 1;
+		else if (ch === ")") {
+			depth -= 1;
+			if (depth === 0) return i;
+		}
+	}
+	return -1;
+}
+
 /**
  * Pairing check per call site, tolerant of whitespace and newlines inside the
  * call: scan from each `canonicalizeProviderBody(` through its paren-balanced
@@ -73,20 +93,8 @@ function pairingOffense(source: string): string | null {
 	for (const match of source.matchAll(/canonicalizeProviderBody\s*\(/g)) {
 		calls += 1;
 		const open = (match.index ?? 0) + match[0].length - 1;
-		let depth = 0;
-		let end = -1;
-		for (let i = open; i < source.length; i += 1) {
-			const ch = source[i];
-			if (ch === "(") depth += 1;
-			else if (ch === ")") {
-				depth -= 1;
-				if (depth === 0) {
-					end = i;
-					break;
-				}
-			}
-		}
-		const callText = source.slice(open, end === -1 ? source.length : end + 1);
+		const close = balancedClose(source, open);
+		const callText = source.slice(open, close === -1 ? source.length : close + 1);
 		if (callText.includes("committedWhitelistNames()")) paired += 1;
 	}
 	if (paired === calls) return null;
@@ -228,37 +236,72 @@ describe("oracle whitelist law", () => {
 		const sources = new Map(walkOracleArea().map((f) => [f, readFileSync(f, "utf8")]));
 		sources.set(comparePath, planted);
 		const { offenders } = censusCompareFiles(sources);
-		expect(offenders.join("\n")).toContain("compare.ts");
+		const text = offenders.join("\n");
+		expect(text).toContain("compare.ts");
+		expect(text).toContain("outside the enumerated compare homes");
 	});
 
 	it("C2b plant (committed witness): a file named normalization.ts outside the table path is scanned, not skipped", () => {
 		// The skip must be keyed on the real table-path files, not on basename:
 		// any file named normalization.ts anywhere must not dodge the census.
-		const roguePath = join(import.meta.dir, "../classify/normalization.ts");
-		writeFileSync(
-			roguePath,
-			'export const rogue = (raw: string): string => canonicalizeProviderBody(raw, ["silent-addition-rogue"]);\n',
-		);
+		// Hermeticity: a dedicated fixture dir, created and removed inside the
+		// test, with a module-top pre-clean so a kill between write and cleanup
+		// can never leave a file that poisons a later N3 run.
+		const roguePath = join(C2B_FIXTURE_DIR, "normalization.ts");
 		try {
+			mkdirSync(C2B_FIXTURE_DIR, { recursive: true });
+			writeFileSync(roguePath, 'export const rogue = (raw: string): string => canonicalizeProviderBody(raw, ["silent-addition-rogue"]);\n');
 			const area = walkOracleArea();
 			expect(area).toContain(roguePath); // the real walk sees it
 			const sources = new Map(area.map((f) => [f, readFileSync(f, "utf8")]));
 			const { offenders } = censusCompareFiles(sources);
 			expect(offenders.join("\n")).toContain(roguePath);
 		} finally {
-			rmSync(roguePath);
+			rmSync(C2B_FIXTURE_DIR, { recursive: true, force: true });
 		}
 	});
 
 	it("C2c anti-false-red witness: a correctly formatted multiline canonicalize call stays paired", () => {
+		// The multiline call is SYNTHESIZED from the located production call
+		// span (same paren-balanced scan pairingOffense uses) — no dependence
+		// on the single-line literal surviving a formatter. If the production
+		// call is already multiline, the witness asserts pairing directly.
 		const legRunnerPath = join(import.meta.dir, "../classify/leg-runner.ts");
 		const legRunner = readFileSync(legRunnerPath, "utf8");
-		const multiline = legRunner.replace(
-			"canonicalizeProviderBody(raw, committedWhitelistNames())",
-			"canonicalizeProviderBody(\n\t\traw,\n\t\tcommittedWhitelistNames(),\n\t)",
-		);
-		expect(multiline).not.toBe(legRunner); // the plant must actually land
+		const callHead = "canonicalizeProviderBody(";
+		const at = legRunner.indexOf(callHead);
+		expect(at, "the leg-runner compare call must exist for any pairing claim").toBeGreaterThanOrEqual(0);
+		const open = at + callHead.length - 1;
+		const close = balancedClose(legRunner, open);
+		expect(close).toBeGreaterThan(0);
+		const callText = legRunner.slice(at, close + 1);
 		const sources = new Map(walkOracleArea().map((f) => [f, readFileSync(f, "utf8")]));
+		if (callText.includes("\n")) {
+			// Already multiline in production: pairing must hold on the real bytes.
+			const { offenders, totalCalls } = censusCompareFiles(sources);
+			expect(offenders).toEqual([]);
+			expect(totalCalls).toBeGreaterThan(0);
+			return;
+		}
+		// Split the args at top-level commas and re-render one per line.
+		const inner = legRunner.slice(open + 1, close);
+		const args: string[] = [];
+		let depth = 0;
+		let start = 0;
+		for (let i = 0; i < inner.length; i += 1) {
+			const ch = inner[i];
+			if (ch === "(") depth += 1;
+			else if (ch === ")") depth -= 1;
+			else if (ch === "," && depth === 0) {
+				args.push(inner.slice(start, i).trim());
+				start = i + 1;
+			}
+		}
+		args.push(inner.slice(start).trim());
+		const synthesized = `${callHead.slice(0, -1)}(\n\t\t${args.join(",\n\t\t")},\n\t)`;
+		expect(synthesized).toContain("\n");
+		const multiline = legRunner.slice(0, at) + synthesized + legRunner.slice(close + 1);
+		expect(multiline).not.toBe(legRunner); // the plant must actually land
 		sources.set(legRunnerPath, multiline);
 		const { offenders, totalCalls } = censusCompareFiles(sources);
 		expect(offenders).toEqual([]);
