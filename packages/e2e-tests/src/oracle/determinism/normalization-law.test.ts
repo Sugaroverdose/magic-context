@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { readdirSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
 	ORACLE_WIRE_WHITELIST,
 	canonicalizeProviderBody,
@@ -25,18 +25,24 @@ import {
 const NORMALIZATION_SOURCE = readFileSync(join(import.meta.dir, "normalization.ts"), "utf8");
 
 /**
- * The live compare homes since the unit-2 leg-runner extraction (8fec40801):
- * every canonicalizeProviderBody call must live in one of these files and pair
- * with committedWhitelistNames(). The set is ENFORCED, not decorative: the
- * census walks the whole oracle area and any call site in a non-enumerated
- * file is an offender (control plant (b) witnesses exactly that).
+ * The live compare homes since the unit-2 leg-runner extraction (8fec40801).
+ * The set is ENFORCED, not decorative: the census walks the whole oracle area
+ * and any file outside this set that MENTIONS canonicalizeProviderBody at all
+ * is an offender — imports, aliases and comments included (C2a plant).
  */
 const COMPARE_FILES: readonly string[] = [
 	join(import.meta.dir, "../../../tests/oracle-determinism.test.ts"),
 	join(import.meta.dir, "../classify/leg-runner.ts"),
 ];
-/** The committed table path: definition + its own law (self-references). */
-const TABLE_PATH_NAMES: readonly string[] = ["normalization.ts", "normalization-law.test.ts"];
+/**
+ * The committed table path: definition + its own law (self-references).
+ * Keyed on RESOLVED FULL PATHS, not basenames — a file named normalization.ts
+ * anywhere else in the area must be scanned, not skipped (C2b plant).
+ */
+const TABLE_PATH_FILES: readonly string[] = [
+	join(import.meta.dir, "normalization.ts"),
+	join(import.meta.dir, "normalization-law.test.ts"),
+];
 
 function walkOracleArea(): string[] {
 	const files: string[] = [];
@@ -55,28 +61,71 @@ function walkOracleArea(): string[] {
 	return files;
 }
 
-/** Census over source texts (parameterized so committed control plants can drive it). */
+/**
+ * Pairing check per call site, tolerant of whitespace and newlines inside the
+ * call: scan from each `canonicalizeProviderBody(` through its paren-balanced
+ * close and require committedWhitelistNames() inside (C2c anti-false-red
+ * witness: a correctly formatted multiline call stays paired).
+ */
+function pairingOffense(source: string): string | null {
+	let calls = 0;
+	let paired = 0;
+	for (const match of source.matchAll(/canonicalizeProviderBody\s*\(/g)) {
+		calls += 1;
+		const open = (match.index ?? 0) + match[0].length - 1;
+		let depth = 0;
+		let end = -1;
+		for (let i = open; i < source.length; i += 1) {
+			const ch = source[i];
+			if (ch === "(") depth += 1;
+			else if (ch === ")") {
+				depth -= 1;
+				if (depth === 0) {
+					end = i;
+					break;
+				}
+			}
+		}
+		const callText = source.slice(open, end === -1 ? source.length : end + 1);
+		if (callText.includes("committedWhitelistNames()")) paired += 1;
+	}
+	if (paired === calls) return null;
+	return `${calls} canonicalizeProviderBody call sites, only ${paired} paired with committedWhitelistNames()`;
+}
+
+/**
+ * Fail-closed TEXT census over the oracle area (src/oracle/** plus
+ * tests/oracle-*.test.ts), stated exactly: every walked file outside the
+ * committed table path must not mention canonicalizeProviderBody at all; the
+ * enumerated compare homes may mention it, and there every call's
+ * paren-balanced text must contain committedWhitelistNames(); zero raw
+ * ORACLE_WIRE_WHITELIST consumption outside the table path.
+ *
+ * It is a text census, not an AST walker: aliases and imports are caught by
+ * MENTION, not by resolution; a paren inside a string literal can mis-balance
+ * the scan; committedWhitelistNames() inside a comment within a call's parens
+ * would satisfy pairing. Accident-catching is the design point — adversarial
+ * source obfuscation is out of scope.
+ */
 function censusCompareFiles(sources: Map<string, string>): { offenders: string[]; totalCalls: number } {
 	const offenders: string[] = [];
 	let totalCalls = 0;
 	for (const [file, source] of sources) {
-		if (TABLE_PATH_NAMES.includes(basename(file))) continue;
+		if (TABLE_PATH_FILES.includes(file)) continue;
 		if (source.includes("ORACLE_WIRE_WHITELIST")) {
 			offenders.push(`${file}: consumes ORACLE_WIRE_WHITELIST outside the committed table path`);
 		}
-		const calls = source.match(/canonicalizeProviderBody\s*\(/g) ?? [];
-		if (calls.length === 0) continue;
 		if (!COMPARE_FILES.includes(file)) {
-			offenders.push(`${file}: canonicalizeProviderBody call site in a non-enumerated oracle file`);
+			if (source.includes("canonicalizeProviderBody")) {
+				offenders.push(
+					`${file}: mentions canonicalizeProviderBody outside the enumerated compare homes (any mention trips: calls, imports, aliases, comments)`,
+				);
+			}
 			continue;
 		}
-		const paired = source.match(/canonicalizeProviderBody\s*\([^\n]*committedWhitelistNames\(\)/g) ?? [];
-		if (paired.length !== calls.length) {
-			offenders.push(
-				`${file}: ${calls.length} canonicalizeProviderBody call sites, only ${paired.length} paired with committedWhitelistNames()`,
-			);
-		}
-		totalCalls += calls.length;
+		const offense = pairingOffense(source);
+		if (offense) offenders.push(`${file}: ${offense}`);
+		totalCalls += (source.match(/canonicalizeProviderBody\s*\(/g) ?? []).length;
 	}
 	return { offenders, totalCalls };
 }
@@ -130,7 +179,7 @@ describe("oracle whitelist law", () => {
 		expect(firstDiffByte("abc", "abc")).toBeNull();
 	});
 
-	it("N3: every canonicalizeProviderBody call site is an enumerated compare file paired with committedWhitelistNames()", () => {
+	it("N3: canonicalizeProviderBody is mentioned only in the enumerated compare homes, and every call there pairs with committedWhitelistNames()", () => {
 		const area = walkOracleArea();
 		// Membership floors: both enumerated compare homes exist in the walked
 		// area — a moved-away file reddens by name, not silently zero.
@@ -159,13 +208,61 @@ describe("oracle whitelist law", () => {
 		expect(plantA.offenders.join("\n")).toContain("paired with committedWhitelistNames()");
 
 		// (b) a call planted in an oracle file the set does not enumerate: the
-		// census reddens on set membership, proving the set is enforced.
+		// census reddens on set membership (any mention), proving the set is
+		// enforced.
 		const comparePath = join(import.meta.dir, "../classify/compare.ts");
 		expect(area).toContain(comparePath);
 		expect(COMPARE_FILES).not.toContain(comparePath);
 		const plantedCompare = `${readFileSync(comparePath, "utf8")}\nexport const rogueCompare = (raw: string): string => canonicalizeProviderBody(raw, committedWhitelistNames());\n`;
 		const plantB = censusCompareFiles(new Map([...sources, [comparePath, plantedCompare]]));
-		expect(plantB.offenders.join("\n")).toContain("non-enumerated oracle file");
+		expect(plantB.offenders.join("\n")).toContain("outside the enumerated compare homes");
+	});
+
+	it("C2a plant (committed witness): an aliased import with zero calls in a non-enumerated oracle file is an offender", () => {
+		// A renamed import is a second rule-name source: whoever resolves it at
+		// call time bypasses the committed table. The census must catch the
+		// MENTION, not a call pattern that an alias evades.
+		const comparePath = join(import.meta.dir, "../classify/compare.ts");
+		const planted = `${readFileSync(comparePath, "utf8")}\nimport { canonicalizeProviderBody as rogueCanonicalize } from "../determinism/normalization";\nexport const rogueAlias = rogueCanonicalize;\n`;
+		expect(planted).toContain("canonicalizeProviderBody as");
+		const sources = new Map(walkOracleArea().map((f) => [f, readFileSync(f, "utf8")]));
+		sources.set(comparePath, planted);
+		const { offenders } = censusCompareFiles(sources);
+		expect(offenders.join("\n")).toContain("compare.ts");
+	});
+
+	it("C2b plant (committed witness): a file named normalization.ts outside the table path is scanned, not skipped", () => {
+		// The skip must be keyed on the real table-path files, not on basename:
+		// any file named normalization.ts anywhere must not dodge the census.
+		const roguePath = join(import.meta.dir, "../classify/normalization.ts");
+		writeFileSync(
+			roguePath,
+			'export const rogue = (raw: string): string => canonicalizeProviderBody(raw, ["silent-addition-rogue"]);\n',
+		);
+		try {
+			const area = walkOracleArea();
+			expect(area).toContain(roguePath); // the real walk sees it
+			const sources = new Map(area.map((f) => [f, readFileSync(f, "utf8")]));
+			const { offenders } = censusCompareFiles(sources);
+			expect(offenders.join("\n")).toContain(roguePath);
+		} finally {
+			rmSync(roguePath);
+		}
+	});
+
+	it("C2c anti-false-red witness: a correctly formatted multiline canonicalize call stays paired", () => {
+		const legRunnerPath = join(import.meta.dir, "../classify/leg-runner.ts");
+		const legRunner = readFileSync(legRunnerPath, "utf8");
+		const multiline = legRunner.replace(
+			"canonicalizeProviderBody(raw, committedWhitelistNames())",
+			"canonicalizeProviderBody(\n\t\traw,\n\t\tcommittedWhitelistNames(),\n\t)",
+		);
+		expect(multiline).not.toBe(legRunner); // the plant must actually land
+		const sources = new Map(walkOracleArea().map((f) => [f, readFileSync(f, "utf8")]));
+		sources.set(legRunnerPath, multiline);
+		const { offenders, totalCalls } = censusCompareFiles(sources);
+		expect(offenders).toEqual([]);
+		expect(totalCalls).toBeGreaterThan(0);
 	});
 
 	it("N2: the unpatched-surface obligations remain recorded in source", () => {
