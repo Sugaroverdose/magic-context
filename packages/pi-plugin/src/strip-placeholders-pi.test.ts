@@ -19,6 +19,16 @@ describe("stripPiDroppedPlaceholderMessages", () => {
 			expect(isPiMarkerOnlyText(text)).toBe(false);
 	});
 
+	it("classifies a bare ... as marker-only (imitation defense, base recognizer arm)", () => {
+		// 9c1520810:strip-placeholders-pi.ts:32 carries the |\.\.\. alternative
+		// in MARKER_ONLY_PATTERN; the Pi lane classifies it exactly like the
+		// core strip-content MARKER_ONLY (restored 2026-11-06, imitation-
+		// defense ruling — the arm guards against model copies of the
+		// released shape, not against our own mintage).
+		expect(isPiMarkerOnlyText("...")).toBe(true);
+		expect(isPiMarkerOnlyText(" ... \n")).toBe(true);
+	});
+
 	it("removes shared blank and marker part combinations", () => {
 		const db = createTestDb();
 		try {

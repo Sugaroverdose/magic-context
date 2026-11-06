@@ -9,7 +9,8 @@
     "§7§",
     "§1§ §2§ [dropped §3§] [cleared]",
     "[dropped] §9§ [cleared]",
-    "  \n §3§\t[dropped]  [dropped §4§] \n"
+    "  \n §3§\t[dropped]  [dropped §4§] \n",
+    "..."
   ],
   "positivePartCombinations": [
     [" \t", "§672§ [dropped §672§]"],
