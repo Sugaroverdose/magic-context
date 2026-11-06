@@ -418,3 +418,36 @@ Raised by the Unit 5 merge gate (v2 minted full-mode drop carriers with guard-on
 - **Pi non-FPE** — pi-plugin production (src + scripts) imports/references NO fpe family symbol (`renderDropToken`, `fpeEncrypt`, `fpeDecrypt`, `fpeGate`, `isFpeTokenCandidate`) and never `TOOL_RELEASED_SENTINEL`: the mirror mints no carriers by design; a future pi mint reddens and must be adjudicated into a resolver-wired lane, not silently shipped.
 
 Planted rogues per mutation class are committed in the law (#2780 form: re-runnable plant → scan reddens → removal regreens); the executed red witnesses (real rogue files at the Unit 8 tip) are pasted verbatim in the gate commit body.
+
+## Dead tag-strip family removal (2026-11-06, ruling #2812)
+
+Dedicated dead-code unit on the assembly-v2 trunk (`feat/v2-strip-code-removal`, cut from 9055c8dd1). Plugin lane only; ownership adjudicated by reading imports — hard boundary: Pi is tag-era (ruling C): a symbol shared code that pi-plugin imports and whose data can legitimately carry prefixes STAYS, with the reason recorded here. Premise (#2812): the wire `§N§ ` prefix has been absent since ctxv12 — the field has no prefix-era stored message bytes, so every OpenCode-side strip is an identity function on reachable data. Laws, census, and witnesses: `packages/plugin/src/hooks/magic-context/tag-strip-removal-law.test.ts` (committed red-first, before the deletion).
+
+### Per-symbol disposition
+
+| Symbol | Disposition | Basis |
+| --- | --- | --- |
+| `skipPrefixInjection` (`TagMessagesOptions`), the two `if (!skipPrefixInjection)` branches in `tagMessages`, `TagNormalizationTarget`, `TagMessagesResult.normalizationTargets`, the `transform-operations` type re-export | **deleted** | The branches' only effect was pushing onto `normalizationTargets`, which has zero readers in either lane (census grep over `packages/` + the standing law; `transform.ts` never destructured the field). Zero test references to any of the four. Sole producer was `transform.ts` (`!ctxReduceCallable`, whose remaining use at :3151 is unrelated and stays). |
+| `skipPrefixInjection` on the Pi side: `shared/tag-transcript.ts` option + its `if (!args.skipPrefixInjection)` arms + the pi `context-handler.ts:5920` pass | **kept (Pi-side, ruling C)** | Shared code on Pi's tagging path; Pi passes the flag. The arms are provably inert today (`setText(text)`, `textPrefix: ""` — ctx_reduce v1 comment), but removing the option requires editing `pi-plugin` — out of this unit's scope. A Pi-lane unit can retire the pair together. |
+| `stripTagPrefix` + regex family: `TAG_PREFIX_REGEX` (canonical), `MALFORMED_TAG_PREFIX_REGEX`, `DANGLING_TAG_PREFIX_REGEX` in `tag-content-primitives.ts` | **kept (shared, ruling C)** | pi-plugin production imports: `context-handler.ts:205` (used :650/:726/:6812), `temporal-awareness-pi.ts:28` (:111), `heuristic-cleanup-pi.ts:62` (:525 via the `tag-part-guards` re-export). Pi data legitimately contains prefixes. OpenCode-side call sites — `tag-messages.ts` (whitespace guard, both token-count lambdas, source-content), `tool-sweep-policy.ts:89`, `tool-drop-target.ts:252`, `tag-part-guards.ts:44`, `heuristic-cleanup.ts:248` — are identity on real-shaped wire data; STRIP-IDENTITY laws pin that at each production composition (read-only prefix math stays upstream per #1643). |
+| `peelLeadingMcTagNotation` | **kept (shared, ruling C)** | pi-plugin `temporal-awareness-pi.ts:27`; built on `stripTagPrefix`. |
+| `prependTag` | **kept (test-pinned)** | Zero production callers — pinned by the census law. Its only callers are tests: plugin `tag-content-primitives.test.ts` (its `describe("prependTag")` block + the round-trip pin at :238) and the **out-of-scope** pi-plugin `strip-tag-prefix.test.ts:2/:206` (that file and its subject are declared out of scope; deleting the symbol would require editing it). Stale comment references removed instead: the `(prependTag runs after assign)` parenthetical in `tag-messages.ts` and the misdocumented import list in `tag-transcript.ts:45`. |
+| `stripPersistedAssistantText` + its global-strip primitives | **kept** | Not in the family; #1643 (completion-boundary no-op is a weighed decision, not an emergency patch). Importers: pi `strip-tag-prefix.ts:15`, `scripts/self-tag-trial/engine.ts:10`, plugin `text-complete.ts:1`. |
+| `stripWellFormedLeadingTagPrefix` | **kept** | Not in the family. Importers: `shared/tag-transcript.ts:66` (shared with Pi), `v2/hooks/hidden-child.ts:17`, `strip-content.ts:12`. |
+| Rust `prepend_tag`/`strip_tag_prefix` (`crates/mc-module/src/transform.rs`) | **untouched** | Rust out-of-contract, parity-only (#2735; #2784 opportunistic); independent mirror with its own prepend/strip inverse law. |
+
+### Caller census — deleted symbols
+
+| Caller | Data | Dead-argument |
+| --- | --- | --- |
+| `transform.ts` (const + options property) | session ctx_reduce-availability verdict | Branch body reached only the unconsumed `normalizationTargets` sink; nothing ever read `TagMessagesResult.normalizationTargets`. |
+| `scripts/self-tag-trial/engine.ts:66/:131` | trial transcripts | Calls `tagMessages` without options; unaffected. |
+| tests | — | Zero references to `skipPrefixInjection`/`normalizationTargets`/`TagNormalizationTarget` in either lane, so **no test file was deleted** (nothing tested only the deleted machinery) and no surviving-behavior test needed re-expression. |
+
+### Witness list (committed in the law file)
+
+- **Wire rogue**: a planted prefix-bearing mint (`§7§ planted-rogue-mint`) driven through the `tagMessages` production walk survives unsanitized to the provider array — the existing prefix-free pins (`transform-compaction-off.test.ts` `not.toMatch(/§\d+§/)`, the `transform.test.ts` served-digest pin, the region goldens) fail on exactly that state, which is what the witness asserts.
+- **Census rogue**: a planted production file calling `tagMessages(..., { skipPrefixInjection: true })` and reading `result.normalizationTargets` is named by the census predicate (entry-law temp-dir shape) — the scan is not vacuous.
+- **STRIP-IDENTITY (7 arms)**: real-shaped OpenCode data (leading digits, numbered lists, markdown, code fences, leading newline, mid-text `§`, unicode, tool outputs) passes byte-unchanged through the `tagMessages` walk including persisted `source_contents` equality with the full originals, the drop-target guard, `buildFileSourceContent`, the sweep-policy decision, and the heuristic-cleanup injection-strip walk.
+
+Existing wire laws, serve/replay goldens, and region goldens were green **unmodified** at the final tip (battery receipts under `~/.local/state/mc-test-gate/logs/`, tree-stamped). Red-first receipt: the census arm ran 10 pass / 4 fail against the pre-deletion tree (the four expected reds), all 14 green after the deletion.

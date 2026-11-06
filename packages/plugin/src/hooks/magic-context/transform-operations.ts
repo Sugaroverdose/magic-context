@@ -9,7 +9,6 @@ export { stripStructuralNoise } from "./strip-structural-noise";
 export {
     hasRecentAssistantCommit,
     type MessageLike,
-    type TagNormalizationTarget,
     type TagTarget,
     tagMessages,
 } from "./tag-messages";
