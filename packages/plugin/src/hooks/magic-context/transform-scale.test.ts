@@ -184,7 +184,7 @@ test("flushed status fallback reads only visible drops in a 100K-tag session", (
             ],
         ]);
         expect(applyFlushedStatuses(session, db, targets)).toBe(true);
-        expect(replacements).toEqual(["[dropped §100000§]"]);
+        expect(replacements).toEqual(["[content omitted]"]);
         expect(counter.rows()).toBe(1);
     } finally {
         counter?.restore();
