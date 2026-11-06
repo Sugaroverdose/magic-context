@@ -1,6 +1,12 @@
 import { refuseBudgetedToolCall } from "../../features/magic-context/dreamer/token-budget";
 import { sessionLog } from "../../shared/logger";
 
+// The pre-fix truncated render kept at most five characters of the original
+// value before the sentinel, so a copied placeholder always has that exact
+// shape. Matching only that shape keeps a legitimate value that merely ends
+// with the sentinel text (a log line, a fixture) executable.
+const LEGACY_TRUNCATED_VALUE = /^[\s\S]{0,5}\.\.\.\[truncated\]$/;
+
 // Longest quote of the received arguments the refusal repeats back. Enough to
 // show the model the placeholder it wrote without echoing a large payload.
 const MAX_QUOTED_ARGUMENTS = 160;
@@ -10,14 +16,13 @@ const MAX_LISTED_PARAMETERS = 12;
 // per-session counters are bounded rather than kept for the process lifetime.
 const MAX_TRACKED_SESSIONS = 1000;
 
-// Unit 4 (coordinator split item D): the pre-upgrade recognition arms —
-// five-character `...[truncated]` copies, `[object]`, `[N items]` — are dead.
-// v2 is clean-room: no v2 path mints those shapes into model-copyable
-// transcript bytes, so they only ever refused legitimate content. The
-// canonical tagged placeholder is the sole recognized poison shape; the
-// census in dropped-input-guard.test.ts keeps the dead arms out.
 function isDroppedPlaceholderString(value: string): boolean {
-    return value.startsWith("[dropped §") && value.endsWith("§]");
+    return (
+        (value.startsWith("[dropped §") && value.endsWith("§]")) ||
+        LEGACY_TRUNCATED_VALUE.test(value) ||
+        value === "[object]" ||
+        /^\[\d+ items\]$/.test(value)
+    );
 }
 
 export function droppedInputMarker(tagId: number): { dropped: string } {

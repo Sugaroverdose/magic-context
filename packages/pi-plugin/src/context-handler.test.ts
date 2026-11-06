@@ -52,6 +52,7 @@ import { createTagger } from "@magic-context/core/features/magic-context/tagger"
 import { checkCompartmentTrigger } from "@magic-context/core/hooks/magic-context/compartment-trigger";
 import { deriveTriggerBudget } from "@magic-context/core/hooks/magic-context/derive-budgets";
 import { resolveExecuteThreshold } from "@magic-context/core/hooks/magic-context/event-resolvers";
+import { GOLDEN_PI_DROP_OUTPUT } from "@magic-context/core/hooks/magic-context/fpe-wire-golden";
 import { onNoteTrigger } from "@magic-context/core/hooks/magic-context/note-nudger";
 import { withRawMessageProvider } from "@magic-context/core/hooks/magic-context/read-session-chunk";
 import * as readSessionFormatting from "@magic-context/core/hooks/magic-context/read-session-formatting";
@@ -1806,8 +1807,6 @@ describe("registerPiContextHandler", () => {
 			const output = result.messages as unknown as ReturnType<
 				typeof buildMessages
 			>;
-			const truncatedSentinel = `[dropped §${truncatedTool.tagNumber}§]`;
-			const editSentinel = `[dropped §${editTool.tagNumber}§]`;
 			const toolArguments = (index: number): Record<string, unknown> => {
 				const content = (output[index] as { content?: unknown }).content;
 				if (!Array.isArray(content))
@@ -1821,21 +1820,23 @@ describe("registerPiContextHandler", () => {
 				return call?.arguments ?? {};
 			};
 
-			expect(textOf(output[0])).toBe(`[dropped §${droppedText.tagNumber}§]`);
-			expect(output).toHaveLength(6);
-			expect(toolArguments(1)).toEqual({ dropped: truncatedSentinel });
-			expect(textOf(output[2])).toBe(truncatedSentinel);
-			expect(toolArguments(3).filePath).toBe("/tmp/edit.ts");
-			expect(String(toolArguments(3).oldString)).toEndWith("...[truncated]");
-			expect(textOf(output[4])).toBe(editSentinel);
-			// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
-			// (stratum port 9f10a1181 removed the materialized §N§ prefixes);
-			// the prefixed expectation pinned the prefix-era state. v1 ref:
-			// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:1810.
-			// Surgical-only: the v1 block renders an older drop era
-			// ([content omitted], length 8) — the [dropped §N§]/length-6
-			// contract above stays the current pin; only message bytes move.
-			expect(textOf(output[5])).toBe("keep this active");
+			// Dropped text renders the constant placeholder; released pairs
+			// keep their rows. The carrier token is session-keyed and opaque
+			// (shape pinned by overwall-wire-shapes); this layer pins the seat
+			// structure and the empty result slot.
+			expect(textOf(output[0])).toBe("[content omitted]");
+			expect(output).toHaveLength(8);
+			expect(textOf(output[2])).toBe("");
+			expect(textOf(output[4])).toBe("");
+			expect(textOf(output[6])).toBe("");
+			expect(JSON.stringify(output)).toContain(GOLDEN_PI_DROP_OUTPUT);
+			expect(Object.keys(toolArguments(1))).toEqual(["filePath"]);
+			expect(Object.keys(toolArguments(3))).toEqual(["filePath"]);
+			// `edit_marker` keeps the truncated edit args verbatim.
+			expect(toolArguments(5).filePath).toBe("/tmp/edit.ts");
+			expect(String(toolArguments(5).oldString)).toEndWith("...[truncated]");
+			expect(String(toolArguments(5).newString)).toEndWith("...[truncated]");
+			expect(textOf(output[7])).toBe("keep this active");
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
@@ -2331,7 +2332,7 @@ describe("registerPiContextHandler", () => {
 				overThresholdCtx as never,
 			);
 
-			expect(textOf(result.messages[1] as never)).toBe("[dropped §2§]");
+			expect(textOf(result.messages[1] as never)).toBe("[content omitted]");
 			expect(getPendingOps(db, "ses-context")).toEqual([]);
 			expect(
 				getPiChannel1Baseline("ses-context")?.agentDropsAppliedThisPass,
@@ -2984,7 +2985,7 @@ describe("registerPiContextHandler", () => {
 				}),
 			} as never);
 
-			expect(textOf(result.messages[1] as never)).toBe("[dropped §2§]");
+			expect(textOf(result.messages[1] as never)).toBe("[content omitted]");
 		} finally {
 			clearContextHandlerSession(sessionId);
 			closeQuietly(db);
@@ -3283,28 +3284,19 @@ describe("registerPiContextHandler", () => {
 			}
 		}
 
-		// Re-pinned 2026-11-06 to the ctx_reduce v1 prefix-free wire bytes
-		// (stratum port 9f10a1181 removed the materialized §N§ prefixes); the
-		// prefixed expectation pinned the prefix-era state. v1 ref:
-		// 9c1520810:packages/pi-plugin/src/context-handler.test.ts:3251.
 		await expect(runProviderScenario("openai")).resolves.toEqual({
 			reduceStatus: "active",
 			replayedToolResult: "reduced old tags",
 		});
 		await expect(runProviderScenario("anthropic", "openai")).resolves.toEqual({
 			reduceStatus: "dropped",
-			// Drop-era re-pin (2026-11-06, N2): with sweeper provenance restored
-			// at the stale ctx_reduce arm (v1 9c1520810 heuristic-cleanup-pi.ts:499,
-			// 3430b4ead), the non-bash released pair replays skeleton_real and the
-			// result slot takes the canonical placeholder (tag-transcript.ts
-			// skeletonReal :1126-1142) — v1's same law at
-			// 9c1520810:context-handler.test.ts:3251 pinned "" because v1's
-			// tag-transcript minted TOOL_RELEASED_SENTINEL there (:1136-1142),
-			// declined by the v2 canonical-placeholder ruling (census Unit-8
-			// addendum note). Same class as the census row-108 dropped-only-replay
-			// precedent. The gate this law exists to pin — active under openai,
-			// dropped under anthropic, byte-stable replay — is unchanged.
-			replayedToolResult: "[dropped §3§]",
+			// The released pair replays: the result slot carries the empty
+			// released placeholder instead of the old emptied row.
+			// (The 2026-11-06 N2 re-pin to `[dropped §3§]` rested on the
+			// census Unit-8 "v2 declines both carrier and sentinel" note,
+			// superseded by the coordinator carrier ruling same day — base
+			// bytes canonical, 9c1520810:context-handler.test.ts:3251-3256.)
+			replayedToolResult: "",
 		});
 	});
 
@@ -4981,11 +4973,25 @@ describe("registerPiContextHandler", () => {
 					lastInputTokens: 4_000,
 				});
 
-				// Defer passes replay the legacy marker byte-identically.
+				// Legacy stored markers replay through the shape-table renderers:
+				// the released pair keeps its rows, the copy-source seat holds an
+				// opaque session-keyed FPE token (pinned by overwall-wire-shapes
+				// and compared across passes), the result slot the constant empty
+				// released sentinel (golden fragment). 9c1520810:context-handler.test.ts:4937-4953.
+				const wire = (bytes: string) =>
+					JSON.parse(bytes) as Array<Record<string, any>>;
+				const argsOf = (bytes: string, callId: string) => {
+					for (const m of wire(bytes))
+						for (const p of (m.content ?? []) as Array<Record<string, any>>)
+							if (p.type === "toolCall" && p.id === callId)
+								return p.arguments as Record<string, string>;
+					return undefined;
+				};
 				const deferA = await pass();
 				const deferB = await pass();
-				expect(deferA).toContain(`{"dropped":"[dropped §${small}§]"}`);
-				expect(deferA).toContain(`{"dropped":"[dropped §${large}§]"}`);
+				expect(deferA).toContain(GOLDEN_PI_DROP_OUTPUT);
+				expect(argsOf(deferA, "call-small")).toBeDefined();
+				expect(argsOf(deferA, "call-large")).toBeDefined();
 				expect(deferB).toBe(deferA);
 				expect(modeOf(small)).toBe("truncated");
 
@@ -5009,15 +5015,19 @@ describe("registerPiContextHandler", () => {
 				expect(modeOf(small)).toBe("truncated");
 				expect(modeOf(large)).toBe("truncated");
 
-				// The executed HARD fold converts them to real-or-absent.
+				// The executed HARD fold converts them to real-or-absent: the small
+				// pair serves its real arguments, the large pair stays released —
+				// the same session-keyed token it carried on the defer passes.
 				recordPiLiveModel(sessionId, HARD_MODEL);
 				const hard = await pass();
 				expect(modeOf(small)).toBe("skeleton_real");
 				expect(modeOf(large)).toBe("full");
 				expect(hard).not.toContain('"dropped":');
 				expect(hard).toContain('"arguments":{"command":"ls -la"}');
-				expect(hard).toContain(`[dropped §${small}§]`);
-				expect(hard).not.toContain("call-large");
+				expect(hard).toContain(GOLDEN_PI_DROP_OUTPUT);
+				expect(argsOf(hard, "call-large")).toEqual(
+					argsOf(deferA, "call-large"),
+				);
 
 				// The following defer pass replays the converted bytes identically.
 				updateSessionMeta(db, sessionId, { lastResponseTime: Date.now() });
@@ -7423,9 +7433,7 @@ describe("Pi proactive strip of invalidated thinking", () => {
 			updateTagStatus(db, sessionId, dropped.tagNumber, "dropped");
 			signalPiPendingMaterialization(sessionId);
 			const busting = await pass(false);
-			expect(textOf(busting[0] as never)).toBe(
-				`[dropped §${dropped.tagNumber}§]`,
-			);
+			expect(textOf(busting[0] as never)).toBe("[content omitted]");
 			expect(busting.map(thinkingIn)).toEqual([0, 0, 0, 0, 0]);
 			expect(getMergedReasoningStrippedIds(db, sessionId)).toEqual(
 				new Set([

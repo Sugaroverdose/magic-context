@@ -910,9 +910,14 @@ function isDroppedPlaceholder(text: string): boolean {
     // "[dropped]" on routes without modelAcceptsEmptyContent), beside the
     // canonical tagged placeholder. The empty match must come first: without
     // it the join path would prepend the block plus "\n\n" onto an emptied
-    // head. "[content omitted]" and "..." are deliberately absent — no v2
-    // minter (die-unless-U5-restores-mint, census addendum).
-    return /^(?:|\[dropped(?: §\d+§)?\])$/.test(text.trim());
+    // head. "[content omitted]" rejoined the gate with the drop-shape doctrine
+    // restore (2026-11-06): buildReplacementContent mints it for message-part
+    // drops again (base 9c1520810:inject-compartments.ts:860), so a dropped
+    // assistant shell must prepend the history block, not join onto it. The
+    // `\.\.\.` alternative is base-canonical (9c1520810:inject-compartments.ts:
+    // :861) — an imitation defense, not a mintage dependency (DeepSeek merge
+    // gate + coordinator ruling 2026-11-06; census dead-strip rows reversed).
+    return /^(?:|\[content omitted\]|\.\.\.|\[dropped(?: §\d+§)?\])$/.test(text.trim());
 }
 
 const EMPTY_HARD_SIGNALS: M0HardSignals = {

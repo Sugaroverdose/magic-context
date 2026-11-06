@@ -57,6 +57,7 @@ import {
 	measureEmergencyTag,
 	planEmergencyDrop,
 } from "@magic-context/core/hooks/magic-context/emergency-drop";
+import { MESSAGE_DROP_PLACEHOLDER } from "@magic-context/core/hooks/magic-context/sentinel";
 import { stripSystemInjection } from "@magic-context/core/hooks/magic-context/system-injection-stripper";
 import type { TagTarget } from "@magic-context/core/hooks/magic-context/tag-messages";
 import { stripTagPrefix } from "@magic-context/core/hooks/magic-context/tag-part-guards";
@@ -532,7 +533,7 @@ export function applyPiHeuristicCleanup(
 					const dropResult = target.drop?.() ?? "absent";
 					const didReplace =
 						dropResult === "absent"
-							? target.setContent(`[dropped §${tag.tagNumber}§]`)
+							? target.setContent(MESSAGE_DROP_PLACEHOLDER)
 							: false;
 					if (dropResult === "removed" || dropResult === "absent") {
 						updateTagStatus(db, sessionId, tag.tagNumber, "dropped");

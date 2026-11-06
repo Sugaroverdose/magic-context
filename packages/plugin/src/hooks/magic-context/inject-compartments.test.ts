@@ -474,9 +474,9 @@ describe("prepareCompartmentInjection — empty compartments fallback", () => {
     // (Unit 5 widened its empty route to station — same mint pair); merging
     // the block onto either strands the head bytes with a "\n\n" seam (or a
     // block-prefixed "" that reads as a real turn). The "[content omitted]"
-    // and "..." shapes are NOT included: Unit 5 ruled the message-part
-    // filler stays the canonical [dropped §N§] (invariant 2), so
-    // [content omitted] has no v2 mint at all — see the U4-M3 witness laws.
+    // shape joined the gate with the drop-shape doctrine restore 2026-11-06
+    // (live mint again — 9c1520810:inject-compartments.ts:860); "..." stays
+    // out: neither tree mints it (TOOL_RELEASED_SENTINEL is empty).
     it('prepends instead of merging onto an emptied head (sentinel text:"")', () => {
         db = makeDb();
         insertMemory(db, {
@@ -520,53 +520,60 @@ describe("prepareCompartmentInjection — empty compartments fallback", () => {
         expect(filler?.text).toBe("[dropped]");
     });
 
-    // U4-M3 witnesses (merge-review): non-recognition of the forbidden
-    // shapes is load-bearing, not incidental. Planting `|[content omitted]|\.\.\.`
-    // into isDroppedPlaceholder reddens both laws — the prepend path moves
-    // the original row to messages[1] behind a synthetic head, breaking the
-    // single-row shape and the joined-tail ordering. The "no synthetic head
-    // prepended" reading is implemented as: exactly one row survives and its
-    // part carries no synthetic flag (the discriminator the reviewer's
-    // ordering note does not need an alternation law for — a single
-    // anchored full-match regex is order-invariant).
-    for (const forbidden of ["[content omitted]", "..."] as const) {
-        it(`merges onto a ${forbidden} head — the shape stays unrecognised (die-unless-U5-restores-mint)`, () => {
-            db = makeDb();
-            insertMemory(db, {
-                projectPath: PROJECT_PATH,
-                category: "USER_DIRECTIVES",
-                content: "directive merge-head",
-            });
-            const messages: MessageLike[] = [userMessage("m1", forbidden)];
-            const prepared = prepareCompartmentInjection(
-                db,
-                SESSION_ID,
-                messages,
-                true,
-                PROJECT_PATH,
-            );
-            expect(prepared).not.toBeNull();
-            if (!prepared) return;
-
-            renderCompartmentInjection(SESSION_ID, messages, prepared);
-
-            // Merge path: the original row stays as the single head, its part
-            // is NOT a synthetic prepend, and the block joins ahead of the
-            // original bytes with the exact "\n\n" seam preserved.
-            expect(messages.length).toBe(1);
-            const part = messages[0].parts[0] as {
-                type: string;
-                text: string;
-                synthetic?: boolean;
-            };
-            expect(part.synthetic).toBeUndefined();
-            expect(part.text).toMatch(
-                new RegExp(
-                    `^<session-history>[\\s\\S]*\\n\\n${forbidden.replace(/[[\].]/g, "\\$&")}$`,
-                ),
-            );
+    // U4-M3 witnesses (merge-review): recognition of the head shapes is
+    // load-bearing, not incidental. Drop-shape doctrine restore (2026-11-06,
+    // owner ruling "ONLY m[0,1] placement was allowed to drift") re-cognized
+    // `[content omitted]` — buildReplacementContent mints it again (base
+    // 9c1520810:sentinel.ts:47). The `...` arm reversed too (2026-11-06,
+    // DeepSeek merge gate + coordinator ruling): a drop-placeholder recognizer
+    // guards against MODEL IMITATION, not against our own mintage — the Unit 4
+    // "no minter on either tree" narrowing was a circular reachability
+    // argument for doctrine artifacts (founding 160-`...`-parts census;
+    // sentinel.ts anti-imitation doctrine), and the base regex
+    // (9c1520810:inject-compartments.ts:861) carries the `\.\.\.` alternative.
+    // Both laws below are the bite: removing either arm from the isDropped-
+    // Placeholder regex reddens the named law (merge path instead of prepend).
+    it("prepends instead of merging onto a [content omitted] head (message-drop filler, restored mint)", () => {
+        db = makeDb();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "USER_DIRECTIVES",
+            content: "directive content-omitted-head",
         });
-    }
+        const messages: MessageLike[] = [userMessage("m1", "[content omitted]")];
+        const prepared = prepareCompartmentInjection(db, SESSION_ID, messages, true, PROJECT_PATH);
+        expect(prepared).not.toBeNull();
+        if (!prepared) return;
+
+        renderCompartmentInjection(SESSION_ID, messages, prepared);
+
+        const headText = (messages[0].parts[0] as { text: string }).text;
+        expect(headText.startsWith("<session-history>")).toBe(true);
+        expect(headText).toContain("directive content-omitted-head");
+        const filler = messages[1]?.parts[0] as { text: string } | undefined;
+        expect(filler?.text).toBe("[content omitted]");
+    });
+
+    it("prepends instead of merging onto a ... head (legacy released shape, imitation defense)", () => {
+        db = makeDb();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "USER_DIRECTIVES",
+            content: "directive dots-head",
+        });
+        const messages: MessageLike[] = [userMessage("m1", "...")];
+        const prepared = prepareCompartmentInjection(db, SESSION_ID, messages, true, PROJECT_PATH);
+        expect(prepared).not.toBeNull();
+        if (!prepared) return;
+
+        renderCompartmentInjection(SESSION_ID, messages, prepared);
+
+        const headText = (messages[0].parts[0] as { text: string }).text;
+        expect(headText.startsWith("<session-history>")).toBe(true);
+        expect(headText).toContain("directive dots-head");
+        const filler = messages[1]?.parts[0] as { text: string } | undefined;
+        expect(filler?.text).toBe("...");
+    });
 });
 
 describe("prepareCompartmentInjection — cross-database cache isolation", () => {

@@ -34,6 +34,19 @@ export const WHOLE_MESSAGE_PLACEHOLDER_TEXT = "[dropped]";
 export const TOOL_RELEASED_SENTINEL = "";
 
 /**
+ * Canonical placeholder for a dropped NON-tool (message) part. Unlike the
+ * tool-result slot, message text cannot be emptied on non-Anthropic routes
+ * (empty text sentinels survive onto those wires and break provider
+ * non-empty/adjacency invariants — see `modelAcceptsEmptyContent`), so this
+ * stays constant non-empty bytes. Bracketed literal, no numeral, nothing the
+ * model produces as its own prose: the released-slot lesson is that any
+ * imitable constant leaks into output as a habit. Deliberately NOT
+ * `WHOLE_MESSAGE_PLACEHOLDER_TEXT` — `isSentinel` recognizes that shape and
+ * would pre-skip these messages out of the persisted neutralization set.
+ */
+export const MESSAGE_DROP_PLACEHOLDER = "[content omitted]";
+
+/**
  * Decide whether empty-text sentinels are safe for the provider's wire path.
  *
  * The gate is deliberately canonical-Anthropic only. OpenCode filters empty
@@ -265,9 +278,10 @@ export function makeSentinel(originalPart: unknown): {
 /**
  * Create a sentinel for replacing a WHOLE assistant message's parts list.
  *
- * Picks `""` when the live provider is the canonical Anthropic provider
- * (whose AI-SDK normalization filters empty content from the wire),
- * `[dropped]` otherwise. See `modelAcceptsEmptyContent` for the rule.
+ * Picks `""` on routes measured to accept empty dropped content
+ * (anthropic, whose AI-SDK normalization filters empty text, and station,
+ * probed HTTP 200 for empty user/assistant content on 2026-10-31),
+ * `[dropped]` otherwise. See `routeAcceptsEmptyDroppedContent`.
  *
  * The chosen placeholder text is kept in `WHOLE_MESSAGE_PLACEHOLDER_TEXT`
  * so `isSentinel` recognizes both shapes (idempotency on replay).

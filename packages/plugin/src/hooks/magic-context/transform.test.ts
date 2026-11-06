@@ -2361,7 +2361,7 @@ describe("createTransform", () => {
         ]);
         expect(secondPass[0]?.info.role).toBe("user");
         const userShellText = (secondPass[0]?.parts[0] as { text: string }).text;
-        expect(userShellText).toBe("[dropped \u00a71\u00a7]");
+        expect(userShellText).toBe("[content omitted]");
         expect(getTagById(db, "ses-1", 1)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.status).toBe("dropped");
         expect(getTagById(db, "ses-1", 2)?.dropMode).toBe("erased");
@@ -3011,7 +3011,7 @@ describe("createTransform", () => {
         decision = "execute";
         await transform({}, { messages });
 
-        expect(text(messages[0], 0)).toBe("[dropped §1§]");
+        expect(text(messages[0], 0)).toBe("[content omitted]");
         expect(text(messages[1], 0)).not.toBe(compressibleOriginal);
         expect(text(messages[1], 0)).not.toContain("[dropped");
         expect(getTagById(db, sessionId, 1)?.cavemanDepth).toBe(0);
@@ -3214,11 +3214,13 @@ describe("createTransform", () => {
         ];
         await transform({}, { messages: secondPass });
 
-        // The dropped part gets the canonical [dropped §N§] placeholder (byte-stable
-        // across passes); the user-role message is never whole-message stripped (the
+        // The dropped part gets the canonical constant message-drop placeholder
+        // `[content omitted]` (byte-stable across passes; drop-shape doctrine
+        // restore 2026-11-06, base 9c1520810:transform.test.ts:3209). The
+        // user-role message is never whole-message stripped (the
         // role guard in stripDroppedPlaceholderMessages), so the turn boundary
         // survives for AI SDK's Anthropic adapter. The sibling part is untouched.
-        expect(text(secondPass[0], 0)).toBe("[dropped \u00a71\u00a7]");
+        expect(text(secondPass[0], 0)).toBe("[content omitted]");
         expect(text(secondPass[0], 1)).toBe("actual user message");
     });
 

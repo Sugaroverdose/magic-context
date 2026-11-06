@@ -2496,6 +2496,7 @@ export async function runPostTransformPhase(
                 new Set(),
                 (reduction) => droppedTokenReductions.push(reduction),
                 undefined,
+                args.resolvedProviderID,
             );
             if (pendingOpsDidMutate) {
                 droppedCount += opsToApply.length;

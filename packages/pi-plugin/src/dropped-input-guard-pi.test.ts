@@ -6,18 +6,10 @@ import { createPiDroppedInputGuard } from "./dropped-input-guard-pi";
 
 const blockedInputs: Array<[string, Record<string, unknown>]> = [
 	["tagged drop sentinel", { command: "[dropped §431§]" }],
+	["legacy truncation", { command: "which...[truncated]" }],
+	["legacy array summary", { files: "[3 items]" }],
+	["legacy object summary", { metadata: "[object]" }],
 	["new dropped marker", { dropped: "[dropped §431§]" }],
-];
-
-// Core-contract mirror (Unit 4, coordinator split item D): the three legacy
-// recognition arms died with the pre-upgrade session class in the shared
-// core guard this Pi wrapper delegates to — no v2/Pi path mints those shapes
-// into model-copyable bytes. Unit 7 owns any Pi-side re-derivation of the
-// guard surface; these rows pin the CORE contract meanwhile.
-const notBlockedInputs: Array<[string, Record<string, unknown>]> = [
-	["truncation-shaped string (no minter)", { command: "which...[truncated]" }],
-	["array-summary string (no minter)", { files: "[3 items]" }],
-	["object-summary string (no minter)", { metadata: "[object]" }],
 ];
 
 const writeParameters = Type.Object({
@@ -48,18 +40,6 @@ describe("Pi dropped input execution guard", () => {
 			});
 		});
 	}
-
-	it("executes a shape the retired arms used to block (core contract)", () => {
-		for (const [, input] of notBlockedInputs) {
-			const result = createPiDroppedInputGuard()({
-				type: "tool_call",
-				toolCallId: "call-clean",
-				toolName: "write",
-				input,
-			});
-			expect(result).toBeUndefined();
-		}
-	});
 
 	it("lists the tool's real parameters from its schema, required first", () => {
 		const result = createPiDroppedInputGuard({

@@ -17,3 +17,13 @@ export const GOLDEN_FULL_DROP_CARRIER = '{"command":"';
 // pins the `text` result wrapper.)
 export const GOLDEN_FULL_DROP_OUTPUT = '"output":""';
 export const GOLDEN_V2_DROP_RESULT = '{"type":"text","value":""}';
+
+// Pi lane (drop-shape doctrine restore, 2026-11-06): the Pi transcript adapter
+// renders the copy-source seat from the fixture input (canonical Pi fixture
+// seat: "path") and the released slot as a Pi text part. Ported from the base
+// pi-side module (9c1520810:packages/pi-plugin/src/fpe-wire-golden.ts:14,:18,
+// deleted from the v2 tree) — the fragments are re-expressed here against the
+// v2-side registry rather than resurrecting the pi-side copy; shapes verified
+// against the restored-carrier wire in transcript-pi.test.ts.
+export const GOLDEN_PI_DROP_CARRIER = '{"path":"';
+export const GOLDEN_PI_DROP_OUTPUT = '{"type":"text","text":""}';

@@ -210,8 +210,8 @@ describe("tagTranscript tool aggregation", () => {
         expect(targets.size).toBe(2);
 
         expect(targets.get(firstTag ?? -1)?.drop()).toBe("removed");
-        expect(firstUse.getText()).toBe(`[dropped §${firstTag}§]`);
-        expect(firstResult.getText()).toBe(`[dropped §${firstTag}§]`);
+        expect(firstUse.getText()).toBe("");
+        expect(firstResult.getText()).toBe("");
         expect(secondUse.getText()).toBe('{"file":"long-b"}');
         expect(secondResult.getText()).toContain("r2");
     });
@@ -238,9 +238,9 @@ describe("tagTranscript tool aggregation", () => {
             result = targets.get(tag ?? -1)?.truncate?.();
         }).not.toThrow();
         expect(result).toBe("truncated");
-        // Skeleton-drop now renders the one canonical placeholder, not a
+        // Skeleton-drop now renders the one canonical `...` placeholder, not a
         // separate "[truncated]" vocabulary.
-        expect(toolUse.getText()).toBe(`[dropped \u00a7${tag}\u00a7]`);
+        expect(toolUse.getText()).toBe("");
     });
 
     it("drops every contiguous folded tool_result block for the paired callId", () => {
@@ -267,9 +267,9 @@ describe("tagTranscript tool aggregation", () => {
 
         expect(targets.size).toBe(1);
         expect(targets.get(tag ?? -1)?.drop()).toBe("removed");
-        expect(toolUse.getText()).toBe(`[dropped §${tag}§]`);
-        expect(firstResult.getText()).toBe(`[dropped §${tag}§]`);
-        expect(secondResult.getText()).toBe(`[dropped §${tag}§]`);
+        expect(toolUse.getText()).toBe("");
+        expect(firstResult.getText()).toBe("");
+        expect(secondResult.getText()).toBe("");
     });
 
     it("pairs a reused callId result with the nearest previous unresolved owner", () => {
@@ -302,8 +302,8 @@ describe("tagTranscript tool aggregation", () => {
 
         expect(targets.get(nearestTag ?? -1)?.drop()).toBe("removed");
         expect(olderUse.getText()).toBe('{"file":"older"}');
-        expect(nearestUse.getText()).toBe(`[dropped §${nearestTag}§]`);
-        expect(result.getText()).toBe(`[dropped §${nearestTag}§]`);
+        expect(nearestUse.getText()).toBe("");
+        expect(result.getText()).toBe("");
     });
 
     it("reuses owner-scoped identities without collapsing duplicate callIds", () => {
@@ -550,5 +550,107 @@ describe("tagTranscript tool aggregation", () => {
         const updatesForTag = db.byteSizeUpdates.filter((u) => u.tagNumber === tag);
         expect(updatesForTag.length).toBeGreaterThanOrEqual(1);
         expect(Math.max(...updatesForTag.map((u) => u.byteSize))).toBeGreaterThan(512);
+    });
+});
+
+describe("tagTranscript single-part tool targets (buildToolTarget drop shapes)", () => {
+    // Drop-shape doctrine restore (2026-11-06 coordinator ruling: the base
+    // bytes at 9c1520810:packages/plugin/src/shared/tag-transcript.ts:1404-1426
+    // are the contract). The base-era laws bound the aggregate targets only;
+    // the single-part arms (tool parts with no stable callId, :322 →
+    // buildToolTarget) were the restored sites without any law — the
+    // planted-rogue audit 2026-11-06 showed a `[dropped §N§]` numeral planted
+    // at skeletonReal survived the whole base law file green. These laws bind
+    // drop()'s released-slot and carrier arms, truncate()'s carrier arm, and
+    // skeletonReal()'s released-slot arm; a numeral re-mint at any of them
+    // reddens a named law.
+    class InputCapableToolPart extends TestPart {
+        constructor(
+            text: string,
+            private currentInput: unknown,
+        ) {
+            super("tool_result", "", text);
+        }
+
+        getToolInput(): unknown {
+            return this.currentInput;
+        }
+
+        setToolInput(next: unknown): boolean {
+            this.currentInput = next;
+            return true;
+        }
+
+        readInput(): unknown {
+            return this.currentInput;
+        }
+    }
+
+    const singleTargetFor = (part: TranscriptPart) => {
+        const tagger = new FakeTagger();
+        const transcript: Transcript = {
+            harness: "pi",
+            messages: [
+                { info: { id: "user-1", role: "user" }, parts: [part] },
+            ],
+            commit() {},
+        };
+        const { targets } = tagTranscript(
+            "session-1",
+            transcript,
+            tagger,
+            new FakeDb() as unknown as ContextDatabase,
+        );
+        expect(targets.size).toBe(1);
+        return Array.from(targets.values())[0];
+    };
+
+    it("drop() on a single-part target releases the slot byte-free", () => {
+        const part = new TestPart("tool_result", "", "orphan result");
+        const target = singleTargetFor(part);
+        expect(target?.drop()).toBe("removed");
+        // Released slot: TOOL_RELEASED_SENTINEL = "" (9c1520810:sentinel.ts:34)
+        // — the anti-imitation rule: no imitable constant in the released seat.
+        expect(part.getText()).toBe("");
+    });
+
+    it("skeletonReal() on a single-part target releases the slot byte-free", () => {
+        const part = new TestPart("tool_result", "", "orphan result");
+        const target = singleTargetFor(part);
+        expect(target?.skeletonReal?.()).toBe("truncated");
+        expect(part.getText()).toBe("");
+    });
+
+    it("drop() fills the copy-source seat with the FPE carrier, never a numeral", () => {
+        const part = new InputCapableToolPart('{"path":"secret-src"}', { path: "secret-src" });
+        const target = singleTargetFor(part);
+        expect(target?.drop()).toBe("removed");
+        const input = part.readInput() as Record<string, unknown>;
+        // carrierInput keeps the original string seat (9c1520810 tag-transcript
+        // :1406-1408 → tool-drop-target carrierInput): schema-shaped args,
+        // opaque token value — not the original bytes, not a `[dropped` shape.
+        expect(Object.keys(input)).toEqual(["path"]);
+        expect(typeof input.path).toBe("string");
+        expect(input.path).not.toBe("");
+        expect(input.path).not.toBe("secret-src");
+        expect(String(input.path).startsWith("[dropped")).toBe(false);
+    });
+
+    it("truncate() fills the copy-source seat with the FPE carrier, never a numeral", () => {
+        const part = new InputCapableToolPart('{"path":"secret-src"}', { path: "secret-src" });
+        const target = singleTargetFor(part);
+        expect(target?.truncate?.()).toBe("truncated");
+        const input = part.readInput() as Record<string, unknown>;
+        expect(Object.keys(input)).toEqual(["path"]);
+        expect(String(input.path).startsWith("[dropped")).toBe(false);
+    });
+
+    it("drop() renders the schema-shaped {d: token} carrier for a non-record input", () => {
+        const part = new InputCapableToolPart("orphan result", undefined);
+        const target = singleTargetFor(part);
+        expect(target?.drop()).toBe("removed");
+        const input = part.readInput() as Record<string, unknown>;
+        expect(Object.keys(input)).toEqual(["d"]);
+        expect(String(input.d).startsWith("[dropped")).toBe(false);
     });
 });

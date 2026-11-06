@@ -14,6 +14,7 @@ import { convertResponsesMessages } from "@earendil-works/pi-ai/api/openai-respo
 import {
 	getStrippedPlaceholderIds,
 	getTagsBySession,
+	setStrippedPlaceholderIds,
 	updateSessionMeta,
 	updateTagDropMode,
 	updateTagStatus,
@@ -198,6 +199,7 @@ function fixture(session: string) {
 	return {
 		db,
 		session,
+		count,
 		pass,
 		useModel,
 		dropAndDiscover,
@@ -214,9 +216,11 @@ describe("issue 586: placeholder strip keeps tool calls and results together", (
 		const f = fixture("issue-586-round-trip");
 		try {
 			const discovered = await f.dropAndDiscover();
-			expect(getStrippedPlaceholderIds(f.db, f.session).size).toBeGreaterThan(
-				0,
-			);
+			// Released pairs survive on the wire, so every assistant that owns
+			// a released call still owns it: the placeholder strip finds
+			// nothing to neutralize and records no ids — the 586 orphan
+			// condition cannot arise at all.
+			expect(getStrippedPlaceholderIds(f.db, f.session).size).toBe(0);
 			expect(orphanToolResults(discovered)).toEqual([]);
 			const relayDeferPass = await f.pass(0);
 			expect(responsesWireOrphans(relayDeferPass)).toEqual([]);
@@ -283,10 +287,14 @@ describe("issue 586: placeholder strip keeps tool calls and results together", (
 		const f = fixture("issue-586-heal");
 		try {
 			await f.dropAndDiscover();
-			// The state issue 586 reports: frozen ids whose dropped arcs now replay
-			// as real-argument skeletons, so each frozen message owns a live call.
-			const stripped = getStrippedPlaceholderIds(f.db, f.session);
-			expect(stripped.size).toBeGreaterThan(0);
+			// The branch's own discovery records no strip ids (released pairs
+			// survive), so the pre-upgrade poisoned state is injected directly:
+			// ids an earlier build froze for the dropped assistants. The
+			// dropped arcs now replay as real-argument skeletons, so each
+			// frozen message owns a live call.
+			const stripped = new Set<string>();
+			for (let i = 0; i < f.count - 2; i++) stripped.add(`entry-${2 * i + 1}`);
+			setStrippedPlaceholderIds(f.db, f.session, stripped);
 			for (const tag of getTagsBySession(f.db, f.session))
 				if (tag.type === "tool" && tag.status === "dropped")
 					updateTagDropMode(f.db, f.session, tag.tagNumber, "skeleton_real");

@@ -143,8 +143,9 @@ describe("Pi binding-strip move: first pass on the new build", () => {
 			const earlierBusting = await pass(true);
 			const earlierDefer = await pass(true);
 			expect(sha(earlierDefer)).toBe(sha(earlierBusting));
-			// The earlier build removed the whole arc: no assistant a1, no result.
-			expect(earlierDefer).toHaveLength(3);
+			// The dropped arc is never removed from the wire: both assistants and
+			// the result row survive, the call row carrying the released shape.
+			expect(earlierDefer).toHaveLength(5);
 
 			// New build, defer pass: Pi hands over the stored messages with their
 			// thinking; the strip now runs after the stages.
@@ -157,9 +158,9 @@ describe("Pi binding-strip move: first pass on the new build", () => {
 					),
 			);
 			expect(thinkingLeft).toBe(false);
-			// Fails on the delivery: the dropped arc comes back as a marker skeleton
-			// (assistant toolCall with `{"dropped": …}` plus the placeholder result),
-			// which changes the served prefix at index 1 on a defer pass.
+			// The released shape re-renders identically whether the thinking was
+			// removed before or after the stages, so the defer pass keeps the
+			// served prefix byte-stable across the upgrade.
 			expect(sha(upgradedDefer)).toBe(sha(earlierDefer));
 			expect(getMergedReasoningStrippedIds(db, sessionId)).not.toContain(
 				"binding_mismatch_order:end",

@@ -280,7 +280,18 @@ function resolverWiredForLane(rel: string): boolean {
 
 // The adjudicated sets at this tip. A new member reddens until it is named
 // here with a reason — the closed-vocabulary pin (the volatile-census arm c).
-const BLESSED_MINT_HOLDERS = new Set(["hooks/magic-context/tool-drop-target.ts"]);
+// shared/tag-transcript.ts joined with the drop-shape doctrine restore
+// (2026-11-06 coordinator ruling, carrier option): the aggregate drop()/
+// truncate() and buildToolTarget drop()/truncate() arms mint carriers via
+// renderDropToken(tagId, sessionKey) byte-exact to 9c1520810:packages/plugin/
+// src/shared/tag-transcript.ts:1108,:1388. It registers no execute.before
+// hook (law 1's mint-reachability term is hook-lane-scoped), and every
+// rendered carrier reaches the wire through the resolver-wired lanes
+// (hook.ts / v2/hooks/context.ts composition sites below).
+const BLESSED_MINT_HOLDERS = new Set([
+    "hooks/magic-context/tool-drop-target.ts",
+    "shared/tag-transcript.ts",
+]);
 // The v1 composition (createToolExecuteBeforeHook wired into the hook map).
 // The v2 composition (Unit 5 closure: guard-then-resolver). The third site is
 // the OpenCode-1 entry's delegation shape: its handler forwards the event to
