@@ -152,9 +152,17 @@ the seeded fixture windows + synthetic arms (identity/ordinal rewrite cost rejec
 2. **Mock-endpoint wiring + request classifier + request-set comparison** (port the e2e machinery above).
 3. **Dual-leg driver** — shared store/cwd sequential boots, reference = ctxv18 bundle via
    `MC_E2E_PLUGIN_ENTRY`, candidate = v2 dist; host binary hash pinned in the manifest.
+   **Completion criterion (cross-model gate A3, 2026-11-06):** `restoreStore` runs before BOTH boots with
+   a bytes hash-assert, not once between legs — unit-1b restores only between leg 1 and leg 2, so leg 1's
+   pre-boot state is assumed-pristine rather than hash-verified (safe in-process today but the stated
+   "before each leg" contract is stronger than the code; the driver must make the code match the contract).
 4. **Comparator + exact declared-drift rules** — M1 placeholder normalization, mural transport rule,
    ordered union seam, watermark-refusal = error; planted rogues: drop re-mint, prefix re-add,
    mural-flag flip.
+   **Completion criterion (cross-model gate A4, 2026-11-06):** the whitelist census law's compare-site
+   enumeration must grow to include the new comparator file — unit 1b pins exactly one compare site
+   (`oracle-determinism.test.ts`), so a second compare file added by this unit escapes the census until
+   the law is extended here.
 5. **Corpus + shape-coverage census** — live-union vocabulary, per-shape predicates + rogues, rows above.
 6. **(phase 2) Pi leg** via `pi-harness.ts`.
 
