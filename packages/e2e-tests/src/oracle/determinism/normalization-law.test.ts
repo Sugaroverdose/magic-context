@@ -73,6 +73,22 @@ describe("oracle whitelist law", () => {
 		expect(firstDiffByte("abc", "abc")).toBeNull();
 	});
 
+	it("N3: the compare site consumes only committedWhitelistNames()", () => {
+		const compareSource = readFileSync(
+			join(import.meta.dir, "../../../tests/oracle-determinism.test.ts"),
+			"utf8",
+		);
+		// No second rule-name source at the compare site: the committed table is
+		// reached only through committedWhitelistNames().
+		expect(compareSource).not.toContain("ORACLE_WIRE_WHITELIST");
+		const callSites = compareSource.match(/canonicalizeProviderBody\s*\(/g) ?? [];
+		const pairedWithCommitted = compareSource.match(
+			/canonicalizeProviderBody\s*\([^\n]*committedWhitelistNames\(\)/g,
+		) ?? [];
+		expect(callSites.length).toBeGreaterThan(0);
+		expect(pairedWithCommitted.length).toBe(callSites.length);
+	});
+
 	it("N2: the unpatched-surface obligations remain recorded in source", () => {
 		expect(NORMALIZATION_SOURCE).toContain("ORACLE-UNPATCHED-SURFACES");
 		expect(NORMALIZATION_SOURCE).toContain("crypto.randomUUID");

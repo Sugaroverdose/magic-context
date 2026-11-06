@@ -59,6 +59,14 @@
             "hosts": ["opencode"]
         },
         {
+            "path": "tests/oracle-determinism.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual RC-gate determinism self-test for the differential rendering oracle (unit 1, docs/superpowers/plans/2026-11-06-differential-oracle.md): two OpenCode 1 boots over a byte-restored seeded store must reproduce identical provider request bytes, with a committed mutation control and whitelist law; excluded rather than ts-only because CI floats opencode@latest on Linux while src/oracle/determinism/host-pin.ts asserts a committed sha256 pin of the owner's macOS Homebrew OC1 binary, so the leg fails closed off that host",
+            "contract_refs": ["DIFFERENTIAL-ORACLE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/historian-host-timeout.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
