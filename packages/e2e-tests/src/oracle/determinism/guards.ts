@@ -8,10 +8,6 @@
  *   nondeterminism can never stand in for mutation sensitivity (R3);
  * - a captured request without a verbatim raw body is refused, never silently
  *   re-serialized from the parsed object (N1).
- *
- * RED STAGE (TDD): the guard clauses are not wired in this commit. The committed
- * law file `oracle-determinism-guards.test.ts` reddens on exactly the missing
- * throws; the next commit wires them.
  */
 
 export interface OracleCapturedRequest {
@@ -46,12 +42,27 @@ export function rawBodyOf(request: OracleCapturedRequest): string {
  * pinned date line to exist INSIDE the compared corpus, so a filtered run that
  * captured only unrelated requests cannot green on an empty comparison.
  */
-export function assertNonVacuousComparedCorpus(_options: {
+export function assertNonVacuousComparedCorpus(options: {
 	legOneRaw: readonly string[];
 	legTwoRaw: readonly string[];
 	pinnedLine: string;
 }): void {
-	// RED STAGE: guard not wired.
+	const { legOneRaw, legTwoRaw, pinnedLine } = options;
+	if (legOneRaw.length === 0 || legTwoRaw.length === 0) {
+		throw new Error(
+			`oracle determinism: zero compared provider requests (leg 1: ${legOneRaw.length}, leg 2: ${legTwoRaw.length}) — a filtered single-arm run cannot green on empty captures`,
+		);
+	}
+	for (const [label, corpus] of [
+		["leg 1", legOneRaw],
+		["leg 2", legTwoRaw],
+	] as const) {
+		if (!corpus.some((raw) => raw.includes(pinnedLine))) {
+			throw new Error(
+				`oracle determinism: pinned date line ${JSON.stringify(pinnedLine)} is absent from the ${label} compared corpus — the wrapper's system hook did not fire on the bytes being compared`,
+			);
+		}
+	}
 }
 
 /**
@@ -59,13 +70,24 @@ export function assertNonVacuousComparedCorpus(_options: {
  * prove it is absent from leg 1 at the same index. Returns the wire request index
  * the control must bind its diff to.
  */
-export function bindMutationToCorpus(_options: {
+export function bindMutationToCorpus(options: {
 	legOneRaw: readonly string[];
 	legTwoRaw: readonly string[];
 	marker: string;
 }): number {
-	// RED STAGE: guard not wired.
-	return -1;
+	const { legOneRaw, legTwoRaw, marker } = options;
+	const index = legTwoRaw.findIndex((raw) => raw.includes(marker));
+	if (index < 0) {
+		throw new Error(
+			`oracle determinism: mutation marker ${JSON.stringify(marker)} is absent from the leg-2 compared corpus — the control is dark`,
+		);
+	}
+	if (legOneRaw[index]?.includes(marker)) {
+		throw new Error(
+			`oracle determinism: mutation marker is present in the unmutated leg at request#${index} — the fixture is self-mutated`,
+		);
+	}
+	return index;
 }
 
 /**
@@ -73,12 +95,29 @@ export function bindMutationToCorpus(_options: {
  * request. A diff confined to earlier requests is ambient nondeterminism and is
  * not evidence that the comparator can see a wire change.
  */
-export function assertMutationSpecificDiff(_options: {
+export function assertMutationSpecificDiff(options: {
 	differences: readonly DiffRef[];
 	legOneRaw: readonly string[];
 	legTwoRaw: readonly string[];
 	marker: string;
 }): number {
-	// RED STAGE: guard not wired.
-	return -1;
+	const { differences, legOneRaw, legTwoRaw, marker } = options;
+	if (differences.length === 0) {
+		throw new Error(
+			"oracle determinism: comparator sensitivity control went dark — a mutated second turn produced byte-identical provider bodies; the apparatus cannot detect a wire change and its pass on the unmutated leg is not evidence",
+		);
+	}
+	const index = bindMutationToCorpus({ legOneRaw, legTwoRaw, marker });
+	if (legOneRaw[index] === legTwoRaw[index]) {
+		throw new Error(
+			`oracle determinism: mutation marker is present at request#${index} but the two legs' bodies are byte-identical there — the marker did not change the wire`,
+		);
+	}
+	const bound = differences.filter((diff) => diff.requestIndex >= index);
+	if (bound.length === 0) {
+		throw new Error(
+			`oracle determinism: comparator sensitivity control went dark — every diff is ambient nondeterminism before the mutated request#${index}; ambient differences cannot prove mutation sensitivity`,
+		);
+	}
+	return index;
 }

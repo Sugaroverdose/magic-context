@@ -11,8 +11,25 @@
  * max_tokens). Rules are added ONLY when a later unit observes a nondeterminism
  * producer on the wire, with the producer named here.
  *
- * RED STAGE (TDD): rule application is not wired in this commit. The committed
- * law reddens on the missing rewrite; the next commit wires it.
+ * ORACLE-UNPATCHED-SURFACES — recorded obligations (N2).
+ *
+ * The determinism wrapper patches Date.now, Math.random and the served
+ * "Today's date" line, and pins TZ through the child env, but it does NOT patch:
+ * - crypto.randomUUID: any producer that puts a UUID on the wire will differ
+ *   between boots. The unit-1 OC1 leg never does (evidence below).
+ * - cwd: the leg shares one isolated cwd across boots by construction (shared
+ *   env), so cwd-derived bytes are identical without a patch. A leg that runs in
+ *   different directories MUST patch or normalize cwd.
+ *
+ * OC1 evidence: the two-boot raw run (verbatim rawBody, no whitelist) is
+ * byte-identical on this leg, and the committed instrument control proves the
+ * comparator sees a wire change. That observation is the evidence, not an
+ * assumption that OC1 is deterministic.
+ *
+ * Forward obligation: OC2 and OpenAI Responses legs carry provider-assigned
+ * ids/request ids. Each such leg requires a named whitelist rule or patch
+ * (producer + reason in ORACLE_WIRE_WHITELIST) before it may run against this
+ * comparator. Adding a rule silently is exactly what this file refuses.
  */
 
 export interface WhitelistRule {
@@ -62,9 +79,9 @@ export function canonicalizeProviderBody(raw: string, ruleNames: readonly string
 }
 
 function normalizeValue(key: string | null, value: unknown, rules: readonly WhitelistRule[]): unknown {
-	// RED STAGE: rules are resolved (so a rogue name still throws) but not applied.
-	void key;
-	void rules;
+	for (const rule of rules) {
+		if (rule.applies(key, value)) return `<rule:${rule.name}>`;
+	}
 	if (Array.isArray(value)) return value.map((entry) => normalizeValue(null, entry, rules));
 	if (value && typeof value === "object") {
 		return Object.fromEntries(
