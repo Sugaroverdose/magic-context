@@ -474,9 +474,9 @@ describe("prepareCompartmentInjection — empty compartments fallback", () => {
     // (Unit 5 widened its empty route to station — same mint pair); merging
     // the block onto either strands the head bytes with a "\n\n" seam (or a
     // block-prefixed "" that reads as a real turn). The "[content omitted]"
-    // and "..." shapes are NOT included: Unit 5 ruled the message-part
-    // filler stays the canonical [dropped §N§] (invariant 2), so
-    // [content omitted] has no v2 mint at all — see the U4-M3 witness laws.
+    // shape joined the gate with the drop-shape doctrine restore 2026-11-06
+    // (live mint again — 9c1520810:inject-compartments.ts:860); "..." stays
+    // out: neither tree mints it (TOOL_RELEASED_SENTINEL is empty).
     it('prepends instead of merging onto an emptied head (sentinel text:"")', () => {
         db = makeDb();
         insertMemory(db, {
@@ -529,8 +529,36 @@ describe("prepareCompartmentInjection — empty compartments fallback", () => {
     // part carries no synthetic flag (the discriminator the reviewer's
     // ordering note does not need an alternation law for — a single
     // anchored full-match regex is order-invariant).
-    for (const forbidden of ["[content omitted]", "..."] as const) {
-        it(`merges onto a ${forbidden} head — the shape stays unrecognised (die-unless-U5-restores-mint)`, () => {
+    // Drop-shape doctrine restore (2026-11-06, owner ruling "ONLY m[0,1]
+    // placement was allowed to drift"): `[content omitted]` is a live mint
+    // again (buildReplacementContent, base 9c1520810:sentinel.ts:47), so the
+    // head gate recognizes it and prepends — the U4-M3 witness kept only the
+    // genuinely-never-minted `...` shape unrecognised (see the sibling
+    // prepends-instead law). Inverting this witness is exactly the
+    // die-unless-mint-restores branch firing.
+    it("prepends instead of merging onto a [content omitted] head (message-drop filler, restored mint)", () => {
+        db = makeDb();
+        insertMemory(db, {
+            projectPath: PROJECT_PATH,
+            category: "USER_DIRECTIVES",
+            content: "directive content-omitted-head",
+        });
+        const messages: MessageLike[] = [userMessage("m1", "[content omitted]")];
+        const prepared = prepareCompartmentInjection(db, SESSION_ID, messages, true, PROJECT_PATH);
+        expect(prepared).not.toBeNull();
+        if (!prepared) return;
+
+        renderCompartmentInjection(SESSION_ID, messages, prepared);
+
+        const headText = (messages[0].parts[0] as { text: string }).text;
+        expect(headText.startsWith("<session-history>")).toBe(true);
+        expect(headText).toContain("directive content-omitted-head");
+        const filler = messages[1]?.parts[0] as { text: string } | undefined;
+        expect(filler?.text).toBe("[content omitted]");
+    });
+
+    for (const forbidden of ["..."] as const) {
+        it(`merges onto a ${forbidden} head — the shape stays unrecognised (no minter on either tree)`, () => {
             db = makeDb();
             insertMemory(db, {
                 projectPath: PROJECT_PATH,
