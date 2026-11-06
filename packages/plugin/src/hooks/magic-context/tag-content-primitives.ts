@@ -93,14 +93,14 @@ export function stripTagSectionCharacters(value: string): string {
  * (never bare leading digits), then malformed hybrids and stray `§`.
  */
 export function stripPersistedAssistantText(value: string): string {
-    let text = stripWellFormedLeadingTagPrefix(value);
-    text = stripCompleteTagPairsGlobally(text);
-    text = stripMalformedTagNotationGlobally(text);
-    // Catch dangling `§N$` / `§Nҩ` (improvised closer) BEFORE the stray-§ pass,
-    // so the digits + closer are removed as a unit instead of orphaned.
-    text = stripDanglingTagNotationGlobally(text);
-    text = stripTagSectionCharacters(text);
-    return text.trim();
+    // ctx_reduce v1 ruling: the plugin never cuts tag notation out of content,
+    // globally or locally. `§N§` is no longer primed as plugin behavior, so
+    // nothing legitimate puts it into persisted text; what is already there
+    // (legacy materialization, model prose) is inert residue and the model's
+    // bytes persist verbatim. Upstream's cutting broke bytes that followed a
+    // tag positioned as shared knowledge; the installed build already
+    // no-ops the pair-stripping for the same reason.
+    return value;
 }
 
 export function byteSize(value: string): number {
