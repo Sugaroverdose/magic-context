@@ -12,7 +12,14 @@ import {
 import { stripWellFormedLeadingTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
-const MARKER_ONLY_PATTERN = /^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\])\s*)+$/;
+// Drop-shape doctrine restore (2026-11-06, owner ruling): buildReplacementContent
+// mints MESSAGE_DROP_PLACEHOLDER (`[content omitted]`) for message-part drops again
+// (base form, 9c1520810:strip-content.ts:15-16), so neutralization must recognize it.
+// The base line also carried a `|\.\.\.` arm; the base never mints it
+// (TOOL_RELEASED_SENTINEL is empty at 9c1520810:sentinel.ts:34), so it stays deleted
+// per the drop-shape dispatch item 4 (see census ruling #2812 dead-strip family).
+const MARKER_ONLY_PATTERN =
+    /^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\]|\[content omitted\])\s*)+$/;
 
 export function isMarkerOnlyText(text: string): boolean {
     const trimmed = text.trim();
