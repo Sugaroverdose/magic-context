@@ -200,12 +200,15 @@ describe("oracle unit 2: request classifier plants", () => {
 			walk(pluginSrc);
 			return text;
 		})();
-		// Every committed marker must be a plugin production string. The plugin's own
-		// internal-agent detectors (system-prompt-hash.ts isInternalOpenCodeAgent /
-		// isMagicContextInternalAgent) pin the host title frame and the historian/
-		// dreamer identity frames as literals — the classifier's marker table is
-		// pinned against the same detectors, so a prompt edit fails this law, not a
-		// live oracle run.
+		// Exact guarantee: every committed marker is still PRESENT SOMEWHERE in
+		// the concatenated plugin production source. Wholesale removal of a marker
+		// trips this law; relocation of a marker between plugin producer files does
+		// NOT (the mechanism is `productionText.includes(marker)` over the whole
+		// tree — the title frame occurs in ~10 prompt files, so producer identity
+		// is deliberately not pinned here). The live-capture classification
+		// (oracle-classified-capture.test.ts) is the tripwire for what this text
+		// law cannot see: a marker that survives in an inert string while the real
+		// prompt stops carrying it.
 		for (const cls of ["title", "historian", "dreamer"] as const) {
 			const markers = ORACLE_SYSTEM_PROMPT_MARKERS[cls] ?? [];
 			expect(markers.length).toBeGreaterThan(0);
