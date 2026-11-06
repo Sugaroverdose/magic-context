@@ -4,7 +4,6 @@ import { describe, expect, it } from "bun:test";
 import { createHash } from "node:crypto";
 import {
 	getTagsBySession,
-	queuePendingOp,
 } from "@magic-context/core/features/magic-context/storage";
 import { createTagger } from "@magic-context/core/features/magic-context/tagger";
 import {
@@ -19,6 +18,7 @@ import {
 import { tagTranscript } from "@magic-context/core/shared/tag-transcript";
 import fixture from "../../../tests/fixtures/tool-input-string-bytes.json";
 import { createPiDroppedInputGuard } from "./dropped-input-guard-pi";
+import { GOLDEN_PI_DROP_OUTPUT as GOLDEN_FULL_DROP_OUTPUT } from "@magic-context/core/hooks/magic-context/fpe-wire-golden";
 import { createTestDb } from "./test-utils.test";
 import { createPiTranscript } from "./transcript-pi";
 
@@ -27,12 +27,12 @@ const SESSION = "ses-real-or-absent";
 const call = (id: string, args: Record<string, unknown>) => ({
 	role: "assistant",
 	timestamp: 1,
-	content: [{ type: "toolCall", id, name: "write", arguments: args }],
+	content: [{ type: "toolCall", id, name: "bash", arguments: args }],
 });
 const result = (id: string, text: string) => ({
 	role: "toolResult",
 	toolCallId: id,
-	toolName: "write",
+	toolName: "bash",
 	content: [{ type: "text", text }],
 	timestamp: 2,
 });
@@ -56,9 +56,17 @@ function serve(db: Db, source: unknown[], dropCallIds?: string[]): unknown[] {
 	tagger.initFromDb(SESSION, db);
 	const { targets } = tagTranscript(SESSION, transcript, tagger, db);
 	if (dropCallIds) {
-		for (const id of dropCallIds)
-			queuePendingOp(db, SESSION, toolTag(db, id), "drop");
-		applyPendingOperations(SESSION, db, targets, new Set());
+		// Sweeper source: these rows pin the automatic real-or-absent tiers
+		// (model stamps erase; see apply-operations.source-modes law tests).
+		applyPendingOperations(SESSION, db, targets, new Set(), undefined, undefined, [
+			...dropCallIds.map((id, i) => ({
+				id: i,
+				sessionId: SESSION,
+				tagId: toolTag(db, id),
+				operation: "drop" as const,
+				queuedAt: 0,
+			})),
+		]);
 	} else {
 		applyFlushedStatuses(SESSION, db, targets);
 	}
@@ -124,9 +132,11 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 			expect(modes.get(small)).toBe("skeleton_real");
 			expect(modes.get(large)).toBe("full");
 			expect(callArguments(served, "call-1024")).toEqual(at);
-			expect(resultText(served, "call-1024")).toBe(`[dropped §${small}§]`);
-			expect(callArguments(served, "call-1025")).toBeUndefined();
-			expect(resultText(served, "call-1025")).toBeUndefined();
+			// `full` keeps the pair on the wire; the released `...` result slot
+			// is pinned as a golden fragment (the carrier shape is the shape
+			// canonical's pin).
+			expect(callArguments(served, "call-1025")).toBeDefined();
+			expect(JSON.stringify(served)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 		} finally {
 			db.close();
 		}
@@ -147,7 +157,7 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 					?.dropMode,
 			).toBe("skeleton_real");
 			expect(callArguments(served, "call-end")).toEqual(large);
-			expect(resultText(served, "call-end")).toBe(`[dropped §${tag}§]`);
+			expect(resultText(served, "call-end")).toBe("");
 			expect(JSON.stringify(served)).not.toContain('"dropped":');
 		} finally {
 			db.close();
@@ -168,8 +178,11 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 			];
 			const passA = serve(db, base, ["call-small", "call-mid", "call-large"]);
 			// Rule 1 (small), rule 2 (large, removed), rule 3 (large, ends the request).
+			// Rule 2 no longer erases the pair: `call-mid` renders the `full`
+			// shape (pinned as a golden fragment, not inline bytes).
 			expect(callArguments(passA, "call-small")).toEqual({ command: "ls -la" });
-			expect(callArguments(passA, "call-mid")).toBeUndefined();
+			expect(callArguments(passA, "call-mid")).toBeDefined();
+			expect(JSON.stringify(passA)).toContain(GOLDEN_FULL_DROP_OUTPUT);
 			expect(callArguments(passA, "call-large")).toEqual({
 				content: "c".repeat(3000),
 			});
@@ -206,7 +219,7 @@ describe("Pi real-or-absent drops inside the newest-call window", () => {
 				createPiDroppedInputGuard()({
 					type: "tool_call",
 					toolCallId: "call-new",
-					toolName: "write",
+					toolName: "bash",
 					input: copied,
 				}),
 			).toBeUndefined();

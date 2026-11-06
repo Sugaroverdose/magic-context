@@ -137,12 +137,34 @@ for (const native of [false, true])
 				expect(calls).toContain("open");
 				expect(results).toContain("keep");
 				for (const id of results) expect(calls).toContain(id);
+				expect(calls).toContain("drop");
+				expect(results).toContain("drop");
 				if (!thinking || native) {
-					expect(calls).not.toContain("drop");
-					expect(results).not.toContain("drop");
+					// `full` shape: the released pair survives serialization with
+					// the FPE token carrier in the args seat and an empty
+					// result slot — never removed from the wire. The Responses
+					// converter substitutes its own "(no tool output)" filler
+					// for any empty output (pi-ai openai-responses-shared),
+					// Anthropic passes the empty content through.
+					const dropCall = parts.find(
+						(p: unknown) =>
+							p.type === (native ? "function_call" : "tool_use") &&
+							(native ? p.call_id : p.id) === "drop",
+					);
+					const dropResult = parts.find(
+						(p: unknown) =>
+							p.type === (native ? "function_call_output" : "tool_result") &&
+							(native ? p.call_id : p.tool_use_id) === "drop",
+					);
+					const args = native ? JSON.parse(dropCall.arguments) : dropCall.input;
+					expect(Object.keys(args)).toEqual(["path"]);
+					expect(typeof args.path).toBe("string");
+					expect(args.path).not.toBe("drop");
+					expect(args.path.length).toBeLessThan(64);
+					expect(native ? dropResult.output : dropResult.content).toBe(
+						native ? "(no tool output)" : "",
+					);
 				} else {
-					expect(calls).toContain("drop");
-					expect(results).toContain("drop");
 					expect(
 						w.messages
 							.filter((m: unknown) => m.role === "assistant")
@@ -345,9 +367,20 @@ test("Q8 indices survive marking and commit; identity finalizer tolerates interv
 		const byRef = new Map(messages.map((m, i) => [m, ids[i]]));
 		messages.unshift({ role: "user", content: "history" });
 		tr.finalizeToolRemovals();
-		expect(messages.length).toBe(2);
-		expect(byRef.get(messages[1])).toBe("tail-entry");
-		expect(messages[1].content).toContain("tail");
+		// The dropped pair survives: assistant row carries the `full` token
+		// carrier, the result row carries the `...` slot.
+		expect(messages.length).toBe(4);
+		expect(byRef.get(messages[1])).toBe("assistant-entry");
+		const oldCall = messages[1].content[0];
+		expect(oldCall.id).toBe("old");
+		expect(Object.keys(oldCall.arguments)).toEqual(["path"]);
+		expect(typeof oldCall.arguments.path).toBe("string");
+		expect(oldCall.arguments.path).not.toBe("old");
+		expect(oldCall.arguments.path.length).toBeLessThan(64);
+		expect(byRef.get(messages[2])).toBe("result-entry");
+		expect(messages[2].content[0].text).toBe("");
+		expect(byRef.get(messages[3])).toBe("tail-entry");
+		expect(messages[3].content).toContain("tail");
 	} finally {
 		db.close();
 	}

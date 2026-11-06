@@ -6,16 +6,24 @@ import { createPiDroppedInputGuard } from "./dropped-input-guard-pi";
 
 const blockedInputs: Array<[string, Record<string, unknown>]> = [
 	["tagged drop sentinel", { command: "[dropped §431§]" }],
+	// Drop-shape doctrine restore (2026-11-06 owner ruling, base bytes
+	// canonical): the five-character truncation copy rejoins the core guard's
+	// blocked set — edit-marker.ts is byte-identical to base and LIVE on this
+	// tree, minting the exact shape into model-visible edit_marker tool input
+	// (9c1520810:dropped-input-guard-pi.test.ts:9 had it blocked for the same
+	// reason: the core guard recognized it).
+	["legacy truncation", { command: "which...[truncated]" }],
 	["new dropped marker", { dropped: "[dropped §431§]" }],
 ];
 
-// Core-contract mirror (Unit 4, coordinator split item D): the three legacy
-// recognition arms died with the pre-upgrade session class in the shared
-// core guard this Pi wrapper delegates to — no v2/Pi path mints those shapes
-// into model-copyable bytes. Unit 7 owns any Pi-side re-derivation of the
-// guard surface; these rows pin the CORE contract meanwhile.
+// Core-contract mirror (Unit 4, coordinator split item D) — narrowed 2026-11-06
+// with the doctrine restore: only the two shapes that NEITHER base nor v2 mints
+// stay unrecognised in the shared core guard this Pi wrapper delegates to
+// ("[N items]", "[object]" — pre-upgrade wire archaeology, rg-verified absent
+// from base production; census drop-shape doctrine-restore addendum). The
+// truncation-shaped string rejoined blockedInputs above: the Unit 4 "no minter"
+// premise was falsified for it (edit-marker.ts renders `...[truncated]`).
 const notBlockedInputs: Array<[string, Record<string, unknown>]> = [
-	["truncation-shaped string (no minter)", { command: "which...[truncated]" }],
 	["array-summary string (no minter)", { files: "[3 items]" }],
 	["object-summary string (no minter)", { metadata: "[object]" }],
 ];
