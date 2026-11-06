@@ -202,18 +202,49 @@ Every ruling must be checkable against the repo at the lane tip without session 
   cardinal presence; verbatim-source mining law; promotion-by-repetition threshold law;
   holdout-split requirement in any translator evaluation artifact.
 
+## Prior art (recovered to documented surfaces, 2026-11-06)
+
+- **Recovery-locality law** (basis of ruling 7(a)): *a model can't query what it doesn't know
+  exist.* Retrieval mediated by a habit the model must independently recall is the failure class;
+  the shape that survives is a two-layer contract — the addressable space is injected (compact,
+  budget-constant structural index), depth is paid only on demand (read-only tool).
+- **sqz counterexample** (the cautionary arm, adjudicated 2026-11-03, fully documented in the
+  harness-ai-exploration research repo, `docs/research/output-guard-repetition-collapse-2026-11-03.md`):
+  a transparent OpenCode TS plugin + MCP (675 stars, Rust, Apache-2.0 — the survey's "MIT" was
+  refuted at the API) that does capture-site command rewriting with originals in its own SQLite.
+  Its recovery path is model-parsed ref tokens on the MAIN path — its own README records GLM 5.1
+  looping on the refs, mitigated by four env escape hatches. That is recovery-locality violated:
+  the model must know and reproduce opaque tokens. The arc design's ledger-index-injected +
+  tool-depth-on-demand split is the direct answer to this counterexample. Harvested from the same
+  adjudication: exception-path-not-main-path (reveal-call-rate ≈ 0 as acceptance gate) is the same
+  acceptance shape as ruling 6's regret ≈ 0.
+- **invizipburu name law** (owner-coined, pinned as the project's name 2026-11-05): "invisible
+  zip" = the recovery-locality contract in one word — the *archive* property (originals always
+  recoverable, exact — hence ruling 8's "raws stay in the store") plus the *invisibility* property
+  (the model reads through builder-emitted markers like any text, never trained to invoke the
+  recovery path; reveal is the exception and its rate ≈ 0 is the acceptance gate). Ruling 9's
+  start/end stamps and the drop-shape family are invisibility-property artifacts.
+- **Operating map rows** reused as mechanisms: "merge arcs below 10%" became ruling 7(e);
+  "historian as the competitor" to the positional sweeper motivates the counterfactual-harm probe
+  arm. These originated in a coordinator session record (not a doc); their operative content is
+  restated in this file, so the doc is self-sufficient for validation.
+- withdraw-lane cancellable-pending pattern (ruling 8 invalidation); rotation-exception fence
+  precedent (ruling 8's pre-authorized exception); Compact-Bench retention gradient (external
+  claim, quoted as its authors' unverified numbers).
+
 ## Sources
 
 - Owner rulings and verbatim quotes: session dialogue 2026-11-05 (arc design thread) and
   2026-11-06 (two-anchor + translator proposals), quoted above with the recorder's context; full
   sequence in the coordinator's session record (compartments "arc-detection mechanism", "settled
-  arc mechanism design").
+  arc mechanism design"). The session record is provenance, not authority — this file is the
+  authority.
 - Store census evidence (2026-11-05): live-tail composition of the coordinator's own session —
   78% finished-arc mass, duplicate-dump liveness-inversion exhibit, 82%-of-restores telemetry.
-- Prior art cited during design: recovery-locality law (invizipburu analysis, sqz failure class);
-  withdraw-lane cancellable-pending pattern; rotation-exception fence precedent; Compact-Bench
-  retention gradient (external claim, quoted as its authors' unverified numbers); MemoryWalker
-  coarse-to-fine (operating map, `13157-13176` era thread).
+  Reproducible against the context store (`tool_tag` per-tag bytes vs applied boundary) before any
+  lane.
 - Related documents: `docs/plans/2026-11-06-v2-defect-ledger.md` (mistake classes this design must
   not reintroduce), `docs/superpowers/plans/2026-11-06-differential-oracle.md` (placement gate
-  preceding this work), `docs/plans/v2-delta-census.md` (disposition census).
+  preceding this work), `docs/plans/v2-delta-census.md` (disposition census),
+  `docs/research/output-guard-repetition-collapse-2026-11-03.md` (cross-repo: harness-ai-exploration
+  research repo — sqz adjudication).

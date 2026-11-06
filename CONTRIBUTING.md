@@ -41,6 +41,13 @@ twin. It is advisory only, never converts drafts, and is not proof of complete
 coverage: differently named implementations, OpenCode 2, OMP and Rust still need
 explicit review.
 
+## Program records and design docs
+
+Current design and program documents are indexed at
+[`docs/README.md`](docs/README.md) — start from the assembly-v2 plan there. A design
+decision is only binding once it is on that document surface and reachable from the index
+(session notes and agent memory are obligation carriers, never the record).
+
 ## Test discipline (mc-gate)
 
 Full suites are expensive and agents iterate with scoped runs, paying for one
