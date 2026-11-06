@@ -12,53 +12,74 @@ Class 1 + 7) is the mistake record it enforces against.
 - "the real gap is the lack of oracle which would test whole rendering path against expected result"
 - "ordered from here: oracle + corpus as its own unit, drop-shape restoration as the first mechanical consequence, both before mcv2.3"
 
-**DeepSeek plan validation (2026-11-06, agent 20aae840, rev f13b6509d): 2/7 caught, four design
-defects; all load-bearing claims coordinator-verified at source before amending (prior-art false, M1
-placeholder, mural part-flag, OC1-only lane, stale Ruling C — all confirmed).** The pre-amendment
-version is superseded; its verdicts are folded into the text below at the points they bind.
+**DeepSeek plan validation (2026-11-06, agent 20aae840): round 1 at `f13b6509d` — 2/7 caught, four
+design defects; round 2 at `864abade2` — PROCEED-WITH-CONDITIONS, seven conditions. All load-bearing
+claims coordinator-verified at source before amending (prior-art false, M1 placeholder, mural
+part-flag, OC1-only lane, stale Ruling C, compaction-off reference serves heads per
+`9c1520810:.../config/system-region-lane.ts:23`, watermark refusal indistinguishable from empty per
+`region-volatile.ts:258-267` — all confirmed).** Pre-amendment versions superseded; verdicts folded
+into the text at the points they bind.
 
 ## Lane declaration (validation B4 — added)
 
 - **OC1-TS only.** The frozen region lane is an OpenCode-1-TS capability; the OC2 lane keeps serving
   synthetic heads (`packages/plugin/src/v2/server.ts:52-53`). The oracle runs the OC1 harness
   (`opencode-runner/spawn.ts`, plugin via `MC_E2E_PLUGIN_ENTRY`).
-- **The OC1 host binary is pinned** — recorded binary hash in the run manifest (the OC1 runner spawns
-  `opencode` from PATH; unlike OC2's `cli-resolution.ts` it is unpinned by default). "Same harness for
-  both legs" means the same recorded hash, enforced.
-- Pi lane is a separate, second-phase leg (`pi-harness.ts` + `MC_E2E_PI_PLUGIN_ROOT` +
-  `MC_E2E_PI_VERSION`) — achievable, not aspirational, but not the first build.
+- **The OC1 host binary is pinned by committed expected hash, not a receipt** — a committed constant
+  (`sha256-pins.json` precedent from the OC2 lane) checked with a pre-boot `shasum` of the resolved
+  `opencode` binary; mismatch fails the run before spawn. Harness reuse mechanism: the OC1 runner's
+  `existingEnv`.
 
 ## Contract
 
 Same fixture store, same pinned clock, same pinned OC1 host, two plugin builds:
-**reference** = field-verified incumbent (ctxv18 bundle, present at
-`~/.cache/opencode/packages/@cortexkit/opencode-magic-context@0.45.0-ctxv18/`),
+**reference** = field-verified incumbent (ctxv18 bundle, resolved through the run manifest from
+`~/.cache/opencode/packages/@cortexkit/opencode-magic-context@0.45.0-ctxv18/`, never hard-coded),
 **candidate** = assembly-v2 tip dist. Both legs boot **sequentially on one shared store and cwd**
-(the `session-api-cutover.test.ts` existingIsolation pattern) so cwd, project identity
-(`git:<root-commit>` keyed golden windows), and paths are identical by construction.
+(the OC1 `existingEnv` reuse) so cwd, project identity (`git:<root-commit>` keyed golden windows),
+and paths are identical by construction.
+
+**Store-reset contract (round-2 condition 1 — gates unit 1).** Shared store gives identity equality,
+not state equality: the reference leg writes region rows, watermarks, `session_meta`, host messages.
+The runner: seed once → **snapshot** the plugin DB, the host `opencode.db`, and the log roots →
+**restore the same path and bytes before each leg and each self-test repeat** → assert restored file
+hashes before boot. Only then is a wire diff a code diff. The `session-api-cutover.test.ts` pattern is
+a compatibility test (legacy→new on one store) and must not be relied on for fresh-state parity.
 
 Verdicts per scenario, on captured wire bytes (not internal state):
 
 1. **Zero diff** → pass.
-2. **Declared-drift** — confined to the m[0,1] relocation, with the comparator rules made exact
-   (validation B3, all coordinator-verified):
-   - `region ∪ volatile` is **ordered with a defined seam**: comparator reconstructs the reference
-     system block as `region_text + "\n\n" + volatile_text` in serve order; unordered multiset matching
-     is forbidden.
-   - **Reference empty-m1 placeholder normalizes to empty**: reference bakes
-     `M1_EMPTY_PLACEHOLDER = "<session-history-since>(no new content since last
-     materialization)</session-history-since>"` into the region at quiescence (base
-     `inject-compartments.ts:1174,2844`) while the candidate's volatile is `""`; this is a declared
-     named normalization, not silent.
-   - **The mural message belongs to the region position**: the candidate's separate synthetic
-     user message at index 0 (region-render `buildRegionMuralMessage`) is compared against the
-     reference's synthetic file part on the m0 message as a declared transport divergence; its bytes,
-     ordering, and part-level flags are still verified — exclusion never means unverified.
-   - **Watermark-refused volatile = error verdict**, not empty.
+2. **Declared-drift** — confined to the m[0,1] relocation, with the comparator rules written as an
+   algorithm (round-2 condition 3; all source-pinned by the validator):
+   - **Explicit sides (3a).** *Candidate system block* = candidate `region_text` + `"\n\n"` +
+     `volatile_text` (serve order, `system-prompt-hash.ts:503-513`, separator
+     `SYSTEM_PROMPT_GUIDANCE_SEPARATOR`). *Reference system block* = reference region row
+     (`m0_text + "\n\n" + m1_text`, base `inject-compartments.ts:2844`). The comparator compares the
+     candidate block against the reference block. Component names never cross sides.
+   - **Lane-dependent reference extraction (3b).** The reference predicate is conditional
+     (`9c1520810:.../config/system-region-lane.ts:23` — compaction-off → false); the candidate's is
+     constant true (`864abade2:.../system-region-lane.ts:18-19`, owner's no-carve-out ruling). The
+     comparator takes a **lane flag** as input: region row when the reference served a region; m0/m1
+     **message** bytes when compaction-off. The compaction-off corpus row runs under the message side.
+   - **M1 placeholder normalization (3c).** Reference empty-m1 = `M1_EMPTY_PLACEHOLDER`
+     (`<session-history-since>(no new content since last materialization)</session-history-since>`,
+     base `:1174-1175`) normalizes to empty — a named whitelist rule, not silent.
+   - **Watermark refusal gets a side channel (3d).** The wire cannot distinguish refusal from empty
+     (`serveRegionVolatile` returns `null` for both, `region-volatile.ts:258-267`). Each scenario
+     **declares its expected volatile state** (empty / specific bytes / refusal-with-mismatched-
+     watermark) in the fixture; the comparator enforces the declaration against the wire, and a
+     refusal where content was declared is an error verdict.
+   - **Mural transport algorithm (3e).** Per scenario: (i) extract the candidate's index-0 mural
+     message, remove it from the candidate message array; (ii) extract the reference's synthetic file
+     part(s) from the m0 message (region path) or head message (compaction-off path); (iii) compare
+     the file parts in order on `mime`/`url`/part-level `synthetic` (base `inject-compartments.ts:3469`
+     — the part-level flag is the compared field; message-level `synthetic`/`syntheticHead` are NOT
+     compared); (iv) remove the reference file parts; (v) compare remaining arrays and the m0/region
+     text. Exclusion never means unverified.
    Anything outside this set → RED, placement blocked. No manifest, no adjudication ceremony.
-3. There is **exactly one declared drift class** (m[0,1] relocation incl. its mural transport). The
-   previously listed "Pi tag-era" drift is **deleted as stale** — N3 restored `ctx_handles` on Pi;
-   Ruling C is superseded (census `:410`).
+3. There is **exactly one declared drift class** (m[0,1] relocation incl. its mural transport and
+   compaction-off lane side). The previously listed "Pi tag-era" drift is **deleted as stale** — N3
+   restored `ctx_handles` on Pi; Ruling C is superseded (census `:410`).
 
 ## Capture design
 
@@ -68,9 +89,14 @@ Verdicts per scenario, on captured wire bytes (not internal state):
   filters on `ignored`) — structural fields come from the draft probe (`outbound-shape-probe.ts`),
   recorded separately, not claimed as wire bytes.
 - **Request classifier + request-set comparison**: main-agent vs title vs historian vs dreamer vs
-  embedding requests are tagged (reuse `mock-routing.ts` `pinMockAgents` /
-  `assertHistorianMockRouting`); the compared artifact is the request **sequence**, not just per-request
-  bytes — a title-generation delta caused by a part-flag change is a finding, not noise.
+  embedding requests are tagged. `pinMockAgents` (mock-routing.ts:21+) pins children to the host model
+  by default, collapsing the model key; the runner therefore (1) names **distinct mock model ids per
+  agent via `agentModels`** (supported by the same provider, rejected otherwise by design), (2) scripts
+  each agent's responses with a per-agent `mockRequestId` prefix, (3) tags by body `model` + queue
+  prefix; leftovers by system-prompt marker. Internals disabled on both legs (`historian.disable=true`
+  etc.) still leave the disabled-leg requests absent — absence equality is itself compared per class.
+  Unclassified request = red. The compared artifact is the request **sequence per class**, not just
+  per-request bytes — a title-generation delta caused by a part-flag change is a finding, not noise.
 - **Internal completions disabled or scripted** on both legs (`memory.enabled=false`,
   `historian.disable=true`, `dreamer.disable=true` — the `oc2-wire-dump.ts` precedent); any scenario
   that needs them names them.
@@ -93,9 +119,9 @@ it is a read-only live-DB probe (+`.py` summarizer). Not ported. Port instead, a
 
 ## Corpus (shape-coverage census first, then fixtures)
 
-Shape vocabulary is the **live v2 union** — `drop_mode × role × route` from
-`packages/plugin/src/features/magic-context/types.ts:22-44` (`erased`, `truncated`, `skeleton_stripped`,
-`skeleton_real`, `edit_marker`, `edit_marker_stripped`, …), NOT the ledger's corrected 3-shape framing;
+Shape vocabulary is the **live v2 union, enumerated** — `packages/plugin/src/features/magic-context/types.ts:22-44`:
+`full`, `skeleton_real`, `skeleton_stripped`, `message_empty`, `message_filler`, `erased`, `truncated`,
+`edit_marker`, `edit_marker_stripped` (the ledger's corrected 3-shape framing is superseded);
 **message-part drops and tool-part drops are distinct shapes** (validation A2).
 
 Coverage rows (each with a named capture predicate + a planted rogue that reddens if the predicate lies —
@@ -108,7 +134,10 @@ committed witnesses, ledger Class 6; untriggered shape = red):
   band, candidate runs to watermark → diff)
 - **subagent session** exercising the `isSubagent`-gated execute reclaim ride (G3 — A5)
 - **tag-shaped assistant text persisted, then replayed** next turn and via `ctx_expand` (N1 — A6)
-- **Pi three-arm sweeper × provenance** (N2 — A7; phase-2 Pi leg)
+- **Pi scope decision (round-2 condition 2):** the mcv2.3 placement gate is the **plugin-lane oracle
+  only**; the Pi provenance row is NOT in the unit-5 census. The Pi leg (unit 6) is its own follow-up
+  unit and gates the next Pi-visible placement, not mcv2.3 — Pi stays gated today by its battery.
+  This resolves the untriggered-row collision instead of silently dropping the row.
 - withdraw / stamp states; compaction-off ride; mural/PNG (incl. the part-flag rule below)
 - memory write → volatile growth → absorption at scheduler-authorized boundary
 - region rotation + boot replay
@@ -133,9 +162,10 @@ the seeded fixture windows + synthetic arms (identity/ordinal rewrite cost rejec
 
 Candidate's mural file part **lacks the part-level `synthetic: true`** where the reference has it
 (candidate `region-render.ts:1141` vs base `inject-compartments.ts:3469`, whose comment ties the flag to
-phantom-user-turn/title-suppression avoidance, issue #129) — a Class 1 wire-shape deviation. Restored
-byte-faithful to base before mcv2.3; it also becomes the oracle's first live catch (mural-flag rogue
-arm).
+phantom-user-turn/title-suppression avoidance, issue #129) — a Class 1 wire-shape deviation. The
+**production fix lands pre-oracle** (in the drop-shape merge train); the oracle's first catch of this
+class is the **committed mural-flag rogue arm**, which proves the comparator would have caught the live
+defect had it shipped. (Wording per round-2 condition 5 — the fix and the catch are separate events.)
 
 ## Gates and integration
 
@@ -147,6 +177,9 @@ arm).
 
 ## Sequencing
 
-Drop-shape restore merges first (its green is unit 4's acceptance evidence). Mural part-flag fix joins
-the same merge train. Then this unit ships in the order above; first full run at the combined tip;
-zero unexpected diffs + batteries green at the same RC tree → mcv2.3 placement.
+Drop-shape restore merges first (its green is unit 4's acceptance evidence), mural part-flag fix in the
+same train. Then this unit ships in the order above. **Unit 5 completion criterion:** every G1/G2/G3/N1
+row carries a written wire predicate + committed planted rogue — a row with only a name is not complete
+(the oracle remains a Class 1 gate until those predicates exist; it does not claim program-parity oracle
+status before then). First full run at the combined tip; zero unexpected diffs + batteries green at the
+same RC tree → mcv2.3 placement.
