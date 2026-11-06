@@ -367,27 +367,36 @@ export function maybeDeliverChannel2Pi(
 }
 
 // Delivery can follow a sibling emergency drop or an agent queue operation after the baseline was saved.
-export function currentReclaimHints(
+// Enrichment mirrors OpenCode's delivery-time `enrichReclaimHintsWithCallIds`
+// (which pairs through the host store). On Pi the registry tool row keys
+// itself by the wire call id — `message_id` IS the copyable handle, no host
+// lookup needed. Hints without a copyable handle render no per-item line
+// (shared renderer rule), so enrichment is all-or-nothing per hint.
+function currentReclaimHints(
 	db: Database,
 	sessionId: string,
 	hints: SharedChannel1State["oldestReclaimableToolTags"],
 ): NonNullable<SharedChannel1State["oldestReclaimableToolTags"]> {
 	if (!hints?.length) return [];
-	const active = new Set(
+	const active = new Map(
 		getTagsByNumbers(
 			db,
 			sessionId,
 			hints.map((tag) => tag.tagNumber),
 		)
 			.filter((tag) => tag.status === "active")
-			.map((tag) => tag.tagNumber),
+			.map((tag) => [tag.tagNumber, tag.messageId]),
 	);
 	const queued = new Set(
 		getPendingOps(db, sessionId)
 			.filter((op) => op.operation === "drop")
 			.map((op) => op.tagId),
 	);
-	return hints.filter(
-		(tag) => active.has(tag.tagNumber) && !queued.has(tag.tagNumber),
-	);
+	return hints
+		.filter((tag) => active.has(tag.tagNumber) && !queued.has(tag.tagNumber))
+		.map((tag) => {
+			if (tag.callId !== undefined) return tag;
+			const callId = active.get(tag.tagNumber);
+			return callId ? { ...tag, callId } : tag;
+		});
 }
