@@ -189,8 +189,17 @@ export function stripDroppedPlaceholderMessages(
         // that AI SDK depends on to avoid merging consecutive assistants.
         if (msg.info.role === "user") continue;
 
-        // Skip messages already reduced to a lone sentinel — idempotent on replay
-        if (msg.parts.length === 1 && isSentinel(msg.parts[0])) continue;
+        // A message already reduced to a lone sentinel keeps its id flowing
+        // into the persisted neutralization set (counted as no fresh strip).
+        // The R11 emptied message drop IS the sentinel shape: the original
+        // skip made it invisible to detection, and after a fold the tag is
+        // `compacted` — the id set is then the only channel that re-blanks a
+        // re-exposed host row. This runs inside the cache-busting detection
+        // pass, where re-adding a known id is a no-op union.
+        if (msg.parts.length === 1 && isSentinel(msg.parts[0])) {
+            if (typeof msg.info.id === "string") sentineledIds.push(msg.info.id);
+            continue;
+        }
 
         let hasContentPart = false;
         let hasNonDroppedContent = false;
