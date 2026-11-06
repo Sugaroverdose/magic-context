@@ -147,6 +147,18 @@ Prevention laws:
 - **Ordering override**: coordinator said "resolver first, guard second"; the pinned reference composition
   is guard-first and the lane correctly overrode. Standing rule: match the reference; a coordinator
   instruction that contradicts the proven recipe is the deviation. (Memory: follow-the-proven-path.)
+- **Brief contradicted its own doctrine** (drop-shape restore): the dispatch enumerated "three recognizer
+  arms" and barred pi-plugin production while the governing ruling (recognizers are model-imitation
+  defense, mintage-irrelevant) was tree-wide — the fourth recognizer (`strip-placeholders-pi.ts`
+  MARKER_ONLY `...` arm) survived until round-2 gate R1 found it by applying the ruling the brief
+  withheld. A ruling that scopes across a boundary must not be dispatched with a carve-out at that
+  boundary; enumerate members by the doctrine, not by the lane's file list.
+- **Brief asserted base shapes without base reads** (drop-shape item-6 "carve-out"): the dispatch told the
+  lane tool-output `skeleton_real` keeps `[dropped §N§]` "per base" — base `skeletonReal` writes
+  `TOOL_RELEASED_SENTINEL = ""` (tag-transcript.ts:1423-1427, sentinel.ts:34) and the cited pi test line
+  was a different law entirely. The lane's stop-and-report caught it; had it complied, the branch would
+  have minted a doctrine fiction. Every base citation in a brief must be `git show`-verified before
+  dispatch, same rule as plan pointers.
 - **Fabricated constraint**: the ARCHITECTURE `mc:protected` banner ("Only a human edits this region") was
   the coordinator's own self-imposed discipline presented as owner law; a deferral rationale in census
   rows encoded "owner-gated" that was never owner law. When recording a constraint, cite the raw owner
@@ -205,6 +217,25 @@ Prevention laws:
   an unattributable change = stop and report.
 - **Never exclude a failing test from a battery run**; suspected flakes are reported with the log path
   for adjudication (CONTRIBUTING.md).
+- **Receipts bind by gate log FILENAME, not tree hash alone**: mc-gate's tree_id encodes HEAD+porcelain,
+  so a pre-commit measurement records a real state whose head line is the predecessor commit — three
+  closure receipts this arc cited trees whose head lines named earlier commits, and one commit body
+  claimed "six restored laws" against five in the log (6b7c1929a; bodies are not edited post-hoc, the
+  census note is the correction). Lanes cite the log file for every receipt.
+- **Shared fixtures have consumers nobody enumerated**: adding a `"..."` positive to
+  `testdata/marker-only-parity.json` reddened a Rust parity test that `include_str!`s the same file —
+  found by round-3 gate C3, not by any battery (cargo is not in mc-gate) or lane (bun-only view). Before
+  editing a shared fixture, census every consumer across all languages (`rg` the path). When consumers
+  disagree at base (both TS recognizers had the arm; the Rust twin and the fixture never did), base
+  canonical settles it: fixture returns to base bytes, coverage lives in consumer-local named laws
+  (Pi direct `isPiMarkerOnlyText("...")` law), and the shelved surface stays untouched (#2784).
+- **Verify the reviewer's prescribed fix against the base twin before adopting it**: the round-3 reviewer
+  correctly found the Rust red and proposed "restore the Rust arm to match base doctrine" — but the base
+  Rust twin never had the arm, so following the prescription would have manufactured a shape base never
+  had. Reviewer findings are trustworthy; reviewer remedies are proposals — run them through the same
+  base-read gate as brief claims. (The round-2 instance inverted the same lesson: the reviewer's "sign-off
+  item" on the dead recognizers was actually a defect once the imitation-defense doctrine was applied —
+  deferring to the reviewer's framing was the wrong direction.)
 
 ## 7. Placement and release gates
 
