@@ -691,12 +691,13 @@ describe("Producer census (D4): the operation vocabulary withdraw's filter relie
             ops: ["drop", "drop"],
             calls: 2,
         },
-        // v2 tree: the Pi ctx-reduce lane still carries its seed shape (one
-        // queue site); the assembly-era three-site Pi re-implementation is
-        // the Unit 7 mirror's subject, not this census's operand.
+        // N3 port 2026-11-06: the Pi ctx-reduce lane carries the v1 handles
+        // tool again (9c1520810 queue sites :242/:307/:489 — handles, bulk,
+        // legacy drop lanes); blessed entry re-pinned to the v1 form at
+        // 9c1520810:withdraw.test.ts:694-697.
         "packages/pi-plugin/src/tools/ctx-reduce.ts": {
-            ops: ["drop"],
-            calls: 1,
+            ops: ["drop", "drop", "drop"],
+            calls: 3,
         },
         "packages/plugin/src/hooks/magic-context/compartment-runner-drop-queue.ts": {
             ops: ["auto_drop", "auto_drop"],
