@@ -129,12 +129,28 @@ export const SELFTEST_MAGIC_CONTEXT_CONFIG = {
 	dreamer: { disable: true },
 };
 
-/** All matched provider requests (Anthropic Messages API for the OC1 leg). */
+/**
+ * The compared request set: Anthropic Messages API posts for the OC1 leg. The
+ * mock captures three shapes (messages, responses, chat/completions), so this
+ * is a completeness contract, not a convenience filter: any captured request
+ * outside the set throws with path and count named. A silent drop here would
+ * hide divergences in the dropped subset of a future mixed-path leg, and the
+ * count-parity check in runOracleLegPair operates on the same unfiltered set.
+ */
+export const COMPARED_REQUEST_PATHS: readonly string[] = ["/messages", "/v1/messages"];
+
 export function requestsOf(requests: CapturedRequest[]): CapturedRequest[] {
-	return requests.filter(
+	const offSet = requests.filter(
 		(request) =>
-			request.method === "POST" && (request.path === "/messages" || request.path === "/v1/messages"),
+			!(request.method === "POST" && COMPARED_REQUEST_PATHS.includes(request.path)),
 	);
+	if (offSet.length > 0) {
+		const shapes = offSet.map((request) => `${request.method} ${request.path}`).join(", ");
+		throw new Error(
+			`oracle requestsOf: ${offSet.length} captured request(s) outside the compared set (POST ${COMPARED_REQUEST_PATHS.join(" | POST ")}): ${shapes} — the compared artifact must never silently drop a captured path`,
+		);
+	}
+	return requests;
 }
 
 export interface RawDiff {

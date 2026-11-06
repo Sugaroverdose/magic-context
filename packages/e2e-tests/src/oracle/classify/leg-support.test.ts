@@ -8,8 +8,9 @@
 import { describe, expect, it } from "bun:test";
 import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { MockProvider } from "../../mock-provider/server";
+import { MockProvider, type CapturedRequest } from "../../mock-provider/server";
 import { spawnOpencode } from "../../opencode-runner/spawn";
+import { requestsOf } from "./leg-runner";
 
 const E2E_ROOT = resolve(import.meta.dir, "../../..");
 
@@ -187,5 +188,56 @@ describe("unit 2 reuse laws (classified legs ride the certified unit-1b path)", 
 		]) {
 			expect(unitTwo.includes(needle), `classified capture must use ${needle}`).toBe(true);
 		}
+	});
+});
+
+function fakeCapture(method: string, path: string): CapturedRequest {
+	return {
+		receivedAt: 0,
+		method,
+		path,
+		headers: {},
+		body: { model: "mock-sonnet", messages: [] },
+	};
+}
+
+describe("fail-closed request filter (compared artifact completeness)", () => {
+	it("a captured request outside the compared set throws with the path and count named, never a silent drop", () => {
+		// The mock captures three shapes (messages, responses, chat/completions);
+		// a mixed-path leg must fail closed, not compare a hidden subset.
+		expect(() =>
+			requestsOf([fakeCapture("POST", "/v1/messages"), fakeCapture("POST", "/v1/responses")]),
+		).toThrow("/v1/responses");
+		expect(() => requestsOf([fakeCapture("POST", "/v1/responses")])).toThrow("1");
+		expect(() =>
+			requestsOf([
+				fakeCapture("POST", "/v1/responses"),
+				fakeCapture("POST", "/chat/completions"),
+			]),
+		).toThrow("2");
+		// Non-POST on a compared path is also off-set.
+		expect(() => requestsOf([fakeCapture("GET", "/v1/messages")])).toThrow("GET /v1/messages");
+	});
+
+	it("the compared set passes through whole: same length, same order, nothing dropped", () => {
+		const compared = [
+			fakeCapture("POST", "/v1/messages"),
+			fakeCapture("POST", "/messages"),
+			fakeCapture("POST", "/v1/messages"),
+		];
+		expect(requestsOf(compared)).toBe(compared);
+	});
+
+	it("reuse law: the leg pair count-parity check operates on the unfiltered capture set", () => {
+		const source = readFileSync(join(import.meta.dir, "leg-runner.ts"), "utf8");
+		// Both legs enter the parity check through the fail-closed filter — there
+		// is no path where one leg's capture bypasses it.
+		expect(source).toMatch(/const first = requestsOf\(await leg\(1\)\);/);
+		expect(source).toMatch(/const second = requestsOf\(await leg\(2\)\);/);
+		expect(source.match(/requestsOf\(await leg/g)?.length).toBe(2);
+		// And requestsOf itself is fail-closed, not a silent filter-return.
+		expect(source).toMatch(/export function requestsOf[\s\S]*?throw new Error/);
+		expect(source).toMatch(/export function requestsOf[\s\S]*?return requests;\n\}/);
+		expect(source).not.toMatch(/return\s+requests\.filter\(/);
 	});
 });
