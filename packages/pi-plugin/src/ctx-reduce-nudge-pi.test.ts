@@ -15,7 +15,6 @@ import {
 import * as loggerModule from "@magic-context/core/shared/logger";
 import {
 	clearPiChannel1State,
-	currentReclaimHints,
 	getPiChannel1Baseline,
 	maybeChannel1ReminderForToolResult,
 	maybeDeliverChannel2Pi,
@@ -95,6 +94,12 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			const hints = reminder.hint.map(({ tag_number, tool_name }) => ({
 				tagNumber: tag_number,
 				toolName: tool_name,
+				// The golden is the registry-only (module-view) copy contract:
+				// no copyable handle visible, so no per-item line (the shared
+				// renderer rule). An explicit null marks "no handle" and
+				// survives delivery enrichment; the Pi production TS path has
+				// the wire call id available and renders the line.
+				callId: null,
 			}));
 			for (const hint of hints)
 				insertTag(
@@ -225,7 +230,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 
 	it("includes oldest reclaimable hints from the baseline", () => {
 		const db = createTestDb();
-		insertTag(db, SESSION, "hint-123", "tool", 9000, 123, 0, "read");
+		insertTag(db, SESSION, "call-h123", "tool", 9000, 123, 0, "read");
 		setPiChannel1Baseline(SESSION, {
 			...channel2BaselineFields(90_000, 120_000),
 			reducedSinceRefresh: false,
@@ -237,12 +242,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			toolName: "bash",
 			content: [{ type: "text", text: "some bash output" }],
 		});
-		// ctx_reduce v1: the shared builder renders the reclaimable row only
-		// when the hint carries a copyable call id. The Pi seed lane mints no
-		// call ids, so the row stays gated off even with baseline hints; the
-		// Pi registry wiring is Unit 7 scope (ledger in the Unit 3 report).
-		expect(block?.text).toContain("spent tool outputs");
-		expect(block?.text).not.toContain("oldest reclaimable");
+		expect(block?.text).toContain("oldest reclaimable: call-h123 read.");
 		clearPiChannel1State(SESSION);
 	});
 
@@ -252,7 +252,7 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			insertTag(
 				db,
 				SESSION,
-				`msg-${tagNumber}`,
+				`call-${tagNumber}`,
 				"tool",
 				9000,
 				tagNumber,
@@ -290,15 +290,11 @@ describe("maybeChannel1ReminderForToolResult", () => {
 			content: [{ type: "text", text: "some bash output" }],
 		});
 
-		// ctx_reduce v1: the rendered row is gated on copyable call ids (Pi
-		// seed lane: none — Unit 7), so the selection itself is asserted at
-		// the row level against the production selector that built the
-		// baseline: control-plane (1 work, 2 board) and tiny (3, 40 tokens)
-		// are skipped, order preserved.
-		expect(block?.text).not.toContain("oldest reclaimable");
-		expect(
-			getOldestActiveUnprotectedToolTags(db, SESSION).map((t) => t.tagNumber),
-		).toEqual([4, 5, 6, 7]);
+		expect(block?.text).toContain(
+			"oldest reclaimable: call-4 bash · call-5 bash · call-6 aft_search · call-7 read.",
+		);
+		expect(block?.text).not.toContain("call-1 work");
+		expect(block?.text).not.toContain("call-2 board");
 		clearPiChannel1State(SESSION);
 	});
 
@@ -800,8 +796,7 @@ describe("maybeDeliverChannel2Pi", () => {
 		expect(capturedContent).toContain(
 			"Your next step: call ctx_reduce on the outputs you've already used (spent tool outputs (~75k tokens)). Then continue your task.",
 		);
-		// ctx_reduce v1: handle row gated without copyable call ids (Pi seed).
-		expect(capturedContent).not.toContain("oldest reclaimable");
+		expect(capturedContent).toContain("oldest reclaimable");
 		expect(getChannel2NudgeState(db, SESSION)).toBe("delivered");
 	});
 
@@ -1134,16 +1129,9 @@ for (const channel of [1, 2]) {
 					sessionId,
 				);
 			}
-			// ctx_reduce v1: the wire row is gated on copyable call ids (Pi
-			// seed: none — Unit 7), so the exclusion is asserted against the
-			// production filter the delivery lanes actually call.
-			expect(text).not.toContain("oldest reclaimable");
-			const remaining = currentReclaimHints(db, sessionId, [
-				{ tagNumber: 1, toolName: "read" },
-				{ tagNumber: 2, toolName: "read" },
-				{ tagNumber: 3, toolName: "read" },
-			]).map((tag) => tag.tagNumber);
-			expect(remaining).toEqual([3]);
+			expect(text).toContain("call-3 read");
+			expect(text).not.toContain("call-1");
+			expect(text).not.toContain("call-2");
 		} finally {
 			clearPiChannel1State(sessionId);
 			db.close();

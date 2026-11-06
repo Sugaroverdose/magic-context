@@ -2,6 +2,7 @@ import type { Scheduler } from "../../features/magic-context/scheduler";
 import type { ContextDatabase } from "../../features/magic-context/storage";
 import { loadPersistedUsage, type PersistedUsageState } from "../../features/magic-context/storage";
 import type { ContextUsage, SessionMeta } from "../../features/magic-context/types";
+import { piModelRefToCanonical } from "../../shared/harness-provider-map";
 import { sessionLog } from "../../shared/logger";
 
 type ContextUsageCacheEntry = {
@@ -43,6 +44,41 @@ export function contextUsagePassSnapshot(sessionMeta: SessionMeta): ContextUsage
               }
             : null,
     };
+}
+
+const canonicalizeModelKeyForUsageSeed = (key: string | null | undefined): string | null => {
+    if (typeof key !== "string" || key.length === 0) return null;
+    const canonical = piModelRefToCanonical(key);
+    return canonical.length > 0 ? canonical : key;
+};
+
+/**
+ * Boot seeding for the provider-reported context usage.
+ *
+ * The live usage map is in-memory and starts empty, so the first priced pass
+ * of a restarted process would otherwise estimate usage against the usable-hard
+ * geometry — a smaller denominator than the provider window the persisted
+ * percentage is measured against. A healthy session's boot pass then lands
+ * above the scheduler trigger and the emergency drain band by arithmetic
+ * alone, and the pass drops calls the session never needed to drop. The
+ * provider-reported usage persisted at the last response is the real number:
+ * percentage against the provider window, input tokens from the served wire.
+ *
+ * Returns the persisted usage when it is usable for the outgoing model:
+ * non-zero, fresh, model key matching (persisted keys are model-bound).
+ * Returns null when the estimate path must run (first pass of a session,
+ * model switch, absent record).
+ */
+export function seedPersistedUsageAtBoot(input: {
+    persistedUsage: ContextUsagePassSnapshot["persistedUsage"];
+    currentModelKey: string | undefined;
+}): ContextUsage | null {
+    const persisted = input.persistedUsage;
+    if (!persisted || persisted.usage.inputTokens <= 0) return null;
+    const persistedKey = canonicalizeModelKeyForUsageSeed(persisted.lastObservedModelKey);
+    const currentKey = canonicalizeModelKeyForUsageSeed(input.currentModelKey);
+    if (persistedKey && currentKey && persistedKey !== currentKey) return null;
+    return persisted.usage;
 }
 
 export function resolveUnknownUsageFromWireEstimate(input: {

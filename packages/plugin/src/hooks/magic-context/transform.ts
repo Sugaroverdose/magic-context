@@ -161,6 +161,7 @@ import {
     loadContextUsage,
     resolveSchedulerDecision,
     resolveUnknownUsageFromWireEstimate,
+    seedPersistedUsageAtBoot,
 } from "./transform-context-state";
 import { findLastUserMessageId, findSessionId } from "./transform-message-helpers";
 import {
@@ -2537,15 +2538,20 @@ export function createTransform(deps: TransformDeps) {
                     modelID: modelForBudget?.modelID,
                     agentName: notificationParams.agent,
                 });
-                contextUsage = resolveUnknownUsageFromWireEstimate({
-                    usage: contextUsage,
-                    pricedPass: true,
-                    wireEstimateTokens: pressureEstimate.tokens,
-                    wireEstimateTrusted: pressureEstimate.trusted,
-                    providerProvenInputTokens: providerProvenInputForRecovery,
-                    providerProvenLimitTokens: providerProvenLimitForRecovery,
-                    usableHardLimit: windowGeometry?.usableHard,
-                });
+                contextUsage =
+                    seedPersistedUsageAtBoot({
+                        persistedUsage: persistedUsageBeforeResets,
+                        currentModelKey: currentModelKeyForBoundary,
+                    }) ??
+                    resolveUnknownUsageFromWireEstimate({
+                        usage: contextUsage,
+                        pricedPass: true,
+                        wireEstimateTokens: pressureEstimate.tokens,
+                        wireEstimateTrusted: pressureEstimate.trusted,
+                        providerProvenInputTokens: providerProvenInputForRecovery,
+                        providerProvenLimitTokens: providerProvenLimitForRecovery,
+                        usableHardLimit: windowGeometry?.usableHard,
+                    });
                 if (contextUsage.inputTokens > 0) {
                     const usedProviderInput =
                         !pressureEstimate.trusted &&
@@ -2597,6 +2603,7 @@ export function createTransform(deps: TransformDeps) {
         const postTransformResult = await runPostTransformPhase({
             compactionMarkerStrategy:
                 deps.compactionMarkerStrategy ?? defaultCompactionMarkerStrategy,
+            executeThresholdPercentage: effectiveExecuteThresholdPercentage,
             sessionId,
             db,
             messages,

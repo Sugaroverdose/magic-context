@@ -1479,6 +1479,9 @@ interface RunPostTransformPhaseArgs {
     didMutateFromFlushedStatuses: boolean;
     watermark: number;
     forceMaterializationPercentage: number;
+    /** Config execute band; the sweeper stops at threshold − 15pp below it.
+     * Absent (test hosts / hosts that predate the law) = unbudgeted sweep. */
+    executeThresholdPercentage?: number;
     hasRecentReduceCall: boolean;
     projectPath?: string;
     sessionDirectory?: string;
@@ -2164,6 +2167,10 @@ export async function runPostTransformPhase(
                 (args.historyRebuiltThisPass ||
                     args.rebuiltHistoryFromInitialPrepare ||
                     (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
+        // Upstream issue 619 backport (TS-only): a subagent has no historian and
+        // no history fold, so its execute pass is the shared ride for its queued
+        // drops.
+        subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
     };
     let publishedWorkDrainAllowed = !compactionOff && hasReclaimRide(rideSignals);
     // System-origin reclaim may only ride a pass that actually rewrites served
@@ -2450,12 +2457,14 @@ export async function runPostTransformPhase(
                 `pending ops WILL APPLY — reason=${applyReason}, pendingOps=${formatPendingOpsDepth()}, context=${args.contextUsage.percentage.toFixed(1)}%`,
             );
             const tApply = performance.now();
-            // System-origin rows wait for a byte-change event; model stamps
-            // release on this pass under the current permission.
-            // Frozen-base adaptation of 347e503cd: this base's pending-op
-            // vocabulary is a single 'drop' operation (readPendingOps ignores
-            // anything else), so there is no system-origin class to filter by —
-            // the whole queue rides the byte-change permission or waits.
+            // Dual pending-op vocabulary on this build: 'drop' = model
+            // ctx_reduce stamps, 'auto_drop' = system-origin (compartment
+            // runner queue; storage-ops toPendingOp accepts both, types.ts
+            // PendingOp). The classes differ at APPLY — system rows render
+            // the sweeper shape (apply-operations source gate, synthetic ||
+            // auto_drop) — not in ride permission: frozen-base adaptation of
+            // 347e503cd keeps the queue all-or-nothing (#2641), so the whole
+            // queue rides the byte-change permission or waits.
             const opsToApply = systemReclaimAllowed ? pendingOps : [];
             if (opsToApply.length !== pendingOps.length) {
                 sessionLog(
@@ -2820,12 +2829,24 @@ export async function runPostTransformPhase(
         let autoReclaimTargetCount = 0;
         let autoReclaimDidMutate = false;
         if (toolReclaimApplicationOpportunity && !emergencyDropEligible) {
+            const usableForBudget =
+                args.contextUsage.percentage > 0
+                    ? (args.contextUsage.inputTokens * 100) / args.contextUsage.percentage
+                    : 0;
             const syntheticPendingOps = buildSyntheticToolReclaimOps({
                 db: args.db,
                 sessionId: args.sessionId,
                 targets: args.targets,
                 watermark: args.sessionMeta.toolReclaimWatermark ?? 0,
                 pendingOps,
+                budget:
+                    usableForBudget > 0 && args.executeThresholdPercentage !== undefined
+                        ? {
+                              currentUsagePercentage: args.contextUsage.percentage,
+                              executeThresholdPercentage: args.executeThresholdPercentage,
+                              usableContextTokens: usableForBudget,
+                          }
+                        : undefined,
             });
             // Smart-drops: reclaim spent control-plane outputs that a later
             // call supersedes (older todowrite/ctx_reduce/meta), and compress
@@ -2899,7 +2920,9 @@ export async function runPostTransformPhase(
         // Advance whenever reclaim could have applied, even if no tags were
         // selected. Plain execute-band residency does not advance the watermark;
         // otherwise each newly eligible tag could drop separately instead of
-        // waiting for the next independently priced batch.
+        // waiting for the next independently priced batch. The stop-line budget
+        // gates SELECTION independently: an overdue tag still only drops while
+        // the projected usage sits above the stop line.
         if (toolReclaimApplicationOpportunity) {
             const maxTagNumber = advanceToolReclaimWatermarkToCurrentMax(args.db, args.sessionId);
             args.sessionMeta.toolReclaimWatermark = Math.max(

@@ -8,12 +8,37 @@ import {
 import type { PendingOp } from "../../features/magic-context/types";
 import type { TagTarget } from "./tag-messages";
 
+/** Points of headroom kept between the sweeper's stop line and the execute
+ * band: the sweep stops once projected usage reaches threshold − 15pp, so a
+ * session oscillates below the band instead of being emptied in one bite. */
+export const AUTO_RECLAIM_STOP_HEADROOM_PP = 15;
+
+export interface SweeperBudget {
+    currentUsagePercentage: number;
+    executeThresholdPercentage: number;
+    usableContextTokens: number;
+}
+
+/** Token mass the sweeper must reclaim to bring usage down to the stop line;
+ * zero or negative when usage already sits below it. */
+export function sweeperNeededTokens(budget: SweeperBudget): number {
+    const stopPercentage = Math.max(
+        10,
+        budget.executeThresholdPercentage - AUTO_RECLAIM_STOP_HEADROOM_PP,
+    );
+    return ((budget.currentUsagePercentage - stopPercentage) / 100) * budget.usableContextTokens;
+}
+
 export function buildSyntheticToolReclaimOps(input: {
     db: ContextDatabase;
     sessionId: string;
     targets: Map<number, TagTarget>;
     watermark: number;
     pendingOps?: readonly PendingOp[];
+    /** Stop-line budget (FPE carrier law): select oldest-first until the
+     * projected usage reaches threshold − 15pp, then stop. Unknown-token tags
+     * ride the sweep but count zero toward the budget. */
+    budget?: SweeperBudget;
 }): PendingOp[] {
     const watermark = Math.max(0, input.watermark);
     if (watermark <= 0) return [];
@@ -30,6 +55,9 @@ export function buildSyntheticToolReclaimOps(input: {
         null,
     );
     const synthetic: PendingOp[] = [];
+    const neededTokens = input.budget ? sweeperNeededTokens(input.budget) : Infinity;
+    if (neededTokens <= 0) return synthetic;
+    let selectedTokens = 0;
 
     for (const tag of tags) {
         if (tag.tagNumber > watermark) continue;
@@ -46,6 +74,8 @@ export function buildSyntheticToolReclaimOps(input: {
             operation: "drop",
             queuedAt: 0,
         });
+        selectedTokens += tag.reclaimableTokens ?? 0;
+        if (selectedTokens >= neededTokens) break;
     }
 
     return synthetic;

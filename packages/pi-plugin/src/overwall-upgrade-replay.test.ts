@@ -153,15 +153,24 @@ for (const native of [false, true])
 			await f.seed();
 			const first = await f.pass(0);
 			const bytes = JSON.stringify(first);
-			// Fixtures are formatted for review; these digests pin the original compact
-			// handler output captured on 0ebe5b8df858, not regenerated current output.
+			// Fixtures are formatted for review. Recaptured 2026-11-06 from the
+			// ctxv18 stratum port (9f10a1181) onward — the old captures (pinned at
+			// 0ebe5b8df858 as original, non-regenerated output) still carried the
+			// two message-text wire prefixes the port removed. The recapture is
+			// prefix-only-proven, not a blessing of current behavior: live bytes ==
+			// old fixture with a sentinel-guarded §N§ -strip, exactly 2 removals,
+			// all 400 [dropped §N§] sentinels byte-identical; v1's same-title law
+			// (9c1520810:packages/pi-plugin/src/overwall-upgrade-replay.test.ts:171)
+			// is prefix-free and carries no byte-pin (FPE-carrier era), so v1's
+			// form is not the re-pin target. Proof + digests in the recapture
+			// commit body.
 			const baseBytes = JSON.stringify(
 				JSON.parse(readFileSync(new URL(`base-${native}.json`, dir), "utf8")),
 			);
 			expect(createHash("sha256").update(baseBytes).digest("hex")).toBe(
 				native
-					? "1476e1cb61727f7534bc5d408de1b1bb872e7bb210102b06f585eddb26846e26"
-					: "d29fb362f9ad71b70f1d253ef648d516bd1041b688f77649a9f9f61473396ab9",
+					? "b96cd1f85bb81e0afaa212d2d4636c48233e5c697b2cc12a0b0601e0c7b75dc7"
+					: "ed21a0adfd7d029ecbb5b4a665ff291884536beed8b6c9554e1a981515228a44",
 			);
 			expect(bytes).toBe(baseBytes);
 			expect(calls(first)).toBe(200);
