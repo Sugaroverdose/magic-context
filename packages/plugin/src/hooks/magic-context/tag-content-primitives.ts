@@ -88,9 +88,12 @@ export function stripTagSectionCharacters(value: string): string {
 }
 
 /**
- * Strip MC tag notation from assistant text at the persistence boundary
- * (`experimental.text.complete`, Pi `message_end`). Removes whole `§N§` pairs
- * (never bare leading digits), then malformed hybrids and stray `§`.
+ * Persistence-boundary pass for assistant text (`experimental.text.complete`,
+ * Pi `message_end`). Verbatim: the model's bytes are persisted unchanged.
+ * The former four-pass cutting chain (pair/hybrid/stray stripping) is
+ * retired — see the ruling in the body. (Doc re-pinned 2026-11-06 per
+ * merge-gate A3; the code has been the no-op since the N1 ctx_reduce-v1
+ * ruling, this header still described the deleted cutting.)
  */
 export function stripPersistedAssistantText(value: string): string {
     // ctx_reduce v1 ruling: the plugin never cuts tag notation out of content,

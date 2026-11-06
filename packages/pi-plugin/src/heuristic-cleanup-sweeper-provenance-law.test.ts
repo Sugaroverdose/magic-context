@@ -17,7 +17,10 @@ import { join } from "node:path";
  * calls. Precedent law: 5a9faa0c5 ("emergency reclaim declares sweeper
  * provenance").
  */
-const SRC = readFileSync(join(import.meta.dir, "heuristic-cleanup-pi.ts"), "utf8");
+const SRC = readFileSync(
+	join(import.meta.dir, "heuristic-cleanup-pi.ts"),
+	"utf8",
+);
 const codeOnly = SRC.split("\n")
 	.filter((line) => !line.trim().startsWith("//"))
 	.join("\n");
@@ -46,8 +49,12 @@ describe("Pi sweeper provenance law (N2)", () => {
 		const sites = callSites();
 		expect(sites).toHaveLength(3);
 		for (const [index, site] of sites.entries()) {
-			expect(site, `applyNewToolDrop arm #${index + 1}`).toContain('source: "sweeper"');
-			expect(site, `applyNewToolDrop arm #${index + 1}`).toContain("toolName: tag.toolName");
+			expect(site, `applyNewToolDrop arm #${index + 1}`).toContain(
+				'source: "sweeper"',
+			);
+			expect(site, `applyNewToolDrop arm #${index + 1}`).toContain(
+				"toolName: tag.toolName",
+			);
 		}
 	});
 });
