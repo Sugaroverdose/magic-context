@@ -38,6 +38,16 @@ interface HostEntry {
 	resolvedPath: string;
 }
 
+// `bun test` consumes the `test` subcommand and any filter args, so argv[1] is
+// always the absolute path of the executing test file. That file lives inside
+// the package under test, and letting it reach dependencyPackageRoot /
+// appNameDetection resolves the devDependency @oh-my-pi/pi-utils from the
+// enclosing repo node_modules and locks the test process to the dev-only
+// "omp" kind. A real OMP/Pi host launches its package bin/entry file
+// (dist/cli.js, a bin script) — never a *.test.*/*.spec.* artifact — so a
+// test-artifact-shaped path is never a host entry on any detection rung.
+const TEST_RUNNER_ENTRY_PATTERN = /\.(?:test|spec)\.[cm]?[jt]sx?$/;
+
 interface PackageJson {
 	name?: unknown;
 	exports?: unknown;
@@ -56,6 +66,12 @@ function hostEntries(): HostEntry[] {
 			resolvedPath = realpathSync(requestedPath);
 		} catch {
 			resolvedPath = requestedPath;
+		}
+		if (
+			TEST_RUNNER_ENTRY_PATTERN.test(requestedPath) ||
+			TEST_RUNNER_ENTRY_PATTERN.test(resolvedPath)
+		) {
+			continue;
 		}
 		if (seen.has(resolvedPath)) continue;
 		seen.add(resolvedPath);
