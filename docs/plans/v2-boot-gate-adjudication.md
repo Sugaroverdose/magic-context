@@ -101,9 +101,15 @@ permits.
   lanes consult the single boundary-permission mechanism (P3) and the fold receipt
   (`foldExecutedThisPass`); a second veto would be the double-gate defect the ALF split-bust
   lesson forbids. Die.
-- **H4 `contextUsagePassSnapshot`** (`transform-context-state.ts` BOOT +36). Helper feeding
-  the detector's reading; dies with H1. Re-enters only via a named headless law that needs a
-  pass-level usage reading (none today — census rows for both files marked U0/dies).
+- **H4 `seedPersistedUsageAtBoot`** (`transform-context-state.ts` BOOT +36). Boot seeding of the
+  persisted provider usage, feeding the first priced pass after a restart; dies with H1. Re-enters
+  only via a named headless law that needs a pass-level usage reading (none today — census rows for
+  both files marked U0/dies). [Correction 2026-11-06, G1 port: the BOOT +36 hunk is commit 10a2de631
+  adding `seedPersistedUsageAtBoot` + `canonicalizeModelKeyForUsageSeed`, not
+  `contextUsagePassSnapshot` — that symbol is unchanged in the hunk and appeared here only as the
+  git context line above the insertion. Re-entered as the G1 port on feat/v2-gap-ports: the boot
+  path seeds from the persisted provider record before the wire-estimate fallback, laws ported
+  verbatim into `transform-context-state.test.ts`.]
 - **H5 the Rust-lane provenance** (`lib.rs` first-pass pinning, per the port docstring).
   Rust is out-of-contract (governance: named boot refusal); dies as a port. If the Rust lane
   returns, it owns its own boot contract. `[reasoned]` for the lane itself; the exclusion
