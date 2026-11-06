@@ -67,6 +67,14 @@
             "hosts": ["opencode"]
         },
         {
+            "path": "tests/oracle-classified-capture.test.ts",
+            "tier": "excluded",
+            "invocation": { "ts": false, "rust": false },
+            "rationale": "manual RC-gate classified capture for the differential rendering oracle (unit 2, docs/superpowers/plans/2026-11-06-differential-oracle.md): the shared unit-1b leg pair rerun with per-agent mock models and scripted agent queues, classifying every captured provider request (unclassified is red) and comparing per-class request sequences across boots, with internals-disabled classes proven absent per class; excluded for the same host-pin reason as tests/oracle-determinism.test.ts",
+            "contract_refs": ["DIFFERENTIAL-ORACLE"],
+            "hosts": ["opencode"]
+        },
+        {
             "path": "tests/historian-host-timeout.test.ts",
             "tier": "excluded",
             "invocation": { "ts": false, "rust": false },
