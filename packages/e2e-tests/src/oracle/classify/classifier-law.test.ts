@@ -206,7 +206,7 @@ describe("oracle unit 2: request classifier plants", () => {
 		// not, and neither does a producer that stops carrying the marker while
 		// the literal survives in any other string. NO live assertion currently
 		// covers marker truth: classifyOracleRequest returns on the model/queue
-		// lanes before the marker scan (classifier.ts:129-130), and the live
+		// lanes before the marker scan (classifier.ts:128-129), and the live
 		// capture registers every class's model and queue, so the marker lane is
 		// never exercised on the wire. Known gap, recorded here deliberately: if
 		// a marker's producer stops carrying it while the literal survives
