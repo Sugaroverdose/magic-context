@@ -2198,6 +2198,89 @@ describe("registerPiContextHandler", () => {
 		});
 	}
 
+	// Ported 2026-11-06 (N5) byte-identical from 9c1520810:packages/pi-plugin/
+	// src/context-handler.test.ts:2168-2245 — the v2 seed carried the issue-619
+	// production setter (context-handler.ts subagentExecute, set at :5747,
+	// consumed at :5854) with no Pi witness at all.
+	// Upstream issue 619 (fixed in 0.46.0, backported): a subagent has no
+	// history fold to ride, so its execute pass is the shared ride for queued
+	// ctx_reduce drops; permission alone must not rewrite bytes.
+	for (const [name, isSubagent, tokens, queued, applies] of [
+		["subagent execute drains queued drops", true, 70000, true, true],
+		["primary execute holds queued drops", false, 70000, true, false],
+		["subagent defer holds queued drops", true, 20000, true, false],
+		["subagent empty execute is byte-identical", true, 70000, false, false],
+	] as const) {
+		it(`issue 619 ${name}`, async () => {
+			const db = createTestDb();
+			const sessionId = `issue-619-${name}`;
+			try {
+				getOrCreateSessionMeta(db, sessionId);
+				updateSessionMeta(db, sessionId, {
+					isSubagent,
+					lastResponseTime: Date.now(),
+					cacheTtl: "59m",
+				});
+				const fake = createFakePi();
+				registerPiContextHandler(fake.pi as never, {
+					db,
+					protectedTags: 0,
+					heuristics: { clearReasoningAge: 1 },
+				});
+				const handler = fake.handlers.get("context") as (
+					event: { messages: never[] },
+					ctx: never,
+				) => Promise<{ messages: never[] }>;
+				let passTokens = 20000;
+				const ctx = {
+					...fakeContext(sessionId),
+					getContextUsage: () => ({
+						tokens: passTokens,
+						percent: passTokens / 1000,
+						contextWindow: 100000,
+					}),
+				};
+				const pass = () =>
+					handler(
+						{
+							messages: [
+								userMessage("keep user", 1),
+								assistantMessage("spent assistant", 2),
+								...(applies
+									? [
+											assistantMessage(
+												"Keep <think>issue-619-stale-thought</think> visible",
+												3,
+											),
+											userMessage("new tail", 4),
+											assistantMessage("fresh assistant", 5),
+										]
+									: []),
+							] as never[],
+						},
+						ctx as never,
+					);
+				await pass();
+				const baseline = JSON.stringify((await pass()).messages);
+				if (queued) queuePendingOp(db, sessionId, 2, "drop");
+				passTokens = tokens;
+				const bytes = JSON.stringify((await pass()).messages);
+				expect(getPendingOps(db, sessionId)).toHaveLength(
+					queued && !applies ? 1 : 0,
+				);
+				if (applies) {
+					expect(bytes).not.toBe(baseline);
+					expect(bytes).not.toContain("issue-619-stale-thought");
+				} else expect(bytes).toBe(baseline);
+				for (let replay = 0; replay < 3; replay++)
+					expect(JSON.stringify((await pass()).messages)).toBe(bytes);
+			} finally {
+				clearContextHandlerSession(sessionId);
+				closeQuietly(db);
+			}
+		});
+	}
+
 	it("applies and drains pending drops for the session", async () => {
 		const db = createTestDb();
 		try {
