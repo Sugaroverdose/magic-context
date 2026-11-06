@@ -263,12 +263,22 @@ describe("Pi ctx_reduce tool", () => {
 		expect(text).toContain("deferred drop §4§");
 	});
 
-	it("rejects empty or missing drop string", async () => {
+	it("no-arg invocation is the v1 bulk default, not the legacy error", async () => {
 		const db = createTestDb();
 		const sessionId = "ses-reduce-empty";
 		seedTags(db, sessionId, [{ tagNumber: 1, messageId: "m1" }]);
 
-		const tool = createCtxReduceTool({ db, protectedTags: 0 });
+		const tool = createCtxReduceTool({
+			db,
+			protectedTags: 0,
+			// Empty canonical space: no newest user message => nothing has been
+			// responded past => the bulk lane reports, it does not error.
+			ordinalMint: () => ({
+				ordinalByMessageId: new Map(),
+				ordinalByCallId: new Map(),
+				latestUserOrdinal: undefined,
+			}),
+		});
 		const result = await tool.execute(
 			"call-1",
 			{},
@@ -276,9 +286,9 @@ describe("Pi ctx_reduce tool", () => {
 			undefined,
 			fakeContext(sessionId) as never,
 		);
-		expect(result.isError).toBe(true);
+		expect(result.isError).not.toBe(true);
 		expect((result.content[0] as { text: string }).text).toContain(
-			"'drop' must",
+			"Nothing to release",
 		);
 	});
 

@@ -30,11 +30,10 @@
  * TS withdraw path cannot see or revoke them; withdraw is outside the
  * rust-mode contract until that lane migrates.
  *
- * Entry points: the OpenCode ctx_expand tool (tools/ctx-expand/tools.ts,
- * hosts 1.x and 2.x) calls these two functions, one per resolved target
- * slot. The Pi wrapper does not call them on this tree — the Pi ctx-reduce/
- * expand stratum is the Unit 7 mirror; when it lands, the wrapper passes its
- * harness's textIndexDomain so the resolver runs the same branch the
+ * Shared by both harnesses: the OpenCode tool (tools/ctx-expand/tools.ts,
+ * hosts 1.x and 2.x) and the Pi wrapper (pi-plugin/tools/ctx-expand.ts)
+ * call the same two entry points, one per resolved target slot, each with
+ * its harness's textIndexDomain so the resolver runs the same branch the
  * renderer runs there.
  */
 

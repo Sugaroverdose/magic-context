@@ -2,114 +2,37 @@ import { describe, expect, it } from "bun:test";
 import { prependTag } from "@magic-context/core/hooks/magic-context/tag-content-primitives";
 import { stripTagPrefixFromAssistantMessage } from "./strip-tag-prefix";
 
-describe("stripTagPrefixFromAssistantMessage", () => {
-	describe("leading tag prefix (canonical MC tagger mimicry)", () => {
-		it("strips a single §N§ prefix from assistant text", () => {
-			const msg = {
-				role: "assistant",
-				content: [
-					{ type: "text", text: "§4§ Yes. I can see the magic context." },
-				],
-			};
-			const mutated = stripTagPrefixFromAssistantMessage(msg);
-			expect(mutated).toBe(true);
-			expect((msg.content[0] as { text: string }).text).toBe(
-				"Yes. I can see the magic context.",
-			);
-		});
+/**
+ * ctx_reduce v1 ruling: the plugin never cuts tag notation out of persisted
+ * content. `§N§` is no longer primed as plugin behavior, so nothing
+ * legitimate puts it into persisted text; what is already there (legacy
+ * materialization, model prose) is inert residue and the model's bytes
+ * persist verbatim. This suite pins the PRESERVATION contract: every
+ * notation shape, on every role, is byte-identical after the call, and the
+ * seam reports no mutation.
+ */
+describe("stripTagPrefixFromAssistantMessage (no-strip ruling)", () => {
+	const NOTATIONS: Array<[string, string]> = [
+		["leading §N§ prefix (canonical MC tagger mimicry)", "§4§ Yes. I can see the magic context."],
+		["consecutive §N§ prefixes", "§3§ §4§ §5§ Hello world"],
+		["trailing whitespace after the prefix", "§4§   \n\nYes"],
+		["multi-digit tag IDs", "§38773§ Found it."],
+		["mid-text §N§ pair", "Looking at §5§ which references the earlier discussion"],
+		['malformed §N"> hybrid', `Hello §40827">Oracle confirmed`],
+		["stray § character", "See § marker for details"],
+		["leading prefix and mid-text § together", "§42§ The pattern §40827§ appeared."],
+	];
 
-		it("strips consecutive §N§ prefixes (model-mimicked sequence)", () => {
-			const msg = {
-				role: "assistant",
-				content: [{ type: "text", text: "§3§ §4§ §5§ Hello world" }],
-			};
-			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"Hello world",
-			);
+	for (const [label, text] of NOTATIONS) {
+		it(`preserves ${label} verbatim on assistant text`, () => {
+			const msg = { role: "assistant", content: [{ type: "text", text }] };
+			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
+			expect((msg.content[0] as { type: string; text: string }).text).toBe(text);
 		});
-
-		it("strips trailing whitespace after the prefix", () => {
-			const msg = {
-				role: "assistant",
-				content: [{ type: "text", text: "§4§   \n\nYes" }],
-			};
-			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"Yes",
-			);
-		});
-
-		it("strips multi-digit tag IDs", () => {
-			const msg = {
-				role: "assistant",
-				content: [{ type: "text", text: "§38773§ Found it." }],
-			};
-			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"Found it.",
-			);
-		});
-	});
-
-	describe("cargo-culted § mid-text (models mimicking MC notation)", () => {
-		it("removes mid-text §N§ pair entirely (cargo-cult defense)", () => {
-			const msg = {
-				role: "assistant",
-				content: [
-					{
-						type: "text",
-						text: "Looking at §5§ which references the earlier discussion",
-					},
-				],
-			};
-			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"Looking at  which references the earlier discussion",
-			);
-		});
-
-		it('removes malformed §N"> hybrid mid-text', () => {
-			const msg = {
-				role: "assistant",
-				content: [{ type: "text", text: `Hello §40827">Oracle confirmed` }],
-			};
-			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"Hello Oracle confirmed",
-			);
-		});
-
-		it("strips stray § character anywhere", () => {
-			const msg = {
-				role: "assistant",
-				content: [{ type: "text", text: "See § marker for details" }],
-			};
-			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"See  marker for details",
-			);
-		});
-
-		it("strips both leading prefix and mid-text § in same message", () => {
-			const msg = {
-				role: "assistant",
-				content: [
-					{
-						type: "text",
-						text: "§42§ The pattern §40827§ appeared.",
-					},
-				],
-			};
-			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
-			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"The pattern  appeared.",
-			);
-		});
-	});
+	}
 
 	describe("scope guards", () => {
-		it("does NOT strip prefix on user messages", () => {
+		it("preserves notation on user messages", () => {
 			const msg = {
 				role: "user",
 				content: [{ type: "text", text: "§4§ Hello from user" }],
@@ -120,7 +43,7 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 			);
 		});
 
-		it("does NOT strip prefix on tool result messages", () => {
+		it("preserves notation on tool result messages", () => {
 			const msg = {
 				role: "toolResult",
 				content: [{ type: "text", text: "§7§ tool output" }],
@@ -128,7 +51,7 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
 		});
 
-		it("strips across multiple text parts in a single message", () => {
+		it("preserves notation across multiple text parts in a single message", () => {
 			const msg = {
 				role: "assistant",
 				content: [
@@ -136,12 +59,12 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 					{ type: "text", text: "§4§ Second chunk" },
 				],
 			};
-			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
+			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
 			expect((msg.content[0] as { type: string; text: string }).text).toBe(
-				"First chunk",
+				"§4§ First chunk",
 			);
 			expect((msg.content[1] as { type: string; text: string }).text).toBe(
-				"Second chunk",
+				"§4§ Second chunk",
 			);
 		});
 
@@ -162,11 +85,10 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 					},
 				],
 			};
-			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(true);
+			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
 			expect((msg.content[1] as { type: string; text: string }).text).toBe(
-				"Real assistant text",
+				"§4§ Real assistant text",
 			);
-			// Thinking part untouched (only text parts are scrubbed)
 			expect(
 				(msg.content[0] as { type: string; thinking: string }).thinking,
 			).toBe("§4§ pretend reasoning, not stripped");
@@ -191,17 +113,17 @@ describe("stripTagPrefixFromAssistantMessage", () => {
 			// Pi user messages can have content: string (legacy shape)
 			const msg = { role: "assistant", content: "§4§ legacy string" };
 			expect(stripTagPrefixFromAssistantMessage(msg)).toBe(false);
-			// String content unchanged (we don't touch legacy string-shape on assistants)
 			expect(msg.content).toBe("§4§ legacy string");
 		});
 	});
 });
 
-it("correct leading self-tag round-trips byte-identically through Pi storage and replay", () => {
+it("leading self-tag bytes persist byte-identically through Pi storage and replay", () => {
 	const reply =
 		"§12§ Reading both files in parallel.\n\nThe next step follows.";
 	const part = { type: "text", text: reply };
 	const message = { role: "assistant", content: [part] };
-	expect(stripTagPrefixFromAssistantMessage(message)).toBe(true);
-	expect(prependTag(12, part.text)).toBe(reply);
+	expect(stripTagPrefixFromAssistantMessage(message)).toBe(false);
+	expect(part.text).toBe(reply);
+	expect(prependTag(12, part.text.slice("§12§ ".length))).toBe(reply);
 });

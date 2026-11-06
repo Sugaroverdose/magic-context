@@ -142,8 +142,8 @@ describe("registerMagicContextTools", () => {
 					"limit",
 					"offset",
 				],
-				ctx_expand: ["start", "end", "verbose", "message", "tag"],
-				ctx_reduce: ["drop"],
+				ctx_expand: ["start", "end", "verbose", "message"],
+				ctx_reduce: ["ctx_handles"],
 			};
 			for (const [name, fields] of Object.entries(expectedFields)) {
 				const definition = registered.get(name);
@@ -385,12 +385,6 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 			expect(implicitIds.sort()).toEqual(Object.keys(golden).sort());
 			expect(explicitIds.sort()).toEqual(Object.keys(golden).sort());
 			for (const [toolId, expected] of Object.entries(golden)) {
-				// ctx_reduce v1: the Pi ctx_reduce/ctx_expand lanes stay
-				// seed-shape ("drop" tag coordinate; tag-bearing ctx_expand);
-				// the plugin stratum's ctx_handles contract on Pi is Unit 7
-				// scope. Their current shape is pinned by the ledger law
-				// below, so this skip can never hide an unannounced Pi move.
-				if (toolId === "ctx_reduce" || toolId === "ctx_expand") continue;
 				expect(implicit.get(toolId)?.description).toBe(expected.description);
 				expect(explicit.get(toolId)?.description).toBe(expected.description);
 				expect(explicit.get(toolId)?.parameters).toEqual(
@@ -410,33 +404,6 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 		}
 	});
 
-	// Unit 7 ruling C (coordinator dispatch 2026-11-05, v2-delta-census.md):
-	// Pi stays TAG-ERA ctx_reduce/ctx_expand — this is the FINAL disposition,
-	// not a pre-mirror placeholder. Pi ctx_expand has no `ctx_handles`
-	// parameter and no withdraw (the v2 handles contract from Unit 3 needs
-	// message-ordinal-mint / tool-call-registry / reduce-resolver / withdraw,
-	// none present in the Pi tree), so adopting the handles shape would leave
-	// THIS law claiming a contract Pi cannot serve. A future Pi ctx-reduce
-	// family port is a separate unit, not a retro-fit.
-	it("ledger: Pi ctx_reduce/ctx_expand are tag-era by Unit 7 ruling (final)", () => {
-		const db = createTestDb();
-		try {
-			const tools = captureRegisteredTools({ db });
-			expect(
-				Object.keys(
-					tools.get("ctx_reduce")?.parameters.properties ?? {},
-				).sort(),
-			).toEqual(["drop"]);
-			expect(
-				Object.keys(
-					tools.get("ctx_expand")?.parameters.properties ?? {},
-				).sort(),
-			).toEqual(["end", "message", "start", "tag", "verbose"]);
-		} finally {
-			closeQuietly(db);
-		}
-	});
-
 	it("registers built-in light prose without changing non-description schema fields", () => {
 		const fullDb = createTestDb();
 		const lightDb = createTestDb();
@@ -447,8 +414,6 @@ describe("registerMagicContextTools — prompt-surface registration", () => {
 				promptSurface: { default: "light" },
 			});
 			for (const toolId of Object.keys(LIGHT_TOOL_DESCRIPTIONS)) {
-				// Seed-shape lanes: see the ledger law (Unit 7 mirror).
-				if (toolId === "ctx_reduce" || toolId === "ctx_expand") continue;
 				expect(light.get(toolId)?.description).toBe(
 					LIGHT_TOOL_DESCRIPTIONS[
 						toolId as keyof typeof LIGHT_TOOL_DESCRIPTIONS

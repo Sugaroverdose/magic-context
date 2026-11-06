@@ -404,7 +404,7 @@ describe("applyPiHeuristicCleanup", () => {
 		}
 	});
 
-	it("persists full drops for stale ctx_reduce calls and paired tool results", () => {
+	it("persists skeleton drops for stale ctx_reduce calls and paired tool results", () => {
 		const db = createTestDb();
 		try {
 			const sessionId = "ses-heuristic";
@@ -452,7 +452,7 @@ describe("applyPiHeuristicCleanup", () => {
 				getTagsBySession(db, sessionId)
 					.filter((tag) => tag.messageId === "reduce-1")
 					.map((tag) => [tag.status, tag.dropMode]),
-			).toEqual([["dropped", "full"]]);
+			).toEqual([["dropped", "skeleton_real"]]);
 
 			const replayMessages = [
 				userMessage("older request", 1),
@@ -486,13 +486,29 @@ describe("applyPiHeuristicCleanup", () => {
 			applyFlushedStatuses(sessionId, db, replay.targets);
 			replayTranscript.commit();
 
-			// Aggregate target uses tagId in sentinel (matches OpenCode parity in
-			// apply-operations.ts:43 — `[dropped §<tagId>§]`). Tag allocation
-			// order across the transcript: user "older request" (#1), assistant
-			// text "I will reduce now." (#2), assistant toolCall reduce-1 (#3),
-			// user toolResult reuses #3, user "next request" (#4), assistant
-			// "newer answer" (#5), user "latest request" (#6). reduce-1 = #3.
-			expect(textOf(replayTranscript.getOutputMessages()[2] as never)).toBe("");
+			// The released pair replays on the sweeper's non-bash shape: the
+			// automatic tier keeps the carrier surface to bash alone, so the
+			// ctx_reduce call keeps its real (empty) arguments and only the
+			// paired result takes the empty released slot.
+			const replayed = replayTranscript.getOutputMessages();
+			const reducedCall = (
+				replayed[1] as {
+					content: Array<{ type: string; arguments?: Record<string, unknown> }>;
+				}
+			).content.find((p) => p.type === "toolCall")!;
+			expect(Object.keys(reducedCall.arguments!)).toEqual([]);
+			// Surgical drop-era exception (2026-11-06, same class as the census
+			// row-108 dropped-only-replay precedent): v1 @ 9c1520810 replays the
+			// released slot as "" (this law at :500, minted by v1
+			// tag-transcript.ts skeletonReal :1136-1142 with
+			// TOOL_RELEASED_SENTINEL); the current v2 drop contract mints the
+			// canonical placeholder there (tag-transcript.ts skeletonReal
+			// :1126-1142, :1132) — ruled in the census Unit-8 addendum note
+			// ("v2 declines both carrier and sentinel in those paths and mints
+			// only the canonical placeholder"). The sweeper shape this law
+			// exists to pin is the args-stay half above, which holds on both
+			// trees.
+			expect(textOf(replayed[2] as never)).toBe("[dropped §3§]");
 		} finally {
 			closeQuietly(db);
 		}
