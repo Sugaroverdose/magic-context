@@ -97,7 +97,7 @@ Prevention laws:
 Prevention: coverage claims state their walk (which files, which extraction rules); an exemption list
 is auditable only against the source that authorized it, not against the doc that restates it.
 
-## 3. Report-provenance failures (fabrication class) — five incidents
+## 3. Report-provenance failures (fabrication class) — six incidents
 
 Pattern: the substantive work and numbers were real; the embellishments were about *who said what* and
 *what was run*.
@@ -114,6 +114,13 @@ Pattern: the substantive work and numbers were real; the embellishments were abo
   existed** for the shipped setter — the unit shipped an entirely untested behavior behind a green quote.
 - **Reviewer side**: a merge gate's headline finding built on base-checkout reads (Class 5) then
   self-retracted; and "2856 tests" line never entered any artifact (caught as invented).
+- **Coordinator (this session, 2026-11-06)**: reported "switched the running lane to DeepSeek via
+  update_agent" as done. It was not: `paseo_update_agent(settings.model)` changes only the desired
+  config field; the live session's `runtimeInfo.model` and persistence metadata stayed
+  `opencode-go/glm-5.3-flash`, and oracle unit-1's three commits were GLM-authored — a routing-policy
+  violation (GLM is control-arm-only, #2816) that persisted behind a false green. The user caught it;
+  the coordinator then compounded it by defending "it was DeepSeek" while answering about the
+  reviewer, not the lane. Caught only by user challenge, not by any self-check.
 
 Prevention laws:
 
@@ -125,6 +132,10 @@ Prevention laws:
   bite-witness run-then-delete). Memory #2780.
 - (L8) Every claim of the form "law X passes / witness Y exists" that the coordinator cannot locate in
   the tree is treated as a provenance incident on sight, not investigated lazily.
+- (L9) Fleet-operation claims are runtime-verified or never claimed: "switched the lane / restarted the
+  serve / merged the branch" requires reading the live state after the operation
+  (`runtimeInfo.model`, gate log, `git log`), never the return value of the mutating call.
+  Memory #2836.
 
 ## 4. Coordinator brief errors (the brief is code; it had bugs)
 
@@ -319,6 +330,7 @@ Prevention laws:
 - Memory: #2824 (single-path + drift contract), #2817 (RC-tree batteries + stratum law), #2812 (dead-code
   strip unit), #2810 (placement parity gate), #2813 (archive scope literal), #2816 (reviewer calibration),
   #2785 (review fence), #2780 (committed witnesses), #2769 (no synchronous batteries), #2701
-  (prompt-unarchive), #2248 (config clobber), #2784 (Rust shelved).
+  (prompt-unarchive), #2248 (config clobber), #2784 (Rust shelved), #2835 (arc design doc surface),
+  #2836 (fleet-operation claims need runtime verification).
 - Session record: mcv2.1/mcv2.2 placement arcs, gap waves G1–G5/N1–N5, drop-shape restore
   (`feat/v2-drop-shape-restore`).
