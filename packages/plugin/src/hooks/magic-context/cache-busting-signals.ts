@@ -33,24 +33,40 @@ export interface MaterializationPassSignals {
 }
 
 /**
- * The four signals that can independently authorize an automatic reduction to
- * run: a hard fold, a forced reduction, an explicit flush, and freshly published
- * history. Each is a cache bust the session is already paying for, so a
- * reduction riding one adds no further prefix rewrite of its own.
+ * The signals that can independently authorize an automatic reduction to
+ * run: a hard fold, a forced reduction, an explicit flush, freshly published
+ * history, and a subagent's execute pass. Each is a cache bust the session is
+ * already paying for, so a reduction riding one adds no further prefix rewrite
+ * of its own. Subagents have no historian or history fold, so their execute
+ * pass is the shared ride for all eligible cleanup; permission alone must not
+ * rewrite any bytes.
  */
 export interface ReclaimRideSignals {
     hardFold: boolean;
     force: boolean;
     explicitFlush: boolean;
     publishedHistory: boolean;
+    subagentExecute?: boolean;
 }
 
-/** Automatic reductions ride independently priced work, never pressure alone. */
+/** Primary reductions never ride pressure alone; subagents share the execute ride. */
 export function hasReclaimRide(signals: ReclaimRideSignals): boolean {
-    return signals.hardFold || signals.force || signals.explicitFlush || signals.publishedHistory;
+    return (
+        signals.hardFold ||
+        signals.force ||
+        signals.explicitFlush ||
+        signals.publishedHistory ||
+        signals.subagentExecute === true
+    );
 }
 
-const RECLAIM_RIDE_NAMES = ["hardFold", "force", "explicitFlush", "publishedHistory"] as const;
+const RECLAIM_RIDE_NAMES = [
+    "hardFold",
+    "force",
+    "explicitFlush",
+    "publishedHistory",
+    "subagentExecute",
+] as const;
 
 /**
  * Names the ride signals that actually granted permission to mutate, for the

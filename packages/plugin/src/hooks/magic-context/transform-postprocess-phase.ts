@@ -2167,6 +2167,10 @@ export async function runPostTransformPhase(
                 (args.historyRebuiltThisPass ||
                     args.rebuiltHistoryFromInitialPrepare ||
                     (args.canConsumeDeferredLate && args.deferredHistoryWasPendingAtPassStart))),
+        // Upstream issue 619 backport (TS-only): a subagent has no historian and
+        // no history fold, so its execute pass is the shared ride for its queued
+        // drops.
+        subagentExecute: !args.fullFeatureMode && args.schedulerDecision === "execute",
     };
     let publishedWorkDrainAllowed = !compactionOff && hasReclaimRide(rideSignals);
     // System-origin reclaim may only ride a pass that actually rewrites served
