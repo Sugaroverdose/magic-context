@@ -12,14 +12,15 @@ import {
 import { stripWellFormedLeadingTagPrefix } from "./tag-content-primitives";
 import type { MessageLike, ThinkingLikePart } from "./tag-messages";
 
-// Drop-shape doctrine restore (2026-11-06, owner ruling): buildReplacementContent
-// mints MESSAGE_DROP_PLACEHOLDER (`[content omitted]`) for message-part drops again
-// (base form, 9c1520810:strip-content.ts:15-16), so neutralization must recognize it.
-// The base line also carried a `|\.\.\.` arm; the base never mints it
-// (TOOL_RELEASED_SENTINEL is empty at 9c1520810:sentinel.ts:34), so it stays deleted
-// per the drop-shape dispatch item 4 (see census ruling #2812 dead-strip family).
+// Base form (9c1520810:strip-content.ts:15-16), restored 2026-11-06 by the
+// DeepSeek merge gate + coordinator ruling: the `\.\.\.` alternative is an
+// imitation defense — models reproduce released-shape constants from
+// training/old transcripts (founding 160-`...`-parts census; sentinel.ts
+// anti-imitation doctrine), so recognizer arms do not depend on our own
+// mintage. The `[content omitted]` arm likewise matches the live
+// buildReplacementContent mint (drop-shape doctrine restore).
 const MARKER_ONLY_PATTERN =
-    /^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\]|\[content omitted\])\s*)+$/;
+    /^(?:(?:§\d+§|\[dropped(?: §\d+§)?\]|\[cleared\]|\[content omitted\]|\.\.\.)\s*)+$/;
 
 export function isMarkerOnlyText(text: string): boolean {
     const trimmed = text.trim();

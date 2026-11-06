@@ -16,19 +16,12 @@ const MAX_LISTED_PARAMETERS = 12;
 // per-session counters are bounded rather than kept for the process lifetime.
 const MAX_TRACKED_SESSIONS = 1000;
 
-// Drop-shape doctrine restore (2026-11-06, owner ruling "ONLY m[0,1] placement
-// was allowed to drift"): the five-character `...[truncated]` matcher is LIVE
-// again below (base 9c1520810:dropped-input-guard.ts:8,:22) — edit-marker.ts is
-// byte-identical to base and renders that exact shape into model-visible
-// edit_marker tool input (tag-transcript.ts editMarker), so the Unit 4 split-item-D
-// "no v2 minter" premise was falsified for it. The two arms that stay deleted —
-// `[object]` and `[N items]` — are minted by NEITHER tree (census ruling #2812,
-// docs/plans/v2-delta-census.md dead-strip family; laws in
-// dropped-input-guard.test.ts dead-arm census).
 function isDroppedPlaceholderString(value: string): boolean {
     return (
         (value.startsWith("[dropped §") && value.endsWith("§]")) ||
-        LEGACY_TRUNCATED_VALUE.test(value)
+        LEGACY_TRUNCATED_VALUE.test(value) ||
+        value === "[object]" ||
+        /^\[\d+ items\]$/.test(value)
     );
 }
 
