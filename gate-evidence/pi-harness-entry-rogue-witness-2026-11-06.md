@@ -1,7 +1,25 @@
 # Planted-rogue witness: removing the TEST_RUNNER_ENTRY exclusion reddens the law
 
 Production edit under witness: the exclusion block in `hostEntries()`
-(pi-harness-kind.ts) deleted; everything else unchanged. Tree id: `8a10e67cc95fe01b5c632b9c58486e279b92e1cc1e39b00d1429deaa9a98994c`.
+(pi-harness-kind.ts) deleted; everything else unchanged.
+
+State binding — the tree id hashes exactly this documented dirty state:
+
+- HEAD: `a5eae5935` (RED-evidence commit; the fix was still uncommitted)
+- `git status --porcelain`:
+  ```
+   M packages/pi-plugin/src/pi-harness-kind.ts
+  ?? package-lock.json
+  ?? packages/pi-plugin/src/pi-harness-kind-test-entry-law.test.ts
+  ```
+- file states: `pi-harness-kind.ts` = the version later committed in
+  `ebbac5170` with the six-line `if (TEST_RUNNER_ENTRY_PATTERN...)` block
+  removed (pattern constant retained); the law file = the `ebbac5170`
+  version, still untracked; `package-lock.json` = npm-install artifact.
+- tree id (mc-gate formula): `8a10e67cc95fe01b5c632b9c58486e279b92e1cc1e39b00d1429deaa9a98994c`
+
+Reproduction (verified): a scratch worktree at `a5eae5935` with those three
+file states yields the identical tree id and porcelain output above.
 
 ## src/pi-harness-kind-test-entry-law.test.ts — 26 fail / 3 pass
 
