@@ -28,6 +28,7 @@ import {
 import {
 	CTX_EXPAND_DESCRIPTION,
 	CTX_EXPAND_TOKEN_BUDGET,
+	stampWithdrawnLine,
 } from "@magic-context/core/tools/ctx-expand/constants";
 import { resolveCtxExpandMode } from "@magic-context/core/tools/ctx-expand/mode";
 import {
@@ -35,22 +36,20 @@ import {
 	renderMessageByOrdinal,
 	renderVerboseRange,
 } from "@magic-context/core/tools/ctx-expand/render";
+import {
+	withdrawStampsForOrdinals,
+	withdrawStampsForTags,
+} from "@magic-context/core/tools/ctx-expand/withdraw";
 import { unwrapImitatedReducedArgs } from "@magic-context/core/tools/unwrap-imitated-reduced-args";
 import { type Static, Type } from "typebox";
 import { readPiSessionMessages } from "../read-session-pi";
 
 const ParamsSchema = Type.Object(
 	{
-		tag: Type.Optional(
-			Type.Union([Type.Number(), Type.String()], {
-				description:
-					"Tag number from a §N§ tag or a [dropped §N§] placeholder, not a message ordinal. Returns that one item in full. Use alone.",
-			}),
-		),
 		start: Type.Optional(
 			Type.Number({
 				description:
-					"First message ordinal of the range (a <session-history> heading's start, or a ctx_search hit), not a tag number.",
+					"First message ordinal of the range (a <session-history> heading's start, a ctx_search hit, or a ctx_reduce echo), not a tag number.",
 			}),
 		),
 		end: Type.Optional(
@@ -68,7 +67,7 @@ const ParamsSchema = Type.Object(
 		message: Type.Optional(
 			Type.Number({
 				description:
-					"Message ordinal from a <session-history> heading or a ctx_search hit, not a tag number. Returns that one message in full. Use alone.",
+					"Message ordinal from a <session-history> heading, a ctx_search hit, or a ctx_reduce echo. Returns that one message in full. Use alone.",
 			}),
 		),
 	},
@@ -87,6 +86,16 @@ function err(text: string) {
 		details: undefined,
 		isError: true,
 	};
+}
+
+/** One canonical line per revoked slot, appended after the recovery text
+ * (template + revocation mechanics are the shared core's; see withdraw.ts). */
+function appendWithdrawLines(
+	text: string,
+	withdrawn: readonly number[],
+): string {
+	if (withdrawn.length === 0) return text;
+	return `${text}\n\n${withdrawn.map((slot) => stampWithdrawnLine(slot)).join("\n")}`;
 }
 
 export interface CtxExpandToolDeps {
@@ -140,10 +149,33 @@ export function createCtxExpandTool(
 					return err(mode.message);
 				}
 				if (mode.kind === "tag") {
-					return ok(renderItemByTag(deps.db, sessionId, mode.tag, "text"));
+					const withdrawn = withdrawStampsForTags(
+						deps.db,
+						sessionId,
+						[mode.tag],
+						"text",
+					);
+					return ok(
+						appendWithdrawLines(
+							renderItemByTag(deps.db, sessionId, mode.tag, "text"),
+							withdrawn,
+						),
+					);
 				}
 				if (mode.kind === "message") {
-					return ok(renderMessageByOrdinal(sessionId, mode.message));
+					const withdrawn = withdrawStampsForOrdinals(
+						deps.db,
+						sessionId,
+						mode.message,
+						mode.message,
+						"text",
+					);
+					return ok(
+						appendWithdrawLines(
+							renderMessageByOrdinal(sessionId, mode.message),
+							withdrawn,
+						),
+					);
 				}
 				const { start, end, verbose } = mode;
 
@@ -156,12 +188,31 @@ export function createCtxExpandTool(
 					sessionId,
 				);
 				if (lastCompartmentEnd >= 0 && start > lastCompartmentEnd) {
+					// The live tail is exactly where a held, not-yet-landed stamp
+					// sits, so the early return still revokes the queue row.
+					const withdrawn = withdrawStampsForOrdinals(
+						deps.db,
+						sessionId,
+						start,
+						end,
+						"text",
+					);
 					return ok(
-						`Range ${start}-${end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`,
+						appendWithdrawLines(
+							`Range ${start}-${end} is entirely within the live tail (after the last compacted message ${lastCompartmentEnd}); those messages are already visible in context.`,
+							withdrawn,
+						),
 					);
 				}
 				const effectiveEnd =
 					lastCompartmentEnd >= 0 ? Math.min(end, lastCompartmentEnd) : end;
+				const withdrawn = withdrawStampsForOrdinals(
+					deps.db,
+					sessionId,
+					start,
+					effectiveEnd,
+					"text",
+				);
 
 				// Verbose mode: each message separate, with ids + per-part previews.
 				if (verbose) {
@@ -174,7 +225,10 @@ export function createCtxExpandTool(
 					);
 					if (!v.text) {
 						return ok(
-							`No messages found in range ${start}-${effectiveEnd}. The range may be outside this session's history.`,
+							appendWithdrawLines(
+								`No messages found in range ${start}-${effectiveEnd}. The range may be outside this session's history.`,
+								withdrawn,
+							),
 						);
 					}
 					const out = [
@@ -188,7 +242,7 @@ export function createCtxExpandTool(
 							`Truncated at message ${v.lastOrdinal} (budget: ~${CTX_EXPAND_TOKEN_BUDGET} tokens). Call again with start=${v.lastOrdinal + 1} end=${effectiveEnd} verbose=true for more.`,
 						);
 					}
-					return ok(out.join("\n"));
+					return ok(appendWithdrawLines(out.join("\n"), withdrawn));
 				}
 
 				const chunk = readSessionChunk(
@@ -201,7 +255,10 @@ export function createCtxExpandTool(
 
 				if (!chunk.text || chunk.messageCount === 0) {
 					return ok(
-						`No messages found in range ${start}-${end}. The range may be outside this session's history.`,
+						appendWithdrawLines(
+							`No messages found in range ${start}-${effectiveEnd}. The range may be outside this session's history.`,
+							withdrawn,
+						),
 					);
 				}
 
@@ -219,7 +276,7 @@ export function createCtxExpandTool(
 					);
 				}
 
-				return ok(lines.join("\n"));
+				return ok(appendWithdrawLines(lines.join("\n"), withdrawn));
 			} finally {
 				unregister();
 			}
